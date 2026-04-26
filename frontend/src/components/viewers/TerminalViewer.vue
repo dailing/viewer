@@ -30,7 +30,10 @@ let reconnectTimer: number | null = null;
 let hasSnapshot = false;
 let appliedOutputVersion = 0;
 let pendingOutput: Array<{ data: string; outputVersion: number }> = [];
+let deferredOutput: Array<{ data: string; outputVersion?: number }> = [];
 let modeQueryRemainder = "";
+let resettingOutput = false;
+let suppressPtyInput = false;
 
 function firstParam(params: Array<number | number[]>): number {
   const first = params[0];
@@ -135,7 +138,24 @@ function ensureTerminal() {
   registerModeQueryHandlers(xterm);
   xterm.loadAddon(fitAddon);
   xterm.open(terminalElement.value);
+  xterm.attachCustomKeyEventHandler((event) => {
+    if (
+      event.type === "keydown" &&
+      event.ctrlKey &&
+      !event.altKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      event.key.toLowerCase() === "c" &&
+      !xterm?.hasSelection()
+    ) {
+      event.preventDefault();
+      send("\x03");
+      return false;
+    }
+    return true;
+  });
   dataDisposable = xterm.onData((data) => {
+    if (suppressPtyInput) return;
     send(data);
   });
   resizeObserver = new ResizeObserver(resize);
@@ -153,6 +173,8 @@ function disposeTerminal() {
   fitAddon = null;
   xterm?.dispose();
   xterm = null;
+  resettingOutput = false;
+  suppressPtyInput = false;
 }
 
 function writeOutput(data: string) {
@@ -161,21 +183,32 @@ function writeOutput(data: string) {
   if (output) xterm?.write(output);
 }
 
-function resetOutput(data: string) {
+function resetOutput(data: string, afterReset?: () => void) {
   ensureTerminal();
   if (!xterm) return;
   modeQueryRemainder = "";
+  resettingOutput = true;
+  suppressPtyInput = true;
+  const finishReset = () => {
+    suppressPtyInput = false;
+    resettingOutput = false;
+    resize();
+    afterReset?.();
+    const deferred = deferredOutput;
+    deferredOutput = [];
+    deferred.forEach((item) => applyOutput(item.data, item.outputVersion));
+  };
   xterm.reset();
   xterm.clear();
   const output = filterModeQueries(data, false);
   modeQueryRemainder = "";
   if (output) {
     xterm.write(output, () => {
-      resize();
+      finishReset();
     });
     return;
   }
-  resize();
+  finishReset();
 }
 
 function applySnapshot(snapshot: TerminalSnapshot) {
@@ -186,16 +219,19 @@ function applySnapshot(snapshot: TerminalSnapshot) {
     .filter((item) => item.outputVersion > appliedOutputVersion)
     .sort((a, b) => a.outputVersion - b.outputVersion);
   pendingOutput = [];
-  resetOutput(snapshot.output + replay.map((item) => item.data).join(""));
-  if (replay.length > 0) {
-    appliedOutputVersion = replay[replay.length - 1].outputVersion;
-  }
+  resetOutput(snapshot.output, () => {
+    replay.forEach((item) => applyOutput(item.data, item.outputVersion));
+  });
   terminals.upsert(snapshot);
 }
 
 function applyOutput(data: string, outputVersion?: number) {
   if (!hasSnapshot) {
     pendingOutput.push({ data, outputVersion: outputVersion ?? Number.MAX_SAFE_INTEGER });
+    return;
+  }
+  if (resettingOutput) {
+    deferredOutput.push({ data, outputVersion });
     return;
   }
   if (outputVersion !== undefined) {
@@ -223,6 +259,10 @@ function resize() {
   }
 }
 
+function focusTerminal() {
+  xterm?.focus();
+}
+
 function connect() {
   if (reconnectTimer !== null) {
     window.clearTimeout(reconnectTimer);
@@ -232,7 +272,10 @@ function connect() {
   hasSnapshot = false;
   appliedOutputVersion = 0;
   pendingOutput = [];
+  deferredOutput = [];
   modeQueryRemainder = "";
+  resettingOutput = false;
+  suppressPtyInput = false;
   const activeSocket = new WebSocket(terminalSocketUrl(props.id));
   socket = activeSocket;
   activeSocket.addEventListener("open", resize);
@@ -307,7 +350,7 @@ onUnmounted(() => {
         <i class="bi bi-stop-fill"></i>
       </button>
     </div>
-    <div ref="terminalElement" class="terminal-surface"></div>
+    <div ref="terminalElement" class="terminal-surface" @pointerdown="focusTerminal"></div>
   </div>
 </template>
 

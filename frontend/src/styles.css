@@ -1,6 +1,7 @@
 :root {
   color-scheme: light;
   --sidebar-width: 320px;
+  --topbar-height: 26px;
   --border: #d9dee7;
   --panel: #ffffff;
   --surface: #f5f7fa;
@@ -31,21 +32,30 @@ body {
   background: #ffffff;
   border-bottom: 1px solid var(--border);
   display: flex;
-  flex: 0 0 48px;
-  gap: 10px;
-  padding: 0 12px;
+  flex: 0 0 var(--topbar-height);
+  gap: 4px;
+  min-width: 0;
+  padding: 0 6px;
 }
 
-.brand {
-  font-weight: 650;
+.active-pane-title {
+  flex: 1 1 auto;
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-dot {
   border-radius: 50%;
+  flex: 0 0 auto;
   display: inline-block;
-  height: 8px;
-  margin-left: auto;
-  width: 8px;
+  height: 7px;
+  margin-left: 2px;
+  width: 7px;
 }
 
 .status-dot.connected {
@@ -55,11 +65,6 @@ body {
 .status-dot.reconnecting,
 .status-dot.connecting {
   background: #d68a00;
-}
-
-.status-text {
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 .body-shell {
@@ -80,7 +85,7 @@ body {
   max-width: 88vw;
   min-width: 0;
   position: fixed;
-  top: 48px;
+  top: var(--topbar-height);
   transform: translateX(-100%);
   transition: transform 0.16s ease;
   width: var(--sidebar-width);
@@ -101,15 +106,41 @@ body {
   transition: none;
 }
 
+.sidebar-resizer {
+  background: transparent;
+  cursor: col-resize;
+  flex: 0 0 7px;
+  position: relative;
+  touch-action: none;
+  user-select: none;
+}
+
+.sidebar-resizer::before {
+  background: var(--border);
+  content: "";
+  inset: 0 3px;
+  position: absolute;
+}
+
+.sidebar-resizer:hover::before,
+.sidebar-resizing .sidebar-resizer::before {
+  background: #4f6f96;
+}
+
+.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 .sidebar-chrome {
   align-items: center;
   border-bottom: 1px solid var(--border);
   display: flex;
-  flex: 0 0 42px;
-  font-size: 13px;
+  flex: 0 0 30px;
+  font-size: 12px;
   font-weight: 700;
-  gap: 6px;
-  padding: 4px 8px 4px 12px;
+  gap: 4px;
+  padding: 3px 6px 3px 10px;
 }
 
 .sidebar-chrome span {
@@ -126,15 +157,20 @@ body {
 .icon-button {
   align-items: center;
   display: inline-flex;
-  height: 34px;
+  height: 22px;
   justify-content: center;
   padding: 0;
-  width: 34px;
+  width: 22px;
+}
+
+.icon-button .bi {
+  font-size: 12px;
+  line-height: 1;
 }
 
 .sidebar-backdrop {
   background: rgb(15 23 42 / 0.35);
-  inset: 48px 0 0;
+  inset: var(--topbar-height) 0 0;
   position: fixed;
   z-index: 20;
 }
@@ -149,6 +185,10 @@ body {
     height: min(48vh, 390px);
     max-width: none;
     width: 100%;
+  }
+
+  .sidebar-resizer {
+    display: none;
   }
 
   .body-shell.sidebar-pinned .workspace-wrap {

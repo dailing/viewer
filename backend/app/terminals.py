@@ -97,6 +97,10 @@ class TerminalManager:
         master_fd, slave_fd = os.openpty()
         try:
             self._set_size(master_fd, 30, 120)
+            def configure_child_pty() -> None:
+                os.setsid()
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+
             process = subprocess.Popen(
                 [shell],
                 cwd=session.cwd,
@@ -108,7 +112,7 @@ class TerminalManager:
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
-                start_new_session=True,
+                preexec_fn=configure_child_pty,
             )
         except FileNotFoundError as exc:
             os.close(master_fd)

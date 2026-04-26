@@ -42,21 +42,6 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
 
 <template>
   <section class="viewer-pane" :class="{ active: layout.activePaneId === pane.id }" @click="layout.setActive(pane.id)">
-    <header class="pane-toolbar">
-      <div class="pane-title" :title="pane.filePath || pane.terminalId">
-        {{ pane.terminalId ? "Terminal" : pane.filePath || "Empty pane" }}
-      </div>
-      <button class="btn btn-sm btn-outline-secondary icon-button" type="button" title="Split vertical" @click.stop="layout.splitPane(pane.id, 'vertical')">
-        <i class="bi bi-layout-split"></i>
-      </button>
-      <button class="btn btn-sm btn-outline-secondary icon-button" type="button" title="Split horizontal" @click.stop="layout.splitPane(pane.id, 'horizontal')">
-        <i class="bi bi-distribute-vertical"></i>
-      </button>
-      <button class="btn btn-sm btn-outline-secondary icon-button" type="button" title="Close pane" @click.stop="layout.closePane(pane.id)">
-        <i class="bi bi-x"></i>
-      </button>
-    </header>
-
     <div class="pane-body">
       <TerminalViewer v-if="pane.terminalId" :id="pane.terminalId" />
       <div v-else-if="!pane.filePath" class="empty-state">
@@ -95,25 +80,6 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
 .viewer-pane.active {
   border-color: #4f6f96;
   box-shadow: 0 0 0 2px rgb(79 111 150 / 0.18);
-}
-
-.pane-toolbar {
-  align-items: center;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  flex: 0 0 42px;
-  gap: 6px;
-  padding: 4px 6px 4px 10px;
-}
-
-.pane-title {
-  flex: 1 1 auto;
-  font-size: 13px;
-  font-weight: 600;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .pane-body {

@@ -12,6 +12,7 @@ const terminals = useTerminalsStore();
 const terminal = ref<TerminalSnapshot | null>(null);
 const error = ref("");
 const terminalElement = ref<HTMLElement | null>(null);
+const controlLatch = ref(false);
 const debugMode = import.meta.env.DEV || import.meta.env.VITE_VIEWER_DEBUG === "1";
 type TerminalMessage =
   | { type: "snapshot"; terminal: TerminalSnapshot }
@@ -34,6 +35,19 @@ let deferredOutput: Array<{ data: string; outputVersion?: number }> = [];
 let modeQueryRemainder = "";
 let resettingOutput = false;
 let suppressPtyInput = false;
+
+const SOFTKEYS = [
+  { title: "Interrupt (Ctrl+C)", icon: "bi-x-octagon", data: "\x03" },
+  { title: "EOF (Ctrl+D)", icon: "bi-box-arrow-right", data: "\x04" },
+  { title: "Home", icon: "bi-chevron-bar-left", data: "\x01" },
+  { title: "End", icon: "bi-chevron-bar-right", data: "\x05" },
+  { title: "Page up", icon: "bi-chevron-double-up", data: "\x1b[5~" },
+  { title: "Page down", icon: "bi-chevron-double-down", data: "\x1b[6~" },
+  { title: "Left", icon: "bi-arrow-left", data: "\x1b[D" },
+  { title: "Down", icon: "bi-arrow-down", data: "\x1b[B" },
+  { title: "Up", icon: "bi-arrow-up", data: "\x1b[A" },
+  { title: "Right", icon: "bi-arrow-right", data: "\x1b[C" },
+];
 
 function firstParam(params: Array<number | number[]>): number {
   const first = params[0];
@@ -139,6 +153,30 @@ function ensureTerminal() {
   xterm.loadAddon(fitAddon);
   xterm.open(terminalElement.value);
   xterm.attachCustomKeyEventHandler((event) => {
+    if (event.type === "keydown" && controlLatch.value && !event.altKey && !event.metaKey) {
+      if (event.key.length === 1) {
+        event.preventDefault();
+        send(controlSequence(event.key));
+        controlLatch.value = false;
+        return false;
+      }
+      if (event.key === "Escape") {
+        controlLatch.value = false;
+        return true;
+      }
+    }
+    if (event.type === "keydown" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (event.key === "Home") {
+        event.preventDefault();
+        send("\x01");
+        return false;
+      }
+      if (event.key === "End") {
+        event.preventDefault();
+        send("\x05");
+        return false;
+      }
+    }
     if (
       event.type === "keydown" &&
       event.ctrlKey &&
@@ -247,6 +285,27 @@ function send(data: string) {
   }
 }
 
+function controlSequence(key: string): string {
+  const normalized = key.toUpperCase();
+  if (normalized.length !== 1) return key;
+  return String.fromCharCode(normalized.charCodeAt(0) & 0x1f);
+}
+
+function sendSoftInput(data: string) {
+  send(data);
+  xterm?.focus();
+}
+
+function sendShortcut(data: string) {
+  sendSoftInput(data);
+  controlLatch.value = false;
+}
+
+function toggleControlLatch() {
+  controlLatch.value = !controlLatch.value;
+  xterm?.focus();
+}
+
 function resize() {
   if (!fitAddon || !xterm) return;
   try {
@@ -351,6 +410,29 @@ onUnmounted(() => {
       </button>
     </div>
     <div ref="terminalElement" class="terminal-surface" @pointerdown="focusTerminal"></div>
+    <div class="terminal-softkeys" aria-label="Terminal quick keys">
+      <button
+        class="softkey control-key"
+        :class="{ active: controlLatch }"
+        type="button"
+        title="Latch Ctrl for the next typed key"
+        aria-label="Latch Ctrl for the next typed key"
+        @click="toggleControlLatch"
+      >
+        Ctrl
+      </button>
+      <button
+        v-for="key in SOFTKEYS"
+        :key="key.title"
+        class="softkey"
+        type="button"
+        :title="key.title"
+        :aria-label="key.title"
+        @click="sendShortcut(key.data)"
+      >
+        <i class="bi" :class="key.icon"></i>
+      </button>
+    </div>
   </div>
 </template>
 
@@ -398,6 +480,44 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   padding: 8px;
+}
+
+.terminal-softkeys {
+  border-top: 1px solid #30363d;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 6px 8px 8px;
+}
+
+.softkey {
+  align-items: center;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #d6deeb;
+  display: inline-flex;
+  flex: 0 0 34px;
+  font: inherit;
+  font-size: 14px;
+  height: 30px;
+  justify-content: center;
+  padding: 0;
+  width: 34px;
+}
+
+.softkey:active,
+.softkey.active {
+  background: #1f6feb;
+  border-color: #58a6ff;
+  color: #ffffff;
+}
+
+.control-key {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
 }
 
 .terminal-surface :deep(.xterm) {

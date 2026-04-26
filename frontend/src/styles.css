@@ -1,0 +1,165 @@
+:root {
+  color-scheme: light;
+  --sidebar-width: 320px;
+  --border: #d9dee7;
+  --panel: #ffffff;
+  --surface: #f5f7fa;
+  --text-muted: #667085;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--surface);
+  color: #172033;
+  overflow: hidden;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.topbar {
+  align-items: center;
+  background: #ffffff;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex: 0 0 48px;
+  gap: 10px;
+  padding: 0 12px;
+}
+
+.brand {
+  font-weight: 650;
+}
+
+.status-dot {
+  border-radius: 50%;
+  display: inline-block;
+  height: 8px;
+  margin-left: auto;
+  width: 8px;
+}
+
+.status-dot.connected {
+  background: #198754;
+}
+
+.status-dot.reconnecting,
+.status-dot.connecting {
+  background: #d68a00;
+}
+
+.status-text {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.body-shell {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.sidebar-drawer {
+  background: #ffffff;
+  border-right: 1px solid var(--border);
+  bottom: 0;
+  box-shadow: 8px 0 24px rgb(15 23 42 / 0.16);
+  display: flex;
+  flex-direction: column;
+  left: 0;
+  max-width: 88vw;
+  min-width: 0;
+  position: fixed;
+  top: 48px;
+  transform: translateX(-100%);
+  transition: transform 0.16s ease;
+  width: var(--sidebar-width);
+  z-index: 21;
+}
+
+.sidebar-drawer.open {
+  transform: translateX(0);
+}
+
+.sidebar-drawer.pinned {
+  box-shadow: none;
+  flex: 0 0 var(--sidebar-width);
+  max-width: none;
+  position: static;
+  top: auto;
+  transform: none;
+  transition: none;
+}
+
+.sidebar-chrome {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex: 0 0 42px;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 6px;
+  padding: 4px 8px 4px 12px;
+}
+
+.sidebar-chrome span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.workspace-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.icon-button {
+  align-items: center;
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+  width: 34px;
+}
+
+.sidebar-backdrop {
+  background: rgb(15 23 42 / 0.35);
+  inset: 48px 0 0;
+  position: fixed;
+  z-index: 20;
+}
+
+@media (max-width: 767.98px) {
+  .body-shell.sidebar-pinned {
+    display: block;
+    overflow: hidden;
+  }
+
+  .sidebar-drawer.pinned {
+    height: min(48vh, 390px);
+    max-width: none;
+    width: 100%;
+  }
+
+  .body-shell.sidebar-pinned .workspace-wrap {
+    height: calc(100% - min(48vh, 390px));
+  }
+}
+
+.scroll-area {
+  overflow: auto;
+}
+
+.muted {
+  color: var(--text-muted);
+}

@@ -52,3 +52,13 @@ class TerminalInfo(BaseModel):
 
 class TerminalSnapshot(TerminalInfo):
     output: str
+    output_version: int = 0
+
+
+class ClientLog(BaseModel):
+    level: Literal["debug", "info", "warning", "error"] = "error"
+    message: str
+    source: str = "frontend"
+    stack: str | None = None
+    url: str | None = None
+    user_agent: str | None = None

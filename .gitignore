@@ -21,6 +21,7 @@ frontend/dist/
 .codex
 
 # Logs and local editor/OS files
+logs/
 *.log
 *.swp
 *.swo

@@ -3,6 +3,7 @@ import argparse
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import uvicorn
@@ -15,6 +16,7 @@ DEFAULT_FRONTEND_DIST = FRONTEND_DIR / "dist"
 DEFAULT_ROOT = Path("~/Sync").expanduser()
 DEFAULT_PORT = 18989
 DEFAULT_HOST = "0.0.0.0"
+DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +64,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable uvicorn reload for backend development.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging and build frontend sourcemaps when --build-frontend is used.",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default=DEFAULT_LOG_DIR,
+        type=Path,
+        help="Directory for timestamped log files. Defaults to ./logs.",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        type=Path,
+        help="Explicit log file path. Overrides --log-dir.",
+    )
     return parser.parse_args()
 
 
@@ -72,18 +91,28 @@ def resolve_project_path(path: Path) -> Path:
     return (PROJECT_ROOT / path).resolve()
 
 
-def build_frontend() -> None:
+def build_frontend(debug: bool) -> None:
     package_json = FRONTEND_DIR / "package.json"
     if not package_json.exists():
         raise SystemExit(f"Frontend package.json does not exist: {package_json}")
 
     print("Building frontend with npm run build...")
+    env = {
+        **os.environ,
+        "VIEWER_DEBUG": "1" if debug else "0",
+        "VITE_VIEWER_DEBUG": "1" if debug else "0",
+    }
     try:
-        subprocess.run(["npm", "run", "build"], cwd=FRONTEND_DIR, check=True)
+        subprocess.run(["npm", "run", "build"], cwd=FRONTEND_DIR, env=env, check=True)
     except FileNotFoundError as exc:
         raise SystemExit("Cannot build frontend because npm was not found.") from exc
     except subprocess.CalledProcessError as exc:
         raise SystemExit(f"Frontend build failed with exit code {exc.returncode}.") from exc
+
+
+def default_log_file(log_dir: Path) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return resolve_project_path(log_dir) / f"viewer-{stamp}.log"
 
 
 def main() -> None:
@@ -95,18 +124,38 @@ def main() -> None:
     if not root.is_dir():
         raise SystemExit(f"Root path is not a directory: {root}")
 
-    if args.build_frontend:
-        build_frontend()
-
     os.environ["VIEWER_ROOT"] = root.as_posix()
+    os.environ["VIEWER_HOST"] = args.host
+    os.environ["VIEWER_PORT"] = str(args.port)
+    os.environ["VIEWER_DEBUG"] = "1" if args.debug else "0"
+    log_file = resolve_project_path(args.log_file) if args.log_file else default_log_file(args.log_dir)
+    os.environ["VIEWER_LOG_FILE"] = log_file.as_posix()
     if args.frontend_dist is not None:
         os.environ["VIEWER_FRONTEND_DIST"] = resolve_project_path(args.frontend_dist).as_posix()
     else:
         os.environ["VIEWER_FRONTEND_DIST"] = DEFAULT_FRONTEND_DIST.as_posix()
 
     sys.path.insert(0, BACKEND_DIR.as_posix())
+    from app.logging import configure_logging
+
+    configure_logging(log_file, args.debug)
+
+    if args.build_frontend:
+        build_frontend(args.debug)
+
+    display_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
+    base_url = f"http://{display_host}:{args.port}"
     print(f"Serving {root} at http://{args.host}:{args.port}")
-    uvicorn.run("app.main:app", host=args.host, port=args.port, reload=args.reload)
+    print(f"Log file: {log_file}")
+    print(f"Log URL:  {base_url}/api/debug/log")
+    uvicorn.run(
+        "app.main:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_config=None,
+        log_level="debug" if args.debug else "info",
+    )
 
 
 if __name__ == "__main__":

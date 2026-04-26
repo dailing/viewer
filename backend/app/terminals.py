@@ -10,11 +10,20 @@ import uuid
 from dataclasses import dataclass, field
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
+from loguru import logger
 
 from .config import settings
 
 MAX_OUTPUT_CHARS = 1_000_000
 CLIENT_SEND_TIMEOUT = 1.0
+CLIENT_QUEUE_SIZE = 200
+
+
+@dataclass
+class TerminalClient:
+    websocket: WebSocket
+    queue: asyncio.Queue[dict | None] = field(default_factory=lambda: asyncio.Queue(maxsize=CLIENT_QUEUE_SIZE))
+    writer_task: asyncio.Task | None = None
 
 
 @dataclass
@@ -25,11 +34,13 @@ class TerminalSession:
     cwd: str
     created_at: float
     output: str = ""
+    output_version: int = 0
     status: str = "running"
     exit_code: int | None = None
     master_fd: int | None = None
     process: subprocess.Popen[bytes] | None = None
-    clients: set[WebSocket] = field(default_factory=set)
+    clients: dict[WebSocket, TerminalClient] = field(default_factory=dict)
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     reader_task: asyncio.Task | None = None
     wait_task: asyncio.Task | None = None
 
@@ -43,6 +54,7 @@ class TerminalSession:
             "status": self.status,
             "exit_code": self.exit_code,
             "output": self.output,
+            "output_version": self.output_version,
         }
 
     def summary(self) -> dict:
@@ -112,6 +124,7 @@ class TerminalManager:
         session.master_fd = master_fd
         session.process = process
         self.sessions[terminal_id] = session
+        logger.info("Terminal {} started shell={} cwd={} pid={}", terminal_id, shell, session.cwd, process.pid)
         session.reader_task = asyncio.create_task(self._read_output(session))
         session.wait_task = asyncio.create_task(self._wait_for_exit(session))
         return session.summary()
@@ -141,13 +154,16 @@ class TerminalManager:
     async def connect(self, terminal_id: str, websocket: WebSocket) -> None:
         session = self.get(terminal_id)
         await websocket.accept()
-        session.clients.add(websocket)
-        await websocket.send_json({"type": "snapshot", "terminal": session.snapshot()})
+        client = TerminalClient(websocket=websocket)
+        session.clients[websocket] = client
+        client.writer_task = asyncio.create_task(self._client_writer(client))
+        self._enqueue(client, {"type": "snapshot", "terminal": session.snapshot()})
+        logger.info("Terminal {} websocket connected clients={}", terminal_id, len(session.clients))
         try:
             while True:
                 message = await websocket.receive_json()
                 if message.get("type") == "input":
-                    self.write(session, str(message.get("data", "")))
+                    await self.write(session, str(message.get("data", "")))
                 elif message.get("type") == "resize":
                     rows = int(message.get("rows", 30))
                     cols = int(message.get("cols", 120))
@@ -158,15 +174,27 @@ class TerminalManager:
             if "disconnect" not in str(exc).lower():
                 raise
         finally:
-            session.clients.discard(websocket)
+            await self._remove_client(session, client)
+            logger.info("Terminal {} websocket disconnected clients={}", terminal_id, len(session.clients))
 
-    def write(self, session: TerminalSession, data: str) -> None:
+    async def write(self, session: TerminalSession, data: str) -> None:
         if session.status != "running" or session.master_fd is None:
             return
-        try:
-            os.write(session.master_fd, data.encode())
-        except OSError:
-            pass
+        pending = memoryview(data.encode())
+        logger.debug("Terminal {} input bytes={}", session.id, len(pending))
+        async with session.write_lock:
+            while pending:
+                try:
+                    written = os.write(session.master_fd, pending)
+                except BlockingIOError:
+                    await asyncio.sleep(0.005)
+                    continue
+                except OSError:
+                    return
+                if written <= 0:
+                    await asyncio.sleep(0.005)
+                    continue
+                pending = pending[written:]
 
     def resize(self, session: TerminalSession, rows: int, cols: int) -> None:
         if session.master_fd is None:
@@ -191,9 +219,11 @@ class TerminalManager:
                 return
             text = chunk.decode(errors="replace")
             session.output += text
+            session.output_version += 1
+            logger.debug("Terminal {} output bytes={} version={}", session.id, len(chunk), session.output_version)
             if len(session.output) > MAX_OUTPUT_CHARS:
                 session.output = session.output[-MAX_OUTPUT_CHARS:]
-            await self._broadcast(session, {"type": "output", "data": text})
+            await self._broadcast(session, {"type": "output", "data": text, "output_version": session.output_version})
 
     async def _wait_for_exit(self, session: TerminalSession) -> None:
         if not session.process:
@@ -201,6 +231,7 @@ class TerminalManager:
         exit_code = await asyncio.to_thread(session.process.wait)
         session.status = "exited"
         session.exit_code = exit_code
+        logger.info("Terminal {} exited code={}", session.id, exit_code)
         await self._broadcast(session, {"type": "status", "terminal": session.summary()})
 
     async def _terminate_process(self, session: TerminalSession) -> None:
@@ -234,18 +265,43 @@ class TerminalManager:
         await self._broadcast(session, {"type": "status", "terminal": session.summary()})
 
     async def _broadcast(self, session: TerminalSession, message: dict) -> None:
-        stale: list[WebSocket] = []
-        for client in list(session.clients):
-            try:
-                await asyncio.wait_for(client.send_json(message), timeout=CLIENT_SEND_TIMEOUT)
-            except Exception:
+        stale: list[TerminalClient] = []
+        for client in list(session.clients.values()):
+            if client.writer_task and client.writer_task.done():
+                stale.append(client)
+                continue
+            if not self._enqueue(client, message):
                 stale.append(client)
         for client in stale:
-            session.clients.discard(client)
-            try:
-                await client.close()
-            except Exception:
-                pass
+            logger.warning("Terminal {} removing stale websocket client", session.id)
+            await self._remove_client(session, client)
+
+    def _enqueue(self, client: TerminalClient, message: dict) -> bool:
+        try:
+            client.queue.put_nowait(message)
+        except asyncio.QueueFull:
+            return False
+        return True
+
+    async def _client_writer(self, client: TerminalClient) -> None:
+        try:
+            while True:
+                message = await client.queue.get()
+                if message is None:
+                    return
+                await asyncio.wait_for(client.websocket.send_json(message), timeout=CLIENT_SEND_TIMEOUT)
+        except Exception:
+            return
+
+    async def _remove_client(self, session: TerminalSession, client: TerminalClient) -> None:
+        if session.clients.pop(client.websocket, None) is None:
+            return
+        if client.writer_task:
+            client.writer_task.cancel()
+        try:
+            await client.websocket.close()
+        except Exception:
+            pass
 
     def _set_size(self, fd: int, rows: int, cols: int) -> None:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))

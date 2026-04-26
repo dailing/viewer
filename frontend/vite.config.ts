@@ -3,6 +3,9 @@ import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
   plugins: [vue()],
+  build: {
+    sourcemap: process.env.VIEWER_DEBUG === "1",
+  },
   server: {
     host: "0.0.0.0",
     proxy: {
@@ -10,4 +13,3 @@ export default defineConfig({
     },
   },
 });
-

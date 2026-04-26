@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     show_hidden: bool = True
     poll_delay_ms: int = 500
     terminal_shell: str = "zsh"
+    debug: bool = False
+    log_file: Path | None = None
 
     @property
     def root_resolved(self) -> Path:

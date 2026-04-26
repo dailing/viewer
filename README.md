@@ -68,3 +68,13 @@ uv run python run.py --build-frontend
 ```
 
 This runs `npm run build` in `frontend/` before starting the server. The backend serves `frontend/dist` by default. You can override that with `VIEWER_FRONTEND_DIST=/other/dist/path` or `--frontend-dist /other/dist/path`.
+
+## Debug logs
+
+Each `run.py` startup creates a timestamped log file under `logs/` and prints a local log URL:
+
+```bash
+uv run python run.py --debug --build-frontend
+```
+
+`--debug` enables verbose backend logging, frontend sourcemaps during `--build-frontend`, xterm debug logging, and browser error reporting to `/api/debug/client-log`. The current log can be viewed at `/api/debug/log`.

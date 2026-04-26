@@ -12,4 +12,5 @@ export interface TerminalInfo {
 
 export interface TerminalSnapshot extends TerminalInfo {
   output: string;
+  output_version: number;
 }

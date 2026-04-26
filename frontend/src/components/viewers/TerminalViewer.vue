@@ -3,7 +3,7 @@ import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { getTerminal, terminalSocketUrl } from "../../api/client";
+import { terminalSocketUrl } from "../../api/client";
 import { useTerminalsStore } from "../../stores/terminals";
 import type { TerminalInfo, TerminalSnapshot } from "../../types/terminals";
 
@@ -12,13 +12,90 @@ const terminals = useTerminalsStore();
 const terminal = ref<TerminalSnapshot | null>(null);
 const error = ref("");
 const terminalElement = ref<HTMLElement | null>(null);
+const debugMode = import.meta.env.DEV || import.meta.env.VITE_VIEWER_DEBUG === "1";
+type TerminalMessage =
+  | { type: "snapshot"; terminal: TerminalSnapshot }
+  | { type: "output"; data?: string; output_version?: number }
+  | { type: "status"; terminal: TerminalInfo }
+  | { type: string; data?: string; output_version?: number; terminal?: TerminalSnapshot | TerminalInfo };
+
 let socket: WebSocket | null = null;
 let xterm: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let dataDisposable: { dispose: () => void } | null = null;
+let parserDisposables: Array<{ dispose: () => void }> = [];
 let mounted = false;
 let reconnectTimer: number | null = null;
+let hasSnapshot = false;
+let appliedOutputVersion = 0;
+let pendingOutput: Array<{ data: string; outputVersion: number }> = [];
+let modeQueryRemainder = "";
+
+function firstParam(params: Array<number | number[]>): number {
+  const first = params[0];
+  return Array.isArray(first) ? first[0] ?? 0 : first ?? 0;
+}
+
+function registerModeQueryHandlers(term: Terminal) {
+  const reply = (params: Array<number | number[]>, privateMode: boolean) => {
+    send(`\x1b[${privateMode ? "?" : ""}${firstParam(params)};0$y`);
+    return true;
+  };
+  parserDisposables = [
+    term.parser.registerCsiHandler({ intermediates: "$", final: "p" }, (params) => reply(params, false)),
+    term.parser.registerCsiHandler({ prefix: "?", intermediates: "$", final: "p" }, (params) => reply(params, true)),
+  ];
+}
+
+function modeQueryReply(sequence: string): string | null {
+  const match = /^\x1b\[(\??)([0-9;:]*)\$p$/.exec(sequence);
+  if (!match) return null;
+  const mode = Number.parseInt(match[2].split(/[;:]/, 1)[0] || "0", 10) || 0;
+  return `\x1b[${match[1]}${mode};0$y`;
+}
+
+function filterModeQueries(data: string, respond: boolean): string {
+  const input = modeQueryRemainder + data;
+  modeQueryRemainder = "";
+  let output = "";
+  let offset = 0;
+
+  while (offset < input.length) {
+    const start = input.indexOf("\x1b[", offset);
+    if (start === -1) {
+      output += input.slice(offset);
+      break;
+    }
+    output += input.slice(offset, start);
+
+    let end = start + 2;
+    while (end < input.length) {
+      const code = input.charCodeAt(end);
+      if (code >= 0x40 && code <= 0x7e) break;
+      end += 1;
+    }
+    if (end >= input.length) {
+      modeQueryRemainder = input.slice(start);
+      break;
+    }
+
+    const sequence = input.slice(start, end + 1);
+    const reply = modeQueryReply(sequence);
+    if (reply) {
+      if (respond) send(reply);
+    } else {
+      output += sequence;
+    }
+    offset = end + 1;
+  }
+
+  if (modeQueryRemainder.length > 128) {
+    output += modeQueryRemainder;
+    modeQueryRemainder = "";
+  }
+  return output;
+}
 
 function ensureTerminal() {
   if (xterm || !terminalElement.value) return;
@@ -30,6 +107,7 @@ function ensureTerminal() {
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
     fontSize: 13,
     lineHeight: 1.25,
+    logLevel: debugMode ? "debug" : "error",
     scrollback: 10000,
     theme: {
       background: "#0d1117",
@@ -54,6 +132,7 @@ function ensureTerminal() {
       brightWhite: "#f0f6fc",
     },
   });
+  registerModeQueryHandlers(xterm);
   xterm.loadAddon(fitAddon);
   xterm.open(terminalElement.value);
   dataDisposable = xterm.onData((data) => {
@@ -65,8 +144,10 @@ function ensureTerminal() {
 }
 
 function disposeTerminal() {
+  parserDisposables.forEach((disposable) => disposable.dispose());
   dataDisposable?.dispose();
   resizeObserver?.disconnect();
+  parserDisposables = [];
   dataDisposable = null;
   resizeObserver = null;
   fitAddon = null;
@@ -76,20 +157,52 @@ function disposeTerminal() {
 
 function writeOutput(data: string) {
   ensureTerminal();
-  xterm?.write(data);
+  const output = filterModeQueries(data, true);
+  if (output) xterm?.write(output);
 }
 
 function resetOutput(data: string) {
   ensureTerminal();
   if (!xterm) return;
-  xterm?.reset();
-  if (data) {
-    xterm.write(data, () => {
+  modeQueryRemainder = "";
+  xterm.reset();
+  xterm.clear();
+  const output = filterModeQueries(data, false);
+  modeQueryRemainder = "";
+  if (output) {
+    xterm.write(output, () => {
       resize();
     });
     return;
   }
   resize();
+}
+
+function applySnapshot(snapshot: TerminalSnapshot) {
+  terminal.value = snapshot;
+  hasSnapshot = true;
+  appliedOutputVersion = snapshot.output_version ?? 0;
+  const replay = pendingOutput
+    .filter((item) => item.outputVersion > appliedOutputVersion)
+    .sort((a, b) => a.outputVersion - b.outputVersion);
+  pendingOutput = [];
+  resetOutput(snapshot.output + replay.map((item) => item.data).join(""));
+  if (replay.length > 0) {
+    appliedOutputVersion = replay[replay.length - 1].outputVersion;
+  }
+  terminals.upsert(snapshot);
+}
+
+function applyOutput(data: string, outputVersion?: number) {
+  if (!hasSnapshot) {
+    pendingOutput.push({ data, outputVersion: outputVersion ?? Number.MAX_SAFE_INTEGER });
+    return;
+  }
+  if (outputVersion !== undefined) {
+    if (outputVersion <= appliedOutputVersion) return;
+    appliedOutputVersion = outputVersion;
+  }
+  writeOutput(data);
 }
 
 function send(data: string) {
@@ -116,18 +229,20 @@ function connect() {
     reconnectTimer = null;
   }
   socket?.close();
+  hasSnapshot = false;
+  appliedOutputVersion = 0;
+  pendingOutput = [];
+  modeQueryRemainder = "";
   const activeSocket = new WebSocket(terminalSocketUrl(props.id));
   socket = activeSocket;
   activeSocket.addEventListener("open", resize);
   activeSocket.addEventListener("message", (event) => {
     if (socket !== activeSocket) return;
-    const message = JSON.parse(event.data) as { type: string; data?: string; terminal?: TerminalSnapshot | TerminalInfo };
+    const message = JSON.parse(event.data) as TerminalMessage;
     if (message.type === "snapshot" && message.terminal) {
-      terminal.value = message.terminal as TerminalSnapshot;
-      resetOutput(terminal.value.output);
-      terminals.upsert(terminal.value);
+      applySnapshot(message.terminal as TerminalSnapshot);
     } else if (message.type === "output") {
-      writeOutput(message.data ?? "");
+      applyOutput(message.data ?? "", message.output_version);
     } else if (message.type === "status" && message.terminal) {
       terminals.upsert(message.terminal as TerminalInfo);
       if (terminal.value) {
@@ -151,9 +266,6 @@ function connect() {
 async function load() {
   error.value = "";
   try {
-    terminal.value = await getTerminal(props.id);
-    terminals.upsert(terminal.value);
-    resetOutput(terminal.value.output);
     connect();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);

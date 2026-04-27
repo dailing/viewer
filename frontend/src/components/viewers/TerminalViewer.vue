@@ -4,15 +4,21 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { terminalSocketUrl } from "../../api/client";
+import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useTerminalsStore } from "../../stores/terminals";
+import type { PaneToolbarAction } from "../../stores/paneToolbar";
 import type { TerminalInfo, TerminalSnapshot } from "../../types/terminals";
 
-const props = defineProps<{ id: string }>();
+const props = defineProps<{ id: string; paneId: string }>();
+const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
 const terminal = ref<TerminalSnapshot | null>(null);
 const error = ref("");
 const terminalElement = ref<HTMLElement | null>(null);
+const pastePadTextarea = ref<HTMLTextAreaElement | null>(null);
 const controlLatch = ref(false);
+const pastePadOpen = ref(false);
+const pastePadText = ref("");
 const debugMode = import.meta.env.DEV || import.meta.env.VITE_VIEWER_DEBUG === "1";
 type TerminalMessage =
   | { type: "snapshot"; terminal: TerminalSnapshot }
@@ -35,8 +41,18 @@ let deferredOutput: Array<{ data: string; outputVersion?: number }> = [];
 let modeQueryRemainder = "";
 let resettingOutput = false;
 let suppressPtyInput = false;
+let slowSendToken = 0;
+let lastTouchTap: { time: number; x: number; y: number } | null = null;
 
-const SOFTKEYS = [
+type SoftKey = {
+  title: string;
+  data: string;
+  icon?: string;
+  label?: string;
+};
+
+const SOFTKEYS: SoftKey[] = [
+  { title: "Tab", label: "Tab", data: "\x09" },
   { title: "Interrupt (Ctrl+C)", icon: "bi-x-octagon", data: "\x03" },
   { title: "EOF (Ctrl+D)", icon: "bi-box-arrow-right", data: "\x04" },
   { title: "Home", icon: "bi-chevron-bar-left", data: "\x01" },
@@ -285,6 +301,10 @@ function send(data: string) {
   }
 }
 
+function normalizeTerminalInput(data: string): string {
+  return data.replace(/\r\n/g, "\n").replace(/\n/g, "\r");
+}
+
 function controlSequence(key: string): string {
   const normalized = key.toUpperCase();
   if (normalized.length !== 1) return key;
@@ -296,6 +316,47 @@ function sendSoftInput(data: string) {
   xterm?.focus();
 }
 
+function openPastePad() {
+  pastePadOpen.value = true;
+  void nextTick(() => pastePadTextarea.value?.focus());
+}
+
+function closePastePad() {
+  pastePadOpen.value = false;
+  xterm?.focus();
+}
+
+function clearPastePad() {
+  pastePadText.value = "";
+  void nextTick(() => pastePadTextarea.value?.focus());
+}
+
+function sendPastePadText(extra = "") {
+  const data = normalizeTerminalInput(pastePadText.value) + extra;
+  if (!data) return;
+  send(data);
+  closePastePad();
+}
+
+function sendBracketedPaste() {
+  const data = normalizeTerminalInput(pastePadText.value);
+  if (!data) return;
+  send(`\x1b[200~${data}\x1b[201~`);
+  closePastePad();
+}
+
+async function sendSlowPaste() {
+  const data = normalizeTerminalInput(pastePadText.value);
+  if (!data) return;
+  const token = ++slowSendToken;
+  pastePadOpen.value = false;
+  for (let index = 0; index < data.length && token === slowSendToken; index += 32) {
+    send(data.slice(index, index + 32));
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+  }
+  xterm?.focus();
+}
+
 function sendShortcut(data: string) {
   sendSoftInput(data);
   controlLatch.value = false;
@@ -304,6 +365,47 @@ function sendShortcut(data: string) {
 function toggleControlLatch() {
   controlLatch.value = !controlLatch.value;
   xterm?.focus();
+}
+
+function updatePaneToolbar() {
+  const status = terminal.value?.status ?? "connecting";
+  const actions: PaneToolbarAction[] = [
+    {
+      id: "terminal-paste-pad",
+      title: "Open text input pad",
+      icon: "bi-textarea-t",
+      active: pastePadOpen.value,
+      run: openPastePad,
+    },
+    {
+      id: "terminal-ctrl",
+      title: "Latch Ctrl for the next typed key",
+      label: "Ctrl",
+      active: controlLatch.value,
+      run: toggleControlLatch,
+    },
+    ...SOFTKEYS.map((key) => ({
+      id: `terminal-${key.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      title: key.title,
+      icon: key.icon,
+      label: key.label,
+      run: () => sendShortcut(key.data),
+    })),
+    {
+      id: "terminal-end",
+      title: "End terminal",
+      icon: "bi-stop-fill",
+      variant: "danger" as const,
+      run: endTerminal,
+    },
+  ];
+
+  paneToolbar.setPaneToolbar(props.paneId, {
+    title: terminal.value?.shell ?? "zsh",
+    status,
+    statusClass: status,
+    actions,
+  });
 }
 
 function resize() {
@@ -320,6 +422,24 @@ function resize() {
 
 function focusTerminal() {
   xterm?.focus();
+}
+
+function handleTerminalDoubleClick() {
+  openPastePad();
+}
+
+function handleTerminalPointerUp(event: PointerEvent) {
+  if (event.pointerType === "mouse") return;
+  const now = window.performance.now();
+  const previous = lastTouchTap;
+  lastTouchTap = { time: now, x: event.clientX, y: event.clientY };
+  if (!previous) return;
+  const elapsed = now - previous.time;
+  const distance = Math.hypot(event.clientX - previous.x, event.clientY - previous.y);
+  if (elapsed < 380 && distance < 24) {
+    openPastePad();
+    lastTouchTap = null;
+  }
 }
 
 function connect() {
@@ -382,6 +502,11 @@ watch(() => props.id, () => {
   socket?.close();
   void load();
 });
+watch(() => props.paneId, (paneId, oldPaneId) => {
+  if (oldPaneId && oldPaneId !== paneId) paneToolbar.clearPaneToolbar(oldPaneId);
+  updatePaneToolbar();
+});
+watch(() => [terminal.value?.shell, terminal.value?.status, controlLatch.value, pastePadOpen.value] as const, updatePaneToolbar, { immediate: true });
 onMounted(() => {
   mounted = true;
   window.addEventListener("resize", resize);
@@ -392,9 +517,11 @@ onMounted(() => {
 });
 onUnmounted(() => {
   mounted = false;
+  slowSendToken += 1;
   if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
   window.removeEventListener("resize", resize);
   socket?.close();
+  paneToolbar.clearPaneToolbar(props.paneId);
   disposeTerminal();
 });
 </script>
@@ -402,36 +529,36 @@ onUnmounted(() => {
 <template>
   <div v-if="error" class="terminal-error">{{ error }}</div>
   <div v-else class="terminal-viewer">
-    <div class="terminal-bar">
-      <span>{{ terminal?.shell ?? "zsh" }}</span>
-      <span class="terminal-status" :class="terminal?.status">{{ terminal?.status ?? "connecting" }}</span>
-      <button class="btn btn-sm btn-outline-light terminal-end" type="button" title="End terminal" @click="endTerminal">
-        <i class="bi bi-stop-fill"></i>
-      </button>
-    </div>
-    <div ref="terminalElement" class="terminal-surface" @pointerdown="focusTerminal"></div>
-    <div class="terminal-softkeys" aria-label="Terminal quick keys">
-      <button
-        class="softkey control-key"
-        :class="{ active: controlLatch }"
-        type="button"
-        title="Latch Ctrl for the next typed key"
-        aria-label="Latch Ctrl for the next typed key"
-        @click="toggleControlLatch"
-      >
-        Ctrl
-      </button>
-      <button
-        v-for="key in SOFTKEYS"
-        :key="key.title"
-        class="softkey"
-        type="button"
-        :title="key.title"
-        :aria-label="key.title"
-        @click="sendShortcut(key.data)"
-      >
-        <i class="bi" :class="key.icon"></i>
-      </button>
+    <div
+      ref="terminalElement"
+      class="terminal-surface"
+      @pointerdown="focusTerminal"
+      @pointerup="handleTerminalPointerUp"
+      @dblclick="handleTerminalDoubleClick"
+    ></div>
+    <div v-if="pastePadOpen" class="terminal-paste-pad" @keydown.esc.stop.prevent="closePastePad">
+      <div class="terminal-paste-pad-header">
+        <span>Text input</span>
+        <button class="btn btn-sm btn-outline-secondary icon-button" type="button" title="Close" @click="closePastePad">
+          <i class="bi bi-x"></i>
+        </button>
+      </div>
+      <textarea
+        ref="pastePadTextarea"
+        v-model="pastePadText"
+        class="terminal-paste-pad-textarea"
+        autocapitalize="off"
+        autocomplete="off"
+        autocorrect="off"
+        spellcheck="false"
+      ></textarea>
+      <div class="terminal-paste-pad-actions">
+        <button class="btn btn-sm btn-primary" type="button" @click="sendPastePadText()">Send</button>
+        <button class="btn btn-sm btn-outline-primary" type="button" @click="sendPastePadText('\r')">Send + Enter</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button" @click="sendBracketedPaste">Bracketed</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button" @click="sendSlowPaste">Slow</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button" @click="clearPastePad">Clear</button>
+      </div>
     </div>
   </div>
 </template>
@@ -444,34 +571,7 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-
-.terminal-bar {
-  align-items: center;
-  border-bottom: 1px solid #30363d;
-  color: #8b949e;
-  display: flex;
-  flex: 0 0 34px;
-  font-size: 12px;
-  gap: 8px;
-  padding: 4px 8px 4px 12px;
-}
-
-.terminal-status {
-  border: 1px solid #30363d;
-  border-radius: 999px;
-  line-height: 1;
-  padding: 3px 7px;
-}
-
-.terminal-status.running {
-  color: #7ee787;
-}
-
-.terminal-end {
-  height: 26px;
-  margin-left: auto;
-  width: 30px;
+  position: relative;
 }
 
 .terminal-surface {
@@ -480,44 +580,6 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   padding: 8px;
-}
-
-.terminal-softkeys {
-  border-top: 1px solid #30363d;
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding: 6px 8px 8px;
-}
-
-.softkey {
-  align-items: center;
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  color: #d6deeb;
-  display: inline-flex;
-  flex: 0 0 34px;
-  font: inherit;
-  font-size: 14px;
-  height: 30px;
-  justify-content: center;
-  padding: 0;
-  width: 34px;
-}
-
-.softkey:active,
-.softkey.active {
-  background: #1f6feb;
-  border-color: #58a6ff;
-  color: #ffffff;
-}
-
-.control-key {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
 }
 
 .terminal-surface :deep(.xterm) {
@@ -536,5 +598,68 @@ onUnmounted(() => {
   justify-content: center;
   padding: 18px;
   text-align: center;
+}
+
+.terminal-paste-pad {
+  background: #ffffff;
+  border-top: 1px solid #2f3b4f;
+  bottom: 0;
+  box-shadow: 0 -8px 24px rgb(0 0 0 / 0.35);
+  color: #172033;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  left: 0;
+  max-height: min(52%, 360px);
+  padding: 8px;
+  position: absolute;
+  right: 0;
+  z-index: 5;
+}
+
+.terminal-paste-pad-header {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 8px;
+}
+
+.terminal-paste-pad-header span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.terminal-paste-pad-textarea {
+  border: 1px solid #c8d0dc;
+  border-radius: 6px;
+  flex: 1 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
+  line-height: 1.35;
+  min-height: 92px;
+  outline: none;
+  padding: 8px;
+  resize: none;
+}
+
+.terminal-paste-pad-textarea:focus {
+  border-color: #1f6feb;
+  box-shadow: 0 0 0 2px rgb(31 111 235 / 0.16);
+}
+
+.terminal-paste-pad-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.terminal-paste-pad-actions .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 </style>

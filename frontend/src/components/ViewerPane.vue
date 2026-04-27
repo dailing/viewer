@@ -43,7 +43,7 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
 <template>
   <section class="viewer-pane" :class="{ active: layout.activePaneId === pane.id }" @click="layout.setActive(pane.id)">
     <div class="pane-body">
-      <TerminalViewer v-if="pane.terminalId" :id="pane.terminalId" />
+      <TerminalViewer v-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">
         <i class="bi bi-folder2-open"></i>
         <span>Select a file from the sidebar</span>

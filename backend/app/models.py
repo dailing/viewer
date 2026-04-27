@@ -31,6 +31,7 @@ class FileMeta(BaseModel):
 
 class ConfigData(BaseModel):
     pinned: list[str] = []
+    current_path: str = ""
 
 
 class WatchEvent(BaseModel):
@@ -48,6 +49,10 @@ class TerminalInfo(BaseModel):
     created_at: float
     status: Literal["running", "exited"]
     exit_code: int | None = None
+
+
+class TerminalCreate(BaseModel):
+    cwd: str | None = None
 
 
 class TerminalSnapshot(TerminalInfo):

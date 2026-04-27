@@ -26,11 +26,13 @@ export const useFilesStore = defineStore("files", {
     async loadConfig() {
       const config = await getConfig();
       this.pinned = config.pinned;
+      this.currentPath = config.current_path;
     },
     async saveConfig() {
-      const config: ViewerConfig = { pinned: this.pinned };
+      const config: ViewerConfig = { pinned: this.pinned, current_path: this.currentPath };
       const saved = await putConfig(config);
       this.pinned = saved.pinned;
+      this.currentPath = saved.current_path;
     },
     async loadDirectory(path = "") {
       this.loading = true;
@@ -43,6 +45,7 @@ export const useFilesStore = defineStore("files", {
     async enterDirectory(path: string) {
       await this.loadDirectory(path);
       this.currentPath = path;
+      await this.saveConfig();
     },
     async enterParentDirectory() {
       await this.enterDirectory(this.parentPath);

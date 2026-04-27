@@ -67,6 +67,56 @@ body {
   background: #d68a00;
 }
 
+.pane-status {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  text-transform: lowercase;
+}
+
+.pane-status.running {
+  border-color: #bfd8c7;
+  color: #157347;
+}
+
+.pane-status.exited {
+  border-color: #e8c1c1;
+  color: #a33;
+}
+
+.pane-actions {
+  display: flex;
+  flex: 0 1 auto;
+  gap: 3px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.pane-actions::-webkit-scrollbar {
+  display: none;
+}
+
+.toolbar-action.active {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #ffffff;
+}
+
+.toolbar-action.has-label {
+  font-size: 10px;
+  font-weight: 700;
+  width: 32px;
+}
+
+.toolbar-action-danger {
+  color: #a33;
+}
+
 .body-shell {
   display: flex;
   flex: 1 1 auto;

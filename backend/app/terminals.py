@@ -13,6 +13,7 @@ from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from .config import settings
+from .files import normalize_relative, resolve_path
 
 MAX_OUTPUT_CHARS = 1_000_000
 CLIENT_SEND_TIMEOUT = 1.0
@@ -83,7 +84,16 @@ class TerminalManager:
             raise HTTPException(status_code=404, detail="Terminal not found")
         return session
 
-    async def create(self) -> dict:
+    def _cwd_for(self, cwd: str | None) -> str:
+        requested = normalize_relative(cwd)
+        target = resolve_path(requested)
+        if not target.exists() or not target.is_dir():
+            if requested:
+                logger.warning("Terminal cwd '{}' is not available; using root", requested)
+            return settings.root_resolved.as_posix()
+        return target.as_posix()
+
+    async def create(self, cwd: str | None = None) -> dict:
         self._counter += 1
         terminal_id = uuid.uuid4().hex
         shell = settings.terminal_shell
@@ -91,7 +101,7 @@ class TerminalManager:
             id=terminal_id,
             title=f"Terminal {self._counter}",
             shell=shell,
-            cwd=settings.root_resolved.as_posix(),
+            cwd=self._cwd_for(cwd),
             created_at=time.time(),
         )
         master_fd, slave_fd = os.openpty()

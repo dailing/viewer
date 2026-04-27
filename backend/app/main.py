@@ -9,9 +9,9 @@ from loguru import logger
 
 from .config import settings
 from .events import hub
-from .files import get_meta, list_directory, read_config, read_text, resolve_path, write_config
+from .files import get_meta, list_directory, normalize_relative, read_config, read_text, resolve_path, write_config
 from .logging import current_log_path, ensure_logging
-from .models import ClientLog, ConfigData
+from .models import ClientLog, ConfigData, TerminalCreate
 from .terminals import terminal_manager
 from .watcher import watch_root
 
@@ -142,7 +142,8 @@ async def put_config(config: ConfigData):
         if cleaned not in seen:
             normalized.append(cleaned)
             seen.add(cleaned)
-    return write_config(ConfigData(pinned=normalized))
+    current_path = normalize_relative(config.current_path)
+    return write_config(ConfigData(pinned=normalized, current_path=current_path))
 
 
 @app.get("/api/events")
@@ -156,9 +157,10 @@ async def terminals():
 
 
 @app.post("/api/terminals")
-async def create_terminal():
-    logger.info("Creating terminal")
-    return await terminal_manager.create()
+async def create_terminal(config: TerminalCreate | None = None):
+    cwd = config.cwd if config else None
+    logger.info("Creating terminal cwd={}", cwd or "")
+    return await terminal_manager.create(cwd)
 
 
 @app.get("/api/terminals/{terminal_id}")

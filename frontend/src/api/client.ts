@@ -44,8 +44,12 @@ export async function listTerminals(): Promise<TerminalInfo[]> {
   return request<TerminalInfo[]>("/api/terminals");
 }
 
-export async function createTerminal(): Promise<TerminalInfo> {
-  return request<TerminalInfo>("/api/terminals", { method: "POST" });
+export async function createTerminal(cwd = ""): Promise<TerminalInfo> {
+  return request<TerminalInfo>("/api/terminals", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd }),
+  });
 }
 
 export async function getTerminal(id: string): Promise<TerminalSnapshot> {

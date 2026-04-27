@@ -167,13 +167,21 @@ def read_config() -> ConfigData:
     if not path.exists():
         return ConfigData()
     try:
-        return ConfigData.model_validate_json(path.read_text(encoding="utf-8"))
+        config = ConfigData.model_validate_json(path.read_text(encoding="utf-8"))
     except Exception:
         return ConfigData()
+    try:
+        current_path = normalize_relative(config.current_path)
+        current_target = resolve_path(current_path)
+    except HTTPException:
+        current_path = ""
+        current_target = settings.root_resolved
+    if not current_target.exists() or not current_target.is_dir():
+        current_path = ""
+    return ConfigData(pinned=config.pinned, current_path=current_path)
 
 
 def write_config(config: ConfigData) -> ConfigData:
     path = config_path()
     path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
     return config
-

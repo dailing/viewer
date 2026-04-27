@@ -29,6 +29,7 @@ export interface FileMeta {
 
 export interface ViewerConfig {
   pinned: string[];
+  current_path: string;
 }
 
 export interface WatchEvent {
@@ -37,4 +38,3 @@ export interface WatchEvent {
   is_dir: boolean;
   mtime: number | null;
 }
-

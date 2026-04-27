@@ -5,7 +5,9 @@ import Workspace from "./components/Workspace.vue";
 import { connectEvents } from "./api/events";
 import { useFilesStore } from "./stores/files";
 import { useLayoutStore } from "./stores/layout";
+import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
+import type { PaneToolbarAction } from "./stores/paneToolbar";
 import type { SplitDirection } from "./types/layout";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
@@ -14,18 +16,22 @@ const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 640;
 const files = useFilesStore();
 const layout = useLayoutStore();
+const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
 const sidebarWidth = ref(320);
 const connectionState = ref("connecting");
 const bodyShellStyle = computed(() => ({ "--sidebar-width": `${sidebarWidth.value}px` }));
+const activePaneToolbar = computed(() => (layout.activePaneId ? paneToolbar.forPane(layout.activePaneId) : undefined));
 const activePaneTitle = computed(() => {
+  if (activePaneToolbar.value?.title) return activePaneToolbar.value.title;
   const pane = layout.activePane;
   if (!pane || pane.type !== "pane") return "Empty pane";
   if (pane.terminalId) return "Terminal";
   return pane.filePath || "Empty pane";
 });
+const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 
@@ -34,7 +40,8 @@ onMounted(async () => {
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || sidebarWidth.value);
   sidebarOpen.value = sidebarPinned.value;
   layout.load();
-  await Promise.all([files.loadDirectory(""), files.loadConfig(), terminals.load()]);
+  await Promise.all([files.loadConfig(), terminals.load()]);
+  await files.loadDirectory(files.currentPath);
   source = connectEvents(
     async (event) => {
       await files.refreshAffected(event.path, event.is_dir);
@@ -106,6 +113,10 @@ function closeActivePane() {
   if (layout.activePaneId) layout.closePane(layout.activePaneId);
 }
 
+function runPaneAction(action: PaneToolbarAction) {
+  void action.run();
+}
+
 onUnmounted(() => {
   source?.close();
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
@@ -119,6 +130,24 @@ onUnmounted(() => {
         <i class="bi bi-list"></i>
       </button>
       <div class="active-pane-title" :title="activePaneTitle">{{ activePaneTitle }}</div>
+      <span v-if="activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
+        {{ activePaneToolbar.status }}
+      </span>
+      <div v-if="activePaneActions.length" class="pane-actions" aria-label="Active pane actions">
+        <button
+          v-for="action in activePaneActions"
+          :key="action.id"
+          class="btn btn-outline-secondary icon-button toolbar-action"
+          :class="[{ active: action.active, 'has-label': action.label }, action.variant === 'danger' ? 'toolbar-action-danger' : '']"
+          type="button"
+          :title="action.title"
+          :aria-label="action.title"
+          @click="runPaneAction(action)"
+        >
+          <i v-if="action.icon" class="bi" :class="action.icon"></i>
+          <span v-else-if="action.label">{{ action.label }}</span>
+        </button>
+      </div>
       <button class="btn btn-outline-secondary icon-button" type="button" title="Split vertical" @click="splitActivePane('vertical')">
         <i class="bi bi-layout-split"></i>
       </button>

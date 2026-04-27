@@ -31,9 +31,9 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/file/meta`: calls `get_meta()`.
 - `/api/file/content`: calls `read_text()`.
 - `/api/file/raw`: streams a file via `FileResponse`.
-- `/api/config` GET/PUT: reads and writes pinned path config.
+- `/api/config` GET/PUT: reads and writes pinned path plus last sidebar directory config.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
-- `/api/terminals`: lists or creates terminal sessions.
+- `/api/terminals`: lists or creates terminal sessions; POST accepts an optional relative `cwd`.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
 
@@ -58,7 +58,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `get_meta(path)`: validates file and returns `FileMeta`, including preview type and text-size limit flag.
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: root-local `.viewer.config.json`.
-- `read_config()` / `write_config(config)`: load and save pinned paths.
+- `read_config()` / `write_config(config)`: load and save pinned paths plus the last sidebar directory; missing/invalid saved directories fall back to root.
 
 `backend/app/events.py`
 
@@ -83,7 +83,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `TerminalSession.summary()`: list-friendly state without output.
 - `TerminalManager.list()`: sorted summaries.
 - `TerminalManager.get(id)`: returns a session or 404.
-- `TerminalManager.create()`: opens PTY, starts configured shell in served root, launches reader/wait tasks.
+- `TerminalManager.create(cwd)`: opens PTY, starts configured shell in the requested served-root-relative directory, falls back to root when unavailable, and launches reader/wait tasks.
 - `terminate(id)`: asks process group to exit.
 - `delete(id)`: terminates, cancels tasks, closes FD, removes session, broadcasts deletion.
 - `connect(id, websocket)`: accepts WebSocket, sends snapshot, handles input/resize messages, removes client on disconnect.
@@ -99,7 +99,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `backend/app/models.py`
 
-- Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `WatchEvent`, `TerminalInfo`, `TerminalSnapshot`, `ClientLog`.
+- Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
 `backend/app/logging.py`
@@ -125,11 +125,12 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `frontend/src/App.vue`
 
 - Root shell: top bar, sidebar drawer/pinned layout, workspace.
-- Loads initial directory/config/terminal lists and layout.
+- Loads config/terminal lists, restores the saved sidebar directory, loads that directory, and restores layout.
 - Connects SSE with `connectEvents()`.
 - Refreshes affected file listings on change events.
 - Dispatches `viewer:file-changed` when an open file changes.
 - Polls terminal list every 3 seconds.
+- Renders active pane toolbar metadata/actions from `stores/paneToolbar.ts` in the top bar.
 - Sidebar state functions: `toggleSidebarPin()`, `clampSidebarWidth()`, `startSidebarResize()`.
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
 
@@ -157,7 +158,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Sidebar content: new terminal button, terminal list, pinned paths, current folder, parent button, and `FileTree`.
 - `openPinned(path)`: tries to enter pinned path as directory, otherwise opens file.
-- `newTerminal()`: creates terminal and opens it in active pane.
+- `newTerminal()`: creates terminal in the current sidebar directory and opens it in active pane.
 - `closeTerminal(id)`: deletes terminal and clears matching panes.
 
 `frontend/src/components/FileTree.vue`
@@ -208,6 +209,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `frontend/src/components/viewers/TerminalViewer.vue`
 
 - xterm.js terminal pane connected to backend WebSocket.
+- Registers terminal shell/status, quick-key controls, and terminate action with `stores/paneToolbar.ts` for top-bar rendering while the pane is active.
 - Maintains socket, xterm instance, fit addon, resize observer, parser disposables, output-version ordering, reconnect timer, and reset state.
 - `firstParam()`: helper for xterm parser mode query parameters.
 - `registerModeQueryHandlers(term)`, `modeQueryReply(sequence)`, `filterModeQueries(data, respond)`: handle terminal mode status queries.
@@ -233,7 +235,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Shared fetch helpers for REST and raw/WS URLs.
 - `request<T>()`: JSON request with error text on non-2xx.
 - File APIs: `rawUrl()`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
-- Terminal APIs: `listTerminals()`, `createTerminal()`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
+- Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
 
 `frontend/src/api/events.ts`
 
@@ -241,9 +243,9 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/stores/files.ts`
 
-- Pinia store for directory listings, current path, expanded dirs, pinned paths, and loading state.
+- Pinia store for directory listings, current path, expanded dirs, pinned paths, and loading state. The current path is persisted in `.viewer.config.json` with pins.
 - Getters: `rootEntries`, `currentEntries`, `parentPath`.
-- Actions: `loadConfig()`, `saveConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`.
+- Actions: `loadConfig()`, `saveConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
 `frontend/src/stores/layout.ts`
 
@@ -252,6 +254,12 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Getters: `activePane`, `openPaths`, `openTerminalIds`.
 - Actions: `load()`, `save()`, `setActive()`, `openFile()`, `openTerminal()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, `clearTerminal()`.
 - Persists to `localStorage` key `viewer.layout.v1`.
+
+`frontend/src/stores/paneToolbar.ts`
+
+- Non-persistent active-pane toolbar registry.
+- Exposes generic per-pane title/status/action metadata so viewers can contribute top-bar controls without coupling `App.vue` to viewer-specific behavior.
+- Actions may hold callbacks owned by the registering viewer and are cleared when that viewer unmounts.
 
 `frontend/src/stores/terminals.ts`
 

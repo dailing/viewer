@@ -22,7 +22,7 @@ async function openPinned(path: string) {
 }
 
 async function newTerminal() {
-  const terminal = await terminals.create();
+  const terminal = await terminals.create(files.currentPath);
   emit("open-terminal", terminal.id);
 }
 

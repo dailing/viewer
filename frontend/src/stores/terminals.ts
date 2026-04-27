@@ -16,8 +16,8 @@ export const useTerminalsStore = defineStore("terminals", {
         this.loading = false;
       }
     },
-    async create() {
-      const terminal = await createTerminal();
+    async create(cwd = "") {
+      const terminal = await createTerminal(cwd);
       this.terminals = [...this.terminals, terminal];
       return terminal;
     },

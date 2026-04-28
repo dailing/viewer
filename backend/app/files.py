@@ -178,7 +178,12 @@ def read_config() -> ConfigData:
         current_target = settings.root_resolved
     if not current_target.exists() or not current_target.is_dir():
         current_path = ""
-    return ConfigData(pinned=config.pinned, current_path=current_path)
+    return ConfigData(
+        pinned=config.pinned,
+        current_path=current_path,
+        appearance=config.appearance,
+        markdown=config.markdown,
+    )
 
 
 def write_config(config: ConfigData) -> ConfigData:

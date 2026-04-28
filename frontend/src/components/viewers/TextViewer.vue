@@ -183,7 +183,8 @@ watch(
 }
 
 .text-viewer {
-  background: #fbfcfe;
+  background: var(--syntax-background);
+  color: var(--syntax-text);
   height: 100%;
   margin: 0;
   overflow: auto;
@@ -195,7 +196,43 @@ watch(
 
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 13px;
+  font-size: var(--markdown-code-font-size);
+}
+
+.hljs {
+  background: var(--syntax-background);
+  color: var(--syntax-text);
+}
+
+:deep(.hljs-keyword),
+:deep(.hljs-selector-tag),
+:deep(.hljs-built_in) {
+  color: var(--syntax-keyword);
+}
+
+:deep(.hljs-string),
+:deep(.hljs-attr) {
+  color: var(--syntax-string);
+}
+
+:deep(.hljs-number),
+:deep(.hljs-literal) {
+  color: var(--syntax-number);
+}
+
+:deep(.hljs-title),
+:deep(.hljs-name) {
+  color: var(--syntax-title);
+}
+
+:deep(.hljs-comment),
+:deep(.hljs-quote) {
+  color: var(--syntax-comment);
+}
+
+:deep(.hljs-meta),
+:deep(.hljs-doctag) {
+  color: var(--syntax-meta);
 }
 
 .text-error {

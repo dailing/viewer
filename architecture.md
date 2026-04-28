@@ -11,7 +11,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 1. `run.py` parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
 2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()` on startup, stops watcher and terminals on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
-4. `App.vue` loads file tree/config/terminal state, restores layout/sidebar state from `localStorage`, connects to `/api/events`, and dispatches `viewer:file-changed` browser events for open panes.
+4. `App.vue` loads file tree/config/terminal state, restores layout/sidebar state from `localStorage`, applies visual config as CSS variables, connects to `/api/events`, and dispatches `viewer:file-changed` browser events for open panes.
 5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component. Viewers fetch raw/text content and reload when their `version` prop changes.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 
@@ -31,7 +31,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/file/meta`: calls `get_meta()`.
 - `/api/file/content`: calls `read_text()`.
 - `/api/file/raw`: streams a file via `FileResponse`.
-- `/api/config` GET/PUT: reads and writes pinned path plus last sidebar directory config.
+- `/api/config` GET/PUT: reads and writes pinned paths, last sidebar directory, nav appearance, and Markdown theme config.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
 - `/api/terminals`: lists or creates terminal sessions; POST accepts an optional relative `cwd`.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
@@ -60,7 +60,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `get_meta(path)`: validates file and returns `FileMeta`, including preview type and text-size limit flag.
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: root-local `.viewer.config.json`.
-- `read_config()` / `write_config(config)`: load and save pinned paths plus the last sidebar directory; missing/invalid saved directories fall back to root.
+- `read_config()` / `write_config(config)`: load and save pinned paths, last sidebar directory, nav appearance, and Markdown theme config; missing/invalid saved directories fall back to root.
 
 `backend/app/events.py`
 
@@ -109,7 +109,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `backend/app/models.py`
 
-- Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
+- Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
 `backend/app/logging.py`
@@ -135,7 +135,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `frontend/src/App.vue`
 
 - Root shell: top bar, sidebar drawer/pinned layout, workspace.
-- Loads config/terminal lists, restores the saved sidebar directory, loads that directory, and restores layout.
+- Loads config/terminal lists, restores the saved sidebar directory, loads that directory, restores layout, and exposes the top-bar configuration panel button.
+- Applies appearance and active Markdown theme settings from `stores/files.ts` as CSS variables on the app shell, including nav height/icon size and Markdown/syntax colors.
 - Connects SSE with `connectEvents()`.
 - Refreshes affected file listings on change events.
 - Dispatches `viewer:file-changed` when an open file changes.
@@ -171,6 +172,14 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `newTerminal()`: creates terminal in the current sidebar directory and opens it in active pane.
 - `closeTerminal(id)`: deletes terminal and clears matching panes.
 
+`frontend/src/components/ConfigPanel.vue`
+
+- Configuration UI opened from the top bar.
+- Edits `.viewer.config.json` through the existing `/api/config` endpoint.
+- Sections: Appearance, Markdown, Syntax Highlighting, and raw JSON.
+- Appearance currently controls nav bar size, which also drives icon/button size via CSS variables.
+- Markdown config stores an active theme plus a theme list. The editor can duplicate/reset themes and edit heading/body/paragraph/code font sizes, colors, weights, link/code/border colors, and Highlight.js token colors.
+
 `frontend/src/components/FileTree.vue`
 
 - Flat current-directory file list.
@@ -190,6 +199,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `persistCurrentScroll()`: saves scroll position.
 - `copyAll()`: clipboard write with textarea fallback.
 - `load()`: fetches text, highlights, restores scroll.
+- Uses syntax CSS variables from the active Markdown theme for Highlight.js token colors.
 
 `frontend/src/components/viewers/MarkdownViewer.vue`
 
@@ -200,6 +210,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `renderMermaid()`: replaces Mermaid blocks with rendered SVG or marks errors.
 - `load()`: fetches Markdown text, renders HTML, renders Mermaid, restores scroll.
 - `persistCurrentScroll()`: saves scroll position.
+- Uses Markdown and syntax CSS variables from the active theme for headings, paragraphs, links, code blocks, tables, and Highlight.js token colors.
 
 `frontend/src/components/viewers/ImageViewer.vue`
 
@@ -256,9 +267,9 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/stores/files.ts`
 
-- Pinia store for directory listings, current path, expanded dirs, pinned paths, and loading state. The current path is persisted in `.viewer.config.json` with pins.
-- Getters: `rootEntries`, `currentEntries`, `parentPath`.
-- Actions: `loadConfig()`, `saveConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
+- Pinia store for directory listings, current path, expanded dirs, pinned paths, appearance config, Markdown theme config, and loading state. The current path, pins, appearance, and Markdown themes are persisted in `.viewer.config.json`.
+- Getters: `rootEntries`, `currentEntries`, `parentPath`, `activeMarkdownTheme`.
+- Actions: `loadConfig()`, `saveConfig()`, `saveAppearance()`, `saveMarkdown()`, `saveViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
 `frontend/src/stores/layout.ts`
 
@@ -281,7 +292,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/types/files.ts`
 
-- TypeScript mirror of backend file/config/watch schemas: `EntryType`, `PreviewType`, `FileEntry`, `DirectoryListing`, `FileMeta`, `ViewerConfig`, `WatchEvent`.
+- TypeScript mirror of backend file/config/watch schemas: `EntryType`, `PreviewType`, `FileEntry`, `DirectoryListing`, `FileMeta`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `ViewerConfig`, `WatchEvent`.
 
 `frontend/src/types/layout.ts`
 
@@ -308,7 +319,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `frontend/src/styles.css`
 
 - Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile sidebar behavior, scroll area, muted text.
-- CSS variables: `--sidebar-width`, `--topbar-height`, `--border`, `--panel`, `--surface`, `--text-muted`.
+- CSS variables: `--sidebar-width`, `--topbar-height`, `--nav-button-size`, `--nav-icon-size`, `--border`, `--panel`, `--surface`, `--text-muted`.
 
 `frontend/src/vite-env.d.ts`
 
@@ -404,6 +415,8 @@ Backend Pydantic models in `backend/app/models.py` should match frontend interfa
 - `DirectoryListing` <-> `DirectoryListing`
 - `FileMeta` <-> `FileMeta`
 - `ConfigData` <-> `ViewerConfig`
+- `AppearanceConfig` <-> `AppearanceConfig`
+- `MarkdownConfig` / `MarkdownTheme` <-> `MarkdownConfig` / `MarkdownTheme`
 - `WatchEvent` <-> `WatchEvent`
 - `TerminalInfo` <-> `TerminalInfo` including PTY rows/cols and shared layout lock state.
 - `TerminalSnapshot` <-> `TerminalSnapshot` including PTY rows/cols and shared layout lock state.
@@ -412,7 +425,7 @@ If a backend field changes, update the matching frontend type and all consumers.
 
 ## Persistence
 
-- Root `.viewer.config.json`: pinned files/folders, managed by `/api/config`.
+- Root `.viewer.config.json`: pinned files/folders, last sidebar directory, appearance, and Markdown themes, managed by `/api/config`.
 - `localStorage viewer.layout.v1`: split tree, active pane, open file paths, open terminal IDs.
 - `localStorage viewer.sidebarPinned.v1`: sidebar pinned state.
 - `localStorage viewer.sidebarWidth.v1`: sidebar width.

@@ -2,6 +2,8 @@
   color-scheme: light;
   --sidebar-width: 320px;
   --topbar-height: 26px;
+  --nav-button-size: 22px;
+  --nav-icon-size: 12px;
   --border: #d9dee7;
   --panel: #ffffff;
   --surface: #f5f7fa;
@@ -207,14 +209,14 @@ body {
 .icon-button {
   align-items: center;
   display: inline-flex;
-  height: 22px;
+  height: var(--nav-button-size);
   justify-content: center;
   padding: 0;
-  width: 22px;
+  width: var(--nav-button-size);
 }
 
 .icon-button .bi {
-  font-size: 12px;
+  font-size: var(--nav-icon-size);
   line-height: 1;
 }
 

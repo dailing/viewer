@@ -144,7 +144,14 @@ async def put_config(config: ConfigData):
             normalized.append(cleaned)
             seen.add(cleaned)
     current_path = normalize_relative(config.current_path)
-    return write_config(ConfigData(pinned=normalized, current_path=current_path))
+    return write_config(
+        ConfigData(
+            pinned=normalized,
+            current_path=current_path,
+            appearance=config.appearance,
+            markdown=config.markdown,
+        )
+    )
 
 
 @app.get("/api/events")

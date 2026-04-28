@@ -1,0 +1,449 @@
+<script setup lang="ts">
+import { computed, reactive, ref, watch } from "vue";
+import { DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
+import type { AppearanceConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme } from "../types/files";
+
+const emit = defineEmits<{ close: [] }>();
+const files = useFilesStore();
+const saving = ref(false);
+const error = ref("");
+const openSections = reactive({ appearance: true, markdown: true, syntax: false, json: false });
+const jsonDraft = ref("");
+const draft = reactive({
+  appearance: clone(files.appearance) as AppearanceConfig,
+  markdown: clone(files.markdown) as MarkdownConfig,
+});
+
+const activeTheme = computed(() => {
+  const theme = draft.markdown.themes.find((item) => item.name === draft.markdown.active_theme);
+  if (theme) return theme;
+  const fallback = draft.markdown.themes[0] ?? clone(DEFAULT_MARKDOWN_THEME);
+  draft.markdown.active_theme = fallback.name;
+  if (!draft.markdown.themes.length) draft.markdown.themes.push(fallback);
+  return fallback;
+});
+
+const fullConfigJson = computed(() =>
+  JSON.stringify(
+    {
+      pinned: files.pinned,
+      current_path: files.currentPath,
+      appearance: draft.appearance,
+      markdown: draft.markdown,
+    },
+    null,
+    2,
+  ),
+);
+
+watch(
+  () => files.appearance,
+  (appearance) => Object.assign(draft.appearance, clone(appearance)),
+  { deep: true },
+);
+
+watch(
+  () => files.markdown,
+  (markdown) => {
+    Object.assign(draft.markdown, clone(markdown));
+    jsonDraft.value = fullConfigJson.value;
+  },
+  { deep: true },
+);
+
+watch(fullConfigJson, (value) => {
+  if (!openSections.json) jsonDraft.value = value;
+});
+
+jsonDraft.value = fullConfigJson.value;
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function sectionToggle(section: keyof typeof openSections) {
+  openSections[section] = !openSections[section];
+  if (section === "json" && openSections.json) jsonDraft.value = fullConfigJson.value;
+}
+
+function numberValue(value: number | null, fallback: number) {
+  return value ?? fallback;
+}
+
+function updateStyleNumber(style: MarkdownElementStyle, key: "font_size" | "line_height", value: string) {
+  const next = Number(value);
+  style[key] = Number.isFinite(next) ? next : null;
+}
+
+function updateStyleText(style: MarkdownElementStyle, key: "color" | "font_weight", value: string) {
+  style[key] = value.trim() || null;
+}
+
+function duplicateTheme() {
+  const next = clone(activeTheme.value);
+  const baseName = `${next.name} Copy`;
+  let name = baseName;
+  let index = 2;
+  while (draft.markdown.themes.some((theme) => theme.name === name)) {
+    name = `${baseName} ${index}`;
+    index += 1;
+  }
+  next.name = name;
+  draft.markdown.themes.push(next);
+  draft.markdown.active_theme = name;
+}
+
+function renameActiveTheme(name: string) {
+  const clean = name.trim() || "Custom";
+  activeTheme.value.name = clean;
+  draft.markdown.active_theme = clean;
+}
+
+function resetActiveTheme() {
+  const replacement = clone(DEFAULT_MARKDOWN_THEME);
+  const index = draft.markdown.themes.findIndex((theme) => theme.name === activeTheme.value.name);
+  if (index === -1) {
+    draft.markdown.themes.push(replacement);
+  } else {
+    draft.markdown.themes[index] = replacement;
+  }
+  draft.markdown.active_theme = replacement.name;
+}
+
+async function save() {
+  saving.value = true;
+  error.value = "";
+  try {
+    await files.saveViewerConfig(draft.appearance, draft.markdown);
+    emit("close");
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function applyJson() {
+  try {
+    const parsed = JSON.parse(jsonDraft.value);
+    if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
+    if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
+    await save();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+</script>
+
+<template>
+  <div class="config-backdrop" @click.self="emit('close')">
+    <section class="config-panel" aria-label="Configuration">
+      <header class="config-header">
+        <div>
+          <h2>Configuration</h2>
+          <span>.viewer.config.json</span>
+        </div>
+        <button class="btn btn-outline-secondary icon-button" type="button" title="Close configuration" @click="emit('close')">
+          <i class="bi bi-x"></i>
+        </button>
+      </header>
+
+      <div class="config-content">
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('appearance')">
+            <i class="bi" :class="openSections.appearance ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Appearance</span>
+          </button>
+          <div v-if="openSections.appearance" class="section-body">
+            <label class="setting-row">
+              <span>Nav bar size</span>
+              <input v-model.number="draft.appearance.navbar_size" class="form-range" type="range" min="22" max="56" step="1" />
+              <input v-model.number="draft.appearance.navbar_size" class="form-control form-control-sm number-input" type="number" min="22" max="56" />
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('markdown')">
+            <i class="bi" :class="openSections.markdown ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Markdown</span>
+          </button>
+          <div v-if="openSections.markdown" class="section-body">
+            <div class="theme-toolbar">
+              <select v-model="draft.markdown.active_theme" class="form-select form-select-sm">
+                <option v-for="theme in draft.markdown.themes" :key="theme.name" :value="theme.name">{{ theme.name }}</option>
+              </select>
+              <button class="btn btn-sm btn-outline-secondary" type="button" @click="duplicateTheme">
+                <i class="bi bi-copy"></i>
+              </button>
+              <button class="btn btn-sm btn-outline-secondary" type="button" @click="resetActiveTheme">
+                <i class="bi bi-arrow-counterclockwise"></i>
+              </button>
+            </div>
+            <label class="compact-field">
+              <span>Theme name</span>
+              <input class="form-control form-control-sm" :value="activeTheme.name" @input="renameActiveTheme(($event.target as HTMLInputElement).value)" />
+            </label>
+
+            <div class="style-grid">
+              <label v-for="item in [
+                ['Body', activeTheme.body],
+                ['Heading 1', activeTheme.h1],
+                ['Heading 2', activeTheme.h2],
+                ['Heading 3', activeTheme.h3],
+                ['Heading 4', activeTheme.h4],
+                ['Paragraph', activeTheme.paragraph],
+                ['Code', activeTheme.code],
+              ]" :key="item[0] as string" class="style-card">
+                <strong>{{ item[0] }}</strong>
+                <span>Size</span>
+                <input
+                  class="form-control form-control-sm"
+                  type="number"
+                  min="9"
+                  max="72"
+                  :value="numberValue((item[1] as MarkdownElementStyle).font_size, 15)"
+                  @input="updateStyleNumber(item[1] as MarkdownElementStyle, 'font_size', ($event.target as HTMLInputElement).value)"
+                />
+                <span>Color</span>
+                <input
+                  class="form-control form-control-sm form-control-color"
+                  type="color"
+                  :value="(item[1] as MarkdownElementStyle).color || '#172033'"
+                  @input="updateStyleText(item[1] as MarkdownElementStyle, 'color', ($event.target as HTMLInputElement).value)"
+                />
+                <span>Weight</span>
+                <input
+                  class="form-control form-control-sm"
+                  :value="(item[1] as MarkdownElementStyle).font_weight || ''"
+                  placeholder="normal"
+                  @input="updateStyleText(item[1] as MarkdownElementStyle, 'font_weight', ($event.target as HTMLInputElement).value)"
+                />
+              </label>
+            </div>
+
+            <div class="color-grid">
+              <label>
+                <span>Link</span>
+                <input v-model="activeTheme.link_color" class="form-control form-control-sm form-control-color" type="color" />
+              </label>
+              <label>
+                <span>Code background</span>
+                <input v-model="activeTheme.code_background" class="form-control form-control-sm form-control-color" type="color" />
+              </label>
+              <label>
+                <span>Border</span>
+                <input v-model="activeTheme.border_color" class="form-control form-control-sm form-control-color" type="color" />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('syntax')">
+            <i class="bi" :class="openSections.syntax ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Syntax Highlighting</span>
+          </button>
+          <div v-if="openSections.syntax" class="section-body color-grid syntax-grid">
+            <label v-for="key in Object.keys(activeTheme.syntax)" :key="key">
+              <span>{{ key }}</span>
+              <input v-model="activeTheme.syntax[key as keyof MarkdownTheme['syntax']]" class="form-control form-control-sm form-control-color" type="color" />
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('json')">
+            <i class="bi" :class="openSections.json ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>JSON</span>
+          </button>
+          <div v-if="openSections.json" class="section-body">
+            <textarea v-model="jsonDraft" class="json-editor" spellcheck="false"></textarea>
+            <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyJson">Apply JSON</button>
+          </div>
+        </section>
+      </div>
+
+      <footer class="config-footer">
+        <span v-if="error" class="config-error">{{ error }}</span>
+        <button class="btn btn-sm btn-outline-secondary" type="button" @click="emit('close')">Cancel</button>
+        <button class="btn btn-sm btn-primary" type="button" :disabled="saving" @click="save">
+          <span v-if="saving" class="spinner-border spinner-border-sm"></span>
+          <span v-else>Save</span>
+        </button>
+      </footer>
+    </section>
+  </div>
+</template>
+
+<style scoped>
+.config-backdrop {
+  background: rgb(15 23 42 / 0.35);
+  inset: var(--topbar-height) 0 0;
+  position: fixed;
+  z-index: 40;
+}
+
+.config-panel {
+  background: #ffffff;
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 26px rgb(15 23 42 / 0.18);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  margin-left: auto;
+  max-width: 100vw;
+  width: min(720px, 100vw);
+}
+
+.config-header,
+.config-footer {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.config-footer {
+  border-bottom: 0;
+  border-top: 1px solid var(--border);
+  justify-content: flex-end;
+}
+
+.config-header h2 {
+  font-size: 16px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.config-header span,
+.config-error {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.config-error {
+  color: #a33;
+  margin-right: auto;
+}
+
+.config-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.config-section {
+  border-bottom: 1px solid var(--border);
+}
+
+.section-toggle {
+  align-items: center;
+  background: #ffffff;
+  border: 0;
+  display: flex;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 8px;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.section-body {
+  padding: 0 12px 12px;
+}
+
+.setting-row,
+.compact-field {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 120px 1fr auto;
+}
+
+.compact-field {
+  grid-template-columns: 120px 1fr;
+  margin-top: 10px;
+}
+
+.number-input {
+  width: 78px;
+}
+
+.theme-toolbar {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr auto auto;
+}
+
+.style-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  margin-top: 12px;
+}
+
+.style-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 62px 1fr;
+  padding: 10px;
+}
+
+.style-card strong {
+  grid-column: 1 / -1;
+}
+
+.style-card span,
+.color-grid span,
+.compact-field span,
+.setting-row span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.color-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-top: 12px;
+}
+
+.color-grid label {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.form-control-color {
+  min-width: 44px;
+  padding: 2px;
+}
+
+.json-editor {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  height: 300px;
+  margin-bottom: 8px;
+  padding: 10px;
+  resize: vertical;
+  width: 100%;
+}
+
+@media (max-width: 640px) {
+  .setting-row,
+  .compact-field {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

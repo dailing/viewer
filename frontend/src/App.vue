@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import ConfigPanel from "./components/ConfigPanel.vue";
 import FileSidebar from "./components/FileSidebar.vue";
 import Workspace from "./components/Workspace.vue";
 import { connectEvents } from "./api/events";
@@ -20,9 +21,56 @@ const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
+const configOpen = ref(false);
 const sidebarWidth = ref(320);
 const connectionState = ref("connecting");
 const bodyShellStyle = computed(() => ({ "--sidebar-width": `${sidebarWidth.value}px` }));
+const appStyle = computed(() => {
+  const navbarSize = files.appearance.navbar_size;
+  const buttonSize = Math.max(18, navbarSize - 4);
+  const iconSize = Math.max(11, Math.round(navbarSize * 0.48));
+  const theme = files.activeMarkdownTheme;
+  return {
+    "--topbar-height": `${navbarSize}px`,
+    "--nav-button-size": `${buttonSize}px`,
+    "--nav-icon-size": `${iconSize}px`,
+    "--markdown-body-font-size": `${theme.body.font_size ?? 15}px`,
+    "--markdown-body-color": theme.body.color ?? "#172033",
+    "--markdown-body-line-height": String(theme.body.line_height ?? 1.65),
+    "--markdown-h1-font-size": `${theme.h1.font_size ?? 28}px`,
+    "--markdown-h1-color": theme.h1.color ?? "#172033",
+    "--markdown-h1-font-weight": theme.h1.font_weight ?? "700",
+    "--markdown-h1-line-height": String(theme.h1.line_height ?? 1.2),
+    "--markdown-h2-font-size": `${theme.h2.font_size ?? 23}px`,
+    "--markdown-h2-color": theme.h2.color ?? "#172033",
+    "--markdown-h2-font-weight": theme.h2.font_weight ?? "700",
+    "--markdown-h2-line-height": String(theme.h2.line_height ?? 1.25),
+    "--markdown-h3-font-size": `${theme.h3.font_size ?? 19}px`,
+    "--markdown-h3-color": theme.h3.color ?? "#172033",
+    "--markdown-h3-font-weight": theme.h3.font_weight ?? "700",
+    "--markdown-h3-line-height": String(theme.h3.line_height ?? 1.3),
+    "--markdown-h4-font-size": `${theme.h4.font_size ?? 16}px`,
+    "--markdown-h4-color": theme.h4.color ?? "#172033",
+    "--markdown-h4-font-weight": theme.h4.font_weight ?? "700",
+    "--markdown-h4-line-height": String(theme.h4.line_height ?? 1.35),
+    "--markdown-paragraph-font-size": `${theme.paragraph.font_size ?? 15}px`,
+    "--markdown-paragraph-color": theme.paragraph.color ?? "#172033",
+    "--markdown-paragraph-line-height": String(theme.paragraph.line_height ?? 1.65),
+    "--markdown-code-font-size": `${theme.code.font_size ?? 13}px`,
+    "--markdown-code-color": theme.code.color ?? "#24292f",
+    "--markdown-code-background": theme.code_background,
+    "--markdown-link-color": theme.link_color,
+    "--markdown-border-color": theme.border_color,
+    "--syntax-background": theme.syntax.background,
+    "--syntax-text": theme.syntax.text,
+    "--syntax-keyword": theme.syntax.keyword,
+    "--syntax-string": theme.syntax.string,
+    "--syntax-number": theme.syntax.number,
+    "--syntax-title": theme.syntax.title,
+    "--syntax-comment": theme.syntax.comment,
+    "--syntax-meta": theme.syntax.meta,
+  };
+});
 const activePaneToolbar = computed(() => (layout.activePaneId ? paneToolbar.forPane(layout.activePaneId) : undefined));
 const activePaneTitle = computed(() => {
   if (activePaneToolbar.value?.title) return activePaneToolbar.value.title;
@@ -124,10 +172,13 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :style="appStyle">
     <header class="topbar">
       <button class="btn btn-outline-secondary icon-button" type="button" @click="sidebarOpen = !sidebarOpen" title="Files">
         <i class="bi bi-list"></i>
+      </button>
+      <button class="btn btn-outline-secondary icon-button" type="button" title="Configuration" @click="configOpen = true">
+        <i class="bi bi-gear"></i>
       </button>
       <div class="active-pane-title" :title="activePaneTitle">{{ activePaneTitle }}</div>
       <span v-if="activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
@@ -196,5 +247,6 @@ onUnmounted(() => {
         <Workspace />
       </main>
     </div>
+    <ConfigPanel v-if="configOpen" @close="configOpen = false" />
   </div>
 </template>

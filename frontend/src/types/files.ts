@@ -27,9 +27,53 @@ export interface FileMeta {
   text_too_large: boolean;
 }
 
+export interface AppearanceConfig {
+  navbar_size: number;
+}
+
+export interface MarkdownElementStyle {
+  font_size: number | null;
+  color: string | null;
+  font_weight: string | null;
+  line_height: number | null;
+}
+
+export interface MarkdownSyntaxStyle {
+  background: string;
+  text: string;
+  keyword: string;
+  string: string;
+  number: string;
+  title: string;
+  comment: string;
+  meta: string;
+}
+
+export interface MarkdownTheme {
+  name: string;
+  body: MarkdownElementStyle;
+  h1: MarkdownElementStyle;
+  h2: MarkdownElementStyle;
+  h3: MarkdownElementStyle;
+  h4: MarkdownElementStyle;
+  paragraph: MarkdownElementStyle;
+  code: MarkdownElementStyle;
+  code_background: string;
+  link_color: string;
+  border_color: string;
+  syntax: MarkdownSyntaxStyle;
+}
+
+export interface MarkdownConfig {
+  active_theme: string;
+  themes: MarkdownTheme[];
+}
+
 export interface ViewerConfig {
   pinned: string[];
   current_path: string;
+  appearance: AppearanceConfig;
+  markdown: MarkdownConfig;
 }
 
 export interface WatchEvent {

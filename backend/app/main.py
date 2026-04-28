@@ -13,6 +13,7 @@ from .files import get_meta, list_directory, normalize_relative, read_config, re
 from .logging import current_log_path, ensure_logging
 from .models import ClientLog, ConfigData, TerminalCreate
 from .terminals import terminal_manager
+from .voice import connect_voice
 from .watcher import watch_root
 
 ensure_logging()
@@ -183,6 +184,11 @@ async def delete_terminal(terminal_id: str):
 @app.websocket("/api/terminals/{terminal_id}/ws")
 async def terminal_ws(websocket: WebSocket, terminal_id: str):
     await terminal_manager.connect(terminal_id, websocket)
+
+
+@app.websocket("/api/voice/ws")
+async def voice_ws(websocket: WebSocket):
+    await connect_voice(websocket)
 
 
 dist = settings.frontend_dist_resolved

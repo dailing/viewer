@@ -68,3 +68,8 @@ export function terminalSocketUrl(id: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/api/terminals/${encodeURIComponent(id)}/ws`;
 }
+
+export function voiceSocketUrl(): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/voice/ws`;
+}

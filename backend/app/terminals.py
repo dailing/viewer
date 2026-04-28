@@ -38,6 +38,9 @@ class TerminalSession:
     output_version: int = 0
     status: str = "running"
     exit_code: int | None = None
+    rows: int = 30
+    cols: int = 120
+    layout_locked: bool = False
     master_fd: int | None = None
     process: subprocess.Popen[bytes] | None = None
     clients: dict[WebSocket, TerminalClient] = field(default_factory=dict)
@@ -54,6 +57,9 @@ class TerminalSession:
             "created_at": self.created_at,
             "status": self.status,
             "exit_code": self.exit_code,
+            "rows": self.rows,
+            "cols": self.cols,
+            "layout_locked": self.layout_locked,
             "output": self.output,
             "output_version": self.output_version,
         }
@@ -67,6 +73,9 @@ class TerminalSession:
             "created_at": self.created_at,
             "status": self.status,
             "exit_code": self.exit_code,
+            "rows": self.rows,
+            "cols": self.cols,
+            "layout_locked": self.layout_locked,
         }
 
 
@@ -181,7 +190,8 @@ class TerminalManager:
                 elif message.get("type") == "resize":
                     rows = int(message.get("rows", 30))
                     cols = int(message.get("cols", 120))
-                    self.resize(session, rows, cols)
+                    lock = bool(message.get("lock", False))
+                    await self.resize(session, rows, cols, lock=lock)
         except WebSocketDisconnect:
             pass
         except RuntimeError as exc:
@@ -210,10 +220,21 @@ class TerminalManager:
                     continue
                 pending = pending[written:]
 
-    def resize(self, session: TerminalSession, rows: int, cols: int) -> None:
+    async def resize(self, session: TerminalSession, rows: int, cols: int, *, lock: bool = False) -> None:
         if session.master_fd is None:
             return
-        self._set_size(session.master_fd, max(5, rows), max(20, cols))
+        if session.layout_locked and not lock:
+            return
+        rows = max(5, rows)
+        cols = max(20, cols)
+        if session.rows == rows and session.cols == cols and session.layout_locked == lock:
+            return
+        session.rows = rows
+        session.cols = cols
+        if lock:
+            session.layout_locked = True
+        self._set_size(session.master_fd, rows, cols)
+        await self._broadcast(session, {"type": "layout", "terminal": session.summary()})
 
     async def shutdown(self) -> None:
         for terminal_id in list(self.sessions):

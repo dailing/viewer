@@ -8,7 +8,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 ## Runtime Flow
 
-1. `run.py` parses CLI flags, sets `VIEWER_*` environment variables, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
+1. `run.py` parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
 2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()` on startup, stops watcher and terminals on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
 4. `App.vue` loads file tree/config/terminal state, restores layout/sidebar state from `localStorage`, connects to `/api/events`, and dispatches `viewer:file-changed` browser events for open panes.
@@ -35,6 +35,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
 - `/api/terminals`: lists or creates terminal sessions; POST accepts an optional relative `cwd`.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
+- `/api/voice/ws`: optional voice-input WebSocket endpoint backed by in-process WhisperLiveKit by default, or by a configured upstream ASR WebSocket when `VIEWER_VOICE_UPSTREAM_WS` is set.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
 
 `backend/app/config.py`
@@ -44,6 +45,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `Settings.root_resolved`: expanded absolute served directory.
 - `Settings.frontend_dist_resolved`: expanded absolute frontend build directory.
 - Important settings: `root`, `host`, `port`, `frontend_dist`, `max_text_preview_bytes`, `show_hidden`, `poll_delay_ms`, `terminal_shell`, `debug`, `log_file`.
+- Voice settings: `voice_enabled`, `voice_model`, `voice_language`, `voice_target_language`, `voice_backend`, `voice_backend_policy`, `voice_direct_english_translation`, `voice_min_chunk_size`, `voice_vac`, and `voice_vad` configure the in-process WhisperLiveKit engine. The default backend is `whisper` with `localagreement` to avoid requiring CTranslate2 CUDA libraries for plain `--voice` runs. `voice_upstream_ws` bypasses the in-process engine and proxies microphone audio to a separate streaming ASR WebSocket.
 
 `backend/app/files.py`
 
@@ -78,7 +80,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Interactive shell session manager using OS PTYs, async tasks, and WebSockets.
 - `TerminalClient`: websocket client plus outgoing queue and writer task.
-- `TerminalSession`: PTY process state, buffered output, connected clients, locks, and tasks.
+- `TerminalSession`: PTY process state, buffered output, current PTY rows/cols, shared layout lock state, connected clients, locks, and tasks.
 - `TerminalSession.snapshot()`: full state including buffered output.
 - `TerminalSession.summary()`: list-friendly state without output.
 - `TerminalManager.list()`: sorted summaries.
@@ -86,9 +88,9 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `TerminalManager.create(cwd)`: opens PTY, starts configured shell in the requested served-root-relative directory, falls back to root when unavailable, and launches reader/wait tasks.
 - `terminate(id)`: asks process group to exit.
 - `delete(id)`: terminates, cancels tasks, closes FD, removes session, broadcasts deletion.
-- `connect(id, websocket)`: accepts WebSocket, sends snapshot, handles input/resize messages, removes client on disconnect.
+- `connect(id, websocket)`: accepts WebSocket, sends snapshot, handles input/resize messages, removes client on disconnect. Resize messages may include `lock: true` to make that client's current terminal dimensions the shared layout; while locked, passive client resizes are ignored.
 - `write(session, data)`: writes encoded input to PTY with a lock.
-- `resize(session, rows, cols)`: updates PTY window size.
+- `resize(session, rows, cols, lock)`: updates PTY window size, records rows/cols, and broadcasts `layout` updates to connected clients when the shared layout changes.
 - `shutdown()`: deletes all sessions.
 - `_read_output(session)`: reads PTY output, caps buffer at `MAX_OUTPUT_CHARS`, broadcasts output with version.
 - `_wait_for_exit(session)`: waits for process and broadcasts status.
@@ -96,6 +98,14 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `_broadcast()`, `_enqueue()`, `_client_writer()`, `_remove_client()`: websocket fanout and cleanup.
 - `_set_size(fd, rows, cols)`: low-level `TIOCSWINSZ`.
 - `terminal_manager`: singleton used by routes.
+
+`backend/app/voice.py`
+
+- Optional WebSocket bridge for low-latency voice input.
+- Lazily loads a singleton WhisperLiveKit `TranscriptionEngine` on the first voice connection when `VIEWER_VOICE_ENABLED=true` and no upstream WebSocket is configured.
+- `connect_voice(websocket)`: accepts browser audio chunks from `/api/voice/ws`, runs them through WhisperLiveKit or the configured upstream ASR WebSocket, and returns normalized `partial` / `final` transcript JSON to the frontend.
+- `_connect_whisperlivekit(websocket)`: creates one WhisperLiveKit `AudioProcessor` per browser voice session, forwards binary audio frames into it, and streams normalized result-state updates back to the client.
+- `_normalize_upstream_message(message)` / `_normalize_payload(payload)`: accept common streaming ASR response shapes plus WhisperLiveKit `lines` / `buffer_transcription` / `buffer_translation` state and normalize final/partial text.
 
 `backend/app/models.py`
 
@@ -210,6 +220,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - xterm.js terminal pane connected to backend WebSocket.
 - Registers terminal shell/status, quick-key controls, and terminate action with `stores/paneToolbar.ts` for top-bar rendering while the pane is active.
+- The terminal text input pad includes a mic button that records browser audio with `MediaRecorder`, streams chunks to `/api/voice/ws`, displays partial transcript text in the pad, and leaves command sending under explicit user control.
 - Maintains socket, xterm instance, fit addon, resize observer, parser disposables, output-version ordering, reconnect timer, and reset state.
 - `firstParam()`: helper for xterm parser mode query parameters.
 - `registerModeQueryHandlers(term)`, `modeQueryReply(sequence)`, `filterModeQueries(data, respond)`: handle terminal mode status queries.
@@ -222,7 +233,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `send(data)`: sends PTY input JSON over WebSocket.
 - `controlSequence(key)`: maps Ctrl latch keys to control characters.
 - `sendSoftInput(data)`, `sendShortcut(data)`, `toggleControlLatch()`: soft keyboard helpers.
-- `resize()`: fits terminal and sends rows/cols to backend.
+- `resize()`: fits terminal and sends rows/cols to backend only while the terminal layout is unlocked.
+- `publishCurrentLayout()`: toolbar action that locks the shared PTY layout to this pane's current rows/cols so other browsers stop resizing the underlying PTY and follow the recorded dimensions.
 - `focusTerminal()`: focuses xterm.
 - `connect()`: opens WebSocket, handles snapshot/output/status, reconnects after close.
 - `load()`: starts connection.
@@ -236,6 +248,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `request<T>()`: JSON request with error text on non-2xx.
 - File APIs: `rawUrl()`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
+- Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 
 `frontend/src/api/events.ts`
 
@@ -392,8 +405,8 @@ Backend Pydantic models in `backend/app/models.py` should match frontend interfa
 - `FileMeta` <-> `FileMeta`
 - `ConfigData` <-> `ViewerConfig`
 - `WatchEvent` <-> `WatchEvent`
-- `TerminalInfo` <-> `TerminalInfo`
-- `TerminalSnapshot` <-> `TerminalSnapshot`
+- `TerminalInfo` <-> `TerminalInfo` including PTY rows/cols and shared layout lock state.
+- `TerminalSnapshot` <-> `TerminalSnapshot` including PTY rows/cols and shared layout lock state.
 
 If a backend field changes, update the matching frontend type and all consumers.
 

@@ -49,6 +49,9 @@ class TerminalInfo(BaseModel):
     created_at: float
     status: Literal["running", "exited"]
     exit_code: int | None = None
+    rows: int = 30
+    cols: int = 120
+    layout_locked: bool = False
 
 
 class TerminalCreate(BaseModel):

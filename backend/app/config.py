@@ -17,6 +17,17 @@ class Settings(BaseSettings):
     show_hidden: bool = True
     poll_delay_ms: int = 500
     terminal_shell: str = "zsh"
+    voice_enabled: bool = False
+    voice_upstream_ws: str = ""
+    voice_model: str = "base"
+    voice_language: str = "auto"
+    voice_target_language: str = ""
+    voice_backend: str = "whisper"
+    voice_backend_policy: str = "localagreement"
+    voice_direct_english_translation: bool = False
+    voice_min_chunk_size: float = 0.1
+    voice_vac: bool = True
+    voice_vad: bool = True
     debug: bool = False
     log_file: Path | None = None
 

@@ -81,6 +81,36 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Explicit log file path. Overrides --log-dir.",
     )
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="Enable in-process WhisperLiveKit voice input for terminal paste pads.",
+    )
+    parser.add_argument(
+        "--voice-model",
+        default="base",
+        help="WhisperLiveKit model size/name for voice input. Defaults to base.",
+    )
+    parser.add_argument(
+        "--voice-language",
+        default="auto",
+        help="Source language code for voice input, or auto. Defaults to auto.",
+    )
+    parser.add_argument(
+        "--voice-target-language",
+        default="",
+        help="Optional target language code for WhisperLiveKit translation output.",
+    )
+    parser.add_argument(
+        "--voice-backend",
+        default="whisper",
+        help="WhisperLiveKit backend. Defaults to whisper.",
+    )
+    parser.add_argument(
+        "--voice-backend-policy",
+        default="localagreement",
+        help="WhisperLiveKit backend policy. Defaults to localagreement.",
+    )
     return parser.parse_args()
 
 
@@ -128,6 +158,12 @@ def main() -> None:
     os.environ["VIEWER_HOST"] = args.host
     os.environ["VIEWER_PORT"] = str(args.port)
     os.environ["VIEWER_DEBUG"] = "1" if args.debug else "0"
+    os.environ["VIEWER_VOICE_ENABLED"] = "1" if args.voice else os.environ.get("VIEWER_VOICE_ENABLED", "0")
+    os.environ["VIEWER_VOICE_MODEL"] = os.environ.get("VIEWER_VOICE_MODEL", args.voice_model)
+    os.environ["VIEWER_VOICE_LANGUAGE"] = os.environ.get("VIEWER_VOICE_LANGUAGE", args.voice_language)
+    os.environ["VIEWER_VOICE_TARGET_LANGUAGE"] = os.environ.get("VIEWER_VOICE_TARGET_LANGUAGE", args.voice_target_language)
+    os.environ["VIEWER_VOICE_BACKEND"] = os.environ.get("VIEWER_VOICE_BACKEND", args.voice_backend)
+    os.environ["VIEWER_VOICE_BACKEND_POLICY"] = os.environ.get("VIEWER_VOICE_BACKEND_POLICY", args.voice_backend_policy)
     log_file = resolve_project_path(args.log_file) if args.log_file else default_log_file(args.log_dir)
     os.environ["VIEWER_LOG_FILE"] = log_file.as_posix()
     if args.frontend_dist is not None:

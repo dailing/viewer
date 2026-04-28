@@ -12,6 +12,7 @@ A private-network, read-only file viewer for browsing a configured folder and li
 - Image, Markdown, PDF, text/code, and unsupported-file previews
 - Markdown with raw HTML, KaTeX math, Mermaid diagrams, tables, and code highlighting
 - Server-Sent Events for live file-change notifications
+- Optional terminal voice input through in-process WhisperLiveKit or an upstream ASR WebSocket
 - Symlinks are allowed, including targets outside `VIEWER_ROOT`
 - Read-only by design
 
@@ -68,6 +69,29 @@ uv run python run.py --build-frontend
 ```
 
 This runs `npm run build` in `frontend/` before starting the server. The backend serves `frontend/dist` by default. You can override that with `VIEWER_FRONTEND_DIST=/other/dist/path` or `--frontend-dist /other/dist/path`.
+
+## Voice input
+
+Terminal panes have a text input pad for mobile entry. Open it by double-tapping the terminal or using the text button in the terminal toolbar, then use the mic button inside the text box. Transcribed text is inserted into the pad only; use Send or Send + Enter when you are ready.
+
+Voice input is disabled by default. Enable the in-process WhisperLiveKit backend when starting the viewer:
+
+```bash
+uv run python run.py --voice --voice-model base
+```
+
+Useful voice options:
+
+```bash
+uv run python run.py --voice --voice-model small --voice-language auto
+uv run python run.py --voice --voice-model large-v3-turbo --voice-backend whisper
+```
+
+The browser sends `MediaRecorder` audio chunks to `/api/voice/ws`. The backend decodes and transcribes them with WhisperLiveKit, then streams normalized partial transcript text back to the paste pad. If the viewer is loaded over HTTPS, the frontend automatically uses `wss://` for terminal and voice sockets. You can still point `VIEWER_VOICE_UPSTREAM_WS` at a separate WhisperLiveKit `/asr` service; when it is set, the backend proxies audio there instead of loading an in-process model.
+
+The default backend is `whisper` with `localagreement` because it avoids WhisperLiveKit's faster-whisper CTranslate2 CUDA runtime unless you explicitly opt into it. To try faster-whisper later, use `VIEWER_VOICE_BACKEND=faster-whisper`; on Linux that path may require CUDA 12 runtime libraries such as `libcublas.so.12`.
+
+WhisperLiveKit translation can be enabled with `VIEWER_VOICE_TARGET_LANGUAGE`, but its NLLB translation dependency is separate from the default transcription install.
 
 ## Debug logs
 

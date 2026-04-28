@@ -8,6 +8,9 @@ export interface TerminalInfo {
   created_at: number;
   status: TerminalStatus;
   exit_code: number | null;
+  rows: number;
+  cols: number;
+  layout_locked: boolean;
 }
 
 export interface TerminalSnapshot extends TerminalInfo {

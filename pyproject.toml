@@ -9,8 +9,9 @@ dependencies = [
   "watchfiles>=0.24.0",
   "pydantic-settings>=2.4.0",
   "loguru>=0.7.3",
+  "websockets>=13.0",
+  "whisperlivekit>=0.2.20.post1",
 ]
 
 [dependency-groups]
 dev = []
-

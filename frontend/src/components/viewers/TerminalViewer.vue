@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { terminalSocketUrl } from "../../api/client";
+import { terminalSocketUrl, voiceSocketUrl } from "../../api/client";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useTerminalsStore } from "../../stores/terminals";
 import type { PaneToolbarAction } from "../../stores/paneToolbar";
@@ -19,12 +19,17 @@ const pastePadTextarea = ref<HTMLTextAreaElement | null>(null);
 const controlLatch = ref(false);
 const pastePadOpen = ref(false);
 const pastePadText = ref("");
+const voiceConnecting = ref(false);
+const voiceRecording = ref(false);
+const voiceError = ref("");
 const debugMode = import.meta.env.DEV || import.meta.env.VITE_VIEWER_DEBUG === "1";
 type TerminalMessage =
   | { type: "snapshot"; terminal: TerminalSnapshot }
   | { type: "output"; data?: string; output_version?: number }
   | { type: "status"; terminal: TerminalInfo }
+  | { type: "layout"; terminal: TerminalInfo }
   | { type: string; data?: string; output_version?: number; terminal?: TerminalSnapshot | TerminalInfo };
+type VoiceMessage = { type: "ready" | "partial" | "final" | "error"; text?: string; message?: string };
 
 let socket: WebSocket | null = null;
 let xterm: Terminal | null = null;
@@ -41,8 +46,34 @@ let deferredOutput: Array<{ data: string; outputVersion?: number }> = [];
 let modeQueryRemainder = "";
 let resettingOutput = false;
 let suppressPtyInput = false;
+let applyingRemoteLayout = false;
 let slowSendToken = 0;
 let lastTouchTap: { time: number; x: number; y: number } | null = null;
+let voiceSocket: WebSocket | null = null;
+let voiceRecorder: MediaRecorder | null = null;
+let voiceStream: MediaStream | null = null;
+let voiceBaseText = "";
+let voiceReady = false;
+
+const voiceActive = computed(() => voiceConnecting.value || voiceRecording.value);
+const voiceButtonIcon = computed(() => {
+  if (voiceError.value) return "bi-exclamation-triangle-fill";
+  if (voiceConnecting.value) return "bi-hourglass-split";
+  if (voiceRecording.value) return "bi-record-circle-fill";
+  return "bi-mic-fill";
+});
+const voiceButtonTitle = computed(() => {
+  if (voiceError.value) return voiceError.value;
+  if (voiceConnecting.value) return "Connecting voice input";
+  if (voiceRecording.value) return "Stop voice input";
+  return "Start voice input";
+});
+const voiceButtonClass = computed(() => {
+  if (voiceError.value) return "btn-outline-danger";
+  if (voiceRecording.value) return "btn-danger";
+  if (voiceConnecting.value) return "btn-outline-primary";
+  return "btn-outline-secondary";
+});
 
 type SoftKey = {
   title: string;
@@ -265,6 +296,29 @@ function resetOutput(data: string, afterReset?: () => void) {
   finishReset();
 }
 
+function applyLockedLayout() {
+  if (!xterm || !terminal.value?.layout_locked) return;
+  applyingRemoteLayout = true;
+  try {
+    if (xterm.rows !== terminal.value.rows || xterm.cols !== terminal.value.cols) {
+      xterm.resize(terminal.value.cols, terminal.value.rows);
+    }
+  } finally {
+    applyingRemoteLayout = false;
+  }
+}
+
+function applyTerminalInfo(info: TerminalInfo) {
+  terminals.upsert(info);
+  if (!terminal.value) return;
+  terminal.value.status = info.status;
+  terminal.value.exit_code = info.exit_code;
+  terminal.value.rows = info.rows;
+  terminal.value.cols = info.cols;
+  terminal.value.layout_locked = info.layout_locked;
+  applyLockedLayout();
+}
+
 function applySnapshot(snapshot: TerminalSnapshot) {
   terminal.value = snapshot;
   hasSnapshot = true;
@@ -277,6 +331,7 @@ function applySnapshot(snapshot: TerminalSnapshot) {
     replay.forEach((item) => applyOutput(item.data, item.outputVersion));
   });
   terminals.upsert(snapshot);
+  applyLockedLayout();
 }
 
 function applyOutput(data: string, outputVersion?: number) {
@@ -322,13 +377,118 @@ function openPastePad() {
 }
 
 function closePastePad() {
+  stopVoiceInput();
   pastePadOpen.value = false;
   xterm?.focus();
 }
 
 function clearPastePad() {
   pastePadText.value = "";
+  voiceBaseText = "";
   void nextTick(() => pastePadTextarea.value?.focus());
+}
+
+function appendVoiceText(text: string) {
+  if (!text) return;
+  const separator = voiceBaseText && !/\s$/.test(voiceBaseText) ? " " : "";
+  voiceBaseText = `${voiceBaseText}${separator}${text}`;
+  pastePadText.value = voiceBaseText;
+}
+
+function applyVoicePartial(text: string) {
+  const separator = voiceBaseText && text && !/\s$/.test(voiceBaseText) ? " " : "";
+  pastePadText.value = `${voiceBaseText}${separator}${text}`;
+}
+
+function supportedVoiceMimeType(): string | undefined {
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+}
+
+function stopVoiceInput() {
+  voiceConnecting.value = false;
+  voiceRecording.value = false;
+  voiceReady = false;
+  if (voiceRecorder && voiceRecorder.state !== "inactive") {
+    voiceRecorder.stop();
+  }
+  voiceRecorder = null;
+  voiceStream?.getTracks().forEach((track) => track.stop());
+  voiceStream = null;
+  if (voiceSocket?.readyState === WebSocket.OPEN) {
+    voiceSocket.send(JSON.stringify({ type: "stop" }));
+  }
+  voiceSocket?.close();
+  voiceSocket = null;
+  voiceBaseText = pastePadText.value;
+}
+
+async function startVoiceInput() {
+  if (voiceRecording.value) return;
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    voiceError.value = "Voice recording is not supported in this browser.";
+    return;
+  }
+  pastePadOpen.value = true;
+  voiceError.value = "";
+  voiceConnecting.value = true;
+  voiceBaseText = pastePadText.value;
+
+  try {
+    voiceStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+    const mimeType = supportedVoiceMimeType();
+    voiceSocket = new WebSocket(voiceSocketUrl());
+    voiceSocket.binaryType = "arraybuffer";
+    voiceSocket.addEventListener("message", (event) => {
+      const message = JSON.parse(event.data) as VoiceMessage;
+      if (message.type === "ready") {
+        voiceReady = true;
+        voiceConnecting.value = false;
+        if (voiceRecorder && voiceRecorder.state === "inactive") {
+          voiceRecorder.start(250);
+          voiceRecording.value = true;
+        }
+      } else if (message.type === "partial") {
+        applyVoicePartial(message.text ?? "");
+      } else if (message.type === "final") {
+        appendVoiceText(message.text ?? "");
+      } else if (message.type === "error") {
+        voiceError.value = message.message ?? "Voice input failed.";
+        stopVoiceInput();
+      }
+    });
+    voiceSocket.addEventListener("close", () => {
+      if (voiceActive.value) stopVoiceInput();
+    });
+    voiceSocket.addEventListener("error", () => {
+      voiceError.value = "Voice input connection failed.";
+      stopVoiceInput();
+    });
+
+    voiceRecorder = new MediaRecorder(voiceStream, mimeType ? { mimeType } : undefined);
+    voiceRecorder.addEventListener("dataavailable", async (event) => {
+      if (voiceReady && event.data.size > 0 && voiceSocket?.readyState === WebSocket.OPEN) {
+        voiceSocket.send(await event.data.arrayBuffer());
+      }
+    });
+  } catch (err) {
+    voiceError.value = err instanceof Error ? err.message : String(err);
+    stopVoiceInput();
+  }
+}
+
+function toggleVoiceInput() {
+  if (voiceActive.value) {
+    stopVoiceInput();
+  } else {
+    void startVoiceInput();
+  }
 }
 
 function sendPastePadText(extra = "") {
@@ -369,7 +529,15 @@ function toggleControlLatch() {
 
 function updatePaneToolbar() {
   const status = terminal.value?.status ?? "connecting";
+  const locked = terminal.value?.layout_locked ?? false;
   const actions: PaneToolbarAction[] = [
+    {
+      id: "terminal-lock-layout",
+      title: locked ? "Update shared terminal size from this pane" : "Use this pane size on all clients",
+      icon: locked ? "bi-aspect-ratio-fill" : "bi-aspect-ratio",
+      active: locked,
+      run: publishCurrentLayout,
+    },
     {
       id: "terminal-paste-pad",
       title: "Open text input pad",
@@ -409,7 +577,11 @@ function updatePaneToolbar() {
 }
 
 function resize() {
-  if (!fitAddon || !xterm) return;
+  if (!fitAddon || !xterm || applyingRemoteLayout) return;
+  if (terminal.value?.layout_locked) {
+    applyLockedLayout();
+    return;
+  }
   try {
     fitAddon.fit();
   } catch {
@@ -417,6 +589,18 @@ function resize() {
   }
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "resize", rows: xterm.rows, cols: xterm.cols }));
+  }
+}
+
+function publishCurrentLayout() {
+  if (!fitAddon || !xterm) return;
+  try {
+    fitAddon.fit();
+  } catch {
+    return;
+  }
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "resize", rows: xterm.rows, cols: xterm.cols, lock: true }));
   }
 }
 
@@ -466,11 +650,9 @@ function connect() {
     } else if (message.type === "output") {
       applyOutput(message.data ?? "", message.output_version);
     } else if (message.type === "status" && message.terminal) {
-      terminals.upsert(message.terminal as TerminalInfo);
-      if (terminal.value) {
-        terminal.value.status = (message.terminal as TerminalInfo).status;
-        terminal.value.exit_code = (message.terminal as TerminalInfo).exit_code;
-      }
+      applyTerminalInfo(message.terminal as TerminalInfo);
+    } else if (message.type === "layout" && message.terminal) {
+      applyTerminalInfo(message.terminal as TerminalInfo);
     }
   });
   activeSocket.addEventListener("close", () => {
@@ -506,7 +688,11 @@ watch(() => props.paneId, (paneId, oldPaneId) => {
   if (oldPaneId && oldPaneId !== paneId) paneToolbar.clearPaneToolbar(oldPaneId);
   updatePaneToolbar();
 });
-watch(() => [terminal.value?.shell, terminal.value?.status, controlLatch.value, pastePadOpen.value] as const, updatePaneToolbar, { immediate: true });
+watch(
+  () => [terminal.value?.shell, terminal.value?.status, terminal.value?.layout_locked, controlLatch.value, pastePadOpen.value] as const,
+  updatePaneToolbar,
+  { immediate: true },
+);
 onMounted(() => {
   mounted = true;
   window.addEventListener("resize", resize);
@@ -518,6 +704,7 @@ onMounted(() => {
 onUnmounted(() => {
   mounted = false;
   slowSendToken += 1;
+  stopVoiceInput();
   if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
   window.removeEventListener("resize", resize);
   socket?.close();
@@ -543,15 +730,27 @@ onUnmounted(() => {
           <i class="bi bi-x"></i>
         </button>
       </div>
-      <textarea
-        ref="pastePadTextarea"
-        v-model="pastePadText"
-        class="terminal-paste-pad-textarea"
-        autocapitalize="off"
-        autocomplete="off"
-        autocorrect="off"
-        spellcheck="false"
-      ></textarea>
+      <div class="terminal-paste-pad-input">
+        <textarea
+          ref="pastePadTextarea"
+          v-model="pastePadText"
+          class="terminal-paste-pad-textarea"
+          autocapitalize="off"
+          autocomplete="off"
+          autocorrect="off"
+          spellcheck="false"
+        ></textarea>
+        <button
+          class="btn btn-sm terminal-voice-button"
+          :class="voiceButtonClass"
+          type="button"
+          :title="voiceButtonTitle"
+          :aria-label="voiceButtonTitle"
+          @click="toggleVoiceInput"
+        >
+          <i class="bi" :class="voiceButtonIcon"></i>
+        </button>
+      </div>
       <div class="terminal-paste-pad-actions">
         <button class="btn btn-sm btn-primary" type="button" @click="sendPastePadText()">Send</button>
         <button class="btn btn-sm btn-outline-primary" type="button" @click="sendPastePadText('\r')">Send + Enter</button>
@@ -578,7 +777,7 @@ onUnmounted(() => {
   background: transparent;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   padding: 8px;
 }
 
@@ -647,6 +846,33 @@ onUnmounted(() => {
 .terminal-paste-pad-textarea:focus {
   border-color: #1f6feb;
   box-shadow: 0 0 0 2px rgb(31 111 235 / 0.16);
+}
+
+.terminal-paste-pad-input {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 92px;
+  min-width: 0;
+  position: relative;
+}
+
+.terminal-paste-pad-input .terminal-paste-pad-textarea {
+  min-height: 0;
+  padding-right: 48px;
+  width: 100%;
+}
+
+.terminal-voice-button {
+  align-items: center;
+  border-radius: 999px;
+  bottom: 8px;
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+  position: absolute;
+  right: 8px;
+  width: 34px;
 }
 
 .terminal-paste-pad-actions {

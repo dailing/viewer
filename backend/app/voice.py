@@ -137,15 +137,16 @@ async def _connect_whisperlivekit(websocket: WebSocket) -> None:
         done, pending = await asyncio.wait([results_task, client_task], return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
-        if client_task in done and not results_task.done():
-            await results_task
         for task in pending:
             if not task.done():
                 task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
     finally:
         for task in (results_task, client_task):
             if not task.done():
                 task.cancel()
+        await asyncio.gather(results_task, client_task, return_exceptions=True)
         await audio_processor.cleanup()
 
 

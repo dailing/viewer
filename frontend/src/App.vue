@@ -4,6 +4,7 @@ import ConfigPanel from "./components/ConfigPanel.vue";
 import FileSidebar from "./components/FileSidebar.vue";
 import Workspace from "./components/Workspace.vue";
 import { connectEvents } from "./api/events";
+import { useCodexStore } from "./stores/codex";
 import { useFilesStore } from "./stores/files";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
@@ -16,6 +17,7 @@ const SIDEBAR_WIDTH_KEY = "viewer.sidebarWidth.v1";
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 640;
 const files = useFilesStore();
+const codex = useCodexStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
@@ -77,11 +79,13 @@ const activePaneTitle = computed(() => {
   const pane = layout.activePane;
   if (!pane || pane.type !== "pane") return "Empty pane";
   if (pane.terminalId) return "Terminal";
+  if (pane.codexSessionId) return codex.sessions.find((session) => session.id === pane.codexSessionId)?.title ?? "Codex";
   return pane.filePath || "Empty pane";
 });
 const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
+let codexRefresh: number | null = null;
 
 function parentPath(path: string): string {
   return path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
@@ -96,7 +100,7 @@ onMounted(async () => {
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || sidebarWidth.value);
   sidebarOpen.value = sidebarPinned.value;
   layout.load();
-  await Promise.all([files.loadConfig(), terminals.load()]);
+  await Promise.all([files.loadConfig(), terminals.load(), codex.load()]);
   await files.loadDirectory(files.currentPath);
   source = connectEvents(
     async (event) => {
@@ -109,6 +113,9 @@ onMounted(async () => {
   );
   terminalRefresh = window.setInterval(() => {
     void terminals.load();
+  }, 3000);
+  codexRefresh = window.setInterval(() => {
+    void codex.load();
   }, 3000);
 });
 
@@ -124,6 +131,11 @@ function openFile(path: string) {
 
 function openTerminal(id: string) {
   layout.openTerminal(id);
+  if (!sidebarPinned.value) sidebarOpen.value = false;
+}
+
+function openCodexSession(id: string) {
+  layout.openCodexSession(id);
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
 
@@ -176,6 +188,7 @@ function runPaneAction(action: PaneToolbarAction) {
 onUnmounted(() => {
   source?.close();
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
+  if (codexRefresh !== null) window.clearInterval(codexRefresh);
 });
 </script>
 
@@ -242,7 +255,7 @@ onUnmounted(() => {
             <i class="bi bi-x"></i>
           </button>
         </div>
-        <FileSidebar @open-file="openFile" @open-terminal="openTerminal" />
+        <FileSidebar @open-file="openFile" @open-terminal="openTerminal" @open-codex-session="openCodexSession" />
       </aside>
       <div
         v-if="sidebarPinned"

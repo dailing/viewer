@@ -1,5 +1,6 @@
 import type { DirectoryListing, FileMeta, ViewerConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
+import type { CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -68,6 +69,39 @@ export async function deleteTerminal(id: string): Promise<void> {
 export function terminalSocketUrl(id: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/api/terminals/${encodeURIComponent(id)}/ws`;
+}
+
+export async function listCodexSessions(): Promise<CodexSessionInfo[]> {
+  return request<CodexSessionInfo[]>("/api/codex/sessions");
+}
+
+export async function createCodexSession(prompt: string, cwd = ""): Promise<CodexSessionInfo> {
+  return request<CodexSessionInfo>("/api/codex/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, cwd }),
+  });
+}
+
+export async function getCodexSession(id: string): Promise<CodexSessionSnapshot> {
+  return request<CodexSessionSnapshot>(`/api/codex/sessions/${encodeURIComponent(id)}`);
+}
+
+export async function sendCodexMessage(id: string, prompt: string): Promise<CodexSessionInfo> {
+  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+}
+
+export async function deleteCodexSession(id: string): Promise<void> {
+  await request<{ status: string }>(`/api/codex/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function codexSessionSocketUrl(id: string): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/codex/sessions/${encodeURIComponent(id)}/ws`;
 }
 
 export function voiceSocketUrl(): string {

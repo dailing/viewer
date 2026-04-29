@@ -4,6 +4,7 @@ import type { LayoutNode } from "../types/layout";
 import type { FileMeta, WatchEvent } from "../types/files";
 import { getMeta } from "../api/client";
 import { useLayoutStore } from "../stores/layout";
+import CodexViewer from "./viewers/CodexViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
 import PdfViewer from "./viewers/PdfViewer.vue";
@@ -28,7 +29,7 @@ function affectsFile(eventPath: string, filePath: string): boolean {
 async function load(clearMeta: boolean) {
   error.value = "";
   if (clearMeta) meta.value = null;
-  if (!props.pane.filePath || props.pane.terminalId) return;
+  if (!props.pane.filePath || props.pane.terminalId || props.pane.codexSessionId) return;
   try {
     meta.value = await getMeta(props.pane.filePath);
     version.value += 1;
@@ -52,6 +53,7 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
   <section class="viewer-pane" :class="{ active: layout.activePaneId === pane.id }" @click="layout.setActive(pane.id)">
     <div class="pane-body">
       <TerminalViewer v-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
+      <CodexViewer v-else-if="pane.codexSessionId" :id="pane.codexSessionId" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">
         <i class="bi bi-folder2-open"></i>
         <span>Select a file from the sidebar</span>

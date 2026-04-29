@@ -1,14 +1,21 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import { useCodexStore } from "../stores/codex";
 import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
 import { useTerminalsStore } from "../stores/terminals";
 import FileTree from "./FileTree.vue";
 
-const emit = defineEmits<{ "open-file": [path: string]; "open-terminal": [id: string] }>();
+const emit = defineEmits<{
+  "open-file": [path: string];
+  "open-terminal": [id: string];
+  "open-codex-session": [id: string];
+}>();
+const codex = useCodexStore();
 const files = useFilesStore();
 const layout = useLayoutStore();
 const terminals = useTerminalsStore();
+const codexError = ref("");
 
 const pinned = computed(() => files.pinned);
 const currentLabel = computed(() => files.currentPath || "/");
@@ -26,9 +33,24 @@ async function newTerminal() {
   emit("open-terminal", terminal.id);
 }
 
+async function newCodexSession() {
+  codexError.value = "";
+  try {
+    const session = await codex.create("", files.currentPath);
+    emit("open-codex-session", session.id);
+  } catch (err) {
+    codexError.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
 async function closeTerminal(id: string) {
   await terminals.remove(id);
   layout.clearTerminal(id);
+}
+
+async function closeCodexSession(id: string) {
+  await codex.remove(id);
+  layout.clearCodexSession(id);
 }
 </script>
 
@@ -39,6 +61,30 @@ async function closeTerminal(id: string) {
         <i class="bi bi-terminal"></i>
         <span>New Terminal</span>
       </button>
+      <button class="btn btn-sm btn-outline-primary terminal-new codex-new" type="button" @click="newCodexSession">
+        <i class="bi bi-stars"></i>
+        <span>New Codex</span>
+      </button>
+      <div v-if="codexError" class="codex-error">{{ codexError }}</div>
+    </div>
+
+    <div class="sidebar-section" v-if="codex.sessions.length">
+      <div class="section-title">Codex</div>
+      <div
+        v-for="session in codex.sessions"
+        :key="session.id"
+        class="file-row pinned-row"
+        :class="{ active: layout.openCodexSessionIds.includes(session.id) }"
+      >
+        <button class="file-main" type="button" @click="emit('open-codex-session', session.id)">
+          <i class="bi" :class="session.status === 'running' ? 'bi-stars' : 'bi-chat-square-text'"></i>
+          <span class="file-name">{{ session.title }}</span>
+        </button>
+        <span class="terminal-state" :class="session.status">{{ session.status }}</span>
+        <button class="btn btn-sm icon-button pin-action" type="button" title="Delete Codex session" @click="closeCodexSession(session.id)">
+          <i class="bi bi-x"></i>
+        </button>
+      </div>
     </div>
 
     <div class="sidebar-section" v-if="terminals.terminals.length">
@@ -199,6 +245,16 @@ async function closeTerminal(id: string) {
   width: 100%;
 }
 
+.codex-new {
+  margin-top: 7px;
+}
+
+.codex-error {
+  color: #a33;
+  font-size: 12px;
+  margin-top: 7px;
+}
+
 .terminal-state {
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -212,5 +268,10 @@ async function closeTerminal(id: string) {
 .terminal-state.running {
   border-color: #9fc5a8;
   color: #146c43;
+}
+
+.terminal-state.failed {
+  border-color: #e8c1c1;
+  color: #a33;
 }
 </style>

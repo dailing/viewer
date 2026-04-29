@@ -85,7 +85,17 @@ body {
   color: #157347;
 }
 
+.pane-status.idle {
+  border-color: #cfd6e4;
+  color: var(--text-muted);
+}
+
 .pane-status.exited {
+  border-color: #e8c1c1;
+  color: #a33;
+}
+
+.pane-status.failed {
   border-color: #e8c1c1;
   color: #a33;
 }

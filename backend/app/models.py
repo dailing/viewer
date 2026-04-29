@@ -108,6 +108,43 @@ class TerminalSnapshot(TerminalInfo):
     output_version: int = 0
 
 
+class CodexSessionInfo(BaseModel):
+    id: str
+    codex_session_id: str | None = None
+    title: str
+    cwd: str
+    created_at: float
+    updated_at: float
+    status: Literal["idle", "running", "exited", "failed"]
+    exit_code: int | None = None
+    event_count: int = 0
+
+
+class CodexPrompt(BaseModel):
+    text: str
+    created_at: float
+
+
+class CodexEvent(BaseModel):
+    index: int
+    received_at: float
+    raw: dict
+
+
+class CodexSessionSnapshot(CodexSessionInfo):
+    prompts: list[CodexPrompt] = Field(default_factory=list)
+    events: list[CodexEvent] = Field(default_factory=list)
+
+
+class CodexSessionCreate(BaseModel):
+    prompt: str = ""
+    cwd: str | None = None
+
+
+class CodexSessionMessage(BaseModel):
+    prompt: str
+
+
 class ClientLog(BaseModel):
     level: Literal["debug", "info", "warning", "error"] = "error"
     message: str

@@ -1,4 +1,5 @@
 import mimetypes
+from hashlib import sha256
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -82,6 +83,17 @@ def preview_kind(path: Path, mime: str, size: int) -> str:
     return "unsupported"
 
 
+def content_hash(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def entry_for(path: Path) -> FileEntry:
     try:
         stat = path.stat()
@@ -141,6 +153,7 @@ def get_meta(path: str) -> FileMeta:
         path=normalize_relative(path),
         size=stat.st_size,
         mtime=stat.st_mtime,
+        content_hash=content_hash(target),
         mime=mime,
         preview=preview,
         text_too_large=preview in {"text", "markdown"} and stat.st_size > settings.max_text_preview_bytes,

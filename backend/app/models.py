@@ -24,6 +24,7 @@ class FileMeta(BaseModel):
     path: str
     size: int
     mtime: float
+    content_hash: str
     mime: str
     preview: Literal["image", "markdown", "pdf", "text", "unsupported"]
     text_too_large: bool = False

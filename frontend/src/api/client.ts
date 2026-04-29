@@ -10,8 +10,9 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function rawUrl(path: string): string {
-  return `/api/file/raw?path=${encodeURIComponent(path)}`;
+export function rawUrl(path: string, contentHash?: string): string {
+  const hashQuery = contentHash ? `&h=${encodeURIComponent(contentHash)}` : "";
+  return `/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}`;
 }
 
 export async function getTree(path = ""): Promise<DirectoryListing> {

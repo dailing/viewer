@@ -22,6 +22,7 @@ export interface FileMeta {
   path: string;
   size: number;
   mtime: number;
+  content_hash: string;
   mime: string;
   preview: PreviewType;
   text_too_large: boolean;

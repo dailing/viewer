@@ -16,7 +16,7 @@ function formatSize(size: number): string {
     <i class="bi bi-file-earmark"></i>
     <h2>{{ meta.name }}</h2>
     <p>{{ meta.mime }} · {{ formatSize(meta.size) }}</p>
-    <a class="btn btn-outline-primary" :href="rawUrl(meta.path)" target="_blank" rel="noreferrer">Open raw</a>
+    <a class="btn btn-outline-primary" :href="rawUrl(meta.path, meta.content_hash)" target="_blank" rel="noreferrer">Open raw</a>
   </div>
 </template>
 
@@ -49,4 +49,3 @@ p {
   margin: 0 0 8px;
 }
 </style>
-

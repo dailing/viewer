@@ -2,8 +2,8 @@
 import { computed } from "vue";
 import { rawUrl } from "../../api/client";
 
-const props = defineProps<{ path: string; version: number }>();
-const src = computed(() => `${rawUrl(props.path)}&v=${props.version}`);
+const props = defineProps<{ path: string; contentHash: string }>();
+const src = computed(() => rawUrl(props.path, props.contentHash));
 </script>
 
 <template>
@@ -17,4 +17,3 @@ const src = computed(() => `${rawUrl(props.path)}&v=${props.version}`);
   width: 100%;
 }
 </style>
-

@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,7 +9,7 @@ from loguru import logger
 
 from .config import settings
 from .events import hub
-from .files import get_meta, list_directory, normalize_relative, read_config, read_text, resolve_path, write_config
+from .files import content_hash, get_meta, guess_mime, list_directory, normalize_relative, read_config, read_text, resolve_path, write_config
 from .logging import current_log_path, ensure_logging
 from .models import ClientLog, ConfigData, TerminalCreate
 from .terminals import terminal_manager
@@ -124,9 +124,19 @@ async def file_content(path: str):
 
 
 @app.get("/api/file/raw")
-async def file_raw(path: str):
-    meta = get_meta(path)
-    return FileResponse(resolve_path(path), media_type=meta.mime, filename=meta.name)
+async def file_raw(path: str, h: str | None = None):
+    target = resolve_path(path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+
+    mime = guess_mime(target)
+    etag = h or content_hash(target)
+    response = FileResponse(target, media_type=mime, filename=target.name)
+    response.headers["ETag"] = f"\"{etag}\""
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
 
 
 @app.get("/api/config")

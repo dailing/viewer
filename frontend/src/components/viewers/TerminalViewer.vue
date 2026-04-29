@@ -5,12 +5,14 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { terminalSocketUrl, voiceSocketUrl } from "../../api/client";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
+import { useLayoutStore } from "../../stores/layout";
 import { useTerminalsStore } from "../../stores/terminals";
 import type { PaneToolbarAction } from "../../stores/paneToolbar";
 import type { TerminalInfo, TerminalSnapshot } from "../../types/terminals";
 
 const props = defineProps<{ id: string; paneId: string }>();
 const paneToolbar = usePaneToolbarStore();
+const layout = useLayoutStore();
 const terminals = useTerminalsStore();
 const terminal = ref<TerminalSnapshot | null>(null);
 const error = ref("");
@@ -74,6 +76,7 @@ const voiceButtonClass = computed(() => {
   if (voiceConnecting.value) return "btn-outline-primary";
   return "btn-outline-secondary";
 });
+const isActivePane = computed(() => layout.activePaneId === props.paneId);
 
 type SoftKey = {
   title: string;
@@ -529,15 +532,7 @@ function toggleControlLatch() {
 
 function updatePaneToolbar() {
   const status = terminal.value?.status ?? "connecting";
-  const locked = terminal.value?.layout_locked ?? false;
   const actions: PaneToolbarAction[] = [
-    {
-      id: "terminal-lock-layout",
-      title: locked ? "Update shared terminal size from this pane" : "Use this pane size on all clients",
-      icon: locked ? "bi-aspect-ratio-fill" : "bi-aspect-ratio",
-      active: locked,
-      run: publishCurrentLayout,
-    },
     {
       id: "terminal-paste-pad",
       title: "Open text input pad",
@@ -578,29 +573,13 @@ function updatePaneToolbar() {
 
 function resize() {
   if (!fitAddon || !xterm || applyingRemoteLayout) return;
-  if (terminal.value?.layout_locked) {
-    applyLockedLayout();
-    return;
-  }
   try {
     fitAddon.fit();
   } catch {
     return;
   }
-  if (socket?.readyState === WebSocket.OPEN) {
+  if (isActivePane.value && socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "resize", rows: xterm.rows, cols: xterm.cols }));
-  }
-}
-
-function publishCurrentLayout() {
-  if (!fitAddon || !xterm) return;
-  try {
-    fitAddon.fit();
-  } catch {
-    return;
-  }
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "resize", rows: xterm.rows, cols: xterm.cols, lock: true }));
   }
 }
 
@@ -689,12 +668,19 @@ watch(() => props.paneId, (paneId, oldPaneId) => {
   updatePaneToolbar();
 });
 watch(
+  () => isActivePane.value,
+  (active) => {
+    if (active) resize();
+  },
+);
+watch(
   () => [terminal.value?.shell, terminal.value?.status, terminal.value?.layout_locked, controlLatch.value, pastePadOpen.value] as const,
   updatePaneToolbar,
   { immediate: true },
 );
 onMounted(() => {
   mounted = true;
+  window.addEventListener("focus", resize);
   window.addEventListener("resize", resize);
   void nextTick(() => {
     ensureTerminal();
@@ -706,6 +692,7 @@ onUnmounted(() => {
   slowSendToken += 1;
   stopVoiceInput();
   if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+  window.removeEventListener("focus", resize);
   window.removeEventListener("resize", resize);
   socket?.close();
   paneToolbar.clearPaneToolbar(props.paneId);

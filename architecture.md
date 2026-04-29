@@ -30,7 +30,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/tree`: calls `list_directory()`.
 - `/api/file/meta`: calls `get_meta()`.
 - `/api/file/content`: calls `read_text()`.
-- `/api/file/raw`: streams a file via `FileResponse`.
+- `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers.
 - `/api/config` GET/PUT: reads and writes pinned paths, last sidebar directory, nav appearance, and Markdown theme config.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
 - `/api/terminals`: lists or creates terminal sessions; POST accepts an optional relative `cwd`.
@@ -55,9 +55,10 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `relative_for(path)`: returns path relative to root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
 - `preview_kind(path, mime, size)`: maps file extension/MIME to `image`, `markdown`, `pdf`, `text`, or `unsupported`.
+- `content_hash(path)`: computes SHA-256 for cache tagging.
 - `entry_for(path)`: builds `FileEntry` for a directory child.
 - `list_directory(path)`: validates directory, filters hidden files when configured, sorts directories first.
-- `get_meta(path)`: validates file and returns `FileMeta`, including preview type and text-size limit flag.
+- `get_meta(path)`: validates file and returns `FileMeta`, including preview type, text-size limit flag, and `content_hash`.
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: root-local `.viewer.config.json`.
 - `read_config()` / `write_config(config)`: load and save pinned paths, last sidebar directory, nav appearance, and Markdown theme config; missing/invalid saved directories fall back to root.
@@ -80,19 +81,20 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Interactive shell session manager using OS PTYs, async tasks, and WebSockets.
 - `TerminalClient`: websocket client plus outgoing queue and writer task.
-- `TerminalSession`: PTY process state, buffered output, current PTY rows/cols, shared layout lock state, connected clients, locks, and tasks.
-- `TerminalSession.snapshot()`: full state including buffered output.
+- `TerminalSession`: PTY process state, buffered output, per-session output log path, current PTY rows/cols, shared layout lock state, connected clients, locks, and tasks.
+- `TerminalSession.snapshot()`: full state fields; reconnect snapshots load output from the per-session on-disk log.
 - `TerminalSession.summary()`: list-friendly state without output.
 - `TerminalManager.list()`: sorted summaries.
 - `TerminalManager.get(id)`: returns a session or 404.
 - `TerminalManager.create(cwd)`: opens PTY, starts configured shell in the requested served-root-relative directory, falls back to root when unavailable, and launches reader/wait tasks.
 - `terminate(id)`: asks process group to exit.
 - `delete(id)`: terminates, cancels tasks, closes FD, removes session, broadcasts deletion.
-- `connect(id, websocket)`: accepts WebSocket, sends snapshot, handles input/resize messages, removes client on disconnect. Resize messages may include `lock: true` to make that client's current terminal dimensions the shared layout; while locked, passive client resizes are ignored.
+- `connect(id, websocket)`: accepts WebSocket, sends snapshot, handles input/resize messages, removes client on disconnect.
 - `write(session, data)`: writes encoded input to PTY with a lock.
-- `resize(session, rows, cols, lock)`: updates PTY window size, records rows/cols, and broadcasts `layout` updates to connected clients when the shared layout changes.
+- `resize(session, rows, cols, lock)`: updates PTY window size, records rows/cols, updates lock state, and broadcasts `layout` updates.
 - `shutdown()`: deletes all sessions.
-- `_read_output(session)`: reads PTY output, caps buffer at `MAX_OUTPUT_CHARS`, broadcasts output with version.
+- `_read_output(session)`: reads PTY output, appends to disk log, caps in-memory buffer at `MAX_OUTPUT_CHARS`, broadcasts output with version.
+- `_initialize_log()`, `_append_log()`, `_read_log()`, `_snapshot_for_client()`, `_remove_log()`: manage per-session terminal output log files used for reconnect replay.
 - `_wait_for_exit(session)`: waits for process and broadcasts status.
 - `_terminate_process(session)`: SIGHUP, then SIGTERM, then SIGKILL fallback.
 - `_broadcast()`, `_enqueue()`, `_client_writer()`, `_remove_client()`: websocket fanout and cleanup.
@@ -214,12 +216,12 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/components/viewers/ImageViewer.vue`
 
-- Image preview using raw file URL with cache-busting `version`.
-- Saves and restores scroll position around path/version changes.
+- Image preview using raw file URL tagged with file `content_hash`.
+- Saves and restores scroll position around path/hash changes.
 
 `frontend/src/components/viewers/PdfViewer.vue`
 
-- PDF preview via full-pane iframe pointed at raw file URL plus cache-busting `version`.
+- PDF preview via full-pane iframe pointed at raw file URL tagged with file `content_hash`.
 
 `frontend/src/components/viewers/UnsupportedViewer.vue`
 
@@ -244,8 +246,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `send(data)`: sends PTY input JSON over WebSocket.
 - `controlSequence(key)`: maps Ctrl latch keys to control characters.
 - `sendSoftInput(data)`, `sendShortcut(data)`, `toggleControlLatch()`: soft keyboard helpers.
-- `resize()`: fits terminal and sends rows/cols to backend only while the terminal layout is unlocked.
-- `publishCurrentLayout()`: toolbar action that locks the shared PTY layout to this pane's current rows/cols so other browsers stop resizing the underlying PTY and follow the recorded dimensions.
+- `resize()`: fits terminal and sends rows/cols to backend only from the active pane, so idle panes/windows do not push PTY size changes.
 - `focusTerminal()`: focuses xterm.
 - `connect()`: opens WebSocket, handles snapshot/output/status, reconnects after close.
 - `load()`: starts connection.
@@ -257,7 +258,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Shared fetch helpers for REST and raw/WS URLs.
 - `request<T>()`: JSON request with error text on non-2xx.
-- File APIs: `rawUrl()`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
+- File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 

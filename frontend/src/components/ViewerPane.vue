@@ -52,9 +52,9 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
         <i class="bi bi-exclamation-triangle"></i>
         <span>{{ error }}</span>
       </div>
-      <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :version="version" />
+      <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" />
       <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" />
-      <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :version="version" />
+      <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" />
       <TextViewer v-else-if="meta?.preview === 'text'" :path="pane.filePath" :version="version" />
       <UnsupportedViewer v-else-if="meta" :meta="meta" />
       <div v-else class="empty-state">

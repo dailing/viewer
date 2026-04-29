@@ -3,8 +3,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { rawUrl } from "../../api/client";
 import { restoreScrollPosition, saveScrollPosition } from "../../utils/scrollMemory";
 
-const props = defineProps<{ path: string; version: number }>();
-const src = computed(() => `${rawUrl(props.path)}&v=${props.version}`);
+const props = defineProps<{ path: string; contentHash: string }>();
+const src = computed(() => rawUrl(props.path, props.contentHash));
 const container = ref<HTMLElement | null>(null);
 
 function persistCurrentScroll() {
@@ -23,10 +23,10 @@ onUnmounted(() => {
   persistCurrentScroll();
   window.removeEventListener("beforeunload", persistCurrentScroll);
 });
-watch(() => [props.path, props.version] as const, async ([newPath], [oldPath, oldVersion]) => {
+watch(() => [props.path, props.contentHash] as const, async ([newPath], [oldPath, oldHash]) => {
   if (oldPath && newPath !== oldPath) {
     saveScrollPosition(oldPath, container.value);
-  } else if (oldVersion !== undefined) {
+  } else if (oldHash !== undefined) {
     saveScrollPosition(newPath, container.value);
   }
   await restore();

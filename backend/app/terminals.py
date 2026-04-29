@@ -8,6 +8,7 @@ import termios
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -18,6 +19,7 @@ from .files import normalize_relative, resolve_path
 MAX_OUTPUT_CHARS = 1_000_000
 CLIENT_SEND_TIMEOUT = 1.0
 CLIENT_QUEUE_SIZE = 200
+TERMINAL_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "terminals"
 
 
 @dataclass
@@ -47,6 +49,7 @@ class TerminalSession:
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     reader_task: asyncio.Task | None = None
     wait_task: asyncio.Task | None = None
+    log_path: Path | None = None
 
     def snapshot(self) -> dict:
         return {
@@ -112,6 +115,7 @@ class TerminalManager:
             shell=shell,
             cwd=self._cwd_for(cwd),
             created_at=time.time(),
+            log_path=TERMINAL_LOG_DIR / f"{terminal_id}.log",
         )
         master_fd, slave_fd = os.openpty()
         try:
@@ -147,6 +151,7 @@ class TerminalManager:
         session.master_fd = master_fd
         session.process = process
         self.sessions[terminal_id] = session
+        self._initialize_log(session)
         logger.info("Terminal {} started shell={} cwd={} pid={}", terminal_id, shell, session.cwd, process.pid)
         session.reader_task = asyncio.create_task(self._read_output(session))
         session.wait_task = asyncio.create_task(self._wait_for_exit(session))
@@ -171,6 +176,7 @@ class TerminalManager:
                 pass
             session.master_fd = None
         self.sessions.pop(terminal_id, None)
+        self._remove_log(session)
         await self._broadcast(session, {"type": "deleted"})
         return {"status": "deleted"}
 
@@ -180,7 +186,7 @@ class TerminalManager:
         client = TerminalClient(websocket=websocket)
         session.clients[websocket] = client
         client.writer_task = asyncio.create_task(self._client_writer(client))
-        self._enqueue(client, {"type": "snapshot", "terminal": session.snapshot()})
+        self._enqueue(client, {"type": "snapshot", "terminal": self._snapshot_for_client(session)})
         logger.info("Terminal {} websocket connected clients={}", terminal_id, len(session.clients))
         try:
             while True:
@@ -223,16 +229,13 @@ class TerminalManager:
     async def resize(self, session: TerminalSession, rows: int, cols: int, *, lock: bool = False) -> None:
         if session.master_fd is None:
             return
-        if session.layout_locked and not lock:
-            return
         rows = max(5, rows)
         cols = max(20, cols)
         if session.rows == rows and session.cols == cols and session.layout_locked == lock:
             return
         session.rows = rows
         session.cols = cols
-        if lock:
-            session.layout_locked = True
+        session.layout_locked = lock
         self._set_size(session.master_fd, rows, cols)
         await self._broadcast(session, {"type": "layout", "terminal": session.summary()})
 
@@ -258,6 +261,7 @@ class TerminalManager:
             logger.debug("Terminal {} output bytes={} version={}", session.id, len(chunk), session.output_version)
             if len(session.output) > MAX_OUTPUT_CHARS:
                 session.output = session.output[-MAX_OUTPUT_CHARS:]
+            await asyncio.to_thread(self._append_log, session, text)
             await self._broadcast(session, {"type": "output", "data": text, "output_version": session.output_version})
 
     async def _wait_for_exit(self, session: TerminalSession) -> None:
@@ -340,6 +344,36 @@ class TerminalManager:
 
     def _set_size(self, fd: int, rows: int, cols: int) -> None:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+    def _initialize_log(self, session: TerminalSession) -> None:
+        if session.log_path is None:
+            return
+        session.log_path.parent.mkdir(parents=True, exist_ok=True)
+        session.log_path.write_text("", encoding="utf-8")
+
+    def _append_log(self, session: TerminalSession, text: str) -> None:
+        if session.log_path is None:
+            return
+        with session.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def _read_log(self, session: TerminalSession) -> str:
+        if session.log_path is None or not session.log_path.exists():
+            return session.output
+        return session.log_path.read_text(encoding="utf-8", errors="replace")
+
+    def _snapshot_for_client(self, session: TerminalSession) -> dict:
+        snapshot = session.snapshot()
+        snapshot["output"] = self._read_log(session)
+        return snapshot
+
+    def _remove_log(self, session: TerminalSession) -> None:
+        if session.log_path is None:
+            return
+        try:
+            session.log_path.unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Failed to remove terminal log {}", session.log_path)
 
 
 terminal_manager = TerminalManager()

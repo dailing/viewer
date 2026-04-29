@@ -4,6 +4,7 @@ import type { LayoutNode } from "../types/layout";
 import type { FileMeta, WatchEvent } from "../types/files";
 import { getMeta } from "../api/client";
 import { useLayoutStore } from "../stores/layout";
+import { fileChangeAffectsPath } from "../utils/paths";
 import CodexViewer from "./viewers/CodexViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
@@ -17,14 +18,6 @@ const layout = useLayoutStore();
 const meta = ref<FileMeta | null>(null);
 const error = ref("");
 const version = ref(0);
-
-function parentPath(path: string): string {
-  return path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
-}
-
-function affectsFile(eventPath: string, filePath: string): boolean {
-  return eventPath === filePath || eventPath === parentPath(filePath);
-}
 
 async function load(clearMeta: boolean) {
   error.value = "";
@@ -40,7 +33,7 @@ async function load(clearMeta: boolean) {
 
 function handleChange(event: Event) {
   const detail = (event as CustomEvent<WatchEvent>).detail;
-  if (props.pane.filePath && affectsFile(detail.path, props.pane.filePath)) void load(false);
+  if (props.pane.filePath && fileChangeAffectsPath(detail.path, props.pane.filePath)) void load(false);
 }
 
 watch(() => props.pane.filePath, () => load(true), { immediate: true });

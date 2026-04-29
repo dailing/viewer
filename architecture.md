@@ -55,6 +55,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - File tree, path normalization, metadata, content reading, and `.viewer.config.json` persistence.
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
 - `resolve_path(path)`: joins normalized relative path to `settings.root_resolved`. Symlinks are allowed by current implementation.
+- `resolve_served_directory(path, label)`: resolves a served-root-relative working directory for terminal/Codex launches, logging and falling back to root when unavailable.
 - `relative_for(path)`: returns path relative to root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
 - `preview_kind(path, mime, size)`: maps file extension/MIME to `image`, `markdown`, `pdf`, `text`, or `unsupported`.
@@ -73,6 +74,12 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `EventHub.subscribe()`: async generator yielding `ready` then `file-change` SSE messages.
 - `hub`: singleton used by `main.py` and `watcher.py`.
 
+`backend/app/ws_clients.py`
+
+- Shared WebSocket client queue/fanout helpers for backend managers.
+- `WebSocketClient`: websocket, outgoing queue, and writer task.
+- `add_client()`, `enqueue()`, `broadcast()`, `remove_client()`, and `client_writer()`: common JSON message queueing, stale-client cleanup, timeout-bounded writes, and socket close handling used by terminal and Codex session managers.
+
 `backend/app/watcher.py`
 
 - Watches `settings.root_resolved` with `watchfiles.awatch`.
@@ -83,7 +90,6 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `backend/app/terminals.py`
 
 - Interactive shell session manager using OS PTYs, async tasks, and WebSockets.
-- `TerminalClient`: websocket client plus outgoing queue and writer task.
 - `TerminalSession`: PTY process state, buffered output, per-session output log path, current PTY rows/cols, shared layout lock state, connected clients, locks, and tasks.
 - `TerminalSession.snapshot()`: full state fields; reconnect snapshots load output from the per-session on-disk log.
 - `TerminalSession.summary()`: list-friendly state without output.
@@ -100,7 +106,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `_initialize_log()`, `_append_log()`, `_read_log()`, `_snapshot_for_client()`, `_remove_log()`: manage per-session terminal output log files used for reconnect replay.
 - `_wait_for_exit(session)`: waits for process and broadcasts status.
 - `_terminate_process(session)`: SIGHUP, then SIGTERM, then SIGKILL fallback.
-- `_broadcast()`, `_enqueue()`, `_client_writer()`, `_remove_client()`: websocket fanout and cleanup.
+- `_broadcast()`, `_remove_client()`: thin wrappers around `ws_clients.py` fanout and cleanup.
 - `_set_size(fd, rows, cols)`: low-level `TIOCSWINSZ`.
 - `terminal_manager`: singleton used by routes.
 
@@ -354,6 +360,23 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `saveScrollPosition(path, element)`: stores `scrollTop` and `scrollLeft`.
 - `restoreScrollPosition(path, element)`: retries restoration across animation frames while content lays out.
 
+`frontend/src/composables/useScrollMemory.ts`
+
+- Vue lifecycle wrapper around `utils/scrollMemory.ts` for viewers that reload when `path` or `version` changes.
+- `useReloadingScrollMemory(path, version, element, load)`: registers `beforeunload`, saves the previous path's scroll position before reload, calls the provided loader, and returns `saveCurrentScroll()` for scroll handlers.
+
+`frontend/src/utils/markdownRender.ts`
+
+- Shared Markdown rendering with markdown-it plugins, KaTeX, Mermaid fences, and Highlight.js code highlighting.
+- `renderMarkdown(source)`: returns rendered HTML.
+- `renderMermaidIn(container, idPrefix)`: renders `.mermaid` blocks after Vue DOM updates and marks render failures.
+
+`frontend/src/utils/paths.ts`
+
+- Shared frontend path helpers.
+- `parentPath(path)`: returns a slash-relative parent directory.
+- `fileChangeAffectsPath(eventPath, filePath)`: matches exact file changes and parent-directory changes for atomic-save/delete-recreate flows.
+
 `frontend/src/utils/clientLog.ts`
 
 - Sends frontend errors to `/api/debug/client-log`.
@@ -363,7 +386,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/styles.css`
 
-- Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile sidebar behavior, scroll area, muted text.
+- Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile sidebar behavior, scroll area, muted text, shared Markdown rendering, and shared Highlight.js token colors.
 - CSS variables: `--sidebar-width`, `--topbar-height`, `--nav-button-size`, `--nav-icon-size`, `--border`, `--panel`, `--surface`, `--text-muted`.
 
 `frontend/src/vite-env.d.ts`

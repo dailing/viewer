@@ -11,6 +11,11 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function socketUrl(path: string): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${path}`;
+}
+
 export function rawUrl(path: string, contentHash?: string): string {
   const hashQuery = contentHash ? `&h=${encodeURIComponent(contentHash)}` : "";
   return `/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}`;
@@ -67,8 +72,7 @@ export async function deleteTerminal(id: string): Promise<void> {
 }
 
 export function terminalSocketUrl(id: string): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/terminals/${encodeURIComponent(id)}/ws`;
+  return socketUrl(`/api/terminals/${encodeURIComponent(id)}/ws`);
 }
 
 export async function listCodexSessions(): Promise<CodexSessionInfo[]> {
@@ -100,11 +104,9 @@ export async function deleteCodexSession(id: string): Promise<void> {
 }
 
 export function codexSessionSocketUrl(id: string): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/codex/sessions/${encodeURIComponent(id)}/ws`;
+  return socketUrl(`/api/codex/sessions/${encodeURIComponent(id)}/ws`);
 }
 
 export function voiceSocketUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/voice/ws`;
+  return socketUrl("/api/voice/ws");
 }

@@ -9,6 +9,7 @@ import { useFilesStore } from "./stores/files";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
+import { parentPath } from "./utils/paths";
 import type { PaneToolbarAction } from "./stores/paneToolbar";
 import type { SplitDirection } from "./types/layout";
 
@@ -86,10 +87,6 @@ const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? [])
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 let codexRefresh: number | null = null;
-
-function parentPath(path: string): string {
-  return path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
-}
 
 function eventAffectsOpenPath(eventPath: string): boolean {
   return layout.openPaths.some((openPath) => openPath === eventPath || parentPath(openPath) === eventPath);

@@ -354,125 +354,20 @@ onUnmounted(() => {
 }
 
 .message-text {
+  --markdown-render-body-size: 13px;
+  --markdown-render-h1-size: 20px;
+  --markdown-render-h2-size: 17px;
+  --markdown-render-h3-size: 15px;
+  --markdown-render-h4-size: 15px;
+  --markdown-render-paragraph-line-height: 1.5;
+  --markdown-render-paragraph-size: 13px;
+  --markdown-render-pre-padding: 10px;
   font-family: inherit;
   font-size: 13px;
   line-height: 1.45;
   margin: 0;
   padding: 0;
   word-break: break-word;
-}
-
-.markdown-content :deep(:first-child) {
-  margin-top: 0;
-}
-
-.markdown-content :deep(:last-child) {
-  margin-bottom: 0;
-}
-
-.markdown-content :deep(p),
-.markdown-content :deep(li) {
-  color: var(--markdown-paragraph-color);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.markdown-content :deep(h1) {
-  color: var(--markdown-h1-color);
-  font-size: 20px;
-  font-weight: var(--markdown-h1-font-weight);
-  line-height: var(--markdown-h1-line-height);
-}
-
-.markdown-content :deep(h2) {
-  color: var(--markdown-h2-color);
-  font-size: 17px;
-  font-weight: var(--markdown-h2-font-weight);
-  line-height: var(--markdown-h2-line-height);
-}
-
-.markdown-content :deep(h3),
-.markdown-content :deep(h4) {
-  color: var(--markdown-h3-color);
-  font-size: 15px;
-  font-weight: var(--markdown-h3-font-weight);
-  line-height: var(--markdown-h3-line-height);
-}
-
-.markdown-content :deep(a) {
-  color: var(--markdown-link-color);
-}
-
-.markdown-content :deep(img) {
-  max-width: 100%;
-}
-
-.markdown-content :deep(pre) {
-  background: var(--syntax-background);
-  border-radius: 6px;
-  color: var(--syntax-text);
-  overflow: auto;
-  padding: 10px;
-}
-
-.markdown-content :deep(code) {
-  background: var(--markdown-code-background);
-  color: var(--markdown-code-color);
-  font-size: var(--markdown-code-font-size);
-}
-
-.markdown-content :deep(pre code) {
-  background: transparent;
-}
-
-.markdown-content :deep(.hljs) {
-  background: var(--syntax-background);
-  color: var(--syntax-text);
-}
-
-.markdown-content :deep(.hljs-keyword),
-.markdown-content :deep(.hljs-selector-tag),
-.markdown-content :deep(.hljs-built_in) {
-  color: var(--syntax-keyword);
-}
-
-.markdown-content :deep(.hljs-string),
-.markdown-content :deep(.hljs-attr) {
-  color: var(--syntax-string);
-}
-
-.markdown-content :deep(.hljs-number),
-.markdown-content :deep(.hljs-literal) {
-  color: var(--syntax-number);
-}
-
-.markdown-content :deep(.hljs-title),
-.markdown-content :deep(.hljs-name) {
-  color: var(--syntax-title);
-}
-
-.markdown-content :deep(.hljs-comment),
-.markdown-content :deep(.hljs-quote) {
-  color: var(--syntax-comment);
-}
-
-.markdown-content :deep(.hljs-meta),
-.markdown-content :deep(.hljs-doctag) {
-  color: var(--syntax-meta);
-}
-
-.markdown-content :deep(table) {
-  border-collapse: collapse;
-  display: block;
-  overflow: auto;
-  width: max-content;
-  max-width: 100%;
-}
-
-.markdown-content :deep(th),
-.markdown-content :deep(td) {
-  border: 1px solid var(--markdown-border-color);
-  padding: 6px 8px;
 }
 
 .raw-event {

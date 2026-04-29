@@ -11,19 +11,11 @@ from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from .config import settings
-from .files import normalize_relative, resolve_path
+from .files import resolve_served_directory
+from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
 CODEX_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "codex-sessions"
-CLIENT_QUEUE_SIZE = 200
-CLIENT_SEND_TIMEOUT = 1.0
 CODEX_PROXY = "http://localhost:7890"
-
-
-@dataclass
-class CodexClient:
-    websocket: WebSocket
-    queue: asyncio.Queue[dict | None] = field(default_factory=lambda: asyncio.Queue(maxsize=CLIENT_QUEUE_SIZE))
-    writer_task: asyncio.Task | None = None
 
 
 @dataclass
@@ -38,7 +30,7 @@ class CodexSession:
     exit_code: int | None = None
     prompts: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
-    clients: dict[WebSocket, CodexClient] = field(default_factory=dict)
+    clients: dict[WebSocket, WebSocketClient] = field(default_factory=dict)
     run_task: asyncio.Task | None = None
     process: asyncio.subprocess.Process | None = None
     meta_path: Path | None = None
@@ -75,13 +67,7 @@ class CodexSessionManager:
         )
 
     def _cwd_for(self, cwd: str | None) -> str:
-        requested = normalize_relative(cwd)
-        target = resolve_path(requested)
-        if not target.exists() or not target.is_dir():
-            if requested:
-                logger.warning("Codex cwd '{}' is not available; using root", requested)
-            return settings.root_resolved.as_posix()
-        return target.as_posix()
+        return resolve_served_directory(cwd, "Codex")
 
     def _relative_cwd(self, cwd: str) -> str:
         path = Path(cwd)
@@ -277,10 +263,8 @@ class CodexSessionManager:
     async def connect(self, session_id: str, websocket: WebSocket) -> None:
         session = self.get(session_id)
         await websocket.accept()
-        client = CodexClient(websocket=websocket)
-        session.clients[websocket] = client
-        client.writer_task = asyncio.create_task(self._client_writer(client))
-        self._enqueue(client, {"type": "snapshot", "session": session.snapshot()})
+        client = add_client(session.clients, websocket)
+        enqueue(client, {"type": "snapshot", "session": session.snapshot()})
         try:
             while True:
                 await websocket.receive_text()
@@ -382,42 +366,10 @@ class CodexSessionManager:
             logger.debug("Codex session {} stderr: {}", session.id, text.rstrip())
 
     async def _broadcast(self, session: CodexSession, message: dict) -> None:
-        stale: list[CodexClient] = []
-        for client in list(session.clients.values()):
-            if client.writer_task and client.writer_task.done():
-                stale.append(client)
-                continue
-            if not self._enqueue(client, message):
-                stale.append(client)
-        for client in stale:
-            await self._remove_client(session, client)
+        await broadcast(session.clients, message)
 
-    def _enqueue(self, client: CodexClient, message: dict) -> bool:
-        try:
-            client.queue.put_nowait(message)
-        except asyncio.QueueFull:
-            return False
-        return True
-
-    async def _client_writer(self, client: CodexClient) -> None:
-        try:
-            while True:
-                message = await client.queue.get()
-                if message is None:
-                    return
-                await asyncio.wait_for(client.websocket.send_json(message), timeout=CLIENT_SEND_TIMEOUT)
-        except Exception:
-            return
-
-    async def _remove_client(self, session: CodexSession, client: CodexClient) -> None:
-        if session.clients.pop(client.websocket, None) is None:
-            return
-        if client.writer_task:
-            client.writer_task.cancel()
-        try:
-            await client.websocket.close()
-        except Exception:
-            pass
+    async def _remove_client(self, session: CodexSession, client: WebSocketClient) -> None:
+        await remove_client(session.clients, client)
 
 
 codex_session_manager = CodexSessionManager()

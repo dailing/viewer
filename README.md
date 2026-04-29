@@ -74,22 +74,23 @@ This runs `npm run build` in `frontend/` before starting the server. The backend
 
 Terminal panes have a text input pad for mobile entry. Open it by double-tapping the terminal or using the text button in the terminal toolbar, then use the mic button inside the text box. Transcribed text is inserted into the pad only; use Send or Send + Enter when you are ready.
 
-Voice input is disabled by default. Enable the in-process WhisperLiveKit backend when starting the viewer:
+Voice input is enabled by default with the in-process WhisperLiveKit backend and the `large-v3-turbo` model:
 
 ```bash
-uv run python run.py --voice --voice-model base
+uv run python run.py
 ```
 
 Useful voice options:
 
 ```bash
-uv run python run.py --voice --voice-model small --voice-language auto
-uv run python run.py --voice --voice-model large-v3-turbo --voice-backend whisper
+uv run python run.py --no-voice
+uv run python run.py --voice-model small --voice-language auto
+VIEWER_VOICE_BACKEND_POLICY=localagreement uv run python run.py
 ```
 
 The browser sends `MediaRecorder` audio chunks to `/api/voice/ws`. The backend decodes and transcribes them with WhisperLiveKit, then streams normalized partial transcript text back to the paste pad. If the viewer is loaded over HTTPS, the frontend automatically uses `wss://` for terminal and voice sockets. You can still point `VIEWER_VOICE_UPSTREAM_WS` at a separate WhisperLiveKit `/asr` service; when it is set, the backend proxies audio there instead of loading an in-process model.
 
-The default backend is `whisper` with `localagreement` because it avoids WhisperLiveKit's faster-whisper CTranslate2 CUDA runtime unless you explicitly opt into it. To try faster-whisper later, use `VIEWER_VOICE_BACKEND=faster-whisper`; on Linux that path may require CUDA 12 runtime libraries such as `libcublas.so.12`.
+The default backend is `whisper` with `localagreement` because it avoids WhisperLiveKit's faster-whisper CTranslate2 CUDA runtime. Advanced backend overrides are available through `VIEWER_VOICE_BACKEND` and `VIEWER_VOICE_BACKEND_POLICY`; faster-whisper on Linux may require CUDA 12 runtime libraries such as `libcublas.so.12`.
 
 WhisperLiveKit translation can be enabled with `VIEWER_VOICE_TARGET_LANGUAGE`, but its NLLB translation dependency is separate from the default transcription install.
 

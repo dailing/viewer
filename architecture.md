@@ -45,7 +45,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `Settings.root_resolved`: expanded absolute served directory.
 - `Settings.frontend_dist_resolved`: expanded absolute frontend build directory.
 - Important settings: `root`, `host`, `port`, `frontend_dist`, `max_text_preview_bytes`, `show_hidden`, `poll_delay_ms`, `terminal_shell`, `debug`, `log_file`.
-- Voice settings: `voice_enabled`, `voice_model`, `voice_language`, `voice_target_language`, `voice_backend`, `voice_backend_policy`, `voice_direct_english_translation`, `voice_min_chunk_size`, `voice_vac`, and `voice_vad` configure the in-process WhisperLiveKit engine. The default backend is `whisper` with `localagreement` to avoid requiring CTranslate2 CUDA libraries for plain `--voice` runs. `voice_upstream_ws` bypasses the in-process engine and proxies microphone audio to a separate streaming ASR WebSocket.
+- Voice settings: `voice_enabled`, `voice_model`, `voice_language`, `voice_target_language`, `voice_backend`, `voice_backend_policy`, `voice_direct_english_translation`, `voice_min_chunk_size`, `voice_vac`, and `voice_vad` configure the in-process WhisperLiveKit engine. `run.py` enables voice by default, uses `large-v3-turbo`, and sets the default backend to `whisper` with `localagreement` unless env vars override them. `voice_upstream_ws` bypasses the in-process engine and proxies microphone audio to a separate streaming ASR WebSocket.
 
 `backend/app/files.py`
 

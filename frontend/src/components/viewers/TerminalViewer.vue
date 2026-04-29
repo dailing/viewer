@@ -326,11 +326,14 @@ function applySnapshot(snapshot: TerminalSnapshot) {
   terminal.value = snapshot;
   hasSnapshot = true;
   appliedOutputVersion = snapshot.output_version ?? 0;
+  // Fit before replay to avoid wrapping artifacts after remount/view switches.
+  scheduleResize();
   const replay = pendingOutput
     .filter((item) => item.outputVersion > appliedOutputVersion)
     .sort((a, b) => a.outputVersion - b.outputVersion);
   pendingOutput = [];
   resetOutput(snapshot.output, () => {
+    scheduleResize();
     replay.forEach((item) => applyOutput(item.data, item.outputVersion));
   });
   terminals.upsert(snapshot);
@@ -583,6 +586,14 @@ function resize() {
   }
 }
 
+function scheduleResize() {
+  void nextTick(() => {
+    window.requestAnimationFrame(() => {
+      resize();
+    });
+  });
+}
+
 function focusTerminal() {
   xterm?.focus();
 }
@@ -684,6 +695,7 @@ onMounted(() => {
   window.addEventListener("resize", resize);
   void nextTick(() => {
     ensureTerminal();
+    scheduleResize();
     void load();
   });
 });

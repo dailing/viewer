@@ -164,7 +164,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Fetches `FileMeta` through `getMeta()`.
 - Tracks `version` counter to force viewer reloads.
 - `load(clearMeta)`: refreshes metadata for current file.
-- `handleChange(event)`: reloads metadata when this pane's file changed.
+- `handleChange(event)`: reloads metadata when this pane's file changed, or when the pane file's parent directory changes (covers delete/recreate and atomic-save workflows).
 - Chooses `TerminalViewer`, `ImageViewer`, `MarkdownViewer`, `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
 
 `frontend/src/components/FileSidebar.vue`
@@ -217,7 +217,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `frontend/src/components/viewers/ImageViewer.vue`
 
 - Image preview using raw file URL tagged with file `content_hash`.
-- Saves and restores scroll position around path/hash changes.
+- Supports transform-based pan/zoom interactions: mouse-wheel zoom, mouse/touch drag panning, one-finger pan, and two-finger pinch zoom.
+- Resets zoom/pan state when image path/hash changes.
 
 `frontend/src/components/viewers/PdfViewer.vue`
 

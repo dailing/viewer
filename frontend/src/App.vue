@@ -83,6 +83,14 @@ const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? [])
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 
+function parentPath(path: string): string {
+  return path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
+}
+
+function eventAffectsOpenPath(eventPath: string): boolean {
+  return layout.openPaths.some((openPath) => openPath === eventPath || parentPath(openPath) === eventPath);
+}
+
 onMounted(async () => {
   sidebarPinned.value = localStorage.getItem(SIDEBAR_PIN_KEY) === "true";
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || sidebarWidth.value);
@@ -93,7 +101,7 @@ onMounted(async () => {
   source = connectEvents(
     async (event) => {
       await files.refreshAffected(event.path, event.is_dir);
-      if (layout.openPaths.includes(event.path)) {
+      if (eventAffectsOpenPath(event.path)) {
         window.dispatchEvent(new CustomEvent("viewer:file-changed", { detail: event }));
       }
     },

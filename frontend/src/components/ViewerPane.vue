@@ -17,6 +17,14 @@ const meta = ref<FileMeta | null>(null);
 const error = ref("");
 const version = ref(0);
 
+function parentPath(path: string): string {
+  return path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
+}
+
+function affectsFile(eventPath: string, filePath: string): boolean {
+  return eventPath === filePath || eventPath === parentPath(filePath);
+}
+
 async function load(clearMeta: boolean) {
   error.value = "";
   if (clearMeta) meta.value = null;
@@ -31,7 +39,7 @@ async function load(clearMeta: boolean) {
 
 function handleChange(event: Event) {
   const detail = (event as CustomEvent<WatchEvent>).detail;
-  if (detail.path === props.pane.filePath) void load(false);
+  if (props.pane.filePath && affectsFile(detail.path, props.pane.filePath)) void load(false);
 }
 
 watch(() => props.pane.filePath, () => load(true), { immediate: true });

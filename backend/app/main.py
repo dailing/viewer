@@ -8,10 +8,11 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from .config import settings
+from .codex_sessions import codex_session_manager
 from .events import hub
 from .files import content_hash, get_meta, guess_mime, list_directory, normalize_relative, read_config, read_text, resolve_path, write_config
 from .logging import current_log_path, ensure_logging
-from .models import ClientLog, ConfigData, TerminalCreate
+from .models import ClientLog, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate
 from .terminals import terminal_manager
 from .voice import connect_voice
 from .watcher import watch_root
@@ -65,6 +66,7 @@ async def shutdown() -> None:
     if watch_task:
         watch_task.cancel()
     await terminal_manager.shutdown()
+    await codex_session_manager.shutdown()
 
 
 @app.get("/api/health")
@@ -201,6 +203,39 @@ async def delete_terminal(terminal_id: str):
 @app.websocket("/api/terminals/{terminal_id}/ws")
 async def terminal_ws(websocket: WebSocket, terminal_id: str):
     await terminal_manager.connect(terminal_id, websocket)
+
+
+@app.get("/api/codex/sessions")
+async def codex_sessions():
+    return codex_session_manager.list()
+
+
+@app.post("/api/codex/sessions")
+async def create_codex_session(config: CodexSessionCreate):
+    logger.info("Creating Codex session cwd={}", config.cwd or "")
+    return await codex_session_manager.create(config.prompt, config.cwd)
+
+
+@app.get("/api/codex/sessions/{session_id}")
+async def codex_session(session_id: str):
+    return codex_session_manager.get(session_id).snapshot()
+
+
+@app.post("/api/codex/sessions/{session_id}/messages")
+async def send_codex_message(session_id: str, message: CodexSessionMessage):
+    logger.info("Sending Codex message session={}", session_id)
+    return await codex_session_manager.send(session_id, message.prompt)
+
+
+@app.delete("/api/codex/sessions/{session_id}")
+async def delete_codex_session(session_id: str):
+    logger.info("Deleting Codex session {}", session_id)
+    return await codex_session_manager.delete(session_id)
+
+
+@app.websocket("/api/codex/sessions/{session_id}/ws")
+async def codex_session_ws(websocket: WebSocket, session_id: str):
+    await codex_session_manager.connect(session_id, websocket)
 
 
 @app.websocket("/api/voice/ws")

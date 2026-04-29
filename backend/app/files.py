@@ -3,6 +3,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from fastapi import HTTPException
+from loguru import logger
 
 from .config import settings
 from .models import ConfigData, DirectoryListing, FileEntry, FileMeta
@@ -57,6 +58,16 @@ def normalize_relative(path: str | None) -> str:
 def resolve_path(path: str | None) -> Path:
     rel = normalize_relative(path)
     return settings.root_resolved.joinpath(rel)
+
+
+def resolve_served_directory(path: str | None, label: str) -> str:
+    requested = normalize_relative(path)
+    target = resolve_path(requested)
+    if not target.exists() or not target.is_dir():
+        if requested:
+            logger.warning("{} cwd '{}' is not available; using root", label, requested)
+        return settings.root_resolved.as_posix()
+    return target.as_posix()
 
 
 def relative_for(path: Path) -> str:

@@ -14,6 +14,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 4. `App.vue` loads file tree/config/terminal state, restores layout/sidebar state from `localStorage`, applies visual config as CSS variables, connects to `/api/events`, and dispatches `viewer:file-changed` browser events for open panes.
 5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component. Viewers fetch raw/text content and reload when their `version` prop changes.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
+7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run.
 
 ## Backend Structure
 
@@ -35,6 +36,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
 - `/api/terminals`: lists or creates terminal sessions; POST accepts an optional relative `cwd`.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
+- `/api/codex/sessions`: lists or creates Codex sessions. POST starts `codex exec --json` in a served-root-relative `cwd`.
+- `/api/codex/sessions/{session_id}` routes: snapshot, send a resumed message via `codex exec resume --json`, delete logs/metadata, and WebSocket connect.
 - `/api/voice/ws`: optional voice-input WebSocket endpoint backed by in-process WhisperLiveKit by default, or by a configured upstream ASR WebSocket when `VIEWER_VOICE_UPSTREAM_WS` is set.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
 
@@ -52,6 +55,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - File tree, path normalization, metadata, content reading, and `.viewer.config.json` persistence.
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
 - `resolve_path(path)`: joins normalized relative path to `settings.root_resolved`. Symlinks are allowed by current implementation.
+- `resolve_served_directory(path, label)`: resolves a served-root-relative working directory for terminal/Codex launches, logging and falling back to root when unavailable.
 - `relative_for(path)`: returns path relative to root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
 - `preview_kind(path, mime, size)`: maps file extension/MIME to `image`, `markdown`, `pdf`, `text`, or `unsupported`.
@@ -70,6 +74,12 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `EventHub.subscribe()`: async generator yielding `ready` then `file-change` SSE messages.
 - `hub`: singleton used by `main.py` and `watcher.py`.
 
+`backend/app/ws_clients.py`
+
+- Shared WebSocket client queue/fanout helpers for backend managers.
+- `WebSocketClient`: websocket, outgoing queue, and writer task.
+- `add_client()`, `enqueue()`, `broadcast()`, `remove_client()`, and `client_writer()`: common JSON message queueing, stale-client cleanup, timeout-bounded writes, and socket close handling used by terminal and Codex session managers.
+
 `backend/app/watcher.py`
 
 - Watches `settings.root_resolved` with `watchfiles.awatch`.
@@ -80,7 +90,6 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `backend/app/terminals.py`
 
 - Interactive shell session manager using OS PTYs, async tasks, and WebSockets.
-- `TerminalClient`: websocket client plus outgoing queue and writer task.
 - `TerminalSession`: PTY process state, buffered output, per-session output log path, current PTY rows/cols, shared layout lock state, connected clients, locks, and tasks.
 - `TerminalSession.snapshot()`: full state fields; reconnect snapshots load output from the per-session on-disk log.
 - `TerminalSession.summary()`: list-friendly state without output.
@@ -97,9 +106,21 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `_initialize_log()`, `_append_log()`, `_read_log()`, `_snapshot_for_client()`, `_remove_log()`: manage per-session terminal output log files used for reconnect replay.
 - `_wait_for_exit(session)`: waits for process and broadcasts status.
 - `_terminate_process(session)`: SIGHUP, then SIGTERM, then SIGKILL fallback.
-- `_broadcast()`, `_enqueue()`, `_client_writer()`, `_remove_client()`: websocket fanout and cleanup.
+- `_broadcast()`, `_remove_client()`: thin wrappers around `ws_clients.py` fanout and cleanup.
 - `_set_size(fd, rows, cols)`: low-level `TIOCSWINSZ`.
 - `terminal_manager`: singleton used by routes.
+
+`backend/app/codex_sessions.py`
+
+- Structured Codex session manager using `codex exec --json` subprocesses instead of PTY/TUI rendering.
+- `CodexSession`: viewer-local session state including title, working directory, Codex thread/session id, prompts, parsed JSON events, process status, connected WebSocket clients, and paths for metadata/raw logs/stderr logs.
+- `CodexSessionManager.create(prompt, cwd)`: creates a viewer session and writes metadata. If `prompt` is blank, the session stays `idle`; otherwise it starts `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -C <cwd> -`, feeds the prompt on stdin, and streams JSONL stdout.
+- `send(session_id, prompt)`: starts a new `codex exec --json` run when no Codex thread id has been captured yet, otherwise resumes with `codex exec resume --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <thread_id> -`. It rejects concurrent sends while a session is running and appends the prompt to metadata.
+- Codex subprocesses set `https_proxy`, `HTTPS_PROXY`, `http_proxy`, and `HTTP_PROXY` to `http://localhost:7890`.
+- Raw Codex JSON stdout is appended verbatim to `logs/codex-sessions/{viewer_session_id}.jsonl`; stderr goes to `{viewer_session_id}.stderr.log`; metadata/prompts are stored in `{viewer_session_id}.json`.
+- `_find_session_id(raw)`: extracts `session_id`, `conversation_id`, or `thread_id` from JSON events so later messages can resume the correct Codex thread.
+- `connect(session_id, websocket)`: sends snapshots and broadcasts live event/status/deleted messages to Codex panes.
+- `codex_session_manager`: singleton used by routes.
 
 `backend/app/voice.py`
 
@@ -112,6 +133,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `backend/app/models.py`
 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
+- Codex schemas: `CodexSessionInfo`, `CodexPrompt`, `CodexEvent`, `CodexSessionSnapshot`, `CodexSessionCreate`, and `CodexSessionMessage`.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
 `backend/app/logging.py`
@@ -146,6 +168,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Renders active pane toolbar metadata/actions from `stores/paneToolbar.ts` in the top bar.
 - Sidebar state functions: `toggleSidebarPin()`, `clampSidebarWidth()`, `startSidebarResize()`.
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
+- Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`.
 
 `frontend/src/components/Workspace.vue`
 
@@ -165,11 +188,13 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Tracks `version` counter to force viewer reloads.
 - `load(clearMeta)`: refreshes metadata for current file.
 - `handleChange(event)`: reloads metadata when this pane's file changed, or when the pane file's parent directory changes (covers delete/recreate and atomic-save workflows).
-- Chooses `TerminalViewer`, `ImageViewer`, `MarkdownViewer`, `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
+- Chooses `TerminalViewer`, `CodexViewer`, `ImageViewer`, `MarkdownViewer`, `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
 
 `frontend/src/components/FileSidebar.vue`
 
 - Sidebar content: new terminal button, terminal list, pinned paths, current folder, parent button, and `FileTree`.
+- New Codex button creates an idle Codex session in the current sidebar directory and opens it in the active pane. The first message is entered in `CodexViewer.vue`.
+- Codex session list shows status and supports delete, which also clears matching panes.
 - `openPinned(path)`: tries to enter pinned path as directory, otherwise opens file.
 - `newTerminal()`: creates terminal in the current sidebar directory and opens it in active pane.
 - `closeTerminal(id)`: deletes terminal and clears matching panes.
@@ -234,7 +259,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - xterm.js terminal pane connected to backend WebSocket.
 - Registers terminal shell/status, quick-key controls, and terminate action with `stores/paneToolbar.ts` for top-bar rendering while the pane is active.
-- The terminal text input pad includes a mic button that records browser audio with `MediaRecorder`, streams chunks to `/api/voice/ws`, displays partial transcript text in the pad, and leaves command sending under explicit user control.
+- The terminal text input pad uses `VoiceInputButton.vue` for microphone transcription into the pad and leaves command sending under explicit user control.
 - Maintains socket, xterm instance, fit addon, resize observer, parser disposables, output-version ordering, reconnect timer, and reset state.
 - `firstParam()`: helper for xterm parser mode query parameters.
 - `registerModeQueryHandlers(term)`, `modeQueryReply(sequence)`, `filterModeQueries(data, respond)`: handle terminal mode status queries.
@@ -253,6 +278,20 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `load()`: starts connection.
 - `endTerminal()`: calls terminal terminate API.
 
+`frontend/src/components/viewers/CodexViewer.vue`
+
+- Structured Codex session pane connected to `/api/codex/sessions/{id}/ws`.
+- Loads snapshots with `getCodexSession()`, receives live JSON events/status over WebSocket, and updates `stores/codex.ts`.
+- Renders prompts, normalized event text, status, Codex thread id, cwd, and optional raw JSON details toggled through the active-pane toolbar.
+- Sends follow-up prompts through `stores/codex.ts`, which calls `/api/codex/sessions/{id}/messages`.
+- Uses `VoiceInputButton.vue` to transcribe microphone input into the Codex draft.
+
+`frontend/src/components/VoiceInputButton.vue`
+
+- Reusable microphone transcription button backed by `/api/voice/ws`.
+- Owns `MediaRecorder`, browser audio stream, voice WebSocket lifecycle, ready/partial/final/error message handling, and cleanup on unmount.
+- Exposes a `v-model` string; partial transcripts temporarily update the model and final transcripts append to the base text. Consumers still decide when to send the text.
+
 ## Frontend Stores And API
 
 `frontend/src/api/client.ts`
@@ -261,6 +300,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `request<T>()`: JSON request with error text on non-2xx.
 - File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
+- Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `deleteCodexSession()`, `codexSessionSocketUrl()`.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 
 `frontend/src/api/events.ts`
@@ -277,9 +317,14 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Pinia store for recursive split layout and active pane.
 - Helpers: `id()`, `defaultLayout()`, `findPane()`, `mapNode()`, `firstPaneId()`, `mapAllPanes()`, `removePane()`.
-- Getters: `activePane`, `openPaths`, `openTerminalIds`.
-- Actions: `load()`, `save()`, `setActive()`, `openFile()`, `openTerminal()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, `clearTerminal()`.
+- Getters: `activePane`, `openPaths`, `openTerminalIds`, `openCodexSessionIds`.
+- Actions: `load()`, `save()`, `setActive()`, `openFile()`, `openTerminal()`, `openCodexSession()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, `clearTerminal()`, `clearCodexSession()`.
 - Persists to `localStorage` key `viewer.layout.v1`.
+
+`frontend/src/stores/codex.ts`
+
+- Pinia store for Codex session summaries.
+- Actions: `load()`, `create(prompt, cwd)`, `send(id, prompt)`, `upsert(session)`, `remove(id)`.
 
 `frontend/src/stores/paneToolbar.ts`
 
@@ -298,11 +343,15 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/types/layout.ts`
 
-- Recursive `LayoutNode` union and `SplitDirection`.
+- Recursive `LayoutNode` union and `SplitDirection`; pane nodes may hold `filePath`, `terminalId`, or `codexSessionId`.
 
 `frontend/src/types/terminals.ts`
 
 - TypeScript mirror of terminal schemas: `TerminalStatus`, `TerminalInfo`, `TerminalSnapshot`.
+
+`frontend/src/types/codex.ts`
+
+- TypeScript mirror of Codex schemas: `CodexStatus`, `CodexSessionInfo`, `CodexPrompt`, `CodexEvent`, and `CodexSessionSnapshot`.
 
 `frontend/src/utils/scrollMemory.ts`
 
@@ -310,6 +359,23 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `readAll()`, `writeAll()`, `keyFor()`.
 - `saveScrollPosition(path, element)`: stores `scrollTop` and `scrollLeft`.
 - `restoreScrollPosition(path, element)`: retries restoration across animation frames while content lays out.
+
+`frontend/src/composables/useScrollMemory.ts`
+
+- Vue lifecycle wrapper around `utils/scrollMemory.ts` for viewers that reload when `path` or `version` changes.
+- `useReloadingScrollMemory(path, version, element, load)`: registers `beforeunload`, saves the previous path's scroll position before reload, calls the provided loader, and returns `saveCurrentScroll()` for scroll handlers.
+
+`frontend/src/utils/markdownRender.ts`
+
+- Shared Markdown rendering with markdown-it plugins, KaTeX, Mermaid fences, and Highlight.js code highlighting.
+- `renderMarkdown(source)`: returns rendered HTML.
+- `renderMermaidIn(container, idPrefix)`: renders `.mermaid` blocks after Vue DOM updates and marks render failures.
+
+`frontend/src/utils/paths.ts`
+
+- Shared frontend path helpers.
+- `parentPath(path)`: returns a slash-relative parent directory.
+- `fileChangeAffectsPath(eventPath, filePath)`: matches exact file changes and parent-directory changes for atomic-save/delete-recreate flows.
 
 `frontend/src/utils/clientLog.ts`
 
@@ -320,7 +386,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/styles.css`
 
-- Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile sidebar behavior, scroll area, muted text.
+- Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile sidebar behavior, scroll area, muted text, shared Markdown rendering, and shared Highlight.js token colors.
 - CSS variables: `--sidebar-width`, `--topbar-height`, `--nav-button-size`, `--nav-icon-size`, `--border`, `--panel`, `--surface`, `--text-muted`.
 
 `frontend/src/vite-env.d.ts`
@@ -433,6 +499,9 @@ If a backend field changes, update the matching frontend type and all consumers.
 - `localStorage viewer.sidebarWidth.v1`: sidebar width.
 - `localStorage viewer.scrollPositions.v1`: per-path scroll positions.
 - `logs/viewer-*.log`: timestamped runtime logs from `run.py`.
+- `logs/codex-sessions/*.jsonl`: raw Codex `--json` stdout event logs for debugging/replay.
+- `logs/codex-sessions/*.stderr.log`: stderr from Codex subprocesses.
+- `logs/codex-sessions/*.json`: viewer-local Codex session metadata including prompts and discovered Codex thread id.
 
 ## Common Fault Locations
 
@@ -444,6 +513,8 @@ If a backend field changes, update the matching frontend type and all consumers.
 - Terminal creation fails: `settings.terminal_shell`, `TerminalManager.create()`, shell availability, PTY permissions.
 - Terminal output glitches: `TerminalViewer.vue` snapshot/output version logic and `TerminalManager._read_output()`.
 - Terminal resize issues: `TerminalViewer.vue resize()` and `TerminalManager.resize()`.
+- Codex session creation/resume fails: check `codex` availability on PATH, `backend/app/codex_sessions.py` command construction, `logs/codex-sessions/*.stderr.log`, and whether a `thread_id` was captured from raw JSON.
+- Codex pane rendering looks incomplete: inspect `CodexViewer.vue` `textFrom()` extraction and use the raw JSON toolbar toggle to compare against `logs/codex-sessions/*.jsonl`.
 - Frontend runtime errors: browser console, `/api/debug/client-log`, `backend/app/logging.py`, `logs/`.
 - Production frontend missing: build `frontend/dist` or set `VIEWER_FRONTEND_DIST`.
 

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import hljs from "highlight.js";
 import "highlight.js/styles/github.css";
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onUnmounted, ref } from "vue";
 import { getText } from "../../api/client";
-import { restoreScrollPosition, saveScrollPosition } from "../../utils/scrollMemory";
+import { useReloadingScrollMemory } from "../../composables/useScrollMemory";
+import { restoreScrollPosition } from "../../utils/scrollMemory";
 
 const props = defineProps<{ path: string; version: number }>();
 const text = ref("");
@@ -85,10 +86,6 @@ function highlightText(value: string): string {
   return hljs.highlightAuto(value).value;
 }
 
-function persistCurrentScroll() {
-  saveScrollPosition(props.path, container.value);
-}
-
 async function copyAll() {
   try {
     await navigator.clipboard.writeText(text.value);
@@ -122,26 +119,16 @@ async function load() {
   }
 }
 
-onMounted(() => {
-  window.addEventListener("beforeunload", persistCurrentScroll);
-  void load();
-});
-onUnmounted(() => {
-  persistCurrentScroll();
-  window.clearTimeout(copiedTimer);
-  window.removeEventListener("beforeunload", persistCurrentScroll);
-});
-watch(
-  () => [props.path, props.version] as const,
-  ([newPath], [oldPath, oldVersion]) => {
-    if (oldPath && newPath !== oldPath) {
-      saveScrollPosition(oldPath, container.value);
-    } else if (oldVersion !== undefined) {
-      saveScrollPosition(newPath, container.value);
-    }
-    void load();
-  },
+const { saveCurrentScroll } = useReloadingScrollMemory(
+  () => props.path,
+  () => props.version,
+  container,
+  load,
 );
+
+onUnmounted(() => {
+  window.clearTimeout(copiedTimer);
+});
 </script>
 
 <template>
@@ -149,7 +136,7 @@ watch(
     <button class="copy-button" type="button" :title="copied ? 'Copied' : 'Copy all text'" @click="copyAll">
       <i :class="copied ? 'bi bi-check2' : 'bi bi-clipboard'"></i>
     </button>
-    <pre ref="container" class="text-viewer hljs" @scroll.passive="saveScrollPosition(path, container)"><code v-html="highlightedHtml"></code></pre>
+    <pre ref="container" class="text-viewer hljs markdown-syntax" @scroll.passive="saveCurrentScroll"><code v-html="highlightedHtml"></code></pre>
   </div>
   <div v-else class="text-error">{{ error }}</div>
 </template>
@@ -192,47 +179,6 @@ watch(
   user-select: text;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: var(--markdown-code-font-size);
-}
-
-.hljs {
-  background: var(--syntax-background);
-  color: var(--syntax-text);
-}
-
-:deep(.hljs-keyword),
-:deep(.hljs-selector-tag),
-:deep(.hljs-built_in) {
-  color: var(--syntax-keyword);
-}
-
-:deep(.hljs-string),
-:deep(.hljs-attr) {
-  color: var(--syntax-string);
-}
-
-:deep(.hljs-number),
-:deep(.hljs-literal) {
-  color: var(--syntax-number);
-}
-
-:deep(.hljs-title),
-:deep(.hljs-name) {
-  color: var(--syntax-title);
-}
-
-:deep(.hljs-comment),
-:deep(.hljs-quote) {
-  color: var(--syntax-comment);
-}
-
-:deep(.hljs-meta),
-:deep(.hljs-doctag) {
-  color: var(--syntax-meta);
 }
 
 .text-error {

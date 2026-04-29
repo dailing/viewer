@@ -14,19 +14,11 @@ from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from .config import settings
-from .files import normalize_relative, resolve_path
+from .files import resolve_served_directory
+from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
 MAX_OUTPUT_CHARS = 1_000_000
-CLIENT_SEND_TIMEOUT = 1.0
-CLIENT_QUEUE_SIZE = 200
 TERMINAL_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "terminals"
-
-
-@dataclass
-class TerminalClient:
-    websocket: WebSocket
-    queue: asyncio.Queue[dict | None] = field(default_factory=lambda: asyncio.Queue(maxsize=CLIENT_QUEUE_SIZE))
-    writer_task: asyncio.Task | None = None
 
 
 @dataclass
@@ -45,7 +37,7 @@ class TerminalSession:
     layout_locked: bool = False
     master_fd: int | None = None
     process: subprocess.Popen[bytes] | None = None
-    clients: dict[WebSocket, TerminalClient] = field(default_factory=dict)
+    clients: dict[WebSocket, WebSocketClient] = field(default_factory=dict)
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     reader_task: asyncio.Task | None = None
     wait_task: asyncio.Task | None = None
@@ -97,13 +89,7 @@ class TerminalManager:
         return session
 
     def _cwd_for(self, cwd: str | None) -> str:
-        requested = normalize_relative(cwd)
-        target = resolve_path(requested)
-        if not target.exists() or not target.is_dir():
-            if requested:
-                logger.warning("Terminal cwd '{}' is not available; using root", requested)
-            return settings.root_resolved.as_posix()
-        return target.as_posix()
+        return resolve_served_directory(cwd, "Terminal")
 
     async def create(self, cwd: str | None = None) -> dict:
         self._counter += 1
@@ -183,10 +169,8 @@ class TerminalManager:
     async def connect(self, terminal_id: str, websocket: WebSocket) -> None:
         session = self.get(terminal_id)
         await websocket.accept()
-        client = TerminalClient(websocket=websocket)
-        session.clients[websocket] = client
-        client.writer_task = asyncio.create_task(self._client_writer(client))
-        self._enqueue(client, {"type": "snapshot", "terminal": self._snapshot_for_client(session)})
+        client = add_client(session.clients, websocket)
+        enqueue(client, {"type": "snapshot", "terminal": self._snapshot_for_client(session)})
         logger.info("Terminal {} websocket connected clients={}", terminal_id, len(session.clients))
         try:
             while True:
@@ -304,43 +288,11 @@ class TerminalManager:
         await self._broadcast(session, {"type": "status", "terminal": session.summary()})
 
     async def _broadcast(self, session: TerminalSession, message: dict) -> None:
-        stale: list[TerminalClient] = []
-        for client in list(session.clients.values()):
-            if client.writer_task and client.writer_task.done():
-                stale.append(client)
-                continue
-            if not self._enqueue(client, message):
-                stale.append(client)
-        for client in stale:
+        for _client in await broadcast(session.clients, message):
             logger.warning("Terminal {} removing stale websocket client", session.id)
-            await self._remove_client(session, client)
 
-    def _enqueue(self, client: TerminalClient, message: dict) -> bool:
-        try:
-            client.queue.put_nowait(message)
-        except asyncio.QueueFull:
-            return False
-        return True
-
-    async def _client_writer(self, client: TerminalClient) -> None:
-        try:
-            while True:
-                message = await client.queue.get()
-                if message is None:
-                    return
-                await asyncio.wait_for(client.websocket.send_json(message), timeout=CLIENT_SEND_TIMEOUT)
-        except Exception:
-            return
-
-    async def _remove_client(self, session: TerminalSession, client: TerminalClient) -> None:
-        if session.clients.pop(client.websocket, None) is None:
-            return
-        if client.writer_task:
-            client.writer_task.cancel()
-        try:
-            await client.websocket.close()
-        except Exception:
-            pass
+    async def _remove_client(self, session: TerminalSession, client: WebSocketClient) -> None:
+        await remove_client(session.clients, client)
 
     def _set_size(self, fd: int, rows: int, cols: int) -> None:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))

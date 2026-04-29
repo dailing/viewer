@@ -4,6 +4,8 @@ import type { LayoutNode } from "../types/layout";
 import type { FileMeta, WatchEvent } from "../types/files";
 import { getMeta } from "../api/client";
 import { useLayoutStore } from "../stores/layout";
+import { fileChangeAffectsPath } from "../utils/paths";
+import CodexViewer from "./viewers/CodexViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
 import PdfViewer from "./viewers/PdfViewer.vue";
@@ -17,18 +19,10 @@ const meta = ref<FileMeta | null>(null);
 const error = ref("");
 const version = ref(0);
 
-function parentPath(path: string): string {
-  return path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
-}
-
-function affectsFile(eventPath: string, filePath: string): boolean {
-  return eventPath === filePath || eventPath === parentPath(filePath);
-}
-
 async function load(clearMeta: boolean) {
   error.value = "";
   if (clearMeta) meta.value = null;
-  if (!props.pane.filePath || props.pane.terminalId) return;
+  if (!props.pane.filePath || props.pane.terminalId || props.pane.codexSessionId) return;
   try {
     meta.value = await getMeta(props.pane.filePath);
     version.value += 1;
@@ -39,7 +33,7 @@ async function load(clearMeta: boolean) {
 
 function handleChange(event: Event) {
   const detail = (event as CustomEvent<WatchEvent>).detail;
-  if (props.pane.filePath && affectsFile(detail.path, props.pane.filePath)) void load(false);
+  if (props.pane.filePath && fileChangeAffectsPath(detail.path, props.pane.filePath)) void load(false);
 }
 
 watch(() => props.pane.filePath, () => load(true), { immediate: true });
@@ -52,6 +46,7 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
   <section class="viewer-pane" :class="{ active: layout.activePaneId === pane.id }" @click="layout.setActive(pane.id)">
     <div class="pane-body">
       <TerminalViewer v-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
+      <CodexViewer v-else-if="pane.codexSessionId" :id="pane.codexSessionId" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">
         <i class="bi bi-folder2-open"></i>
         <span>Select a file from the sidebar</span>

@@ -91,6 +91,19 @@ export const useLayoutStore = defineStore("layout", {
       visit(state.root);
       return ids;
     },
+    openCodexSessionIds(state): string[] {
+      const ids: string[] = [];
+      const visit = (node: LayoutNode) => {
+        if (node.type === "pane") {
+          if (node.codexSessionId) ids.push(node.codexSessionId);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(state.root);
+      return ids;
+    },
   },
   actions: {
     load() {
@@ -117,12 +130,32 @@ export const useLayoutStore = defineStore("layout", {
     },
     openFile(path: string) {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
-      this.root = mapNode(this.root, this.activePaneId, (pane) => ({ ...pane, filePath: path, terminalId: undefined }));
+      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
+        ...pane,
+        filePath: path,
+        terminalId: undefined,
+        codexSessionId: undefined,
+      }));
       this.save();
     },
     openTerminal(id: string) {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
-      this.root = mapNode(this.root, this.activePaneId, (pane) => ({ ...pane, filePath: undefined, terminalId: id }));
+      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
+        ...pane,
+        filePath: undefined,
+        terminalId: id,
+        codexSessionId: undefined,
+      }));
+      this.save();
+    },
+    openCodexSession(id: string) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
+        ...pane,
+        filePath: undefined,
+        terminalId: undefined,
+        codexSessionId: id,
+      }));
       this.save();
     },
     splitPane(paneId: string, direction: SplitDirection) {
@@ -145,7 +178,12 @@ export const useLayoutStore = defineStore("layout", {
       this.save();
     },
     clearPane(paneId: string) {
-      this.root = mapNode(this.root, paneId, (pane) => ({ ...pane, filePath: undefined, terminalId: undefined }));
+      this.root = mapNode(this.root, paneId, (pane) => ({
+        ...pane,
+        filePath: undefined,
+        terminalId: undefined,
+        codexSessionId: undefined,
+      }));
       this.save();
     },
     closePane(paneId: string) {
@@ -161,6 +199,10 @@ export const useLayoutStore = defineStore("layout", {
     },
     clearTerminal(id: string) {
       this.root = mapAllPanes(this.root, (pane) => (pane.terminalId === id ? { ...pane, terminalId: undefined } : pane));
+      this.save();
+    },
+    clearCodexSession(id: string) {
+      this.root = mapAllPanes(this.root, (pane) => (pane.codexSessionId === id ? { ...pane, codexSessionId: undefined } : pane));
       this.save();
     },
   },

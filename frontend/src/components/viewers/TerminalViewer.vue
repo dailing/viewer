@@ -3,7 +3,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { terminalSocketUrl, voiceSocketUrl } from "../../api/client";
+import { terminalSocketUrl } from "../../api/client";
+import VoiceInputButton from "../VoiceInputButton.vue";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useLayoutStore } from "../../stores/layout";
 import { useTerminalsStore } from "../../stores/terminals";
@@ -21,9 +22,6 @@ const pastePadTextarea = ref<HTMLTextAreaElement | null>(null);
 const controlLatch = ref(false);
 const pastePadOpen = ref(false);
 const pastePadText = ref("");
-const voiceConnecting = ref(false);
-const voiceRecording = ref(false);
-const voiceError = ref("");
 const debugMode = import.meta.env.DEV || import.meta.env.VITE_VIEWER_DEBUG === "1";
 type TerminalMessage =
   | { type: "snapshot"; terminal: TerminalSnapshot }
@@ -31,8 +29,6 @@ type TerminalMessage =
   | { type: "status"; terminal: TerminalInfo }
   | { type: "layout"; terminal: TerminalInfo }
   | { type: string; data?: string; output_version?: number; terminal?: TerminalSnapshot | TerminalInfo };
-type VoiceMessage = { type: "ready" | "partial" | "final" | "error"; text?: string; message?: string };
-
 let socket: WebSocket | null = null;
 let xterm: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
@@ -51,31 +47,6 @@ let suppressPtyInput = false;
 let applyingRemoteLayout = false;
 let slowSendToken = 0;
 let lastTouchTap: { time: number; x: number; y: number } | null = null;
-let voiceSocket: WebSocket | null = null;
-let voiceRecorder: MediaRecorder | null = null;
-let voiceStream: MediaStream | null = null;
-let voiceBaseText = "";
-let voiceReady = false;
-
-const voiceActive = computed(() => voiceConnecting.value || voiceRecording.value);
-const voiceButtonIcon = computed(() => {
-  if (voiceError.value) return "bi-exclamation-triangle-fill";
-  if (voiceConnecting.value) return "bi-hourglass-split";
-  if (voiceRecording.value) return "bi-record-circle-fill";
-  return "bi-mic-fill";
-});
-const voiceButtonTitle = computed(() => {
-  if (voiceError.value) return voiceError.value;
-  if (voiceConnecting.value) return "Connecting voice input";
-  if (voiceRecording.value) return "Stop voice input";
-  return "Start voice input";
-});
-const voiceButtonClass = computed(() => {
-  if (voiceError.value) return "btn-outline-danger";
-  if (voiceRecording.value) return "btn-danger";
-  if (voiceConnecting.value) return "btn-outline-primary";
-  return "btn-outline-secondary";
-});
 const isActivePane = computed(() => layout.activePaneId === props.paneId);
 
 type SoftKey = {
@@ -383,118 +354,13 @@ function openPastePad() {
 }
 
 function closePastePad() {
-  stopVoiceInput();
   pastePadOpen.value = false;
   xterm?.focus();
 }
 
 function clearPastePad() {
   pastePadText.value = "";
-  voiceBaseText = "";
   void nextTick(() => pastePadTextarea.value?.focus());
-}
-
-function appendVoiceText(text: string) {
-  if (!text) return;
-  const separator = voiceBaseText && !/\s$/.test(voiceBaseText) ? " " : "";
-  voiceBaseText = `${voiceBaseText}${separator}${text}`;
-  pastePadText.value = voiceBaseText;
-}
-
-function applyVoicePartial(text: string) {
-  const separator = voiceBaseText && text && !/\s$/.test(voiceBaseText) ? " " : "";
-  pastePadText.value = `${voiceBaseText}${separator}${text}`;
-}
-
-function supportedVoiceMimeType(): string | undefined {
-  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
-}
-
-function stopVoiceInput() {
-  voiceConnecting.value = false;
-  voiceRecording.value = false;
-  voiceReady = false;
-  if (voiceRecorder && voiceRecorder.state !== "inactive") {
-    voiceRecorder.stop();
-  }
-  voiceRecorder = null;
-  voiceStream?.getTracks().forEach((track) => track.stop());
-  voiceStream = null;
-  if (voiceSocket?.readyState === WebSocket.OPEN) {
-    voiceSocket.send(JSON.stringify({ type: "stop" }));
-  }
-  voiceSocket?.close();
-  voiceSocket = null;
-  voiceBaseText = pastePadText.value;
-}
-
-async function startVoiceInput() {
-  if (voiceRecording.value) return;
-  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-    voiceError.value = "Voice recording is not supported in this browser.";
-    return;
-  }
-  pastePadOpen.value = true;
-  voiceError.value = "";
-  voiceConnecting.value = true;
-  voiceBaseText = pastePadText.value;
-
-  try {
-    voiceStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-      },
-    });
-    const mimeType = supportedVoiceMimeType();
-    voiceSocket = new WebSocket(voiceSocketUrl());
-    voiceSocket.binaryType = "arraybuffer";
-    voiceSocket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data) as VoiceMessage;
-      if (message.type === "ready") {
-        voiceReady = true;
-        voiceConnecting.value = false;
-        if (voiceRecorder && voiceRecorder.state === "inactive") {
-          voiceRecorder.start(250);
-          voiceRecording.value = true;
-        }
-      } else if (message.type === "partial") {
-        applyVoicePartial(message.text ?? "");
-      } else if (message.type === "final") {
-        appendVoiceText(message.text ?? "");
-      } else if (message.type === "error") {
-        voiceError.value = message.message ?? "Voice input failed.";
-        stopVoiceInput();
-      }
-    });
-    voiceSocket.addEventListener("close", () => {
-      if (voiceActive.value) stopVoiceInput();
-    });
-    voiceSocket.addEventListener("error", () => {
-      voiceError.value = "Voice input connection failed.";
-      stopVoiceInput();
-    });
-
-    voiceRecorder = new MediaRecorder(voiceStream, mimeType ? { mimeType } : undefined);
-    voiceRecorder.addEventListener("dataavailable", async (event) => {
-      if (voiceReady && event.data.size > 0 && voiceSocket?.readyState === WebSocket.OPEN) {
-        voiceSocket.send(await event.data.arrayBuffer());
-      }
-    });
-  } catch (err) {
-    voiceError.value = err instanceof Error ? err.message : String(err);
-    stopVoiceInput();
-  }
-}
-
-function toggleVoiceInput() {
-  if (voiceActive.value) {
-    stopVoiceInput();
-  } else {
-    void startVoiceInput();
-  }
 }
 
 function sendPastePadText(extra = "") {
@@ -702,7 +568,6 @@ onMounted(() => {
 onUnmounted(() => {
   mounted = false;
   slowSendToken += 1;
-  stopVoiceInput();
   if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
   window.removeEventListener("focus", resize);
   window.removeEventListener("resize", resize);
@@ -739,16 +604,7 @@ onUnmounted(() => {
           autocorrect="off"
           spellcheck="false"
         ></textarea>
-        <button
-          class="btn btn-sm terminal-voice-button"
-          :class="voiceButtonClass"
-          type="button"
-          :title="voiceButtonTitle"
-          :aria-label="voiceButtonTitle"
-          @click="toggleVoiceInput"
-        >
-          <i class="bi" :class="voiceButtonIcon"></i>
-        </button>
+        <VoiceInputButton v-model="pastePadText" @start="pastePadOpen = true" />
       </div>
       <div class="terminal-paste-pad-actions">
         <button class="btn btn-sm btn-primary" type="button" @click="sendPastePadText()">Send</button>
@@ -861,7 +717,7 @@ onUnmounted(() => {
   width: 100%;
 }
 
-.terminal-voice-button {
+.terminal-paste-pad-input :deep(.voice-input-button) {
   align-items: center;
   border-radius: 999px;
   bottom: 8px;

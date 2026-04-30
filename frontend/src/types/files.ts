@@ -75,6 +75,10 @@ export interface ViewerConfig {
   current_path: string;
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
+  codex?: {
+    available_models: string[];
+    default_model: string;
+  };
 }
 
 export interface WatchEvent {

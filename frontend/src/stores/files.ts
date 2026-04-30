@@ -85,6 +85,10 @@ export const useFilesStore = defineStore("files", {
     pinned: [] as string[],
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
+    codexConfig: {
+      available_models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"],
+      default_model: "gpt-5.5",
+    },
     loading: false,
   }),
   getters: {
@@ -109,6 +113,12 @@ export const useFilesStore = defineStore("files", {
       this.currentPath = config.current_path;
       this.appearance = normalizeAppearance(config.appearance);
       this.markdown = normalizeMarkdown(config.markdown);
+      this.codexConfig = {
+        available_models: config.codex?.available_models?.length
+          ? [...config.codex.available_models]
+          : this.codexConfig.available_models,
+        default_model: config.codex?.default_model || this.codexConfig.default_model,
+      };
     },
     async saveConfig() {
       const config: ViewerConfig = {
@@ -116,12 +126,17 @@ export const useFilesStore = defineStore("files", {
         current_path: this.currentPath,
         appearance: normalizeAppearance(this.appearance),
         markdown: normalizeMarkdown(this.markdown),
+        codex: this.codexConfig,
       };
       const saved = await putConfig(config);
       this.pinned = saved.pinned;
       this.currentPath = saved.current_path;
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
+      this.codexConfig = {
+        available_models: saved.codex?.available_models?.length ? [...saved.codex.available_models] : this.codexConfig.available_models,
+        default_model: saved.codex?.default_model || this.codexConfig.default_model,
+      };
     },
     async saveAppearance(appearance: AppearanceConfig) {
       this.appearance = normalizeAppearance(appearance);

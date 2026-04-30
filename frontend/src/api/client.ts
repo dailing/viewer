@@ -1,6 +1,6 @@
 import type { DirectoryListing, FileMeta, ViewerConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
-import type { CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
+import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -79,11 +79,19 @@ export async function listCodexSessions(): Promise<CodexSessionInfo[]> {
   return request<CodexSessionInfo[]>("/api/codex/sessions");
 }
 
-export async function createCodexSession(prompt: string, cwd = ""): Promise<CodexSessionInfo> {
+export async function getCodexStatus(): Promise<CodexCliStatus> {
+  return request<CodexCliStatus>("/api/codex/status");
+}
+
+export async function getCodexModels(): Promise<CodexModelOptions> {
+  return request<CodexModelOptions>("/api/codex/models");
+}
+
+export async function createCodexSession(prompt: string, cwd = "", model?: string): Promise<CodexSessionInfo> {
   return request<CodexSessionInfo>("/api/codex/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, cwd }),
+    body: JSON.stringify({ prompt, cwd, model }),
   });
 }
 
@@ -91,12 +99,16 @@ export async function getCodexSession(id: string): Promise<CodexSessionSnapshot>
   return request<CodexSessionSnapshot>(`/api/codex/sessions/${encodeURIComponent(id)}`);
 }
 
-export async function sendCodexMessage(id: string, prompt: string): Promise<CodexSessionInfo> {
+export async function sendCodexMessage(id: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
   return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ prompt, model }),
   });
+}
+
+export async function terminateCodexSession(id: string): Promise<CodexSessionInfo> {
+  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/terminate`, { method: "POST" });
 }
 
 export async function deleteCodexSession(id: string): Promise<void> {

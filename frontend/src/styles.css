@@ -113,6 +113,39 @@ body {
   display: none;
 }
 
+.pane-toolbar-chips {
+  align-items: center;
+  display: flex;
+  flex: 0 1 auto;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pane-toolbar-select {
+  flex: 0 0 180px;
+  font-size: 11px;
+  height: var(--nav-button-size);
+  line-height: 1;
+  min-width: 120px;
+  padding: 0 20px 0 6px;
+}
+
+.pane-toolbar-chip {
+  background: #f4f6fb;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: #44526a;
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  max-width: 220px;
+  overflow: hidden;
+  padding: 3px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .toolbar-action.active {
   background: #1f6feb;
   border-color: #1f6feb;

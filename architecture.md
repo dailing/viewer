@@ -37,7 +37,9 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/terminals`: lists or creates terminal sessions; POST accepts an optional relative `cwd`.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
 - `/api/codex/sessions`: lists or creates Codex sessions. POST starts `codex exec --json` in a served-root-relative `cwd`.
-- `/api/codex/sessions/{session_id}` routes: snapshot, send a resumed message via `codex exec resume --json`, delete logs/metadata, and WebSocket connect.
+- `/api/codex/status`: returns parsed status from the newest `~/.codex/sessions/**/rollout-*.jsonl` file (model, cwd, context usage, and 5-hour/weekly limit percentages) for top-bar rendering.
+- `/api/codex/models`: returns selected and available models for Codex session creation from `.viewer.config.json` codex defaults only.
+- `/api/codex/sessions/{session_id}` routes: snapshot, send a resumed message via `codex exec resume --json`, terminate a running Codex subprocess, delete logs/metadata, and WebSocket connect.
 - `/api/voice/ws`: optional voice-input WebSocket endpoint backed by in-process WhisperLiveKit by default, or by a configured upstream ASR WebSocket when `VIEWER_VOICE_UPSTREAM_WS` is set.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
 
@@ -113,13 +115,19 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `backend/app/codex_sessions.py`
 
 - Structured Codex session manager using `codex exec --json` subprocesses instead of PTY/TUI rendering.
-- `CodexSession`: viewer-local session state including title, working directory, Codex thread/session id, prompts, parsed JSON events, process status, connected WebSocket clients, and paths for metadata/raw logs/stderr logs.
-- `CodexSessionManager.create(prompt, cwd)`: creates a viewer session and writes metadata. If `prompt` is blank, the session stays `idle`; otherwise it starts `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -C <cwd> -`, feeds the prompt on stdin, and streams JSONL stdout.
+- `CodexSession`: viewer-local session state including title, working directory, Codex thread/session id, rollout path, prompts, parsed rollout JSON events, process status, connected WebSocket clients, and paths for metadata/stderr logs.
+- Session metadata now stores an optional `model`; when set, runs pass `-m <model>` to `codex exec`.
+- `cli_status()`: discovers the newest `~/.codex/sessions/**/rollout-*.jsonl` file, parses recent `session_meta`, `turn_context`, and `token_count` events, and exposes a cached status payload used by the navbar.
+- `CodexSessionManager.create(prompt, cwd)`: creates a viewer session and writes metadata. If `prompt` is blank, the session stays `idle`; otherwise it starts `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -C <cwd> -`, feeds the prompt on stdin, and uses stdout only to discover the Codex thread id and trigger rollout resyncs.
 - `send(session_id, prompt)`: starts a new `codex exec --json` run when no Codex thread id has been captured yet, otherwise resumes with `codex exec resume --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <thread_id> -`. It rejects concurrent sends while a session is running and appends the prompt to metadata.
 - Codex subprocesses set `https_proxy`, `HTTPS_PROXY`, `http_proxy`, and `HTTP_PROXY` to `http://localhost:7890`.
-- Raw Codex JSON stdout is appended verbatim to `logs/codex-sessions/{viewer_session_id}.jsonl`; stderr goes to `{viewer_session_id}.stderr.log`; metadata/prompts are stored in `{viewer_session_id}.json`.
+- Rendered Codex events are read from the canonical `~/.codex/sessions/**/rollout-*.jsonl` file matched by Codex session id. Viewer-local metadata/prompts and the matched `rollout_path` are stored in `logs/codex-sessions/{viewer_session_id}.json`; stderr goes to `{viewer_session_id}.stderr.log`.
 - `_find_session_id(raw)`: extracts `session_id`, `conversation_id`, or `thread_id` from JSON events so later messages can resume the correct Codex thread.
+- Active Codex runs watch the matched rollout JSONL file with `watchfiles.awatch()` and broadcast newly parsed events when that file changes, rather than depending on stdout for every rendered message.
+- Codex session status is updated from rollout turn-finish events: `task_complete` / `turn.completed` mark the viewer session `exited`, while `turn_aborted` / `turn.failed` mark it `failed`; the later subprocess wait still records the final exit code.
+- Codex live-refresh debugging uses Loguru in `codex_sessions.py`: rollout matching and turn-finish status changes log at info level; rollout unavailability, file-watch changes, synced event counts, per-event broadcasts, and stale WebSocket clients log at debug level.
 - `connect(session_id, websocket)`: sends snapshots and broadcasts live event/status/deleted messages to Codex panes.
+- `terminate(session_id)`: stops the active Codex subprocess for a session and broadcasts updated status.
 - `codex_session_manager`: singleton used by routes.
 
 `backend/app/voice.py`
@@ -134,6 +142,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
 - Codex schemas: `CodexSessionInfo`, `CodexPrompt`, `CodexEvent`, `CodexSessionSnapshot`, `CodexSessionCreate`, and `CodexSessionMessage`.
+- `CodexConfig` stores Codex model options for `.viewer.config.json`; the built-in default model is `gpt-5.5`.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
 `backend/app/logging.py`
@@ -165,7 +174,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Refreshes affected file listings on change events.
 - Dispatches `viewer:file-changed` when an open file changes.
 - Polls terminal list every 3 seconds.
-- Renders active pane toolbar metadata/actions from `stores/paneToolbar.ts` in the top bar.
+- Renders active pane toolbar metadata, actions, and generic controls from `stores/paneToolbar.ts` in the top bar, plus global pane split actions.
+- Top-bar ownership rule: cross-viewer pane actions such as split belong in `App.vue`; view-specific icons/controls/status belong in the owning viewer and must be registered through `stores/paneToolbar.ts`, not hard-coded in `App.vue`.
 - Sidebar state functions: `toggleSidebarPin()`, `clampSidebarWidth()`, `startSidebarResize()`.
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
 - Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`.
@@ -282,7 +292,9 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Structured Codex session pane connected to `/api/codex/sessions/{id}/ws`.
 - Loads snapshots with `getCodexSession()`, receives live JSON events/status over WebSocket, and updates `stores/codex.ts`.
-- Renders prompts, normalized event text, status, Codex thread id, cwd, and optional raw JSON details toggled through the active-pane toolbar.
+- Renders prompts, normalized event text, status, Codex thread id, cwd, inline patch/file-change details parsed from `patch_apply_end`/`apply_patch` events, wrapped word-level highlights inside paired added/deleted diff lines, derived post-change result snippets below diffs, and optional raw JSON details toggled through the active-pane toolbar.
+- Registers Codex-specific top-bar controls through `stores/paneToolbar.ts`, including the refresh action, model selector, usage/status chips, raw JSON toggle, and stop action.
+- Rollout rendering is keyed to canonical `~/.codex/sessions/**/rollout-*.jsonl` shapes: top-level `response_item` and `event_msg`, with turn grouping from `event_msg.payload.type=task_started/task_complete`.
 - Sends follow-up prompts through `stores/codex.ts`, which calls `/api/codex/sessions/{id}/messages`.
 - Uses `VoiceInputButton.vue` to transcribe microphone input into the Codex draft.
 
@@ -329,7 +341,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `frontend/src/stores/paneToolbar.ts`
 
 - Non-persistent active-pane toolbar registry.
-- Exposes generic per-pane title/status/action metadata so viewers can contribute top-bar controls without coupling `App.vue` to viewer-specific behavior.
+- Exposes generic per-pane title/status/action/control metadata so viewers can contribute top-bar controls without coupling `App.vue` to viewer-specific behavior.
 - Actions may hold callbacks owned by the registering viewer and are cleared when that viewer unmounts.
 
 `frontend/src/stores/terminals.ts`
@@ -499,9 +511,9 @@ If a backend field changes, update the matching frontend type and all consumers.
 - `localStorage viewer.sidebarWidth.v1`: sidebar width.
 - `localStorage viewer.scrollPositions.v1`: per-path scroll positions.
 - `logs/viewer-*.log`: timestamped runtime logs from `run.py`.
-- `logs/codex-sessions/*.jsonl`: raw Codex `--json` stdout event logs for debugging/replay.
+- `logs/codex-sessions/*.jsonl`: obsolete viewer-local Codex stdout caches from older versions; rendering now reads canonical rollout JSONL files under `~/.codex/sessions/`.
 - `logs/codex-sessions/*.stderr.log`: stderr from Codex subprocesses.
-- `logs/codex-sessions/*.json`: viewer-local Codex session metadata including prompts and discovered Codex thread id.
+- `logs/codex-sessions/*.json`: viewer-local Codex session metadata including prompts, discovered Codex thread id, selected model, status, and matched rollout path.
 
 ## Common Fault Locations
 
@@ -514,7 +526,7 @@ If a backend field changes, update the matching frontend type and all consumers.
 - Terminal output glitches: `TerminalViewer.vue` snapshot/output version logic and `TerminalManager._read_output()`.
 - Terminal resize issues: `TerminalViewer.vue resize()` and `TerminalManager.resize()`.
 - Codex session creation/resume fails: check `codex` availability on PATH, `backend/app/codex_sessions.py` command construction, `logs/codex-sessions/*.stderr.log`, and whether a `thread_id` was captured from raw JSON.
-- Codex pane rendering looks incomplete: inspect `CodexViewer.vue` `textFrom()` extraction and use the raw JSON toolbar toggle to compare against `logs/codex-sessions/*.jsonl`.
+- Codex pane rendering looks incomplete: inspect `CodexViewer.vue` `textFrom()` extraction and use the raw JSON toolbar toggle to compare against the matched `~/.codex/sessions/**/rollout-*.jsonl`.
 - Frontend runtime errors: browser console, `/api/debug/client-log`, `backend/app/logging.py`, `logs/`.
 - Production frontend missing: build `frontend/dist` or set `VIEWER_FRONTEND_DIST`.
 

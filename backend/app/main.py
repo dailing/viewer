@@ -12,7 +12,7 @@ from .codex_sessions import codex_session_manager
 from .events import hub
 from .files import content_hash, get_meta, guess_mime, list_directory, normalize_relative, read_config, read_text, resolve_path, write_config
 from .logging import current_log_path, ensure_logging
-from .models import ClientLog, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate
+from .models import ClientLog, CodexCliStatus, CodexModelOptions, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate
 from .terminals import terminal_manager
 from .voice import connect_voice
 from .watcher import watch_root
@@ -210,10 +210,20 @@ async def codex_sessions():
     return codex_session_manager.list()
 
 
+@app.get("/api/codex/status", response_model=CodexCliStatus)
+async def codex_status():
+    return codex_session_manager.cli_status()
+
+
+@app.get("/api/codex/models", response_model=CodexModelOptions)
+async def codex_models():
+    return await codex_session_manager.model_options()
+
+
 @app.post("/api/codex/sessions")
 async def create_codex_session(config: CodexSessionCreate):
     logger.info("Creating Codex session cwd={}", config.cwd or "")
-    return await codex_session_manager.create(config.prompt, config.cwd)
+    return await codex_session_manager.create(config.prompt, config.cwd, config.model)
 
 
 @app.get("/api/codex/sessions/{session_id}")
@@ -224,7 +234,13 @@ async def codex_session(session_id: str):
 @app.post("/api/codex/sessions/{session_id}/messages")
 async def send_codex_message(session_id: str, message: CodexSessionMessage):
     logger.info("Sending Codex message session={}", session_id)
-    return await codex_session_manager.send(session_id, message.prompt)
+    return await codex_session_manager.send(session_id, message.prompt, message.model)
+
+
+@app.post("/api/codex/sessions/{session_id}/terminate")
+async def terminate_codex_session(session_id: str):
+    logger.info("Terminating Codex session {}", session_id)
+    return await codex_session_manager.terminate(session_id)
 
 
 @app.delete("/api/codex/sessions/{session_id}")

@@ -72,11 +72,17 @@ class MarkdownConfig(BaseModel):
     themes: list[MarkdownTheme] = Field(default_factory=lambda: [MarkdownTheme()])
 
 
+class CodexConfig(BaseModel):
+    available_models: list[str] = Field(default_factory=lambda: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"])
+    default_model: str = "gpt-5.5"
+
+
 class ConfigData(BaseModel):
     pinned: list[str] = Field(default_factory=list)
     current_path: str = ""
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
+    codex: CodexConfig = Field(default_factory=CodexConfig)
 
 
 class WatchEvent(BaseModel):
@@ -111,8 +117,10 @@ class TerminalSnapshot(TerminalInfo):
 class CodexSessionInfo(BaseModel):
     id: str
     codex_session_id: str | None = None
+    rollout_path: str | None = None
     title: str
     cwd: str
+    model: str | None = None
     created_at: float
     updated_at: float
     status: Literal["idle", "running", "exited", "failed"]
@@ -139,10 +147,35 @@ class CodexSessionSnapshot(CodexSessionInfo):
 class CodexSessionCreate(BaseModel):
     prompt: str = ""
     cwd: str | None = None
+    model: str | None = None
 
 
 class CodexSessionMessage(BaseModel):
     prompt: str
+    model: str | None = None
+
+
+class CodexCliStatus(BaseModel):
+    available: bool = False
+    session_id: str | None = None
+    rollout_path: str | None = None
+    updated_at: float | None = None
+    cwd: str | None = None
+    model: str | None = None
+    model_context_window: int | None = None
+    context_used_percent: float | None = None
+    total_tokens: int | None = None
+    plan_type: str | None = None
+    primary_used_percent: float | None = None
+    primary_window_minutes: int | None = None
+    secondary_used_percent: float | None = None
+    secondary_window_minutes: int | None = None
+
+
+class CodexModelOptions(BaseModel):
+    selected_model: str
+    available_models: list[str] = Field(default_factory=list)
+    source: str = "config"
 
 
 class ClientLog(BaseModel):

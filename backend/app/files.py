@@ -207,6 +207,7 @@ def read_config() -> ConfigData:
         current_path=current_path,
         appearance=config.appearance,
         markdown=config.markdown,
+        codex=config.codex,
     )
 
 

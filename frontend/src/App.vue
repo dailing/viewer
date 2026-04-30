@@ -10,7 +10,7 @@ import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
 import { parentPath } from "./utils/paths";
-import type { PaneToolbarAction } from "./stores/paneToolbar";
+import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { SplitDirection } from "./types/layout";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
@@ -83,7 +83,25 @@ const activePaneTitle = computed(() => {
   if (pane.codexSessionId) return codex.sessions.find((session) => session.id === pane.codexSessionId)?.title ?? "Codex";
   return pane.filePath || "Empty pane";
 });
-const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
+const globalPaneActions = computed<PaneToolbarAction[]>(() => {
+  if (!layout.activePaneId) return [];
+  return [
+    {
+      id: "split-horizontal",
+      title: "Split pane right",
+      icon: "bi-layout-split",
+      run: () => splitActivePane("horizontal"),
+    },
+    {
+      id: "split-vertical",
+      title: "Split pane down",
+      icon: "bi-view-stacked",
+      run: () => splitActivePane("vertical"),
+    },
+  ];
+});
+const activePaneActions = computed(() => [...globalPaneActions.value, ...(activePaneToolbar.value?.actions ?? [])]);
+const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 let codexRefresh: number | null = null;
@@ -170,16 +188,20 @@ function startSidebarResize(event: PointerEvent) {
   window.addEventListener("pointercancel", stop);
 }
 
-function splitActivePane(direction: SplitDirection) {
-  if (layout.activePaneId) layout.splitPane(layout.activePaneId, direction);
-}
-
-function closeActivePane() {
-  if (layout.activePaneId) layout.closePane(layout.activePaneId);
-}
-
 function runPaneAction(action: PaneToolbarAction) {
   void action.run();
+}
+
+function updatePaneControl(control: PaneToolbarControl, event: Event) {
+  if (control.kind !== "select") return;
+  const target = event.target as HTMLSelectElement | null;
+  if (!target) return;
+  void control.onChange(target.value);
+}
+
+function splitActivePane(direction: SplitDirection) {
+  if (!layout.activePaneId) return;
+  layout.splitPane(layout.activePaneId, direction);
 }
 
 onUnmounted(() => {
@@ -217,15 +239,20 @@ onUnmounted(() => {
           <span v-else-if="action.label">{{ action.label }}</span>
         </button>
       </div>
-      <button class="btn btn-outline-secondary icon-button" type="button" title="Split vertical" @click="splitActivePane('vertical')">
-        <i class="bi bi-layout-split"></i>
-      </button>
-      <button class="btn btn-outline-secondary icon-button" type="button" title="Split horizontal" @click="splitActivePane('horizontal')">
-        <i class="bi bi-distribute-vertical"></i>
-      </button>
-      <button class="btn btn-outline-secondary icon-button" type="button" title="Close pane" @click="closeActivePane">
-        <i class="bi bi-x"></i>
-      </button>
+      <template v-for="control in activePaneControls" :key="control.id">
+        <select
+          v-if="control.kind === 'select'"
+          class="form-select form-select-sm pane-toolbar-select"
+          :title="control.title"
+          :value="control.value"
+          @change="updatePaneControl(control, $event)"
+        >
+          <option v-for="option in control.options" :key="option" :value="option">{{ option }}</option>
+        </select>
+        <div v-else class="pane-toolbar-chips" :title="control.title">
+          <span v-for="(item, index) in control.items" :key="`${index}:${item}`" class="pane-toolbar-chip">{{ item }}</span>
+        </div>
+      </template>
       <span class="status-dot" :class="connectionState"></span>
     </header>
 

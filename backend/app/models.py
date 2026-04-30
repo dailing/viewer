@@ -126,6 +126,9 @@ class CodexSessionInfo(BaseModel):
     status: Literal["idle", "running", "exited", "failed"]
     exit_code: int | None = None
     event_count: int = 0
+    model_context_window: int | None = None
+    context_used_percent: float | None = None
+    total_tokens: int | None = None
 
 
 class CodexPrompt(BaseModel):
@@ -167,8 +170,10 @@ class CodexCliStatus(BaseModel):
     total_tokens: int | None = None
     plan_type: str | None = None
     primary_used_percent: float | None = None
+    primary_remaining_percent: float | None = None
     primary_window_minutes: int | None = None
     secondary_used_percent: float | None = None
+    secondary_remaining_percent: float | None = None
     secondary_window_minutes: int | None = None
 
 

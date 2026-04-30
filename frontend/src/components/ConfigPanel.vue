@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
-import type { AppearanceConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme } from "../types/files";
+import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
+import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
 const saving = ref(false);
 const error = ref("");
-const openSections = reactive({ appearance: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ appearance: true, codex: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
+  codex: clone(files.codexConfig) as CodexConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
 });
 
@@ -29,6 +30,7 @@ const fullConfigJson = computed(() =>
       pinned: files.pinned,
       current_path: files.currentPath,
       appearance: draft.appearance,
+      codex: draft.codex,
       markdown: draft.markdown,
     },
     null,
@@ -39,6 +41,15 @@ const fullConfigJson = computed(() =>
 watch(
   () => files.appearance,
   (appearance) => Object.assign(draft.appearance, clone(appearance)),
+  { deep: true },
+);
+
+watch(
+  () => files.codexConfig,
+  (codex) => {
+    Object.assign(draft.codex, clone(codex));
+    jsonDraft.value = fullConfigJson.value;
+  },
   { deep: true },
 );
 
@@ -64,6 +75,30 @@ function clone<T>(value: T): T {
 function sectionToggle(section: keyof typeof openSections) {
   openSections[section] = !openSections[section];
   if (section === "json" && openSections.json) jsonDraft.value = fullConfigJson.value;
+}
+
+function normalizeModelList(value: string) {
+  const seen = new Set<string>();
+  const available = value
+    .split(/\r?\n|,/)
+    .map((model) => model.trim())
+    .filter((model) => {
+      if (!model || seen.has(model)) return false;
+      seen.add(model);
+      return true;
+    });
+  draft.codex.available_models = available.length ? available : [...DEFAULT_CODEX_CONFIG.available_models];
+  if (!draft.codex.default_model || !draft.codex.available_models.includes(draft.codex.default_model)) {
+    draft.codex.default_model = draft.codex.available_models[0] ?? DEFAULT_CODEX_CONFIG.default_model;
+  }
+}
+
+function setDefaultModel(value: string) {
+  const model = value.trim();
+  draft.codex.default_model = model;
+  if (model && !draft.codex.available_models.includes(model)) {
+    draft.codex.available_models = [model, ...draft.codex.available_models];
+  }
 }
 
 function numberValue(value: number | null, fallback: number) {
@@ -114,7 +149,7 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    await files.saveViewerConfig(draft.appearance, draft.markdown);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex);
     emit("close");
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -127,6 +162,7 @@ async function applyJson() {
   try {
     const parsed = JSON.parse(jsonDraft.value);
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
+    if (parsed.codex) Object.assign(draft.codex, parsed.codex);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
     await save();
   } catch (err) {
@@ -159,6 +195,36 @@ async function applyJson() {
               <span>Nav bar size</span>
               <input v-model.number="draft.appearance.navbar_size" class="form-range" type="range" min="22" max="56" step="1" />
               <input v-model.number="draft.appearance.navbar_size" class="form-control form-control-sm number-input" type="number" min="22" max="56" />
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('codex')">
+            <i class="bi" :class="openSections.codex ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Codex Models</span>
+          </button>
+          <div v-if="openSections.codex" class="section-body">
+            <label class="compact-field">
+              <span>Default model</span>
+              <input
+                class="form-control form-control-sm"
+                list="codex-model-options"
+                :value="draft.codex.default_model"
+                @input="setDefaultModel(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <datalist id="codex-model-options">
+              <option v-for="model in draft.codex.available_models" :key="model" :value="model"></option>
+            </datalist>
+            <label class="compact-field model-list-field">
+              <span>Available models</span>
+              <textarea
+                class="form-control form-control-sm model-list"
+                :value="draft.codex.available_models.join('\n')"
+                spellcheck="false"
+                @change="normalizeModelList(($event.target as HTMLTextAreaElement).value)"
+              ></textarea>
             </label>
           </div>
         </section>
@@ -438,6 +504,16 @@ async function applyJson() {
   padding: 10px;
   resize: vertical;
   width: 100%;
+}
+
+.model-list-field {
+  align-items: start;
+}
+
+.model-list {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  min-height: 92px;
+  resize: vertical;
 }
 
 @media (max-width: 640px) {

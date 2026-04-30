@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { getConfig, getTree, putConfig } from "../api/client";
-import type { AppearanceConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig } from "../types/files";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   name: "Default",
@@ -33,6 +33,11 @@ export const DEFAULT_APPEARANCE_CONFIG: AppearanceConfig = {
 export const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
   active_theme: DEFAULT_MARKDOWN_THEME.name,
   themes: [DEFAULT_MARKDOWN_THEME],
+};
+
+export const DEFAULT_CODEX_CONFIG: CodexConfig = {
+  available_models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"],
+  default_model: "gpt-5.5",
 };
 
 function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
@@ -77,6 +82,22 @@ function normalizeMarkdown(config?: Partial<MarkdownConfig>): MarkdownConfig {
   return { active_theme: activeTheme ?? DEFAULT_MARKDOWN_THEME.name, themes };
 }
 
+function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
+  const seen = new Set<string>();
+  const available = (config?.available_models?.length ? config.available_models : DEFAULT_CODEX_CONFIG.available_models)
+    .map((model) => model.trim())
+    .filter((model) => {
+      if (!model || seen.has(model)) return false;
+      seen.add(model);
+      return true;
+    });
+  const defaultModel = config?.default_model?.trim() || available[0] || DEFAULT_CODEX_CONFIG.default_model;
+  return {
+    available_models: available.includes(defaultModel) ? available : [defaultModel, ...available],
+    default_model: defaultModel,
+  };
+}
+
 export const useFilesStore = defineStore("files", {
   state: () => ({
     listings: {} as Record<string, DirectoryListing>,
@@ -85,10 +106,7 @@ export const useFilesStore = defineStore("files", {
     pinned: [] as string[],
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
-    codexConfig: {
-      available_models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"],
-      default_model: "gpt-5.5",
-    },
+    codexConfig: normalizeCodexConfig(),
     loading: false,
   }),
   getters: {
@@ -113,12 +131,7 @@ export const useFilesStore = defineStore("files", {
       this.currentPath = config.current_path;
       this.appearance = normalizeAppearance(config.appearance);
       this.markdown = normalizeMarkdown(config.markdown);
-      this.codexConfig = {
-        available_models: config.codex?.available_models?.length
-          ? [...config.codex.available_models]
-          : this.codexConfig.available_models,
-        default_model: config.codex?.default_model || this.codexConfig.default_model,
-      };
+      this.codexConfig = normalizeCodexConfig(config.codex);
     },
     async saveConfig() {
       const config: ViewerConfig = {
@@ -126,17 +139,14 @@ export const useFilesStore = defineStore("files", {
         current_path: this.currentPath,
         appearance: normalizeAppearance(this.appearance),
         markdown: normalizeMarkdown(this.markdown),
-        codex: this.codexConfig,
+        codex: normalizeCodexConfig(this.codexConfig),
       };
       const saved = await putConfig(config);
       this.pinned = saved.pinned;
       this.currentPath = saved.current_path;
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
-      this.codexConfig = {
-        available_models: saved.codex?.available_models?.length ? [...saved.codex.available_models] : this.codexConfig.available_models,
-        default_model: saved.codex?.default_model || this.codexConfig.default_model,
-      };
+      this.codexConfig = normalizeCodexConfig(saved.codex);
     },
     async saveAppearance(appearance: AppearanceConfig) {
       this.appearance = normalizeAppearance(appearance);
@@ -149,6 +159,12 @@ export const useFilesStore = defineStore("files", {
     async saveViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig) {
       this.appearance = normalizeAppearance(appearance);
       this.markdown = normalizeMarkdown(markdown);
+      await this.saveConfig();
+    },
+    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig) {
+      this.appearance = normalizeAppearance(appearance);
+      this.markdown = normalizeMarkdown(markdown);
+      this.codexConfig = normalizeCodexConfig(codex);
       await this.saveConfig();
     },
     async loadDirectory(path = "") {

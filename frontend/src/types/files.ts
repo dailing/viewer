@@ -70,15 +70,17 @@ export interface MarkdownConfig {
   themes: MarkdownTheme[];
 }
 
+export interface CodexConfig {
+  available_models: string[];
+  default_model: string;
+}
+
 export interface ViewerConfig {
   pinned: string[];
   current_path: string;
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
-  codex?: {
-    available_models: string[];
-    default_model: string;
-  };
+  codex?: CodexConfig;
 }
 
 export interface WatchEvent {

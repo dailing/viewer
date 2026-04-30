@@ -12,6 +12,9 @@ export type CodexSessionInfo = {
   status: CodexStatus;
   exit_code?: number | null;
   event_count: number;
+  model_context_window?: number | null;
+  context_used_percent?: number | null;
+  total_tokens?: number | null;
 };
 
 export type CodexPrompt = {
@@ -42,8 +45,10 @@ export type CodexCliStatus = {
   total_tokens?: number | null;
   plan_type?: string | null;
   primary_used_percent?: number | null;
+  primary_remaining_percent?: number | null;
   primary_window_minutes?: number | null;
   secondary_used_percent?: number | null;
+  secondary_remaining_percent?: number | null;
   secondary_window_minutes?: number | null;
   selected_model?: string | null;
 };

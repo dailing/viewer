@@ -26,7 +26,6 @@ const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
 const configOpen = ref(false);
 const sidebarWidth = ref(320);
-const connectionState = ref("connecting");
 const bodyShellStyle = computed(() => ({ "--sidebar-width": `${sidebarWidth.value}px` }));
 const appStyle = computed(() => {
   const navbarSize = files.appearance.navbar_size;
@@ -91,16 +90,16 @@ const globalPaneActions = computed<PaneToolbarAction[]>(() => {
   if (!layout.activePaneId) return [];
   return [
     {
-      id: "split-horizontal",
+      id: "split-vertical",
       title: "Split pane right",
       icon: "bi-layout-split",
-      run: () => splitActivePane("horizontal"),
+      run: () => splitActivePane("vertical"),
     },
     {
-      id: "split-vertical",
+      id: "split-horizontal",
       title: "Split pane down",
       icon: "bi-view-stacked",
-      run: () => splitActivePane("vertical"),
+      run: () => splitActivePane("horizontal"),
     },
     {
       id: "close-pane",
@@ -134,7 +133,6 @@ onMounted(async () => {
         window.dispatchEvent(new CustomEvent("viewer:file-changed", { detail: event }));
       }
     },
-    (state) => (connectionState.value = state),
   );
   terminalRefresh = window.setInterval(() => {
     void terminals.load();
@@ -273,7 +271,6 @@ onUnmounted(() => {
           <span v-for="(item, index) in control.items" :key="`${index}:${item}`" class="pane-toolbar-chip">{{ item }}</span>
         </div>
       </template>
-      <span class="status-dot" :class="connectionState"></span>
       <div v-if="globalPaneActions.length" class="pane-actions global-pane-actions" aria-label="Global pane actions">
         <button
           v-for="action in globalPaneActions"

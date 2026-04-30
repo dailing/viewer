@@ -31,75 +31,75 @@ let mounted = false;
 const canSend = computed(() => Boolean(promptText.value.trim()) && session.value?.status !== "running");
 const sortedEvents = computed(() => [...(session.value?.events ?? [])].sort((a, b) => a.index - b.index));
 const codexStatusItems = computed(() => {
-  const status = codex.status;
-  if (!status.available) return [];
+  const status = session.value;
+  if (!status) return [];
   const items: string[] = [];
   if (status.model) items.push(status.model);
   if (typeof status.context_used_percent === "number") items.push(`ctx ${status.context_used_percent}%`);
-  if (typeof status.primary_used_percent === "number" && status.primary_window_minutes) {
-    const hours = Math.round(status.primary_window_minutes / 60);
-    items.push(`${status.primary_used_percent}%/${hours}h`);
+  if (typeof codex.status.primary_remaining_percent === "number" && codex.status.primary_window_minutes) {
+    const hours = Math.round(codex.status.primary_window_minutes / 60);
+    items.push(`${codex.status.primary_remaining_percent}%/${hours}h left`);
   }
-  if (typeof status.secondary_used_percent === "number" && status.secondary_window_minutes) {
-    const days = Math.round(status.secondary_window_minutes / (60 * 24));
-    items.push(`${status.secondary_used_percent}%/${days}d`);
+  if (typeof codex.status.secondary_remaining_percent === "number" && codex.status.secondary_window_minutes) {
+    const days = Math.round(codex.status.secondary_window_minutes / (60 * 24));
+    items.push(`${codex.status.secondary_remaining_percent}%/${days}d left`);
   }
-  if (status.cwd) items.push(status.cwd);
   return items;
 });
 type TranscriptEntry =
   | { kind: "prompt"; id: string; text: string }
   | { kind: "event"; id: string; event: CodexEvent; text: string; eventType: string; fileChanges: FileChange[]; patchText: string | null };
+type TranscriptTimelineItem =
+  | { kind: "prompt"; orderTime: number; orderIndex: number; entry: Extract<TranscriptEntry, { kind: "prompt" }> }
+  | { kind: "event"; orderTime: number; orderIndex: number; entry: Extract<TranscriptEntry, { kind: "event" }> };
 type FileChange = { path: string; changeType: string; diff: string | null };
 type DiffLineKind = "add" | "delete" | "hunk" | "file" | "context";
 type DiffSegment = { text: string; changed: boolean };
 type DiffLine = { text: string; kind: DiffLineKind; segments: DiffSegment[] };
 const transcriptEntries = computed<TranscriptEntry[]>(() => {
   const prompts = session.value?.prompts ?? [];
-  const groups: CodexEvent[][] = [];
-  let current: CodexEvent[] | null = null;
+  const assistantResponseTexts = new Set(
+    sortedEvents.value
+      .filter((event) => isAssistantResponseItem(event.raw))
+      .map((event) => normalizeMessageText(eventText(event)))
+      .filter(Boolean),
+  );
+  const timeline: TranscriptTimelineItem[] = prompts.map((prompt, index) => ({
+    kind: "prompt",
+    orderTime: finiteTime(prompt.created_at),
+    orderIndex: index * 2,
+    entry: { kind: "prompt", id: `prompt-${index}`, text: prompt.text },
+  }));
 
   for (const event of sortedEvents.value) {
     const eventType = rawType(event.raw);
-    if (eventType === "task_started" || eventType === "turn.started") {
-      current = [];
-      groups.push(current);
-      continue;
-    }
-    if (!current) {
-      current = [];
-      groups.push(current);
-    }
-    current.push(event);
-    if (eventType === "task_complete" || eventType === "turn_aborted" || eventType === "turn.completed") current = null;
-  }
-
-  const entries: TranscriptEntry[] = [];
-  const count = Math.max(prompts.length, groups.length);
-  for (let index = 0; index < count; index += 1) {
-    const prompt = prompts[index];
-    if (prompt) entries.push({ kind: "prompt", id: `prompt-${index}`, text: prompt.text });
-    const group = groups[index] ?? [];
-    const assistantResponseTexts = new Set(
-      group
-        .filter((event) => isAssistantResponseItem(event.raw))
-        .map((event) => normalizeMessageText(eventText(event)))
-        .filter(Boolean),
-    );
-    for (const event of group) {
-      const eventType = rawType(event.raw);
-      if (isHiddenEventType(eventType)) continue;
-      const text = eventText(event);
-      if (isDuplicateAgentMessage(event.raw, text, assistantResponseTexts)) continue;
-      const fileChanges = extractFileChanges(event.raw);
-      const patchText = extractPatchInput(event.raw);
-      if (text || showRaw.value || fileChanges.length || patchText) {
-        entries.push({ kind: "event", id: `event-${event.index}`, event, text, eventType, fileChanges, patchText });
-      }
+    if (isHiddenEventType(eventType)) continue;
+    const text = eventText(event);
+    if (isDuplicateAgentMessage(event.raw, text, assistantResponseTexts)) continue;
+    const fileChanges = extractFileChanges(event.raw);
+    const patchText = extractPatchInput(event.raw);
+    if (text || showRaw.value || fileChanges.length || patchText) {
+      timeline.push({
+        kind: "event",
+        orderTime: finiteTime(event.received_at),
+        orderIndex: event.index * 2 + 1,
+        entry: { kind: "event", id: `event-${event.index}`, event, text, eventType, fileChanges, patchText },
+      });
     }
   }
-  return entries;
+  return timeline.sort(compareTranscriptTimelineItems).map((item) => item.entry);
 });
+
+function finiteTime(value: number): number {
+  return Number.isFinite(value) ? value : 0;
+}
+
+function compareTranscriptTimelineItems(left: TranscriptTimelineItem, right: TranscriptTimelineItem): number {
+  const timeDelta = left.orderTime - right.orderTime;
+  if (timeDelta !== 0) return timeDelta;
+  if (left.kind !== right.kind) return left.kind === "prompt" ? -1 : 1;
+  return left.orderIndex - right.orderIndex;
+}
 
 function isHiddenEventType(type: string): boolean {
   return [
@@ -469,6 +469,10 @@ function applyInfo(info: CodexSessionInfo) {
   session.value.exit_code = info.exit_code;
   session.value.event_count = info.event_count;
   session.value.updated_at = info.updated_at;
+  session.value.model = info.model;
+  session.value.model_context_window = info.model_context_window;
+  session.value.context_used_percent = info.context_used_percent;
+  session.value.total_tokens = info.total_tokens;
 }
 
 function applySnapshot(snapshot: CodexSessionSnapshot) {
@@ -624,7 +628,7 @@ function updatePaneToolbar() {
       {
         kind: "chips",
         id: "codex-status",
-        title: codex.status.rollout_path ?? undefined,
+        title: session.value?.rollout_path ?? undefined,
         items: codexStatusItems.value,
       },
     ],
@@ -789,15 +793,13 @@ onUnmounted(() => {
 }
 
 .file-change-diff {
-  background: #f4f7fb;
+  background: #ffffff;
   border: 1px solid #dde5f1;
   border-radius: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 11px;
   line-height: 1.35;
   margin: 6px 0 0;
-  max-height: 260px;
-  overflow: auto;
   overflow-wrap: anywhere;
   padding: 6px 0;
   white-space: pre-wrap;
@@ -834,8 +836,6 @@ onUnmounted(() => {
   font-size: 11px;
   line-height: 1.35;
   margin: 0;
-  max-height: 260px;
-  overflow: auto;
   overflow-wrap: anywhere;
   padding: 6px 8px;
   white-space: pre-wrap;

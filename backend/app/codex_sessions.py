@@ -1,7 +1,7 @@
 import asyncio
 from collections import deque
-import calendar
 from contextlib import suppress
+from datetime import datetime, timezone
 import json
 import os
 import time
@@ -43,6 +43,9 @@ class CodexSession:
     log_path: Path | None = None
     stderr_path: Path | None = None
     rollout_path: Path | None = None
+    model_context_window: int | None = None
+    context_used_percent: float | None = None
+    total_tokens: int | None = None
 
     def summary(self) -> dict:
         return {
@@ -57,6 +60,9 @@ class CodexSession:
             "status": self.status,
             "exit_code": self.exit_code,
             "event_count": len(self.events),
+            "model_context_window": self.model_context_window,
+            "context_used_percent": self.context_used_percent,
+            "total_tokens": self.total_tokens,
         }
 
     def snapshot(self) -> dict:
@@ -68,7 +74,7 @@ class CodexSessionManager:
         self.sessions: dict[str, CodexSession] = {}
         self._loaded = False
         self._status_cache: dict[str, Any] | None = None
-        self._status_cache_key: tuple[str, int, int] | None = None
+        self._status_cache_key: tuple[int, int, int] | None = None
 
     def _paths(self, session_id: str) -> tuple[Path, Path, Path]:
         return (
@@ -184,11 +190,13 @@ class CodexSessionManager:
     def _timestamp_value(self, raw: dict) -> float:
         timestamp = raw.get("timestamp")
         if isinstance(timestamp, str):
-            for pattern in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-                try:
-                    return float(calendar.timegm(time.strptime(timestamp, pattern)))
-                except ValueError:
-                    pass
+            try:
+                parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.timestamp()
+            except ValueError:
+                pass
         return time.time()
 
     def _rollout_session_id(self, path: Path) -> str | None:
@@ -243,6 +251,51 @@ class CodexSessionManager:
                 status = "failed"
         return status
 
+    def _payload_of(self, raw: dict) -> dict | None:
+        payload = raw.get("payload")
+        return payload if isinstance(payload, dict) else None
+
+    def _usage_from_token_count(self, payload: dict) -> tuple[int | None, int | None, float | None]:
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return None, None, None
+        context_window = info.get("model_context_window")
+        if not isinstance(context_window, int) or context_window <= 0:
+            context_window = None
+        usage = info.get("last_token_usage")
+        if not isinstance(usage, dict):
+            usage = info.get("total_token_usage")
+        if not isinstance(usage, dict):
+            return context_window, None, None
+        total_tokens = usage.get("total_tokens")
+        if not isinstance(total_tokens, int):
+            return context_window, None, None
+        used_percent = round((total_tokens / context_window) * 100, 1) if context_window else None
+        return context_window, total_tokens, used_percent
+
+    def _apply_session_rollout_status(self, session: CodexSession, events: list[dict]) -> None:
+        for event in events:
+            raw = event.get("raw")
+            if not isinstance(raw, dict):
+                continue
+            payload = self._payload_of(raw)
+            if not payload:
+                continue
+            event_type = raw.get("type")
+            if event_type == "turn_context":
+                model = payload.get("model")
+                if isinstance(model, str) and model:
+                    session.model = model
+            if event_type != "event_msg" or payload.get("type") != "token_count":
+                continue
+            context_window, total_tokens, used_percent = self._usage_from_token_count(payload)
+            if context_window is not None:
+                session.model_context_window = context_window
+            if total_tokens is not None:
+                session.total_tokens = total_tokens
+            if used_percent is not None:
+                session.context_used_percent = used_percent
+
     def _sync_rollout_events(self, session: CodexSession) -> list[dict]:
         if session.rollout_path is None:
             session.rollout_path = self._find_rollout_for_session(session.codex_session_id)
@@ -270,6 +323,7 @@ class CodexSessionManager:
 
         old_count = len(session.events)
         session.events = events
+        self._apply_session_rollout_status(session, events)
         new_events = events[old_count:]
         turn_status = self._turn_finished_status(new_events)
         if session.status == "running" and turn_status is not None:
@@ -417,31 +471,38 @@ class CodexSessionManager:
                 session.process.terminate()
 
     def cli_status(self) -> dict:
-        latest = self._latest_rollout()
-        if latest is None:
+        rollouts = self._recent_rollouts()
+        if not rollouts:
             return {"available": False}
-        cache_key = (latest.as_posix(), int(latest.stat().st_mtime), latest.stat().st_size)
+        cache_key = self._rollout_cache_key(rollouts)
         if self._status_cache is not None and self._status_cache_key == cache_key:
             return self._status_cache
-        status = self._parse_rollout_status(latest)
+        status = self._latest_global_status(rollouts)
         self._status_cache = status
         self._status_cache_key = cache_key
         return status
 
-    def _latest_rollout(self) -> Path | None:
+    def _recent_rollouts(self, max_files: int = 40) -> list[Path]:
         if not CODEX_ROLLOUT_ROOT.exists():
-            return None
-        latest_path: Path | None = None
-        latest_mtime = -1.0
-        for path in CODEX_ROLLOUT_ROOT.rglob("rollout-*.jsonl"):
+            return []
+        try:
+            return sorted(CODEX_ROLLOUT_ROOT.rglob("rollout-*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True)[:max_files]
+        except OSError:
+            return []
+
+    def _rollout_cache_key(self, paths: list[Path]) -> tuple[int, int, int]:
+        newest_mtime = 0
+        total_size = 0
+        count = 0
+        for path in paths:
             try:
-                mtime = path.stat().st_mtime
+                stat = path.stat()
             except OSError:
                 continue
-            if mtime > latest_mtime:
-                latest_path = path
-                latest_mtime = mtime
-        return latest_path
+            count += 1
+            newest_mtime = max(newest_mtime, int(stat.st_mtime))
+            total_size += stat.st_size
+        return count, newest_mtime, total_size
 
     def _tail_lines(self, path: Path, max_lines: int = 1800) -> list[str]:
         lines: deque[str] = deque(maxlen=max_lines)
@@ -449,6 +510,22 @@ class CodexSessionManager:
             for line in handle:
                 lines.append(line)
         return list(lines)
+
+    def _latest_global_status(self, paths: list[Path]) -> dict:
+        latest_status: dict | None = None
+        latest_time = -1.0
+        for path in paths:
+            status = self._parse_rollout_status(path)
+            updated_at = status.get("updated_at")
+            if isinstance(updated_at, (int, float)) and updated_at > latest_time:
+                latest_status = status
+                latest_time = float(updated_at)
+        return latest_status if latest_status is not None else {"available": False}
+
+    def _rate_limit_percent(self, value: Any) -> float | None:
+        if not isinstance(value, (int, float)):
+            return None
+        return round(max(0.0, min(100.0, float(value))), 1)
 
     def _parse_rollout_status(self, path: Path) -> dict:
         session_id: str | None = None
@@ -460,8 +537,10 @@ class CodexSessionManager:
         context_used_percent: float | None = None
         plan_type: str | None = None
         primary_used_percent: float | None = None
+        primary_remaining_percent: float | None = None
         primary_window_minutes: int | None = None
         secondary_used_percent: float | None = None
+        secondary_remaining_percent: float | None = None
         secondary_window_minutes: int | None = None
 
         for line in self._tail_lines(path):
@@ -499,7 +578,9 @@ class CodexSessionManager:
                     context = info.get("model_context_window")
                     if isinstance(context, int) and context > 0:
                         context_window = context
-                    usage = info.get("total_token_usage")
+                    usage = info.get("last_token_usage")
+                    if not isinstance(usage, dict):
+                        usage = info.get("total_token_usage")
                     if isinstance(usage, dict):
                         total = usage.get("total_tokens")
                         if isinstance(total, int):
@@ -513,28 +594,21 @@ class CodexSessionManager:
                         plan_type = plan
                     primary = rate_limits.get("primary")
                     if isinstance(primary, dict):
-                        used = primary.get("used_percent")
-                        if isinstance(used, (int, float)):
-                            value = float(used)
-                            primary_used_percent = round(value * 100, 1) if value <= 1 else round(value, 1)
+                        primary_used_percent = self._rate_limit_percent(primary.get("used_percent"))
+                        if primary_used_percent is not None:
+                            primary_remaining_percent = round(100.0 - primary_used_percent, 1)
                         window = primary.get("window_minutes")
                         if isinstance(window, int):
                             primary_window_minutes = window
                     secondary = rate_limits.get("secondary")
                     if isinstance(secondary, dict):
-                        used = secondary.get("used_percent")
-                        if isinstance(used, (int, float)):
-                            value = float(used)
-                            secondary_used_percent = round(value * 100, 1) if value <= 1 else round(value, 1)
+                        secondary_used_percent = self._rate_limit_percent(secondary.get("used_percent"))
+                        if secondary_used_percent is not None:
+                            secondary_remaining_percent = round(100.0 - secondary_used_percent, 1)
                         window = secondary.get("window_minutes")
                         if isinstance(window, int):
                             secondary_window_minutes = window
-                timestamp = event.get("timestamp")
-                if isinstance(timestamp, str):
-                    try:
-                        updated_at = calendar.timegm(time.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ"))
-                    except ValueError:
-                        pass
+                updated_at = self._timestamp_value(event)
 
         return {
             "available": True,
@@ -548,8 +622,10 @@ class CodexSessionManager:
             "total_tokens": total_tokens,
             "plan_type": plan_type,
             "primary_used_percent": primary_used_percent,
+            "primary_remaining_percent": primary_remaining_percent,
             "primary_window_minutes": primary_window_minutes,
             "secondary_used_percent": secondary_used_percent,
+            "secondary_remaining_percent": secondary_remaining_percent,
             "secondary_window_minutes": secondary_window_minutes,
             "selected_model": model,
         }

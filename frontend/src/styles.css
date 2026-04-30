@@ -51,24 +51,6 @@ body {
   white-space: nowrap;
 }
 
-.status-dot {
-  border-radius: 50%;
-  flex: 0 0 auto;
-  display: inline-block;
-  height: 7px;
-  margin-left: 2px;
-  width: 7px;
-}
-
-.status-dot.connected {
-  background: #198754;
-}
-
-.status-dot.reconnecting,
-.status-dot.connecting {
-  background: #d68a00;
-}
-
 .pane-status {
   border: 1px solid var(--border);
   border-radius: 999px;

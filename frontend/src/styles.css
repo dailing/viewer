@@ -113,6 +113,11 @@ body {
   display: none;
 }
 
+.global-pane-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 .pane-toolbar-chips {
   align-items: center;
   display: flex;
@@ -362,6 +367,43 @@ body {
   color: var(--syntax-text);
   overflow: auto;
   padding: var(--markdown-render-pre-padding, 12px);
+}
+
+.markdown-content .markdown-code-block {
+  white-space: normal;
+}
+
+.markdown-content .markdown-code-block code {
+  display: block;
+}
+
+.markdown-content .markdown-code-line {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  min-height: 1.4em;
+}
+
+.markdown-content .markdown-code-line-number {
+  border-right: 1px solid var(--markdown-border-color);
+  color: var(--text-muted);
+  margin-right: 10px;
+  min-width: 2.5ch;
+  padding-right: 8px;
+  text-align: right;
+  user-select: none;
+}
+
+.markdown-content .markdown-code-line-content {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.markdown-content .markdown-fence-block {
+  background: color-mix(in srgb, var(--syntax-background) 72%, #ffffff);
+  border: 1px solid var(--markdown-border-color);
+  border-radius: 6px;
+  margin: 0.8em 0;
+  padding: 8px 10px;
 }
 
 .markdown-content code,

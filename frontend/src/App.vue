@@ -83,6 +83,10 @@ const activePaneTitle = computed(() => {
   if (pane.codexSessionId) return codex.sessions.find((session) => session.id === pane.codexSessionId)?.title ?? "Codex";
   return pane.filePath || "Empty pane";
 });
+const activePaneHasContent = computed(() => {
+  const pane = layout.activePane;
+  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || pane.codexSessionId));
+});
 const globalPaneActions = computed<PaneToolbarAction[]>(() => {
   if (!layout.activePaneId) return [];
   return [
@@ -98,9 +102,15 @@ const globalPaneActions = computed<PaneToolbarAction[]>(() => {
       icon: "bi-view-stacked",
       run: () => splitActivePane("vertical"),
     },
+    {
+      id: "close-pane",
+      title: activePaneHasContent.value ? "Clear pane content" : "Close empty pane",
+      icon: "bi-x-lg",
+      run: () => closeActivePane(),
+    },
   ];
 });
-const activePaneActions = computed(() => [...globalPaneActions.value, ...(activePaneToolbar.value?.actions ?? [])]);
+const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
 const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
@@ -204,6 +214,16 @@ function splitActivePane(direction: SplitDirection) {
   layout.splitPane(layout.activePaneId, direction);
 }
 
+function closeActivePane() {
+  const paneId = layout.activePaneId;
+  if (!paneId) return;
+  if (activePaneHasContent.value) {
+    layout.clearPane(paneId);
+    return;
+  }
+  layout.closePane(paneId);
+}
+
 onUnmounted(() => {
   source?.close();
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
@@ -254,6 +274,21 @@ onUnmounted(() => {
         </div>
       </template>
       <span class="status-dot" :class="connectionState"></span>
+      <div v-if="globalPaneActions.length" class="pane-actions global-pane-actions" aria-label="Global pane actions">
+        <button
+          v-for="action in globalPaneActions"
+          :key="action.id"
+          class="btn btn-outline-secondary icon-button toolbar-action"
+          :class="[{ active: action.active, 'has-label': action.label }, action.variant === 'danger' ? 'toolbar-action-danger' : '']"
+          type="button"
+          :title="action.title"
+          :aria-label="action.title"
+          @click="runPaneAction(action)"
+        >
+          <i v-if="action.icon" class="bi" :class="action.icon"></i>
+          <span v-else-if="action.label">{{ action.label }}</span>
+        </button>
+      </div>
     </header>
 
     <div class="body-shell" :class="{ 'sidebar-pinned': sidebarPinned }" :style="bodyShellStyle">

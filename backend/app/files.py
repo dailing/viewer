@@ -205,6 +205,7 @@ def read_config() -> ConfigData:
     return ConfigData(
         pinned=config.pinned,
         current_path=current_path,
+        visit_times=config.visit_times,
         appearance=config.appearance,
         markdown=config.markdown,
         codex=config.codex,

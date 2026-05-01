@@ -84,15 +84,18 @@ Useful voice options:
 
 ```bash
 uv run python run.py --no-voice
-uv run python run.py --voice-model small --voice-language auto
+uv run python run.py --voice-model small --voice-language en
 VIEWER_VOICE_BACKEND_POLICY=localagreement uv run python run.py
 ```
 
 The browser sends `MediaRecorder` audio chunks to `/api/voice/ws`. The backend decodes and transcribes them with WhisperLiveKit, then streams normalized partial transcript text back to the paste pad. If the viewer is loaded over HTTPS, the frontend automatically uses `wss://` for terminal and voice sockets. You can still point `VIEWER_VOICE_UPSTREAM_WS` at a separate WhisperLiveKit `/asr` service; when it is set, the backend proxies audio there instead of loading an in-process model.
 
-The default backend is `whisper` with `localagreement` because it avoids WhisperLiveKit's faster-whisper CTranslate2 CUDA runtime. Advanced backend overrides are available through `VIEWER_VOICE_BACKEND` and `VIEWER_VOICE_BACKEND_POLICY`; faster-whisper on Linux may require CUDA 12 runtime libraries such as `libcublas.so.12`.
+The default backend is `faster-whisper` with `localagreement`, so WhisperLiveKit uses its CTranslate2-backed runtime and can use CUDA on supported Linux/NVIDIA systems. Advanced backend overrides are available through `VIEWER_VOICE_BACKEND` and `VIEWER_VOICE_BACKEND_POLICY`; faster-whisper on Linux may require CUDA runtime libraries such as `libcublas.so.12`.
+
+Each browser voice session is also saved under `logs/voice/` when recording stops. The audio file is named with the UTC finish time, and a matching `.json` sidecar records the MIME type, byte count, chunk count, backend, and backend policy for transcription debugging.
 
 WhisperLiveKit translation can be enabled with `VIEWER_VOICE_TARGET_LANGUAGE`, but its NLLB translation dependency is separate from the default transcription install.
+The default source language is `en`. With the default `localagreement` policy, WhisperLiveKit does not allow translation when `VIEWER_VOICE_LANGUAGE=auto`; in that incompatible combination the backend logs a warning and falls back to transcription-only mode. Use an explicit source language such as `en` or switch to `VIEWER_VOICE_BACKEND_POLICY=simulstreaming` if translation with automatic source-language detection is required.
 
 ## Debug logs
 

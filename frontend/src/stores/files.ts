@@ -104,6 +104,7 @@ export const useFilesStore = defineStore("files", {
     currentPath: "",
     expanded: new Set<string>(),
     pinned: [] as string[],
+    visitTimes: {} as Record<string, number>,
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
     codexConfig: normalizeCodexConfig(),
@@ -114,7 +115,14 @@ export const useFilesStore = defineStore("files", {
       return state.listings[""]?.entries ?? [];
     },
     currentEntries(state): FileEntry[] {
-      return state.listings[state.currentPath]?.entries ?? [];
+      const entries = [...(state.listings[state.currentPath]?.entries ?? [])];
+      return entries.sort((left, right) => {
+        const leftVisited = state.visitTimes[left.path] ?? 0;
+        const rightVisited = state.visitTimes[right.path] ?? 0;
+        if (leftVisited !== rightVisited) return rightVisited - leftVisited;
+        if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1;
+        return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+      });
     },
     parentPath(state): string {
       if (!state.currentPath) return "";
@@ -129,6 +137,7 @@ export const useFilesStore = defineStore("files", {
       const config = await getConfig();
       this.pinned = config.pinned;
       this.currentPath = config.current_path;
+      this.visitTimes = config.visit_times ?? {};
       this.appearance = normalizeAppearance(config.appearance);
       this.markdown = normalizeMarkdown(config.markdown);
       this.codexConfig = normalizeCodexConfig(config.codex);
@@ -137,6 +146,7 @@ export const useFilesStore = defineStore("files", {
       const config: ViewerConfig = {
         pinned: this.pinned,
         current_path: this.currentPath,
+        visit_times: this.visitTimes,
         appearance: normalizeAppearance(this.appearance),
         markdown: normalizeMarkdown(this.markdown),
         codex: normalizeCodexConfig(this.codexConfig),
@@ -144,6 +154,7 @@ export const useFilesStore = defineStore("files", {
       const saved = await putConfig(config);
       this.pinned = saved.pinned;
       this.currentPath = saved.current_path;
+      this.visitTimes = saved.visit_times ?? {};
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
       this.codexConfig = normalizeCodexConfig(saved.codex);
@@ -178,6 +189,11 @@ export const useFilesStore = defineStore("files", {
     async enterDirectory(path: string) {
       await this.loadDirectory(path);
       this.currentPath = path;
+      this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
+      await this.saveConfig();
+    },
+    async recordVisit(path: string) {
+      this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
       await this.saveConfig();
     },
     async enterParentDirectory() {

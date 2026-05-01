@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
+import { restartServer } from "../api/client";
 import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
 import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
 const saving = ref(false);
+const restarting = ref(false);
 const error = ref("");
-const openSections = reactive({ appearance: true, codex: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, appearance: true, codex: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
@@ -29,6 +31,7 @@ const fullConfigJson = computed(() =>
     {
       pinned: files.pinned,
       current_path: files.currentPath,
+      visit_times: files.visitTimes,
       appearance: draft.appearance,
       codex: draft.codex,
       markdown: draft.markdown,
@@ -75,6 +78,45 @@ function clone<T>(value: T): T {
 function sectionToggle(section: keyof typeof openSections) {
   openSections[section] = !openSections[section];
   if (section === "json" && openSections.json) jsonDraft.value = fullConfigJson.value;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function waitForServer(previousPid: number) {
+  await sleep(1000);
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const response = await fetch(`/api/health?t=${Date.now()}`, { cache: "no-store" });
+      if (response.ok) {
+        const health = (await response.json()) as { pid?: number };
+        if (health.pid && health.pid !== previousPid) {
+          window.location.reload();
+          return;
+        }
+      }
+    } catch {
+      // The server is expected to be unavailable while the helper restarts it.
+    }
+    await sleep(1000);
+  }
+  error.value = "Restart was requested, but the server did not come back within 60 seconds.";
+  restarting.value = false;
+}
+
+async function restart() {
+  if (restarting.value) return;
+  if (!window.confirm("Restart the viewer server now?")) return;
+  restarting.value = true;
+  error.value = "";
+  try {
+    const response = await restartServer();
+    await waitForServer(response.pid);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+    restarting.value = false;
+  }
 }
 
 function normalizeModelList(value: string) {
@@ -185,6 +227,22 @@ async function applyJson() {
       </header>
 
       <div class="config-content">
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('server')">
+            <i class="bi" :class="openSections.server ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Server</span>
+          </button>
+          <div v-if="openSections.server" class="section-body">
+            <div class="server-actions">
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="restarting" @click="restart">
+                <span v-if="restarting" class="spinner-border spinner-border-sm"></span>
+                <i v-else class="bi bi-arrow-clockwise"></i>
+                <span>{{ restarting ? "Restarting" : "Restart server" }}</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
         <section class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('appearance')">
             <i class="bi" :class="openSections.appearance ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
@@ -421,6 +479,18 @@ async function applyJson() {
 
 .section-body {
   padding: 0 12px 12px;
+}
+
+.server-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.server-actions .btn {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
 }
 
 .setting-row,

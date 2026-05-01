@@ -20,12 +20,13 @@ class Settings(BaseSettings):
     voice_enabled: bool = False
     voice_upstream_ws: str = ""
     voice_model: str = "base"
-    voice_language: str = "auto"
+    voice_language: str = "en"
     voice_target_language: str = ""
-    voice_backend: str = "whisper"
+    voice_backend: str = "faster-whisper"
     voice_backend_policy: str = "localagreement"
     voice_direct_english_translation: bool = False
     voice_min_chunk_size: float = 0.1
+    voice_stop_timeout_seconds: float = 10.0
     voice_vac: bool = True
     voice_vad: bool = True
     debug: bool = False

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { codexSessionSocketUrl, getCodexSession } from "../../api/client";
 import { useCodexStore } from "../../stores/codex";
+import { useLayoutStore } from "../../stores/layout";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import VoiceInputButton from "../VoiceInputButton.vue";
@@ -10,6 +11,7 @@ import type { CodexEvent, CodexSessionInfo, CodexSessionSnapshot } from "../../t
 
 const props = defineProps<{ id: string; paneId: string }>();
 const codex = useCodexStore();
+const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const session = ref<CodexSessionSnapshot | null>(null);
 const promptText = ref("");
@@ -17,6 +19,7 @@ const error = ref("");
 const scroller = ref<HTMLElement | null>(null);
 const showRaw = ref(false);
 const stopping = ref(false);
+const creatingSession = ref(false);
 
 type CodexMessage =
   | { type: "snapshot"; session: CodexSessionSnapshot }
@@ -582,9 +585,29 @@ async function stopRun() {
   }
 }
 
+async function createSessionHere() {
+  if (!session.value || creatingSession.value) return;
+  creatingSession.value = true;
+  error.value = "";
+  try {
+    const nextSession = await codex.create("", session.value.cwd);
+    layout.openCodexSession(nextSession.id);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    creatingSession.value = false;
+  }
+}
+
 function updatePaneToolbar() {
   const status = session.value?.status ?? "connecting";
   const actions: PaneToolbarAction[] = [
+    {
+      id: "codex-new-session-here",
+      title: "New Codex session in this directory",
+      icon: "bi-plus-square",
+      run: () => createSessionHere(),
+    },
     {
       id: "codex-refresh",
       title: "Refresh Codex messages",

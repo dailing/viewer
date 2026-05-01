@@ -148,6 +148,7 @@ watch(sidebarPinned, (pinned) => {
 });
 
 function openFile(path: string) {
+  void files.recordVisit(path);
   layout.openFile(path);
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
@@ -232,7 +233,7 @@ onUnmounted(() => {
 <template>
   <div class="app-shell" :style="appStyle">
     <header class="topbar">
-      <button class="btn btn-outline-secondary icon-button" type="button" @click="sidebarOpen = !sidebarOpen" title="Files">
+      <button class="btn btn-outline-secondary icon-button" type="button" @click="sidebarOpen = !sidebarOpen" title="Tools">
         <i class="bi bi-list"></i>
       </button>
       <button class="btn btn-outline-secondary icon-button" type="button" title="Configuration" @click="configOpen = true">
@@ -292,7 +293,7 @@ onUnmounted(() => {
       <div v-if="sidebarOpen && !sidebarPinned" class="sidebar-backdrop" @click="sidebarOpen = false"></div>
       <aside class="sidebar-drawer" :class="{ open: sidebarOpen, pinned: sidebarPinned }">
         <div class="sidebar-chrome">
-          <span>Files</span>
+          <span>Tools</span>
           <button
             class="btn btn-sm btn-outline-secondary icon-button"
             type="button"

@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
@@ -13,6 +14,7 @@ from .events import hub
 from .files import content_hash, get_meta, guess_mime, list_directory, normalize_relative, read_config, read_text, resolve_path, write_config
 from .logging import current_log_path, ensure_logging
 from .models import ClientLog, CodexCliStatus, CodexModelOptions, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate
+from .restart import request_restart
 from .terminals import terminal_manager
 from .voice import connect_voice
 from .watcher import watch_root
@@ -70,8 +72,8 @@ async def shutdown() -> None:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "root": settings.root_resolved.as_posix()}
+async def health() -> dict[str, str | int]:
+    return {"status": "ok", "root": settings.root_resolved.as_posix(), "pid": os.getpid()}
 
 
 @app.get("/api/debug/info")
@@ -91,6 +93,14 @@ async def debug_log():
     if not log_path or not log_path.exists():
         return PlainTextResponse("No log file is configured.", status_code=404)
     return PlainTextResponse(log_path.read_text(encoding="utf-8", errors="replace"))
+
+
+@app.post("/api/admin/restart", status_code=202)
+async def restart_server():
+    try:
+        return request_restart()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/debug/client-log")
@@ -156,10 +166,15 @@ async def put_config(config: ConfigData):
             normalized.append(cleaned)
             seen.add(cleaned)
     current_path = normalize_relative(config.current_path)
+    visit_times = {}
+    for path, visited_at in config.visit_times.items():
+        cleaned = normalize_relative(path)
+        visit_times[cleaned] = visited_at
     return write_config(
         ConfigData(
             pinned=normalized,
             current_path=current_path,
+            visit_times=visit_times,
             appearance=config.appearance,
             markdown=config.markdown,
             codex=config.codex,

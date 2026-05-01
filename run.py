@@ -93,8 +93,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--voice-language",
-        default="auto",
-        help="Source language code for voice input, or auto. Defaults to auto.",
+        default="en",
+        help="Source language code for voice input, or auto. Defaults to en.",
     )
     parser.add_argument(
         "--voice-target-language",
@@ -152,7 +152,7 @@ def main() -> None:
     os.environ["VIEWER_VOICE_MODEL"] = os.environ.get("VIEWER_VOICE_MODEL", args.voice_model)
     os.environ["VIEWER_VOICE_LANGUAGE"] = os.environ.get("VIEWER_VOICE_LANGUAGE", args.voice_language)
     os.environ["VIEWER_VOICE_TARGET_LANGUAGE"] = os.environ.get("VIEWER_VOICE_TARGET_LANGUAGE", args.voice_target_language)
-    os.environ["VIEWER_VOICE_BACKEND"] = os.environ.get("VIEWER_VOICE_BACKEND", "whisper")
+    os.environ["VIEWER_VOICE_BACKEND"] = os.environ.get("VIEWER_VOICE_BACKEND", "faster-whisper")
     os.environ["VIEWER_VOICE_BACKEND_POLICY"] = os.environ.get("VIEWER_VOICE_BACKEND_POLICY", "localagreement")
     log_file = resolve_project_path(args.log_file) if args.log_file else default_log_file(args.log_dir)
     os.environ["VIEWER_LOG_FILE"] = log_file.as_posix()

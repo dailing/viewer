@@ -80,6 +80,7 @@ class CodexConfig(BaseModel):
 class ConfigData(BaseModel):
     pinned: list[str] = Field(default_factory=list)
     current_path: str = ""
+    visit_times: dict[str, float] = Field(default_factory=dict)
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)

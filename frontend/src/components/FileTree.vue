@@ -15,12 +15,11 @@ function icon(entry: FileEntry): string {
 }
 
 async function select(entry: FileEntry) {
-  if (entry.is_dir) return;
+  if (entry.is_dir) {
+    await files.enterDirectory(entry.path);
+    return;
+  }
   emit("open-file", entry.path);
-}
-
-async function enter(entry: FileEntry) {
-  if (entry.is_dir) await files.enterDirectory(entry.path);
 }
 
 function isActive(entry: FileEntry): boolean {
@@ -32,7 +31,7 @@ function isActive(entry: FileEntry): boolean {
   <div class="tree-list">
     <div v-for="entry in entries" :key="entry.path">
       <div class="tree-row" :class="{ active: isActive(entry) }">
-        <button class="tree-main" type="button" @click="select(entry)" @dblclick="enter(entry)" :title="entry.path">
+        <button class="tree-main" type="button" @click="select(entry)" :title="entry.path">
           <i class="bi" :class="icon(entry)"></i>
           <span class="entry-name">{{ entry.name }}</span>
           <i v-if="entry.is_symlink" class="bi bi-link-45deg muted"></i>

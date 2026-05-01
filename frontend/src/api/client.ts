@@ -47,6 +47,10 @@ export async function putConfig(config: ViewerConfig): Promise<ViewerConfig> {
   });
 }
 
+export async function restartServer(): Promise<{ status: string; pid: number }> {
+  return request<{ status: string; pid: number }>("/api/admin/restart", { method: "POST" });
+}
+
 export async function listTerminals(): Promise<TerminalInfo[]> {
   return request<TerminalInfo[]>("/api/terminals");
 }

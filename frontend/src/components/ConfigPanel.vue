@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { restartServer } from "../api/client";
+import { restartServer, stopServer } from "../api/client";
 import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
 import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme } from "../types/files";
 
@@ -8,7 +8,9 @@ const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
 const saving = ref(false);
 const restarting = ref(false);
+const stopping = ref(false);
 const error = ref("");
+const serverNotice = ref("");
 const openSections = reactive({ server: true, appearance: true, codex: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
@@ -110,12 +112,28 @@ async function restart() {
   if (!window.confirm("Restart the viewer server now?")) return;
   restarting.value = true;
   error.value = "";
+  serverNotice.value = "";
   try {
     const response = await restartServer();
     await waitForServer(response.pid);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
     restarting.value = false;
+  }
+}
+
+async function stop() {
+  if (stopping.value) return;
+  if (!window.confirm("Stop the viewer server now? Use scripts/manage_viewer.py start to bring it back.")) return;
+  stopping.value = true;
+  error.value = "";
+  serverNotice.value = "";
+  try {
+    await stopServer();
+    serverNotice.value = "Stop requested. Restart from the command line with scripts/manage_viewer.py start.";
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+    stopping.value = false;
   }
 }
 
@@ -234,12 +252,18 @@ async function applyJson() {
           </button>
           <div v-if="openSections.server" class="section-body">
             <div class="server-actions">
-              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="restarting" @click="restart">
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="restarting || stopping" @click="restart">
                 <span v-if="restarting" class="spinner-border spinner-border-sm"></span>
                 <i v-else class="bi bi-arrow-clockwise"></i>
                 <span>{{ restarting ? "Restarting" : "Restart server" }}</span>
               </button>
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="stopping || restarting" @click="stop">
+                <span v-if="stopping" class="spinner-border spinner-border-sm"></span>
+                <i v-else class="bi bi-stop-fill"></i>
+                <span>{{ stopping ? "Stopping" : "Stop server" }}</span>
+              </button>
             </div>
+            <div v-if="serverNotice" class="server-notice">{{ serverNotice }}</div>
           </div>
         </section>
 
@@ -444,7 +468,8 @@ async function applyJson() {
 }
 
 .config-header span,
-.config-error {
+.config-error,
+.server-notice {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -491,6 +516,10 @@ async function applyJson() {
   align-items: center;
   display: inline-flex;
   gap: 6px;
+}
+
+.server-notice {
+  margin-top: 8px;
 }
 
 .setting-row,

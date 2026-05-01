@@ -61,8 +61,21 @@ def resolve_path(path: str | None) -> Path:
 
 
 def resolve_served_directory(path: str | None, label: str) -> str:
-    requested = normalize_relative(path)
-    target = resolve_path(requested)
+    raw = (path or "").strip()
+    requested = normalize_relative(raw)
+    if raw:
+        raw_path = Path(raw).expanduser()
+        if raw_path.is_absolute():
+            try:
+                target = raw_path.resolve()
+                requested = target.relative_to(settings.root_resolved).as_posix()
+            except (OSError, ValueError):
+                logger.warning("{} cwd '{}' is outside served root; using root", label, raw)
+                return settings.root_resolved.as_posix()
+        else:
+            target = resolve_path(requested)
+    else:
+        target = settings.root_resolved
     if not target.exists() or not target.is_dir():
         if requested:
             logger.warning("{} cwd '{}' is not available; using root", label, requested)

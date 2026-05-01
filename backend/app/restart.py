@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 import sys
@@ -7,45 +6,50 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-HELPER_PATH = PROJECT_ROOT / "scripts" / "restart_viewer.py"
+MANAGER_PATH = PROJECT_ROOT / "scripts" / "manage_viewer.py"
+RESPONSE_FLUSH_DELAY_SECONDS = 0.35
 
 
-def _restart_dir() -> Path:
+def _admin_log_dir() -> Path:
     log_file = os.environ.get("VIEWER_LOG_FILE", "")
     if log_file:
         return Path(log_file).expanduser().resolve().parent
     return PROJECT_ROOT / "logs"
 
 
-def current_restart_command() -> list[str]:
-    return [sys.executable, *sys.argv]
+def _run_manager(command: str) -> dict[str, Any]:
+    if not MANAGER_PATH.exists():
+        raise RuntimeError(f"Viewer manager does not exist: {MANAGER_PATH}")
 
-
-def request_restart() -> dict[str, Any]:
-    if not HELPER_PATH.exists():
-        raise RuntimeError(f"Restart helper does not exist: {HELPER_PATH}")
-
-    restart_dir = _restart_dir()
-    restart_dir.mkdir(parents=True, exist_ok=True)
-    state_path = restart_dir / f"restart-{os.getpid()}.json"
-    helper_log_path = restart_dir / "restart.log"
-    state = {
-        "pid": os.getpid(),
-        "command": current_restart_command(),
-        "cwd": os.getcwd(),
-        "helper_log": helper_log_path.as_posix(),
-    }
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
-
-    with helper_log_path.open("a", encoding="utf-8") as helper_log:
+    log_dir = _admin_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    admin_log_path = log_dir / "manager.log"
+    manager_command = [
+        sys.executable,
+        MANAGER_PATH.as_posix(),
+        command,
+        "--pid",
+        str(os.getpid()),
+        "--delay",
+        str(RESPONSE_FLUSH_DELAY_SECONDS),
+    ]
+    with admin_log_path.open("a", encoding="utf-8") as admin_log:
         subprocess.Popen(
-            [sys.executable, HELPER_PATH.as_posix(), state_path.as_posix()],
+            manager_command,
             cwd=PROJECT_ROOT,
             stdin=subprocess.DEVNULL,
-            stdout=helper_log,
+            stdout=admin_log,
             stderr=subprocess.STDOUT,
             close_fds=True,
             start_new_session=True,
         )
 
-    return {"status": "restarting", "pid": state["pid"], "command": state["command"]}
+    return {"status": f"{command}ing" if command == "restart" else "stopping", "pid": os.getpid(), "command": manager_command}
+
+
+def request_restart() -> dict[str, Any]:
+    return _run_manager("restart")
+
+
+def request_stop() -> dict[str, Any]:
+    return _run_manager("stop")

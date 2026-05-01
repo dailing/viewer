@@ -14,7 +14,7 @@ from .events import hub
 from .files import content_hash, get_meta, guess_mime, list_directory, normalize_relative, read_config, read_text, resolve_path, write_config
 from .logging import current_log_path, ensure_logging
 from .models import ClientLog, CodexCliStatus, CodexModelOptions, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate
-from .restart import request_restart
+from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
 from .watcher import watch_root
@@ -99,6 +99,14 @@ async def debug_log():
 async def restart_server():
     try:
         return request_restart()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/stop", status_code=202)
+async def stop_server():
+    try:
+        return request_stop()
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

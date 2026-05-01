@@ -27,7 +27,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/health`: returns health, active root, and current backend PID.
 - `/api/debug/info`: returns debug/root/frontend/log file details.
 - `/api/debug/log`: returns current log file content.
-- `/api/admin/restart`: launches the detached restart helper and returns the current PID before the server is terminated.
+- `/api/admin/restart`: launches the detached process manager to stop the current PID and start a replacement server with the manager's default command.
+- `/api/admin/stop`: launches the detached process manager to stop the current backend PID.
 - `/api/debug/client-log`: receives frontend errors and writes them through Loguru.
 - `/api/tree`: calls `list_directory()`.
 - `/api/file/meta`: calls `get_meta()`.
@@ -160,9 +161,10 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `backend/app/restart.py`
 
-- Builds the restart state for the current process and launches `scripts/restart_viewer.py` as a detached helper.
-- `current_restart_command()`: returns the current Python executable plus `sys.argv`, intentionally reusing the current interpreter/environment rather than reconstructing a `uv run` command.
-- `request_restart()`: writes restart state under the current log directory, starts the helper with output in `restart.log`, and returns `status`, current `pid`, and command metadata to the API caller.
+- Thin admin bridge from FastAPI to the detached process manager.
+- `_run_manager(command)`: starts `scripts/manage_viewer.py` in a new session with the current backend PID and a short delay so the HTTP response can flush before the server is signaled.
+- `request_restart()`: asks the manager to stop the current backend PID and start the default managed server command.
+- `request_stop()`: asks the manager to stop the current backend PID without starting a replacement.
 
 `backend/app/__init__.py`
 
@@ -240,7 +242,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Configuration UI opened from the top bar.
 - Edits `.viewer.config.json` through the existing `/api/config` endpoint.
 - Sections: Server, Appearance, Codex Models, Markdown, Syntax Highlighting, and raw JSON.
-- Server section has a confirmed restart button that calls `/api/admin/restart`, polls `/api/health` until the PID changes, then reloads the page.
+- Server section has confirmed restart and stop buttons. Restart calls `/api/admin/restart`, polls `/api/health` until the PID changes, then reloads the page. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
 - Appearance currently controls nav bar size, which also drives icon/button size via CSS variables.
 - Codex Models controls the default Codex model and the available model list used by `/api/codex/models` and the Codex pane toolbar.
 - Markdown config stores an active theme plus a theme list. The editor can duplicate/reset themes and edit heading/body/paragraph/code font sizes, colors, weights, link/code/border colors, and Highlight.js token colors.
@@ -339,7 +341,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Shared fetch helpers for REST and raw/WS URLs.
 - `request<T>()`: JSON request with error text on non-2xx.
 - File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
-- Admin API: `restartServer()`.
+- Admin APIs: `restartServer()` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
 - Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `deleteCodexSession()`, `codexSessionSocketUrl()`.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
@@ -446,10 +448,13 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `default_log_file(log_dir)`: timestamped log path.
 - `main()`: validates served root, exports env, configures logging, optionally builds frontend, prints URLs, starts uvicorn.
 
-`scripts/restart_viewer.py`
+`scripts/manage_viewer.py`
 
-- Detached helper used by `/api/admin/restart`.
-- Reads a JSON state file containing the old PID, cwd, and restart command; waits briefly for the API response to flush; sends `SIGTERM`; waits for process exit; escalates to `SIGKILL` after a timeout; starts the replacement process in a new session with inherited environment and output appended to `restart.log`.
+- Lightweight CLI process manager with `start`, `stop`, `restart`, and `status` commands.
+- Stores `viewer.pid`, `viewer.json`, and `viewer.log` under the system temp directory at `viewer-process-manager/<project-hash>/`.
+- Default start command is `uv run run.py --build-frontend --debug -p 18888`, matching the local server command used for this project.
+- `stop` sends `SIGTERM`, waits for exit, escalates to `SIGKILL` after a timeout, and clears the pid/state files.
+- `restart` stops the active or explicitly supplied PID, then starts the default or override command in a detached session.
 
 `pyproject.toml`
 

@@ -32,6 +32,7 @@ let reconnectTimer: number | null = null;
 let mounted = false;
 
 const canSend = computed(() => Boolean(promptText.value.trim()) && session.value?.status !== "running");
+const canClearPrompt = computed(() => Boolean(promptText.value));
 const sortedEvents = computed(() => [...(session.value?.events ?? [])].sort((a, b) => a.index - b.index));
 const codexStatusItems = computed(() => {
   const status = session.value;
@@ -572,6 +573,10 @@ async function sendPrompt() {
   }
 }
 
+function clearPrompt() {
+  promptText.value = "";
+}
+
 async function stopRun() {
   if (!session.value || session.value.status !== "running" || stopping.value) return;
   stopping.value = true;
@@ -746,6 +751,10 @@ onUnmounted(() => {
         <button class="btn btn-primary" type="submit" :disabled="!canSend">
           <i class="bi bi-send-fill"></i>
           <span>Send</span>
+        </button>
+        <button class="btn btn-outline-secondary" type="button" :disabled="!canClearPrompt" @click="clearPrompt">
+          <i class="bi bi-eraser"></i>
+          <span>Clear</span>
         </button>
         <button class="btn btn-outline-danger" type="button" :disabled="session?.status !== 'running' || stopping" @click="stopRun">
           <i class="bi bi-stop-fill"></i>

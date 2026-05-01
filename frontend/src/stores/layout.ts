@@ -25,6 +25,14 @@ function firstPaneId(node: LayoutNode): string {
   return node.type === "pane" ? node.id : firstPaneId(node.first);
 }
 
+function hasPane(node: LayoutNode, paneId: string): boolean {
+  return Boolean(findPane(node, paneId));
+}
+
+function cloneLayout(node: LayoutNode): LayoutNode {
+  return JSON.parse(JSON.stringify(node)) as LayoutNode;
+}
+
 function mapAllPanes(node: LayoutNode, update: (pane: Extract<LayoutNode, { type: "pane" }>) => LayoutNode): LayoutNode {
   if (node.type === "pane") return update(node);
   return { ...node, first: mapAllPanes(node.first, update), second: mapAllPanes(node.second, update) };
@@ -123,6 +131,19 @@ export const useLayoutStore = defineStore("layout", {
     },
     save() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
+    },
+    snapshot() {
+      return { root: cloneLayout(this.root), activePaneId: this.activePaneId || firstPaneId(this.root) };
+    },
+    restore(root: LayoutNode, activePaneId?: string | null) {
+      this.root = cloneLayout(root);
+      this.activePaneId = activePaneId && hasPane(this.root, activePaneId) ? activePaneId : firstPaneId(this.root);
+      this.save();
+    },
+    reset() {
+      this.root = defaultLayout();
+      this.activePaneId = firstPaneId(this.root);
+      this.save();
     },
     setActive(paneId: string) {
       this.activePaneId = paneId;

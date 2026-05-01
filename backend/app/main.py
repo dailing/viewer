@@ -11,9 +11,22 @@ from loguru import logger
 from .config import settings
 from .codex_sessions import codex_session_manager
 from .events import hub
-from .files import content_hash, get_meta, guess_mime, list_directory, normalize_relative, read_config, read_text, resolve_path, write_config
+from .files import (
+    content_hash,
+    get_meta,
+    guess_mime,
+    list_directory,
+    normalize_relative,
+    read_config,
+    read_text,
+    read_workspaces,
+    resolve_path,
+    set_active_workspace,
+    write_config,
+    write_workspace,
+)
 from .logging import current_log_path, ensure_logging
-from .models import ClientLog, CodexCliStatus, CodexModelOptions, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate
+from .models import ClientLog, CodexCliStatus, CodexModelOptions, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -186,8 +199,24 @@ async def put_config(config: ConfigData):
             appearance=config.appearance,
             markdown=config.markdown,
             codex=config.codex,
+            workspaces=config.workspaces,
         )
     )
+
+
+@app.get("/api/workspaces")
+async def get_workspaces():
+    return read_workspaces()
+
+
+@app.put("/api/workspaces/{workspace_id}")
+async def put_workspace(workspace_id: str, snapshot: WorkspaceSnapshot):
+    return write_workspace(workspace_id, snapshot)
+
+
+@app.post("/api/workspaces/{workspace_id}/activate")
+async def activate_workspace(workspace_id: str):
+    return set_active_workspace(workspace_id)
 
 
 @app.get("/api/events")

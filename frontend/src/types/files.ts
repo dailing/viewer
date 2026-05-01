@@ -75,6 +75,10 @@ export interface CodexConfig {
   default_model: string;
 }
 
+export interface WorkspaceConfig {
+  count: number;
+}
+
 export interface ViewerConfig {
   pinned: string[];
   current_path: string;
@@ -82,6 +86,7 @@ export interface ViewerConfig {
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
   codex?: CodexConfig;
+  workspaces?: WorkspaceConfig;
 }
 
 export interface WatchEvent {

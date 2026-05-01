@@ -1,6 +1,7 @@
 import type { DirectoryListing, FileMeta, ViewerConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
+import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -45,6 +46,22 @@ export async function putConfig(config: ViewerConfig): Promise<ViewerConfig> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
+}
+
+export async function getWorkspaces(): Promise<WorkspaceData> {
+  return request<WorkspaceData>("/api/workspaces");
+}
+
+export async function putWorkspace(id: string, snapshot: WorkspaceSnapshot): Promise<WorkspaceData> {
+  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(snapshot),
+  });
+}
+
+export async function activateWorkspace(id: string): Promise<WorkspaceData> {
+  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/activate`, { method: "POST" });
 }
 
 export async function restartServer(): Promise<{ status: string; pid: number }> {

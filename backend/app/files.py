@@ -6,9 +6,10 @@ from fastapi import HTTPException
 from loguru import logger
 
 from .config import settings
-from .models import ConfigData, DirectoryListing, FileEntry, FileMeta
+from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, WorkspaceData, WorkspaceSnapshot
 
 CONFIG_NAME = ".viewer.config.json"
+WORKSPACES_NAME = ".viewer.workspaces.json"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
@@ -222,6 +223,7 @@ def read_config() -> ConfigData:
         appearance=config.appearance,
         markdown=config.markdown,
         codex=config.codex,
+        workspaces=config.workspaces,
     )
 
 
@@ -229,3 +231,58 @@ def write_config(config: ConfigData) -> ConfigData:
     path = config_path()
     path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
     return config
+
+
+def workspaces_path() -> Path:
+    return settings.root_resolved / WORKSPACES_NAME
+
+
+def read_workspaces() -> WorkspaceData:
+    path = workspaces_path()
+    if not path.exists():
+        return WorkspaceData()
+    try:
+        data = WorkspaceData.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Ignoring invalid workspace state file {}", path)
+        return WorkspaceData()
+    return data
+
+
+def write_workspaces(data: WorkspaceData) -> WorkspaceData:
+    path = workspaces_path()
+    path.write_text(data.model_dump_json(indent=2), encoding="utf-8")
+    return data
+
+
+def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> WorkspaceData:
+    cleaned_id = workspace_id.strip()
+    if not cleaned_id:
+        raise HTTPException(status_code=400, detail="Workspace id is required")
+    current_path = normalize_relative(snapshot.current_path)
+    pinned = []
+    seen = set()
+    for item in snapshot.pinned or []:
+        cleaned = normalize_relative(item)
+        if cleaned not in seen:
+            pinned.append(cleaned)
+            seen.add(cleaned)
+    data = read_workspaces()
+    data.active_workspace_id = cleaned_id
+    data.slots[cleaned_id] = WorkspaceSnapshot(
+        layout=snapshot.layout,
+        active_pane_id=snapshot.active_pane_id,
+        current_path=current_path,
+        pinned=pinned,
+        updated_at=snapshot.updated_at,
+    )
+    return write_workspaces(data)
+
+
+def set_active_workspace(workspace_id: str) -> WorkspaceData:
+    cleaned_id = workspace_id.strip()
+    if not cleaned_id:
+        raise HTTPException(status_code=400, detail="Workspace id is required")
+    data = read_workspaces()
+    data.active_workspace_id = cleaned_id
+    return write_workspaces(data)

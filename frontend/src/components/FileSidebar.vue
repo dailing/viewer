@@ -8,10 +8,17 @@ type SidebarTool = "files" | "terminals" | "codex";
 
 const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 
+const props = defineProps<{
+  workspaceCount: number;
+  activeWorkspaceId: string;
+  switchingWorkspace?: boolean;
+}>();
+
 const emit = defineEmits<{
   "open-file": [path: string];
   "open-terminal": [id: string];
   "open-codex-session": [id: string];
+  "switch-workspace": [id: string];
 }>();
 
 const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
@@ -27,6 +34,7 @@ function storedTool(): SidebarTool {
 
 const activeTool = ref<SidebarTool>(storedTool());
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
+const workspaceIds = computed(() => Array.from({ length: Math.max(1, props.workspaceCount) }, (_, index) => String(index + 1)));
 
 watch(activeTool, (tool) => {
   localStorage.setItem(ACTIVE_TOOL_KEY, tool);
@@ -49,6 +57,22 @@ watch(activeTool, (tool) => {
       >
         <i class="bi" :class="tool.icon"></i>
       </button>
+      <div class="workspace-buttons" aria-label="Workspaces">
+        <button
+          v-for="id in workspaceIds"
+          :key="id"
+          class="activity-button workspace-button"
+          :class="{ active: props.activeWorkspaceId === id }"
+          type="button"
+          :title="`Workspace ${id}`"
+          :aria-label="`Workspace ${id}`"
+          :aria-pressed="props.activeWorkspaceId === id"
+          :disabled="props.switchingWorkspace"
+          @click="emit('switch-workspace', id)"
+        >
+          <span>{{ id }}</span>
+        </button>
+      </div>
     </nav>
 
     <section class="tool-panel" :aria-label="activeTitle">
@@ -116,6 +140,20 @@ watch(activeTool, (tool) => {
 .activity-button .bi {
   font-size: 16px;
   line-height: 1;
+}
+
+.workspace-buttons {
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  padding-top: 6px;
+}
+
+.workspace-button {
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .tool-panel {

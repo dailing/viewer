@@ -77,6 +77,10 @@ class CodexConfig(BaseModel):
     default_model: str = "gpt-5.5"
 
 
+class WorkspaceConfig(BaseModel):
+    count: int = Field(default=5, ge=1, le=20)
+
+
 class ConfigData(BaseModel):
     pinned: list[str] = Field(default_factory=list)
     current_path: str = ""
@@ -84,6 +88,20 @@ class ConfigData(BaseModel):
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
+    workspaces: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+
+
+class WorkspaceSnapshot(BaseModel):
+    layout: dict
+    active_pane_id: str | None = None
+    current_path: str = ""
+    pinned: list[str] | None = None
+    updated_at: float | None = None
+
+
+class WorkspaceData(BaseModel):
+    active_workspace_id: str = "1"
+    slots: dict[str, WorkspaceSnapshot] = Field(default_factory=dict)
 
 
 class WatchEvent(BaseModel):

@@ -18,6 +18,7 @@ frontend/dist/
 
 # Local viewer/user state
 .viewer.config.json
+.viewer.workspaces.json
 .codex
 
 # Logs and local editor/OS files

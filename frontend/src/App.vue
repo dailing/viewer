@@ -9,6 +9,7 @@ import { useFilesStore } from "./stores/files";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
+import { useWorkspacesStore } from "./stores/workspaces";
 import { parentPath } from "./utils/paths";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { SplitDirection } from "./types/layout";
@@ -22,6 +23,7 @@ const codex = useCodexStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
+const workspaces = useWorkspacesStore();
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
 const configOpen = ref(false);
@@ -111,9 +113,12 @@ const globalPaneActions = computed<PaneToolbarAction[]>(() => {
 });
 const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
 const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
+const workspaceCount = computed(() => files.workspaceConfig.count);
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 let codexRefresh: number | null = null;
+let workspaceSaveTimer: number | null = null;
+let workspaceAutosaveReady = false;
 
 function eventAffectsOpenPath(eventPath: string): boolean {
   return layout.openPaths.some((openPath) => openPath === eventPath || parentPath(openPath) === eventPath);
@@ -124,8 +129,9 @@ onMounted(async () => {
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || sidebarWidth.value);
   sidebarOpen.value = sidebarPinned.value;
   layout.load();
-  await Promise.all([files.loadConfig(), terminals.load(), codex.load()]);
-  await files.loadDirectory(files.currentPath);
+  await Promise.all([files.loadConfig(), terminals.load(), codex.load(), workspaces.load()]);
+  await restoreInitialWorkspace();
+  workspaceAutosaveReady = true;
   source = connectEvents(
     async (event) => {
       await files.refreshAffected(event.path, event.is_dir);
@@ -140,6 +146,22 @@ onMounted(async () => {
   codexRefresh = window.setInterval(() => {
     void codex.load();
   }, 3000);
+});
+
+watch(
+  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned],
+  () => {
+    scheduleWorkspaceSave();
+  },
+  { deep: true },
+);
+
+watch(workspaceCount, () => {
+  if (!workspaceAutosaveReady) return;
+  const activeId = normalizeWorkspaceId(workspaces.activeWorkspaceId);
+  if (activeId !== workspaces.activeWorkspaceId) {
+    void switchWorkspace(activeId);
+  }
 });
 
 watch(sidebarPinned, (pinned) => {
@@ -161,6 +183,85 @@ function openTerminal(id: string) {
 function openCodexSession(id: string) {
   layout.openCodexSession(id);
   if (!sidebarPinned.value) sidebarOpen.value = false;
+}
+
+function currentWorkspaceSnapshot() {
+  const snapshot = layout.snapshot();
+  return {
+    layout: snapshot.root,
+    active_pane_id: snapshot.activePaneId,
+    current_path: files.currentPath,
+    pinned: [...files.pinned],
+  };
+}
+
+function scheduleWorkspaceSave() {
+  if (!workspaceAutosaveReady || workspaces.switching) return;
+  if (workspaceSaveTimer !== null) window.clearTimeout(workspaceSaveTimer);
+  workspaceSaveTimer = window.setTimeout(() => {
+    workspaceSaveTimer = null;
+    void workspaces.saveSlot(workspaces.activeWorkspaceId, currentWorkspaceSnapshot());
+  }, 500);
+}
+
+function normalizeWorkspaceId(id: string) {
+  const index = Number(id);
+  if (!Number.isInteger(index) || index < 1 || index > workspaceCount.value) return "1";
+  return String(index);
+}
+
+async function loadWorkspaceDirectory(path: string) {
+  try {
+    await files.enterDirectory(path);
+  } catch {
+    await files.enterDirectory("");
+  }
+}
+
+function restoreWorkspacePins(pinned?: string[] | null) {
+  files.pinned = [...(pinned ?? files.pinned)];
+}
+
+async function restoreInitialWorkspace() {
+  const activeId = normalizeWorkspaceId(workspaces.activeWorkspaceId);
+  if (activeId !== workspaces.activeWorkspaceId) {
+    await workspaces.activate(activeId);
+  }
+  const snapshot = workspaces.snapshotFor(activeId);
+  if (snapshot) {
+    layout.restore(snapshot.layout, snapshot.active_pane_id);
+    restoreWorkspacePins(snapshot.pinned);
+    await loadWorkspaceDirectory(snapshot.current_path);
+    return;
+  }
+  await files.loadDirectory(files.currentPath);
+  await workspaces.saveSlot(activeId, currentWorkspaceSnapshot());
+}
+
+async function switchWorkspace(id: string) {
+  const targetId = normalizeWorkspaceId(id);
+  if (workspaces.switching || targetId === workspaces.activeWorkspaceId) return;
+  workspaces.switching = true;
+  if (workspaceSaveTimer !== null) {
+    window.clearTimeout(workspaceSaveTimer);
+    workspaceSaveTimer = null;
+  }
+  try {
+    await workspaces.saveSlot(workspaces.activeWorkspaceId, currentWorkspaceSnapshot());
+    const target = workspaces.snapshotFor(targetId);
+    if (target) {
+      layout.restore(target.layout, target.active_pane_id);
+      restoreWorkspacePins(target.pinned);
+      await loadWorkspaceDirectory(target.current_path);
+      await workspaces.activate(targetId);
+    } else {
+      layout.reset();
+      files.pinned = [];
+      await workspaces.saveSlot(targetId, currentWorkspaceSnapshot());
+    }
+  } finally {
+    workspaces.switching = false;
+  }
 }
 
 function toggleSidebarPin() {
@@ -225,6 +326,7 @@ function closeActivePane() {
 
 onUnmounted(() => {
   source?.close();
+  if (workspaceSaveTimer !== null) window.clearTimeout(workspaceSaveTimer);
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
   if (codexRefresh !== null) window.clearInterval(codexRefresh);
 });
@@ -312,7 +414,15 @@ onUnmounted(() => {
             <i class="bi bi-x"></i>
           </button>
         </div>
-        <FileSidebar @open-file="openFile" @open-terminal="openTerminal" @open-codex-session="openCodexSession" />
+        <FileSidebar
+          :workspace-count="workspaceCount"
+          :active-workspace-id="workspaces.activeWorkspaceId"
+          :switching-workspace="workspaces.switching"
+          @open-file="openFile"
+          @open-terminal="openTerminal"
+          @open-codex-session="openCodexSession"
+          @switch-workspace="switchWorkspace"
+        />
       </aside>
       <div
         v-if="sidebarPinned"

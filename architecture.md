@@ -335,7 +335,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Structured Codex session pane connected to `/api/codex/sessions/{id}/ws`.
 - Loads snapshots with `getCodexSession()`, receives live JSON events/status over WebSocket, and updates `stores/codex.ts`.
 - Renders prompts, normalized event text, status, Codex thread id, cwd, inline patch/file-change details parsed from `patch_apply_end`/`apply_patch` events, wrapped word-level highlights inside paired added/deleted diff lines, derived post-change result snippets below diffs, and optional raw JSON details toggled through the active-pane toolbar.
-- Registers Codex-specific top-bar controls through `stores/paneToolbar.ts`, including the refresh action, model selector, session-specific context chips, latest global rate-limit-left chips, raw JSON toggle, and stop action. The Codex cwd stays in the session content header, not the navbar.
+- Registers Codex-specific top-bar controls through `stores/paneToolbar.ts`, including the refresh action, model selector, session-specific context chips, latest global rate-limit-left chips, and raw JSON toggle. The Codex cwd stays in the session content header, not the navbar.
 - Its Codex-specific top-bar actions also include creating a new idle Codex session in the current session's working directory, then opening it in the active pane.
 - Rollout rendering is keyed to canonical `~/.codex/sessions/**/rollout-*.jsonl` shapes: top-level `response_item` and `event_msg`, with turn grouping from `event_msg.payload.type=task_started/task_complete`.
 - Sends follow-up prompts through `stores/codex.ts`, which calls `/api/codex/sessions/{id}/messages`.

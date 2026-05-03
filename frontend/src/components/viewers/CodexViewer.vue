@@ -535,15 +535,6 @@ function updatePaneToolbar() {
       },
     },
   ];
-  if (session.value?.status === "running") {
-    actions.push({
-      id: "codex-stop",
-      title: "Stop current run",
-      icon: "bi-stop-fill",
-      variant: "danger",
-      run: () => stopRun(),
-    });
-  }
   paneToolbar.setPaneToolbar(props.paneId, {
     title: session.value?.title ?? "Codex",
     status,

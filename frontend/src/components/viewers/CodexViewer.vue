@@ -21,7 +21,7 @@ const session = ref<CodexSessionSnapshot | null>(null);
 const promptText = ref("");
 const error = ref("");
 const scroller = ref<HTMLElement | null>(null);
-const focusMode = ref(false);
+const focusMode = ref(true);
 const stopping = ref(false);
 const creatingSession = ref(false);
 const editingQueueItemId = ref<string | null>(null);
@@ -36,7 +36,6 @@ let socket: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let mounted = false;
 
-const canSend = computed(() => Boolean(promptText.value.trim()) && session.value?.status !== "running");
 const canQueue = computed(() => Boolean(promptText.value.trim()));
 const isEditingQueue = computed(() => editingQueueItemId.value !== null);
 const editingQueueItem = computed(() => session.value?.queue.find((item) => item.id === editingQueueItemId.value) ?? null);
@@ -404,21 +403,6 @@ function connect() {
   });
 }
 
-async function sendPrompt() {
-  const prompt = promptText.value.trim();
-  if (!prompt || !session.value || session.value.status === "running" || isEditingQueue.value) return;
-  error.value = "";
-  promptText.value = "";
-  voice.clear(voiceContextId.value);
-  session.value.prompts.push({ text: prompt, created_at: Date.now() / 1000 });
-  try {
-    applyInfo(await codex.send(props.id, prompt));
-    scrollToBottom(true);
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
-  }
-}
-
 async function queuePrompt() {
   const prompt = promptText.value.trim();
   if (!prompt || !session.value || isEditingQueue.value) return;
@@ -638,7 +622,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <form class="codex-input" @submit.prevent="isEditingQueue ? saveQueuedMessage() : sendPrompt()">
+    <form class="codex-input" @submit.prevent="isEditingQueue && saveQueuedMessage()">
       <div v-if="session?.queue.length" class="codex-queue">
         <div class="codex-queue-title">Queue</div>
         <div
@@ -663,7 +647,6 @@ onUnmounted(() => {
       </div>
       <div class="codex-input-box">
         <textarea v-model="promptText" rows="3" placeholder="Send a message to this Codex session"></textarea>
-        <VoiceInputButton v-model="promptText" :context-id="voiceContextId" />
       </div>
       <div class="codex-input-actions">
         <template v-if="isEditingQueue">
@@ -681,22 +664,19 @@ onUnmounted(() => {
           </button>
         </template>
         <template v-else>
-        <button v-if="session?.status !== 'running'" class="btn btn-primary" type="submit" :disabled="!canSend">
-          <i class="bi bi-send-fill"></i>
-          <span>Send</span>
-        </button>
-        <button class="btn btn-outline-primary" type="button" :disabled="!canQueue" @click="queuePrompt">
-          <i class="bi bi-list-ol"></i>
-          <span>Queue</span>
-        </button>
-        <button class="btn btn-outline-secondary" type="button" :disabled="!canClearPrompt" @click="clearPrompt">
-          <i class="bi bi-eraser"></i>
-          <span>Clear</span>
-        </button>
-        <button class="btn btn-outline-danger" type="button" :disabled="session?.status !== 'running' || stopping" @click="stopRun">
-          <i class="bi bi-stop-fill"></i>
-          <span>{{ stopping ? "Stopping" : "Stop" }}</span>
-        </button>
+          <VoiceInputButton v-model="promptText" :context-id="voiceContextId" />
+          <button class="btn btn-outline-primary" type="button" :disabled="!canQueue" @click="queuePrompt">
+            <i class="bi bi-list-ol"></i>
+            <span>Queue</span>
+          </button>
+          <button class="btn btn-outline-secondary" type="button" :disabled="!canClearPrompt" @click="clearPrompt">
+            <i class="bi bi-eraser"></i>
+            <span>Clear</span>
+          </button>
+          <button class="btn btn-outline-danger" type="button" :disabled="session?.status !== 'running' || stopping" @click="stopRun">
+            <i class="bi bi-stop-fill"></i>
+            <span>{{ stopping ? "Stopping" : "Stop" }}</span>
+          </button>
         </template>
       </div>
     </form>
@@ -1034,7 +1014,7 @@ onUnmounted(() => {
   line-height: 1.35;
   min-height: 92px;
   outline: none;
-  padding: 8px 46px 8px 8px;
+  padding: 8px;
   resize: vertical;
   width: 100%;
 }
@@ -1042,19 +1022,6 @@ onUnmounted(() => {
 .codex-input textarea:focus {
   border-color: #1f6feb;
   box-shadow: 0 0 0 2px rgb(31 111 235 / 0.16);
-}
-
-.codex-input-box :deep(.voice-input-button) {
-  align-items: center;
-  border-radius: 999px;
-  bottom: 8px;
-  display: inline-flex;
-  height: 34px;
-  justify-content: center;
-  padding: 0;
-  position: absolute;
-  right: 8px;
-  width: 34px;
 }
 
 .codex-input-actions {

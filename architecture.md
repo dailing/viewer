@@ -14,7 +14,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 4. `App.vue` loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, and dispatches `viewer:file-changed` browser events for open panes.
 5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component. Viewers fetch raw/text content and reload when their `version` prop changes.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
-7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run.
+7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run. Raw rollout events stay server-side; REST/WebSocket snapshots send compact display events so hidden tool output is not transmitted to the browser.
 
 ## Backend Structure
 
@@ -42,8 +42,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/codex/sessions`: lists or creates Codex sessions. POST starts `codex exec --json` in a served-root-relative `cwd`.
 - `/api/codex/status`: returns the latest global Codex CLI rate-limit status parsed from recent `~/.codex/sessions/**/rollout-*.jsonl` `token_count` events by timestamp; pane-level context usage comes from each session's matched rollout file.
 - `/api/codex/models`: returns selected and available models for Codex session creation from `.viewer.config.json` codex defaults only.
-- `/api/codex/sessions/{session_id}` routes: snapshot, send a resumed message via `codex exec resume --json`, terminate a running Codex subprocess, delete logs/metadata, and WebSocket connect.
-- `/api/voice/ws`: optional voice-input WebSocket endpoint backed by in-process WhisperLiveKit by default, or by a configured upstream ASR WebSocket when `VIEWER_VOICE_UPSTREAM_WS` is set.
+- `/api/codex/sessions/{session_id}` routes: snapshot, send a resumed message via `codex exec resume --json`, append/update/delete server-persisted queued messages, terminate a running Codex subprocess, delete logs/metadata, and WebSocket connect.
+- `/api/voice/ws`: optional voice-input WebSocket endpoint. By default the browser streams encoded audio chunks while recording, the backend saves them, and a single full-file `faster-whisper` transcription runs after the client sends `stop`. A configured upstream ASR WebSocket still bypasses the in-process path.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
 
 `backend/app/config.py`
@@ -53,7 +53,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `Settings.root_resolved`: expanded absolute served directory.
 - `Settings.frontend_dist_resolved`: expanded absolute frontend build directory.
 - Important settings: `root`, `host`, `port`, `frontend_dist`, `max_text_preview_bytes`, `show_hidden`, `poll_delay_ms`, `terminal_shell`, `debug`, `log_file`.
-- Voice settings: `voice_enabled`, `voice_model`, `voice_language`, `voice_target_language`, `voice_backend`, `voice_backend_policy`, `voice_direct_english_translation`, `voice_min_chunk_size`, `voice_stop_timeout_seconds`, `voice_vac`, and `voice_vad` configure the in-process WhisperLiveKit engine. `run.py` enables voice by default, uses `large-v3-turbo`, sets the default source language to `en`, and sets the default backend to `faster-whisper` with `localagreement` unless env vars override them. `voice_upstream_ws` bypasses the in-process engine and proxies microphone audio to a separate streaming ASR WebSocket.
+- Voice settings: `voice_enabled`, `voice_model`, `voice_language`, `voice_target_language`, `voice_backend`, `voice_backend_policy`, `voice_direct_english_translation`, `voice_min_chunk_size`, `voice_stop_timeout_seconds`, `voice_model_idle_timeout_seconds`, `voice_offline_beam_size`, `voice_offline_vad_filter`, `voice_vac`, and `voice_vad` configure voice input. `run.py` enables voice by default, uses `large-v3-turbo`, sets the default source language to `en`, and sets the default backend to `faster-whisper` with `localagreement` unless env vars override them. `voice_upstream_ws` bypasses the in-process offline path and proxies microphone audio to a separate streaming ASR WebSocket.
 
 `backend/app/files.py`
 
@@ -119,13 +119,16 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `backend/app/codex_sessions.py`
 
 - Structured Codex session manager using `codex exec --json` subprocesses instead of PTY/TUI rendering.
-- `CodexSession`: viewer-local session state including title, working directory, Codex thread/session id, rollout path, prompts, parsed rollout JSON events, process status, connected WebSocket clients, and paths for metadata/stderr logs.
+- `CodexSession`: viewer-local session state including title, working directory, served-root-relative working directory for frontend filtering, Codex thread/session id, rollout path, prompts, server-persisted queued prompts, parsed rollout JSON events, process status, connected WebSocket clients, and paths for metadata/stderr logs.
 - Session metadata now stores an optional `model`; when set, runs pass `-m <model>` to `codex exec`.
 - `cli_status()`: scans recent `~/.codex/sessions/**/rollout-*.jsonl` files, parses `token_count` events, and exposes a cached coarse status payload using the newest event timestamp for global 5-hour/weekly rate-limit chips. Codex `rate_limits.*.used_percent` values are treated as percentage points, and the API also exposes `*_remaining_percent` for "usage left" UI.
 - `CodexSessionManager.create(prompt, cwd)`: creates a viewer session and writes metadata. If `prompt` is blank, the session stays `idle`; otherwise it starts `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -C <cwd> -`, feeds the prompt on stdin, and uses stdout only to discover the Codex thread id and trigger rollout resyncs.
 - `send(session_id, prompt)`: starts a new `codex exec --json` run when no Codex thread id has been captured yet, otherwise resumes with `codex exec resume --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <thread_id> -`. It rejects concurrent sends while a session is running and appends the prompt to metadata.
-- Codex subprocesses set `https_proxy`, `HTTPS_PROXY`, `http_proxy`, and `HTTP_PROXY` to `http://localhost:7890`.
+- `enqueue()`, `update_queue_item()`, and `delete_queue_item()`: manage pending prompts in session metadata. Appending to the queue starts the drain loop immediately when the session is not running.
+- `_start_next_queued(session)`: pops the next queued prompt, appends it to normal prompts, broadcasts a snapshot, and starts a Codex run. `_run()` calls it after each completed subprocess unless the current run was terminated by the user. `resume_pending_queues()` runs on backend startup so persisted queued work resumes without a browser connection.
+- Codex subprocess proxying is controlled by `.viewer.config.json` `codex.proxy`; when non-empty it sets `https_proxy`, `HTTPS_PROXY`, `http_proxy`, and `HTTP_PROXY` for Codex runs, and when empty those variables are removed from the Codex subprocess environment. The default is no proxy.
 - Rendered Codex events are read from the canonical `~/.codex/sessions/**/rollout-*.jsonl` file matched by Codex session id. Viewer-local metadata/prompts and the matched `rollout_path` are stored in `logs/codex-sessions/{viewer_session_id}.json`; stderr goes to `{viewer_session_id}.stderr.log`.
+- API snapshots and WebSocket event messages compact raw rollout entries into a transport/display shape before sending them to the frontend. Full raw events remain in memory/on disk for status parsing; compact events carry `event_type`, rendered `text`, `file_changes`, `patch_text`, and a bounded `raw_preview`.
 - Per-session Codex summaries parse `last_token_usage.total_tokens` from that session's matched rollout `token_count` events to expose `context_used_percent`, `model_context_window`, and `total_tokens`; navbar Codex chips use these session fields instead of the newest global rollout.
 - `_find_session_id(raw)`: extracts `session_id`, `conversation_id`, or `thread_id` from JSON events so later messages can resume the correct Codex thread.
 - Active Codex runs watch the matched rollout JSONL file with `watchfiles.awatch()` and broadcast newly parsed events when that file changes, rather than depending on stdout for every rendered message.
@@ -137,11 +140,12 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `backend/app/voice.py`
 
-- Optional WebSocket bridge for low-latency voice input.
+- Optional WebSocket bridge for voice input.
 - `VoiceCapture`: saves the browser-sent audio chunks for each session under `logs/voice/`, using a UTC finish-time filename plus a JSON sidecar with MIME type, size, chunk count, backend, and backend policy.
-- Lazily loads a singleton WhisperLiveKit `TranscriptionEngine` on the first voice connection when `VIEWER_VOICE_ENABLED=true` and no upstream WebSocket is configured.
-- `connect_voice(websocket)`: accepts browser audio chunks from `/api/voice/ws`, runs them through WhisperLiveKit or the configured upstream ASR WebSocket, and returns normalized `partial` / `final` transcript JSON to the frontend.
+- Lazily loads a singleton offline `faster_whisper.WhisperModel` for the first in-process final transcription, keeps it warm across nearby dictations, and unloads it after `voice_model_idle_timeout_seconds` of inactivity to release GPU resources.
+- `connect_voice(websocket)`: accepts browser audio chunks from `/api/voice/ws`, saves them during recording, runs full-file transcription after `stop`, and returns `processing` then `final` transcript JSON to the frontend. When `voice_upstream_ws` is configured, it proxies audio to the upstream ASR WebSocket and normalizes upstream messages.
 - `_connect_whisperlivekit(websocket)`: creates one WhisperLiveKit `AudioProcessor` per browser voice session, forwards binary audio frames into it, saves the transmitted audio, and streams normalized result-state updates back to the client. On client stop, it flushes the processor and waits up to `voice_stop_timeout_seconds` for final model output before closing.
+- `_connect_offline_voice(websocket)` / `_transcribe_offline(audio_path)`: save the streamed WebM/MP4 chunks, then transcribe the completed file with `faster-whisper` using `voice_offline_beam_size`, `voice_offline_vad_filter`, and the configured voice language.
 - `_normalize_upstream_message(message)` / `_normalize_payload(payload)`: accept common streaming ASR response shapes plus WhisperLiveKit `lines` / `buffer_transcription` / `buffer_translation` state and normalize final/partial text.
 - `_whisper_kwargs()`: normalizes WhisperLiveKit options and disables `voice_target_language` with a warning when `voice_language=auto` and `voice_backend_policy` is not `simulstreaming`, because WhisperLiveKit rejects that translation configuration.
 
@@ -150,8 +154,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
 - `ConfigData.visit_times` stores per-path last visit timestamps for files and directories in `.viewer.config.json`; the frontend uses it to sort the current folder by most recent visit.
 - `WorkspaceConfig.count` defaults to 5 and controls how many numbered workspace buttons appear in the sidebar activity rail. `WorkspaceData` and `WorkspaceSnapshot` mirror `.viewer.workspaces.json`.
-- Codex schemas: `CodexSessionInfo`, `CodexPrompt`, `CodexEvent`, `CodexSessionSnapshot`, `CodexSessionCreate`, and `CodexSessionMessage`.
-- `CodexConfig` stores Codex model options for `.viewer.config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`.
+- Codex schemas: `CodexSessionInfo`, `CodexPrompt`, compact `CodexEvent`, `CodexFileChange`, `CodexSessionSnapshot`, `CodexSessionCreate`, `CodexSessionMessage`, `CodexQueueItem`, and `CodexQueueMessage`. `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible.
+- `CodexConfig` stores Codex model options, muted operation-message alpha, and an optional `proxy` for `.viewer.config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
 `backend/app/logging.py`
@@ -191,6 +195,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Dispatches `viewer:file-changed` when an open file changes.
 - Polls terminal list every 3 seconds.
 - Renders active pane toolbar metadata, actions, and generic controls from `stores/paneToolbar.ts` in the top bar, plus global pane split actions.
+- On phone-width screens, active-pane toolbar actions and controls collapse behind a top-bar overflow menu while global pane actions remain inline.
 - Top-bar ownership rule: cross-viewer pane actions such as split belong in `App.vue`; view-specific icons/controls/status belong in the owning viewer and must be registered through `stores/paneToolbar.ts`, not hard-coded in `App.vue`. The global SSE connection dot is intentionally not rendered.
 - Sidebar state functions: `toggleSidebarPin()`, `clampSidebarWidth()`, `startSidebarResize()`.
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
@@ -223,6 +228,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Persists the active sidebar tool in `localStorage` under `viewer.sidebarActiveTool.v1`.
 - Tools: Files, Terminals, and Codex. Future side tools should be added to this shell instead of mixing all lists into one panel.
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool or workspace changes only the active selection; clicking the already-active tool or workspace toggles the tool panel open/closed.
+- On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
 - Renders one-click numbered workspace buttons in the activity rail. Clicking a different workspace saves the current workspace and restores the selected workspace without changing the tool panel open/closed state.
 - Re-emits `open-file`, `open-terminal`, and `open-codex-session` events to `App.vue`.
 
@@ -241,7 +247,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Codex tool panel: new Codex button plus Codex session list.
 - New Codex creates an idle Codex session in the current sidebar directory and opens it in the active pane. The first message is entered in `CodexViewer.vue`.
-- Codex session list shows status and supports delete, which also clears matching panes.
+- Filters the session list to the current sidebar directory and its descendants using `CodexSessionInfo.cwd_relative`, so workspace directory changes scope the visible Codex sessions without changing open panes.
+- Codex session list uses row background color for status (normal idle/exited, green running, red failed) and supports delete, which also clears matching panes.
 
 `frontend/src/components/ConfigPanel.vue`
 
@@ -250,7 +257,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Sections: Server, Appearance, Codex Models, Markdown, Syntax Highlighting, and raw JSON.
 - Server section has confirmed restart and stop buttons. Restart calls `/api/admin/restart`, polls `/api/health` until the PID changes, then reloads the page. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
 - Appearance currently controls nav bar size, which also drives icon/button size via CSS variables.
-- Codex Models controls the default Codex model and the available model list used by `/api/codex/models` and the Codex pane toolbar.
+- Codex Models controls the default Codex model, the available model list used by `/api/codex/models` and the Codex pane toolbar, and the optional Codex subprocess proxy.
 - Markdown config stores an active theme plus a theme list. The editor can duplicate/reset themes and edit heading/body/paragraph/code font sizes, colors, weights, link/code/border colors, and Highlight.js token colors.
 
 `frontend/src/components/FileTree.vue`
@@ -332,13 +339,20 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Its Codex-specific top-bar actions also include creating a new idle Codex session in the current session's working directory, then opening it in the active pane.
 - Rollout rendering is keyed to canonical `~/.codex/sessions/**/rollout-*.jsonl` shapes: top-level `response_item` and `event_msg`, with turn grouping from `event_msg.payload.type=task_started/task_complete`.
 - Sends follow-up prompts through `stores/codex.ts`, which calls `/api/codex/sessions/{id}/messages`.
+- Renders server-backed queued prompts above the composer. Queue rows can be clicked into the shared composer for edit/save/cancel/delete; the queue button appends to `/api/codex/sessions/{id}/queue`, and queued work drains server-side even after the browser closes.
 - Uses `VoiceInputButton.vue` to transcribe microphone input into the Codex draft.
+
+`frontend/src/stores/voice.ts`
+
+- Browser voice job store keyed by input context ids such as `codex:{session_id}:prompt` and `terminal:{terminal_id}:paste`.
+- Owns `MediaRecorder`, microphone stream, voice WebSocket lifecycle, chunk sending, `ready` / `processing` / `final` / `error` handling, and context text/status state.
+- Voice jobs survive component unmounts after recording has stopped, so users can switch sessions while final transcription is processing and return to the same pending/ready draft.
+- Context statuses drive sidebar indicators: processing/recording contexts show as pending, completed but unsent voice text shows as ready.
 
 `frontend/src/components/VoiceInputButton.vue`
 
 - Reusable microphone transcription button backed by `/api/voice/ws`.
-- Owns `MediaRecorder`, browser audio stream, voice WebSocket lifecycle, ready/partial/final/error message handling, and cleanup on unmount. Stop now flushes the final `MediaRecorder` chunk, sends a `stop` control message, and waits for the backend to close the WebSocket after final transcription output or timeout.
-- Exposes a `v-model` string; partial transcripts temporarily update the model and final transcripts append to the base text. Consumers still decide when to send the text.
+- Requires a stable `contextId`, binds the voice store's context text to its `v-model`, and toggles start/stop for that context. Consumers still decide when to send or queue the text.
 
 ## Frontend Stores And API
 
@@ -349,7 +363,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
 - Admin APIs: `restartServer()` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
-- Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `deleteCodexSession()`, `codexSessionSocketUrl()`.
+- Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `queueCodexMessage()`, `updateCodexQueuedMessage()`, `deleteCodexQueuedMessage()`, `deleteCodexSession()`, `codexSessionSocketUrl()`.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 
 `frontend/src/api/events.ts`
@@ -379,6 +393,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Pinia store for Codex session summaries.
 - Actions: `load()`, `create(prompt, cwd)`, `send(id, prompt)`, `upsert(session)`, `remove(id)`.
+- Queue actions: `queue(id, prompt)`, `updateQueued(id, itemId, prompt)`, and `deleteQueued(id, itemId)` call the server-backed Codex queue APIs and upsert the returned session summary.
 
 `frontend/src/stores/paneToolbar.ts`
 
@@ -405,7 +420,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/types/codex.ts`
 
-- TypeScript mirror of Codex schemas: `CodexStatus`, `CodexSessionInfo`, `CodexPrompt`, `CodexEvent`, and `CodexSessionSnapshot`.
+- TypeScript mirror of Codex schemas: `CodexStatus`, `CodexSessionInfo`, `CodexPrompt`, compact `CodexEvent`, `CodexFileChange`, `CodexSessionSnapshot`, and `CodexQueueItem`.
 
 `frontend/src/utils/scrollMemory.ts`
 
@@ -452,12 +467,19 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `run.py`
 
 - Main production/development launcher.
+- This project is run through `uv`; use `uv run ...` for Python entrypoints and checks instead of calling system `python` directly.
 - Constants: project paths, default root `~/Sync`, host `0.0.0.0`, port `18989`, log dir.
 - `parse_args()`: CLI options for root, port, host, frontend dist, build, reload, debug, log paths.
 - `resolve_project_path(path)`: resolves relative paths against repo root.
 - `build_frontend(debug)`: runs `npm run build` in `frontend/`, passing debug sourcemap env flags.
 - `default_log_file(log_dir)`: timestamped log path.
 - `main()`: validates served root, exports env, configures logging, optionally builds frontend, prints URLs, starts uvicorn.
+
+Implementation checks:
+
+- Frontend: `npm run build` from `frontend/`.
+- Backend: `uv run python -m compileall backend/app` from the repo root.
+- Do not start the frontend dev server for verification; the user tests the server manually.
 
 `scripts/manage_viewer.py`
 

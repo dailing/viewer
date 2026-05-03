@@ -38,6 +38,8 @@ export const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
 export const DEFAULT_CODEX_CONFIG: CodexConfig = {
   available_models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"],
   default_model: "gpt-5.5",
+  proxy: "",
+  muted_message_alpha: 0.56,
 };
 
 export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfig = {
@@ -99,7 +101,15 @@ function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
   return {
     available_models: available.includes(defaultModel) ? available : [defaultModel, ...available],
     default_model: defaultModel,
+    proxy: config?.proxy?.trim() ?? DEFAULT_CODEX_CONFIG.proxy,
+    muted_message_alpha: normalizeAlpha(config?.muted_message_alpha, DEFAULT_CODEX_CONFIG.muted_message_alpha),
   };
+}
+
+function normalizeAlpha(value: unknown, fallback: number): number {
+  const alpha = Number(value ?? fallback);
+  if (!Number.isFinite(alpha)) return fallback;
+  return Math.min(1, Math.max(0.15, alpha));
 }
 
 function normalizeWorkspaceConfig(config?: Partial<WorkspaceConfig>): WorkspaceConfig {

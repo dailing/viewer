@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 from contextlib import suppress
 from dataclasses import dataclass
@@ -16,6 +17,11 @@ from .logging import DEFAULT_LOG_DIR, current_log_path
 
 _whisper_engine: Any | None = None
 _whisper_engine_lock = asyncio.Lock()
+_offline_model: Any | None = None
+_offline_model_lock = asyncio.Lock()
+_offline_transcribe_lock = asyncio.Lock()
+_offline_model_unload_task: asyncio.Task | None = None
+_offline_model_last_used = 0.0
 
 
 def _utc_stamp() -> str:
@@ -183,6 +189,109 @@ async def _get_whisper_engine() -> Any:
         return _whisper_engine
 
 
+def _release_gpu_memory() -> None:
+    gc.collect()
+    with suppress(Exception):
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+async def _unload_offline_model_after_idle() -> None:
+    global _offline_model
+    await asyncio.sleep(settings.voice_model_idle_timeout_seconds)
+    async with _offline_model_lock:
+        idle_for = asyncio.get_running_loop().time() - _offline_model_last_used
+        if _offline_model is None or idle_for < settings.voice_model_idle_timeout_seconds:
+            _schedule_offline_model_unload()
+            return
+        logger.info("Unloading offline voice model after {:.1f}s idle", idle_for)
+        _offline_model = None
+    await asyncio.to_thread(_release_gpu_memory)
+
+
+def _schedule_offline_model_unload() -> None:
+    global _offline_model_unload_task
+    if settings.voice_model_idle_timeout_seconds <= 0:
+        return
+    current_task = asyncio.current_task()
+    if _offline_model_unload_task and not _offline_model_unload_task.done() and _offline_model_unload_task is not current_task:
+        _offline_model_unload_task.cancel()
+    _offline_model_unload_task = asyncio.create_task(_unload_offline_model_after_idle())
+
+
+async def _get_offline_model() -> Any:
+    global _offline_model, _offline_model_last_used
+    async with _offline_model_lock:
+        _offline_model_last_used = asyncio.get_running_loop().time()
+        if _offline_model is None:
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError as exc:
+                raise RuntimeError("faster-whisper is not installed. Run `uv sync`.") from exc
+            logger.info("Loading offline voice model {}", settings.voice_model)
+            _offline_model = await asyncio.to_thread(WhisperModel, settings.voice_model, device="auto", compute_type="default")
+        _schedule_offline_model_unload()
+        return _offline_model
+
+
+def _join_segments(segments: Any) -> str:
+    return " ".join(str(segment.text).strip() for segment in segments if str(segment.text).strip()).strip()
+
+
+def _transcribe_with_model(model: Any, audio_path: Path) -> str:
+    segments, _info = model.transcribe(
+        audio_path.as_posix(),
+        language=settings.voice_language if settings.voice_language != "auto" else None,
+        beam_size=settings.voice_offline_beam_size,
+        vad_filter=settings.voice_offline_vad_filter,
+        condition_on_previous_text=True,
+    )
+    return _join_segments(segments)
+
+
+async def _transcribe_offline(audio_path: Path) -> str:
+    global _offline_model_last_used
+    model = await _get_offline_model()
+    async with _offline_transcribe_lock:
+        text = await asyncio.to_thread(_transcribe_with_model, model, audio_path)
+        _offline_model_last_used = asyncio.get_running_loop().time()
+        _schedule_offline_model_unload()
+        return " ".join(text.split())
+
+
+async def _connect_offline_voice(websocket: WebSocket) -> None:
+    capture = VoiceCapture(_utc_stamp(), f"offline-{settings.voice_backend}", settings.voice_backend_policy)
+    await websocket.send_json({"type": "ready"})
+    try:
+        while True:
+            message = await websocket.receive()
+            if "bytes" in message and message["bytes"] is not None:
+                capture.write(message["bytes"])
+                continue
+            if "text" not in message or not message["text"]:
+                continue
+            try:
+                payload = json.loads(message["text"])
+            except json.JSONDecodeError:
+                payload = {"type": message["text"]}
+            if payload.get("type") == "start":
+                capture.set_mime_type(str(payload.get("mimeType") or ""))
+            if payload.get("type") == "stop":
+                audio_path = capture.finish()
+                if audio_path is None:
+                    await _send_error(websocket, "No voice audio was received.")
+                    return
+                await websocket.send_json({"type": "processing"})
+                text = await _transcribe_offline(audio_path)
+                await websocket.send_json({"type": "final", "text": text})
+                return
+    finally:
+        if capture.path is None:
+            capture.finish()
+
+
 async def _connect_whisperlivekit(websocket: WebSocket) -> None:
     from whisperlivekit import AudioProcessor
 
@@ -259,7 +368,7 @@ async def connect_voice(websocket: WebSocket) -> None:
 
     try:
         if not settings.voice_upstream_ws:
-            await _connect_whisperlivekit(websocket)
+            await _connect_offline_voice(websocket)
             return
 
         async with websockets.connect(settings.voice_upstream_ws, max_size=None) as upstream:

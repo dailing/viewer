@@ -132,6 +132,26 @@ export async function sendCodexMessage(id: string, prompt: string, model?: strin
   });
 }
 
+export async function queueCodexMessage(id: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
+  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/queue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, model }),
+  });
+}
+
+export async function updateCodexQueuedMessage(id: string, itemId: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
+  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, model }),
+  });
+}
+
+export async function deleteCodexQueuedMessage(id: string, itemId: string): Promise<CodexSessionInfo> {
+  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+}
+
 export async function terminateCodexSession(id: string): Promise<CodexSessionInfo> {
   return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/terminate`, { method: "POST" });
 }

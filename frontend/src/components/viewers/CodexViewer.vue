@@ -2,24 +2,29 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { codexSessionSocketUrl, getCodexSession } from "../../api/client";
 import { useCodexStore } from "../../stores/codex";
+import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
+import { useVoiceStore } from "../../stores/voice";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import VoiceInputButton from "../VoiceInputButton.vue";
 import type { PaneToolbarAction } from "../../stores/paneToolbar";
-import type { CodexEvent, CodexSessionInfo, CodexSessionSnapshot } from "../../types/codex";
+import type { CodexEvent, CodexQueueItem, CodexSessionInfo, CodexSessionSnapshot } from "../../types/codex";
 
 const props = defineProps<{ id: string; paneId: string }>();
 const codex = useCodexStore();
+const files = useFilesStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
+const voice = useVoiceStore();
 const session = ref<CodexSessionSnapshot | null>(null);
 const promptText = ref("");
 const error = ref("");
 const scroller = ref<HTMLElement | null>(null);
-const showRaw = ref(false);
+const focusMode = ref(false);
 const stopping = ref(false);
 const creatingSession = ref(false);
+const editingQueueItemId = ref<string | null>(null);
 
 type CodexMessage =
   | { type: "snapshot"; session: CodexSessionSnapshot }
@@ -32,13 +37,29 @@ let reconnectTimer: number | null = null;
 let mounted = false;
 
 const canSend = computed(() => Boolean(promptText.value.trim()) && session.value?.status !== "running");
+const canQueue = computed(() => Boolean(promptText.value.trim()));
+const isEditingQueue = computed(() => editingQueueItemId.value !== null);
+const editingQueueItem = computed(() => session.value?.queue.find((item) => item.id === editingQueueItemId.value) ?? null);
 const canClearPrompt = computed(() => Boolean(promptText.value));
+const isActivePane = computed(() => layout.activePaneId === props.paneId);
+const voiceContextId = computed(() => `codex:${props.id}:prompt`);
+const codexViewerStyle = computed(() => {
+  const alpha = clampAlpha(files.codexConfig.muted_message_alpha);
+  const scaledAlpha = (scale: number) => Math.min(1, Math.max(0, alpha * scale)).toFixed(3);
+  return {
+    "--codex-muted-alpha": alpha.toFixed(3),
+    "--codex-muted-text": `rgb(37 50 74 / ${scaledAlpha(0.72)})`,
+    "--codex-muted-strong": `rgb(37 50 74 / ${scaledAlpha(0.86)})`,
+    "--codex-muted-faint": `rgb(37 50 74 / ${scaledAlpha(0.5)})`,
+    "--codex-muted-border": `rgb(118 134 160 / ${scaledAlpha(0.32)})`,
+    "--codex-muted-surface": `rgb(255 255 255 / ${Math.min(0.82, 0.2 + alpha * 0.45).toFixed(3)})`,
+  };
+});
 const sortedEvents = computed(() => [...(session.value?.events ?? [])].sort((a, b) => a.index - b.index));
 const codexStatusItems = computed(() => {
   const status = session.value;
   if (!status) return [];
   const items: string[] = [];
-  if (status.model) items.push(status.model);
   if (typeof status.context_used_percent === "number") items.push(`ctx ${status.context_used_percent}%`);
   if (typeof codex.status.primary_remaining_percent === "number" && codex.status.primary_window_minutes) {
     const hours = Math.round(codex.status.primary_window_minutes / 60);
@@ -62,12 +83,6 @@ type DiffSegment = { text: string; changed: boolean };
 type DiffLine = { text: string; kind: DiffLineKind; segments: DiffSegment[] };
 const transcriptEntries = computed<TranscriptEntry[]>(() => {
   const prompts = session.value?.prompts ?? [];
-  const assistantResponseTexts = new Set(
-    sortedEvents.value
-      .filter((event) => isAssistantResponseItem(event.raw))
-      .map((event) => normalizeMessageText(eventText(event)))
-      .filter(Boolean),
-  );
   const timeline: TranscriptTimelineItem[] = prompts.map((prompt, index) => ({
     kind: "prompt",
     orderTime: finiteTime(prompt.created_at),
@@ -76,18 +91,24 @@ const transcriptEntries = computed<TranscriptEntry[]>(() => {
   }));
 
   for (const event of sortedEvents.value) {
-    const eventType = rawType(event.raw);
-    if (isHiddenEventType(eventType)) continue;
-    const text = eventText(event);
-    if (isDuplicateAgentMessage(event.raw, text, assistantResponseTexts)) continue;
-    const fileChanges = extractFileChanges(event.raw);
-    const patchText = extractPatchInput(event.raw);
-    if (text || showRaw.value || fileChanges.length || patchText) {
+    const text = event.text ?? "";
+    const eventType = event.event_type;
+    const muted = isMutedEventType(eventType);
+    if (focusMode.value && muted) continue;
+    const fileChanges = event.file_changes.map((change) => ({
+      path: change.path,
+      changeType: change.change_type,
+      diff: change.diff ?? null,
+    }));
+    const patchText = event.patch_text ?? null;
+    const visibleFileChanges = focusMode.value ? [] : fileChanges;
+    const visiblePatchText = focusMode.value ? null : patchText;
+    if (text || visibleFileChanges.length || visiblePatchText) {
       timeline.push({
         kind: "event",
         orderTime: finiteTime(event.received_at),
         orderIndex: event.index * 2 + 1,
-        entry: { kind: "event", id: `event-${event.index}`, event, text, eventType, fileChanges, patchText },
+        entry: { kind: "event", id: `event-${event.index}`, event, text, eventType, fileChanges: visibleFileChanges, patchText: visiblePatchText },
       });
     }
   }
@@ -105,121 +126,27 @@ function compareTranscriptTimelineItems(left: TranscriptTimelineItem, right: Tra
   return left.orderIndex - right.orderIndex;
 }
 
-function isHiddenEventType(type: string): boolean {
+function clampAlpha(value: unknown): number {
+  const alpha = Number(value ?? 0.56);
+  if (!Number.isFinite(alpha)) return 0.56;
+  return Math.min(1, Math.max(0.15, alpha));
+}
+
+function isMutedEvent(entry: Extract<TranscriptEntry, { kind: "event" }>): boolean {
+  return isMutedEventType(entry.eventType);
+}
+
+function isMutedEventType(eventType: string): boolean {
+  if (eventType === "message:assistant" || eventType === "agent_message") return false;
+  if (eventType.startsWith("tool:")) return true;
   return [
-    "session_meta",
-    "turn_context",
-    "task_started",
-    "task_complete",
-    "turn_aborted",
-    "context_compacted",
-    "token_count",
-    "user_message",
-    "turn.started",
-    "turn.completed",
-    "thread.started",
-    "message:developer",
-    "message:system",
-    "message:user",
-    "function_call_output",
-    "custom_tool_call_output",
-    "web_search_call",
-    "web_search_end",
-  ].includes(type);
-}
-
-function rawType(raw: Record<string, unknown>): string {
-  const payload = raw.payload;
-  if ((raw.type === "event_msg" || raw.type === "response_item") && payload && typeof payload === "object") {
-    const record = payload as Record<string, unknown>;
-    if (record.type === "message" && typeof record.role === "string") return `message:${record.role}`;
-    if (typeof record.type === "string") return record.type;
-  }
-  if (raw.type === "custom_tool_call" && typeof raw.name === "string") return `tool:${raw.name}`;
-  const item = raw.item;
-  if (item && typeof item === "object" && "type" in item && typeof item.type === "string") return item.type;
-  const direct = raw.type;
-  if (typeof direct === "string") return direct;
-  const nested = raw.msg;
-  if (nested && typeof nested === "object" && "type" in nested && typeof nested.type === "string") return nested.type;
-  return "event";
-}
-
-function normalizeMessageText(text: string): string {
-  return text.replace(/\r\n/g, "\n").trim();
-}
-
-function isAssistantResponseItem(raw: Record<string, unknown>): boolean {
-  const payload = payloadOf(raw);
-  return raw.type === "response_item" && payload?.type === "message" && payload.role === "assistant";
-}
-
-function isDuplicateAgentMessage(raw: Record<string, unknown>, text: string, assistantResponseTexts: Set<string>): boolean {
-  const payload = payloadOf(raw);
-  return raw.type === "event_msg" && payload?.type === "agent_message" && assistantResponseTexts.has(normalizeMessageText(text));
-}
-
-function extractFileChanges(raw: Record<string, unknown>): FileChange[] {
-  const direct = raw.type === "patch_apply_end" ? raw : null;
-  const wrapped =
-    (raw.type === "event_msg" || raw.type === "response_item") &&
-    raw.payload &&
-    typeof raw.payload === "object" &&
-    (raw.payload as Record<string, unknown>).type === "patch_apply_end"
-      ? (raw.payload as Record<string, unknown>)
-      : null;
-  const source = direct ?? wrapped;
-  if (!source) return [];
-  const changes = source.changes;
-  if (!changes || typeof changes !== "object") return [];
-  const rows: FileChange[] = [];
-  for (const [path, value] of Object.entries(changes as Record<string, unknown>)) {
-    const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-    rows.push({
-      path,
-      changeType: typeof record.type === "string" ? record.type : "update",
-      diff: typeof record.unified_diff === "string" ? record.unified_diff : null,
-    });
-  }
-  return rows;
-}
-
-function extractPatchInput(raw: Record<string, unknown>): string | null {
-  const isDirect = raw.type === "custom_tool_call" && raw.name === "apply_patch" && typeof raw.input === "string";
-  const wrapped =
-    raw.type === "response_item" &&
-    raw.payload &&
-    typeof raw.payload === "object" &&
-    (raw.payload as Record<string, unknown>).type === "custom_tool_call" &&
-    (raw.payload as Record<string, unknown>).name === "apply_patch" &&
-    typeof (raw.payload as Record<string, unknown>).input === "string";
-  if (isDirect) return raw.input as string;
-  if (wrapped) return (raw.payload as Record<string, unknown>).input as string;
-  return null;
-}
-
-function payloadOf(value: Record<string, unknown>): Record<string, unknown> | null {
-  return value.payload && typeof value.payload === "object" ? (value.payload as Record<string, unknown>) : null;
-}
-
-function contentText(content: unknown): string {
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((item) => {
-      if (!item || typeof item !== "object") return "";
-      const record = item as Record<string, unknown>;
-      if (typeof record.text === "string") return record.text;
-      if (typeof record.output_text === "string") return record.output_text;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function commandText(command: unknown): string {
-  if (Array.isArray(command)) return command.map(String).join(" ");
-  if (typeof command === "string") return command;
-  return "";
+    "custom_tool_call",
+    "exec_command_begin",
+    "exec_command_end",
+    "function_call",
+    "patch_apply_end",
+    "view_image_tool_call",
+  ].includes(eventType);
 }
 
 function diffLines(text: string): DiffLine[] {
@@ -363,102 +290,6 @@ function mergeSegments(segments: DiffSegment[]): DiffSegment[] {
   return merged.length ? merged : [{ text: " ", changed: false }];
 }
 
-function textFrom(value: unknown, depth = 0): string {
-  if (depth > 6 || value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return value.map((item) => textFrom(item, depth + 1)).filter(Boolean).join("\n");
-  if (typeof value !== "object") return "";
-
-  const record = value as Record<string, unknown>;
-  if (record.type === "event_msg") {
-    const payload = payloadOf(record);
-    if (!payload) return "";
-    const payloadType = typeof payload.type === "string" ? payload.type : "";
-    if (payloadType === "exec_command_begin") {
-      const command = commandText(payload.command);
-      return command ? `$ ${command}` : "";
-    }
-    if (payloadType === "exec_command_end") {
-      const command = commandText(payload.command);
-      const output = typeof payload.aggregated_output === "string" ? payload.aggregated_output.trim() : "";
-      const exitCode = typeof payload.exit_code === "number" ? `exit ${payload.exit_code}` : "";
-      return [`$ ${command}`.trim(), output, exitCode].filter(Boolean).join("\n");
-    }
-    if (payloadType === "agent_message") {
-      const message = payload.message;
-      if (typeof message === "string") return message;
-    }
-    if (payloadType === "patch_apply_end") {
-      const success = payload.success === true ? "Applied patch" : "Patch failed";
-      const stdout = typeof payload.stdout === "string" ? payload.stdout.trim() : "";
-      const stderr = typeof payload.stderr === "string" ? payload.stderr.trim() : "";
-      return [success, stdout, stderr].filter(Boolean).join("\n");
-    }
-    if (payloadType === "view_image_tool_call" && typeof payload.path === "string") return `Viewed image: ${payload.path}`;
-  }
-  if (record.type === "response_item") {
-    const payload = payloadOf(record);
-    if (!payload) return "";
-    if (payload.type === "message") {
-      const role = typeof payload.role === "string" ? payload.role : "";
-      if (role !== "assistant") return "";
-      return contentText(payload.content);
-    }
-    if (payload.type === "function_call" && typeof payload.name === "string") {
-      if (payload.name === "exec_command" && typeof payload.arguments === "string") {
-        try {
-          const args = JSON.parse(payload.arguments) as Record<string, unknown>;
-          if (typeof args.cmd === "string") return `$ ${args.cmd}`;
-        } catch {
-          return `Tool call: ${payload.name}`;
-        }
-      }
-      return `Tool call: ${payload.name}`;
-    }
-    if (payload.type === "custom_tool_call" && typeof payload.name === "string") {
-      if (payload.name === "apply_patch") return "Applied patch";
-      return `Tool call: ${payload.name}`;
-    }
-    return "";
-  }
-  if (record.type === "custom_tool_call" && typeof record.name === "string") {
-    if (record.name === "apply_patch") return "Applied patch";
-    return `Tool call: ${record.name}`;
-  }
-  for (const key of ["message", "text", "content", "output", "summary", "final_answer", "item"]) {
-    const found = textFrom(record[key], depth + 1);
-    if (found) return found;
-  }
-  if (Array.isArray(record.changes)) {
-    return record.changes
-      .map((change) => {
-        if (!change || typeof change !== "object") return "";
-        const item = change as Record<string, unknown>;
-        const kind = typeof item.kind === "string" ? item.kind : "change";
-        const path = typeof item.path === "string" ? item.path : "";
-        return path ? `${kind}: ${path}` : kind;
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-  if (record.usage && typeof record.usage === "object") {
-    const usage = record.usage as Record<string, unknown>;
-    const input = typeof usage.input_tokens === "number" ? usage.input_tokens : undefined;
-    const output = typeof usage.output_tokens === "number" ? usage.output_tokens : undefined;
-    if (input !== undefined || output !== undefined) return `tokens: input ${input ?? "-"}, output ${output ?? "-"}`;
-  }
-  return "";
-}
-
-function eventText(event: CodexEvent): string {
-  return textFrom(event.raw);
-}
-
-function shortJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
-}
-
 function messageHtml(text: string): string {
   return renderMarkdown(text);
 }
@@ -477,10 +308,19 @@ function applyInfo(info: CodexSessionInfo) {
   session.value.model_context_window = info.model_context_window;
   session.value.context_used_percent = info.context_used_percent;
   session.value.total_tokens = info.total_tokens;
+  session.value.queue = info.queue ?? [];
+  if (editingQueueItemId.value && !session.value.queue.some((item) => item.id === editingQueueItemId.value)) {
+    editingQueueItemId.value = null;
+    promptText.value = "";
+  }
 }
 
 function applySnapshot(snapshot: CodexSessionSnapshot) {
   session.value = snapshot;
+  if (editingQueueItemId.value && !snapshot.queue.some((item) => item.id === editingQueueItemId.value)) {
+    editingQueueItemId.value = null;
+    promptText.value = "";
+  }
   codex.upsert(snapshot);
   updatePaneToolbar();
   void renderRichContent();
@@ -496,6 +336,11 @@ function applyEvent(event: CodexEvent, info: CodexSessionInfo) {
   updatePaneToolbar();
   void renderRichContent();
   scrollToBottom(false);
+  if (isActivePane.value) {
+    codex.markRead(props.id);
+  } else {
+    codex.markUnread(props.id);
+  }
 }
 
 function shouldAutoScroll(): boolean {
@@ -561,9 +406,10 @@ function connect() {
 
 async function sendPrompt() {
   const prompt = promptText.value.trim();
-  if (!prompt || !session.value) return;
+  if (!prompt || !session.value || session.value.status === "running" || isEditingQueue.value) return;
   error.value = "";
   promptText.value = "";
+  voice.clear(voiceContextId.value);
   session.value.prompts.push({ text: prompt, created_at: Date.now() / 1000 });
   try {
     applyInfo(await codex.send(props.id, prompt));
@@ -573,8 +419,67 @@ async function sendPrompt() {
   }
 }
 
+async function queuePrompt() {
+  const prompt = promptText.value.trim();
+  if (!prompt || !session.value || isEditingQueue.value) return;
+  error.value = "";
+  promptText.value = "";
+  voice.clear(voiceContextId.value);
+  try {
+    applyInfo(await codex.queue(props.id, prompt));
+    scrollToBottom(true);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function editQueuedMessage(item: CodexQueueItem) {
+  editingQueueItemId.value = item.id;
+  promptText.value = item.prompt;
+  void nextTick(() => {
+    const textarea = document.querySelector<HTMLTextAreaElement>(".codex-input textarea");
+    textarea?.focus();
+  });
+}
+
+async function saveQueuedMessage() {
+  const prompt = promptText.value.trim();
+  const itemId = editingQueueItemId.value;
+  if (!prompt || !itemId || !session.value) return;
+  error.value = "";
+  try {
+    applyInfo(await codex.updateQueued(props.id, itemId, prompt));
+    editingQueueItemId.value = null;
+    promptText.value = "";
+    voice.clear(voiceContextId.value);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function cancelQueuedEdit() {
+  editingQueueItemId.value = null;
+  promptText.value = "";
+  voice.clear(voiceContextId.value);
+}
+
+async function deleteQueuedMessage(itemId: string) {
+  if (!session.value) return;
+  error.value = "";
+  try {
+    applyInfo(await codex.deleteQueued(props.id, itemId));
+    if (editingQueueItemId.value === itemId) {
+      editingQueueItemId.value = null;
+      promptText.value = "";
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
 function clearPrompt() {
   promptText.value = "";
+  voice.clear(voiceContextId.value);
 }
 
 async function stopRun() {
@@ -620,12 +525,12 @@ function updatePaneToolbar() {
       run: () => loadSnapshot(),
     },
     {
-      id: "codex-raw",
-      title: showRaw.value ? "Hide raw Codex JSON" : "Show raw Codex JSON",
-      icon: "bi-braces",
-      active: showRaw.value,
+      id: "codex-focus",
+      title: focusMode.value ? "Show Codex operation details" : "Focus mode: hide Codex operation details",
+      icon: focusMode.value ? "bi-eye-slash" : "bi-eye",
+      active: focusMode.value,
       run: () => {
-        showRaw.value = !showRaw.value;
+        focusMode.value = !focusMode.value;
         updatePaneToolbar();
       },
     },
@@ -651,6 +556,7 @@ function updatePaneToolbar() {
         title: "Model for new Codex turns",
         value: codex.models.selected_model,
         options: codex.models.available_models,
+        size: "compact",
         onChange: (value) => codex.setSelectedModel(value),
       },
       {
@@ -668,10 +574,13 @@ watch(() => props.id, () => {
   session.value = null;
   void loadSnapshot();
 });
-watch(showRaw, updatePaneToolbar);
+watch(focusMode, updatePaneToolbar);
 watch(() => [codex.models.selected_model, codex.models.available_models, codex.status], updatePaneToolbar, { deep: true });
 watch(transcriptEntries, () => {
   void renderRichContent();
+});
+watch(isActivePane, (active) => {
+  if (active) codex.markRead(props.id);
 });
 
 onMounted(() => {
@@ -690,7 +599,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="codex-viewer">
+  <div class="codex-viewer" :style="codexViewerStyle">
     <div ref="scroller" class="codex-scroll">
       <div v-if="error" class="codex-error">{{ error }}</div>
 
@@ -709,7 +618,7 @@ onUnmounted(() => {
           <div class="message-text markdown-content" v-html="messageHtml(entry.text)"></div>
         </div>
 
-        <div v-else class="message event-message">
+        <div v-else class="message event-message" :class="{ 'event-message-muted': isMutedEvent(entry) }">
           <div v-if="entry.text" class="message-text markdown-content" v-html="messageHtml(entry.text)"></div>
           <div v-if="entry.fileChanges.length" class="file-changes">
             <div class="file-change" v-for="change in entry.fileChanges" :key="`${entry.id}:${change.path}`">
@@ -729,10 +638,6 @@ onUnmounted(() => {
               <pre>{{ cleanDiffText(entry.patchText) }}</pre>
             </div>
           </div>
-          <details v-if="showRaw" class="raw-event" open>
-            <summary>JSON #{{ entry.event.index }}</summary>
-            <pre>{{ shortJson(entry.event.raw) }}</pre>
-          </details>
         </div>
       </template>
 
@@ -742,15 +647,56 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <form class="codex-input" @submit.prevent="sendPrompt">
+    <form class="codex-input" @submit.prevent="isEditingQueue ? saveQueuedMessage() : sendPrompt()">
+      <div v-if="session?.queue.length" class="codex-queue">
+        <div class="codex-queue-title">Queue</div>
+        <div
+          v-for="(item, index) in session.queue"
+          :key="item.id"
+          class="codex-queue-row"
+          :class="{ active: item.id === editingQueueItemId }"
+          role="button"
+          tabindex="0"
+          @click="editQueuedMessage(item)"
+          @keydown.enter.prevent="editQueuedMessage(item)"
+        >
+          <span class="codex-queue-index">{{ index + 1 }}</span>
+          <span class="codex-queue-preview">{{ item.prompt.split(/\r?\n/)[0] }}</span>
+          <button class="codex-queue-delete" type="button" title="Delete queued message" @click.stop="deleteQueuedMessage(item.id)">
+            <i class="bi bi-trash"></i>
+          </button>
+        </div>
+      </div>
+      <div v-if="editingQueueItem" class="codex-editing-row">
+        Editing queued message
+      </div>
       <div class="codex-input-box">
         <textarea v-model="promptText" rows="3" placeholder="Send a message to this Codex session"></textarea>
-        <VoiceInputButton v-model="promptText" />
+        <VoiceInputButton v-model="promptText" :context-id="voiceContextId" />
       </div>
       <div class="codex-input-actions">
-        <button class="btn btn-primary" type="submit" :disabled="!canSend">
+        <template v-if="isEditingQueue">
+          <button class="btn btn-primary" type="submit" :disabled="!promptText.trim()">
+            <i class="bi bi-check2"></i>
+            <span>Save</span>
+          </button>
+          <button class="btn btn-outline-secondary" type="button" @click="cancelQueuedEdit">
+            <i class="bi bi-x-lg"></i>
+            <span>Cancel</span>
+          </button>
+          <button class="btn btn-outline-danger" type="button" :disabled="!editingQueueItemId" @click="editingQueueItemId && deleteQueuedMessage(editingQueueItemId)">
+            <i class="bi bi-trash"></i>
+            <span>Delete</span>
+          </button>
+        </template>
+        <template v-else>
+        <button v-if="session?.status !== 'running'" class="btn btn-primary" type="submit" :disabled="!canSend">
           <i class="bi bi-send-fill"></i>
           <span>Send</span>
+        </button>
+        <button class="btn btn-outline-primary" type="button" :disabled="!canQueue" @click="queuePrompt">
+          <i class="bi bi-list-ol"></i>
+          <span>Queue</span>
         </button>
         <button class="btn btn-outline-secondary" type="button" :disabled="!canClearPrompt" @click="clearPrompt">
           <i class="bi bi-eraser"></i>
@@ -760,6 +706,7 @@ onUnmounted(() => {
           <i class="bi bi-stop-fill"></i>
           <span>{{ stopping ? "Stopping" : "Stop" }}</span>
         </button>
+        </template>
       </div>
     </form>
   </div>
@@ -784,12 +731,12 @@ onUnmounted(() => {
 }
 
 .session-meta {
-  color: var(--text-muted);
+  color: var(--codex-muted-faint);
   display: flex;
   flex-wrap: wrap;
-  font-size: 11px;
+  font-size: 10px;
   gap: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .message {
@@ -808,104 +755,148 @@ onUnmounted(() => {
   background: transparent;
 }
 
+.event-message-muted {
+  color: var(--codex-muted-text);
+  margin-bottom: 3px;
+  padding: 0;
+}
+
+.event-message-muted .message-text {
+  --markdown-render-body-size: 11px;
+  --markdown-render-h1-size: 14px;
+  --markdown-render-h2-size: 13px;
+  --markdown-render-h3-size: 12px;
+  --markdown-render-h4-size: 12px;
+  --markdown-render-paragraph-line-height: 1.28;
+  --markdown-render-paragraph-size: 11px;
+  --markdown-render-pre-padding: 4px;
+  --markdown-body-color: var(--codex-muted-text);
+  --markdown-border-color: var(--codex-muted-border);
+  --markdown-code-background: transparent;
+  --markdown-code-color: var(--codex-muted-strong);
+  --markdown-h1-color: var(--codex-muted-strong);
+  --markdown-h2-color: var(--codex-muted-strong);
+  --markdown-h3-color: var(--codex-muted-strong);
+  --markdown-h4-color: var(--codex-muted-strong);
+  --markdown-link-color: var(--codex-muted-strong);
+  --markdown-paragraph-color: var(--codex-muted-text);
+  --syntax-background: var(--codex-muted-surface);
+  --syntax-text: var(--codex-muted-text);
+  color: var(--codex-muted-text);
+  font-size: 11px;
+  line-height: 1.28;
+}
+
+.event-message-muted .message-text :deep(p),
+.event-message-muted .message-text :deep(li),
+.event-message-muted .message-text :deep(pre),
+.event-message-muted .message-text :deep(code) {
+  color: var(--codex-muted-text);
+}
+
 .file-changes {
-  margin-top: 6px;
+  color: var(--codex-muted-text);
+  font-size: 10px;
+  margin-top: 2px;
 }
 
 .file-change {
-  border-left: 2px solid #d8e0ed;
-  margin-top: 6px;
-  padding-left: 8px;
+  border-left: 2px solid var(--codex-muted-border);
+  margin-top: 2px;
+  padding-left: 5px;
 }
 
 .file-change-path {
-  color: #3b4d68;
+  color: var(--codex-muted-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
+  font-size: 10px;
 }
 
 .file-change-diff {
-  background: #ffffff;
-  border: 1px solid #dde5f1;
+  background: var(--codex-muted-surface);
+  border: 1px solid var(--codex-muted-border);
   border-radius: 6px;
+  color: var(--codex-muted-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 11px;
-  line-height: 1.35;
-  margin: 6px 0 0;
+  font-size: 10px;
+  line-height: 1.24;
+  margin: 2px 0 0;
   overflow-wrap: anywhere;
-  padding: 6px 0;
+  padding: 3px 0;
   white-space: pre-wrap;
 }
 
 .patch-input {
-  margin-top: 8px;
+  color: var(--codex-muted-text);
+  font-size: 10px;
+  margin-top: 3px;
 }
 
 .patch-input-title {
-  color: #3b4d68;
+  color: var(--codex-muted-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  margin-bottom: 4px;
+  font-size: 10px;
+  margin-bottom: 2px;
 }
 
 .file-change-result {
-  margin-top: 6px;
+  margin-top: 2px;
 }
 
 .file-change-result-title {
-  color: #3b4d68;
+  color: var(--codex-muted-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  margin-bottom: 4px;
+  font-size: 10px;
+  margin-bottom: 2px;
 }
 
 .file-change-result pre {
-  background: #ffffff;
-  border: 1px solid #dde5f1;
+  background: var(--codex-muted-surface);
+  border: 1px solid var(--codex-muted-border);
   border-radius: 6px;
-  color: #25324a;
+  color: var(--codex-muted-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 11px;
-  line-height: 1.35;
+  font-size: 10px;
+  line-height: 1.24;
   margin: 0;
   overflow-wrap: anywhere;
-  padding: 6px 8px;
+  padding: 3px 5px;
   white-space: pre-wrap;
 }
 
 .diff-line {
   display: block;
-  min-height: 1.35em;
-  padding: 0 8px;
+  min-height: 1.24em;
+  padding: 0 5px;
   user-select: text;
 }
 
 .diff-add {
-  background: #e8f6ec;
-  color: #1a6b32;
+  background: #f0f8f2;
+  color: #4f8a61;
 }
 
 .diff-delete {
-  background: #ffebe9;
-  color: #b42318;
+  background: #fff1f0;
+  color: #c46a63;
 }
 
 .diff-hunk {
-  background: #edf4ff;
-  color: #345f9f;
+  background: #f3f7fc;
+  color: #7791ba;
 }
 
 .diff-file {
-  color: #5d6b82;
-  font-weight: 600;
+  color: var(--codex-muted-text);
+  font-weight: 500;
 }
 
 .diff-add .diff-word-change {
-  background: #b7e7c1;
+  background: #d9efdd;
 }
 
 .diff-delete .diff-word-change {
-  background: #ffc9c2;
+  background: #ffdeda;
 }
 
 .message-text {
@@ -925,19 +916,6 @@ onUnmounted(() => {
   word-break: break-word;
 }
 
-.raw-event {
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  margin-top: 8px;
-  padding-top: 7px;
-}
-
-.raw-event pre {
-  margin: 7px 0 0;
-  overflow: auto;
-  white-space: pre-wrap;
-}
-
 .codex-error {
   background: #fff1f1;
   border: 1px solid #efc7c7;
@@ -949,10 +927,11 @@ onUnmounted(() => {
 
 .running-row {
   align-items: center;
-  color: var(--text-muted);
+  color: var(--codex-muted-faint);
   display: flex;
-  gap: 8px;
-  padding: 6px 2px;
+  font-size: 11px;
+  gap: 6px;
+  padding: 3px 2px;
 }
 
 .empty-codex {
@@ -977,6 +956,78 @@ onUnmounted(() => {
   flex: 0 0 auto;
   gap: 7px;
   padding: 8px;
+}
+
+.codex-queue {
+  border: 1px solid #dde5f1;
+  border-radius: 6px;
+  display: grid;
+  gap: 2px;
+  max-height: 150px;
+  overflow: auto;
+  padding: 5px;
+}
+
+.codex-queue-title {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 4px 4px;
+  text-transform: uppercase;
+}
+
+.codex-queue-row {
+  align-items: center;
+  border-radius: 4px;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 22px minmax(0, 1fr) 28px;
+  min-height: 30px;
+  padding: 2px 2px 2px 4px;
+}
+
+.codex-queue-row:hover,
+.codex-queue-row.active {
+  background: #edf5ff;
+}
+
+.codex-queue-index {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.codex-queue-preview {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-queue-delete {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: #8a94a6;
+  display: inline-flex;
+  height: 26px;
+  justify-content: center;
+  padding: 0;
+  width: 26px;
+}
+
+.codex-queue-delete:hover {
+  background: #ffe8e8;
+  color: #b42318;
+}
+
+.codex-editing-row {
+  color: #3b4d68;
+  font-size: 12px;
 }
 
 .codex-input-box {

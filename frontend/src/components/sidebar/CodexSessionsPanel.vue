@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { useCodexStore } from "../../stores/codex";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
+import { useVoiceStore } from "../../stores/voice";
+import type { CodexSessionInfo } from "../../types/codex";
 
 const emit = defineEmits<{
   "open-codex-session": [id: string];
@@ -11,7 +13,47 @@ const emit = defineEmits<{
 const codex = useCodexStore();
 const files = useFilesStore();
 const layout = useLayoutStore();
+const voice = useVoiceStore();
 const codexError = ref("");
+const visibleSessions = computed(() => codex.sessions.filter((session) => sessionMatchesCurrentDirectory(session)));
+
+function voiceContextId(sessionId: string) {
+  return `codex:${sessionId}:prompt`;
+}
+
+function hasVoicePending(sessionId: string) {
+  const status = voice.context(voiceContextId(sessionId)).status;
+  return status === "connecting" || status === "recording" || status === "processing";
+}
+
+function hasVoiceReady(sessionId: string) {
+  return voice.hasReadyText(voiceContextId(sessionId));
+}
+
+function normalizeDirectory(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
+function matchesRelativeDirectory(sessionDirectory: string, currentDirectory: string) {
+  const sessionPath = normalizeDirectory(sessionDirectory);
+  const currentPath = normalizeDirectory(currentDirectory);
+  if (!currentPath) return true;
+  return sessionPath === currentPath || sessionPath.startsWith(`${currentPath}/`);
+}
+
+function absolutePathMatchesRelativeDirectory(sessionDirectory: string, currentDirectory: string) {
+  const sessionPath = normalizeDirectory(sessionDirectory);
+  const currentPath = normalizeDirectory(currentDirectory);
+  if (!currentPath) return true;
+  return sessionPath.endsWith(`/${currentPath}`) || sessionPath.includes(`/${currentPath}/`);
+}
+
+function sessionMatchesCurrentDirectory(session: CodexSessionInfo) {
+  if (session.cwd_relative) {
+    return matchesRelativeDirectory(session.cwd_relative, files.currentPath);
+  }
+  return absolutePathMatchesRelativeDirectory(session.cwd, files.currentPath);
+}
 
 async function newCodexSession() {
   codexError.value = "";
@@ -41,18 +83,24 @@ async function closeCodexSession(id: string) {
 
     <div class="sidebar-section list-section">
       <div class="section-title">Codex</div>
-      <div v-if="!codex.sessions.length" class="empty-panel">No Codex sessions</div>
+      <div v-if="!visibleSessions.length" class="empty-panel">No Codex sessions in this directory</div>
       <div
-        v-for="session in codex.sessions"
+        v-for="session in visibleSessions"
         :key="session.id"
         class="sidebar-row"
-        :class="{ active: layout.openCodexSessionIds.includes(session.id) }"
+        :class="[
+          `status-${session.status}`,
+          {
+            active: layout.openCodexSessionIds.includes(session.id),
+            'voice-pending': hasVoicePending(session.id),
+            'voice-ready': hasVoiceReady(session.id),
+          },
+        ]"
       >
         <button class="sidebar-row-main" type="button" @click="emit('open-codex-session', session.id)">
-          <i class="bi" :class="session.status === 'running' ? 'bi-stars' : 'bi-chat-square-text'"></i>
+          <span v-if="codex.unreadSessionIds.includes(session.id)" class="unread-dot" aria-label="Unread output"></span>
           <span class="sidebar-row-name">{{ session.title }}</span>
         </button>
-        <span class="state-pill" :class="session.status">{{ session.status }}</span>
         <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Delete Codex session" @click="closeCodexSession(session.id)">
           <i class="bi bi-x"></i>
         </button>
@@ -129,6 +177,42 @@ async function closeCodexSession(id: string) {
   background: #eef3f8;
 }
 
+.sidebar-row.status-running {
+  background: #ffe4e4;
+}
+
+.sidebar-row.status-running:hover,
+.sidebar-row.status-running.active {
+  background: #ffd4d4;
+}
+
+.sidebar-row.status-failed {
+  background: #fff0f0;
+}
+
+.sidebar-row.status-failed:hover,
+.sidebar-row.status-failed.active {
+  background: #f8dddd;
+}
+
+.sidebar-row.voice-pending {
+  background: #fff6d7;
+}
+
+.sidebar-row.voice-pending:hover,
+.sidebar-row.voice-pending.active {
+  background: #ffedb0;
+}
+
+.sidebar-row.voice-ready {
+  background: #fff0b8;
+}
+
+.sidebar-row.voice-ready:hover,
+.sidebar-row.voice-ready.active {
+  background: #ffe48a;
+}
+
 .sidebar-row-main {
   align-items: center;
   background: transparent;
@@ -150,30 +234,18 @@ async function closeCodexSession(id: string) {
   white-space: nowrap;
 }
 
+.unread-dot {
+  background: #d1242f;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  height: 7px;
+  width: 7px;
+}
+
 .sidebar-row-action {
   flex: 0 0 auto;
   height: 24px;
   opacity: 0.75;
   width: 24px;
-}
-
-.state-pill {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-muted);
-  flex: 0 0 auto;
-  font-size: 10px;
-  line-height: 1;
-  padding: 3px 6px;
-}
-
-.state-pill.running {
-  border-color: #9fc5a8;
-  color: #146c43;
-}
-
-.state-pill.failed {
-  border-color: #e8c1c1;
-  color: #a33;
 }
 </style>

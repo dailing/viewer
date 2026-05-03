@@ -271,4 +271,22 @@ function selectWorkspace(id: string) {
   font-size: 12px;
   line-height: 1;
 }
+
+@media (max-width: 767.98px) {
+  .tool-sidebar.panel-pinned {
+    flex: 0 0 42px;
+    width: 42px;
+  }
+
+  .tool-sidebar.panel-pinned .tool-panel,
+  .tool-sidebar:not(.panel-pinned) .tool-panel {
+    bottom: 0;
+    box-shadow: 8px 0 24px rgb(15 23 42 / 0.16);
+    left: 42px;
+    max-width: calc(100vw - 42px);
+    position: absolute;
+    top: 0;
+    width: calc(100vw - 42px);
+  }
+}
 </style>

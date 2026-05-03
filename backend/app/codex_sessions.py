@@ -20,7 +20,36 @@ from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_
 
 CODEX_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "codex-sessions"
 CODEX_ROLLOUT_ROOT = Path.home() / ".codex" / "sessions"
-CODEX_PROXY = "http://localhost:7890"
+PROXY_ENV_KEYS = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY")
+RAW_PREVIEW_MAX_BYTES = 16 * 1024
+HIDDEN_DISPLAY_EVENT_TYPES = {
+    "session_meta",
+    "turn_context",
+    "task_started",
+    "task_complete",
+    "turn_aborted",
+    "context_compacted",
+    "token_count",
+    "user_message",
+    "turn.started",
+    "turn.completed",
+    "thread.started",
+    "message:developer",
+    "message:system",
+    "message:user",
+    "function_call_output",
+    "custom_tool_call_output",
+    "web_search_call",
+    "web_search_end",
+}
+
+
+def relative_cwd(cwd: str) -> str:
+    path = Path(cwd)
+    try:
+        return path.relative_to(settings.root_resolved).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 @dataclass
@@ -36,6 +65,7 @@ class CodexSession:
     exit_code: int | None = None
     prompts: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
+    queue: list[dict] = field(default_factory=list)
     clients: dict[WebSocket, WebSocketClient] = field(default_factory=dict)
     run_task: asyncio.Task | None = None
     process: asyncio.subprocess.Process | None = None
@@ -46,6 +76,7 @@ class CodexSession:
     model_context_window: int | None = None
     context_used_percent: float | None = None
     total_tokens: int | None = None
+    suppress_queue_drain: bool = False
 
     def summary(self) -> dict:
         return {
@@ -54,6 +85,7 @@ class CodexSession:
             "rollout_path": self.rollout_path.as_posix() if self.rollout_path else None,
             "title": self.title,
             "cwd": self.cwd,
+            "cwd_relative": relative_cwd(self.cwd),
             "model": self.model,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -63,6 +95,7 @@ class CodexSession:
             "model_context_window": self.model_context_window,
             "context_used_percent": self.context_used_percent,
             "total_tokens": self.total_tokens,
+            "queue": self.queue,
         }
 
     def snapshot(self) -> dict:
@@ -85,13 +118,6 @@ class CodexSessionManager:
 
     def _cwd_for(self, cwd: str | None) -> str:
         return resolve_served_directory(cwd, "Codex")
-
-    def _relative_cwd(self, cwd: str) -> str:
-        path = Path(cwd)
-        try:
-            return path.relative_to(settings.root_resolved).as_posix()
-        except ValueError:
-            return path.as_posix()
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -117,6 +143,7 @@ class CodexSessionManager:
                     status=status,
                     exit_code=meta.get("exit_code"),
                     prompts=list(meta.get("prompts") or []),
+                    queue=self._queue_from_meta(meta.get("queue")),
                     meta_path=meta_path,
                     log_path=log_path,
                     stderr_path=stderr_path,
@@ -127,6 +154,30 @@ class CodexSessionManager:
             except Exception:
                 logger.warning("Failed to load Codex session metadata {}", meta_path)
         self._loaded = True
+
+    def _queue_from_meta(self, value: Any) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        queue: list[dict] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            prompt = item.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                continue
+            created_at = item.get("created_at")
+            updated_at = item.get("updated_at")
+            model = item.get("model")
+            queue.append(
+                {
+                    "id": str(item.get("id") or uuid.uuid4().hex),
+                    "prompt": prompt,
+                    "created_at": float(created_at) if isinstance(created_at, (int, float)) else time.time(),
+                    "updated_at": float(updated_at) if isinstance(updated_at, (int, float)) else time.time(),
+                    "model": model if isinstance(model, str) and model.strip() else None,
+                }
+            )
+        return queue
 
     def _write_meta(self, session: CodexSession) -> None:
         if session.meta_path is None:
@@ -146,6 +197,7 @@ class CodexSessionManager:
                     "status": session.status,
                     "exit_code": session.exit_code,
                     "prompts": session.prompts,
+                    "queue": session.queue,
                 },
                 indent=2,
             ),
@@ -237,6 +289,247 @@ class CodexSessionManager:
                 return payload_type
         raw_type = raw.get("type")
         return raw_type if isinstance(raw_type, str) else "event"
+
+    def _display_event_type(self, raw: dict) -> str:
+        payload = raw.get("payload")
+        if raw.get("type") in ("event_msg", "response_item") and isinstance(payload, dict):
+            if payload.get("type") == "message" and isinstance(payload.get("role"), str):
+                return f"message:{payload['role']}"
+            payload_type = payload.get("type")
+            if isinstance(payload_type, str):
+                return payload_type
+        if raw.get("type") == "custom_tool_call" and isinstance(raw.get("name"), str):
+            return f"tool:{raw['name']}"
+        item = raw.get("item")
+        if isinstance(item, dict) and isinstance(item.get("type"), str):
+            return item["type"]
+        raw_type = raw.get("type")
+        if isinstance(raw_type, str):
+            return raw_type
+        nested = raw.get("msg")
+        if isinstance(nested, dict) and isinstance(nested.get("type"), str):
+            return nested["type"]
+        return "event"
+
+    def _content_text(self, content: Any) -> str:
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            output_text = item.get("output_text")
+            if isinstance(text, str):
+                parts.append(text)
+            elif isinstance(output_text, str):
+                parts.append(output_text)
+        return "\n".join(parts)
+
+    def _command_text(self, command: Any) -> str:
+        if isinstance(command, list):
+            return " ".join(str(item) for item in command)
+        if isinstance(command, str):
+            return command
+        return ""
+
+    def _text_from_value(self, value: Any, depth: int = 0) -> str:
+        if depth > 6 or value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, list):
+            return "\n".join(filter(None, (self._text_from_value(item, depth + 1) for item in value)))
+        if not isinstance(value, dict):
+            return ""
+
+        if value.get("type") == "event_msg":
+            payload = self._payload_of(value)
+            if not payload:
+                return ""
+            payload_type = payload.get("type") if isinstance(payload.get("type"), str) else ""
+            if payload_type == "exec_command_begin":
+                command = self._command_text(payload.get("command"))
+                return f"$ {command}" if command else ""
+            if payload_type == "exec_command_end":
+                command = self._command_text(payload.get("command"))
+                output = payload.get("aggregated_output").strip() if isinstance(payload.get("aggregated_output"), str) else ""
+                exit_code = f"exit {payload['exit_code']}" if isinstance(payload.get("exit_code"), int) else ""
+                return "\n".join(filter(None, (f"$ {command}".strip(), output, exit_code)))
+            if payload_type == "agent_message":
+                message = payload.get("message")
+                return message if isinstance(message, str) else ""
+            if payload_type == "patch_apply_end":
+                success = "Applied patch" if payload.get("success") is True else "Patch failed"
+                stdout = payload.get("stdout").strip() if isinstance(payload.get("stdout"), str) else ""
+                stderr = payload.get("stderr").strip() if isinstance(payload.get("stderr"), str) else ""
+                return "\n".join(filter(None, (success, stdout, stderr)))
+            if payload_type == "view_image_tool_call" and isinstance(payload.get("path"), str):
+                return f"Viewed image: {payload['path']}"
+
+        if value.get("type") == "response_item":
+            payload = self._payload_of(value)
+            if not payload:
+                return ""
+            if payload.get("type") == "message":
+                role = payload.get("role") if isinstance(payload.get("role"), str) else ""
+                if role != "assistant":
+                    return ""
+                return self._content_text(payload.get("content"))
+            if payload.get("type") == "function_call" and isinstance(payload.get("name"), str):
+                if payload.get("name") == "exec_command" and isinstance(payload.get("arguments"), str):
+                    try:
+                        args = json.loads(payload["arguments"])
+                    except json.JSONDecodeError:
+                        return f"Tool call: {payload['name']}"
+                    if isinstance(args, dict) and isinstance(args.get("cmd"), str):
+                        return f"$ {args['cmd']}"
+                return f"Tool call: {payload['name']}"
+            if payload.get("type") == "custom_tool_call" and isinstance(payload.get("name"), str):
+                return "Applied patch" if payload.get("name") == "apply_patch" else f"Tool call: {payload['name']}"
+            return ""
+
+        if value.get("type") == "custom_tool_call" and isinstance(value.get("name"), str):
+            return "Applied patch" if value.get("name") == "apply_patch" else f"Tool call: {value['name']}"
+
+        for key in ("message", "text", "content", "output", "summary", "final_answer", "item"):
+            found = self._text_from_value(value.get(key), depth + 1)
+            if found:
+                return found
+
+        changes = value.get("changes")
+        if isinstance(changes, list):
+            rows: list[str] = []
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                kind = change.get("kind") if isinstance(change.get("kind"), str) else "change"
+                path = change.get("path") if isinstance(change.get("path"), str) else ""
+                rows.append(f"{kind}: {path}" if path else kind)
+            return "\n".join(filter(None, rows))
+
+        usage = value.get("usage")
+        if isinstance(usage, dict):
+            input_tokens = usage.get("input_tokens") if isinstance(usage.get("input_tokens"), int) else None
+            output_tokens = usage.get("output_tokens") if isinstance(usage.get("output_tokens"), int) else None
+            if input_tokens is not None or output_tokens is not None:
+                return f"tokens: input {input_tokens if input_tokens is not None else '-'}, output {output_tokens if output_tokens is not None else '-'}"
+        return ""
+
+    def _normalize_message_text(self, text: str) -> str:
+        return text.replace("\r\n", "\n").strip()
+
+    def _is_assistant_response_item(self, raw: dict) -> bool:
+        payload = self._payload_of(raw)
+        return raw.get("type") == "response_item" and payload is not None and payload.get("type") == "message" and payload.get("role") == "assistant"
+
+    def _is_duplicate_agent_message(self, raw: dict, text: str, assistant_response_texts: set[str]) -> bool:
+        payload = self._payload_of(raw)
+        return (
+            raw.get("type") == "event_msg"
+            and payload is not None
+            and payload.get("type") == "agent_message"
+            and self._normalize_message_text(text) in assistant_response_texts
+        )
+
+    def _extract_file_changes(self, raw: dict) -> list[dict]:
+        direct = raw if raw.get("type") == "patch_apply_end" else None
+        payload = self._payload_of(raw)
+        wrapped = payload if raw.get("type") in ("event_msg", "response_item") and payload and payload.get("type") == "patch_apply_end" else None
+        source = direct or wrapped
+        if not source:
+            return []
+        changes = source.get("changes")
+        if not isinstance(changes, dict):
+            return []
+        rows: list[dict] = []
+        for path, value in changes.items():
+            record = value if isinstance(value, dict) else {}
+            rows.append(
+                {
+                    "path": str(path),
+                    "change_type": record.get("type") if isinstance(record.get("type"), str) else "update",
+                    "diff": record.get("unified_diff") if isinstance(record.get("unified_diff"), str) else None,
+                }
+            )
+        return rows
+
+    def _extract_patch_input(self, raw: dict) -> str | None:
+        if raw.get("type") == "custom_tool_call" and raw.get("name") == "apply_patch" and isinstance(raw.get("input"), str):
+            return raw["input"]
+        payload = self._payload_of(raw)
+        if (
+            raw.get("type") == "response_item"
+            and payload is not None
+            and payload.get("type") == "custom_tool_call"
+            and payload.get("name") == "apply_patch"
+            and isinstance(payload.get("input"), str)
+        ):
+            return payload["input"]
+        return None
+
+    def _raw_preview(self, raw: dict) -> dict | None:
+        encoded = json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode("utf-8", errors="replace")
+        if len(encoded) <= RAW_PREVIEW_MAX_BYTES:
+            return raw
+        payload = self._payload_of(raw)
+        preview: dict[str, Any] = {"type": raw.get("type"), "omitted_bytes": len(encoded)}
+        if isinstance(raw.get("name"), str):
+            preview["name"] = raw["name"]
+        if payload:
+            preview_payload: dict[str, Any] = {}
+            for key in ("type", "role", "name"):
+                if isinstance(payload.get(key), str):
+                    preview_payload[key] = payload[key]
+            preview["payload"] = preview_payload
+        return preview
+
+    def _compact_event(self, event: dict, assistant_response_texts: set[str]) -> dict | None:
+        raw = event.get("raw")
+        if not isinstance(raw, dict):
+            return None
+        event_type = self._display_event_type(raw)
+        if event_type in HIDDEN_DISPLAY_EVENT_TYPES:
+            return None
+        text = self._text_from_value(raw)
+        if self._is_duplicate_agent_message(raw, text, assistant_response_texts):
+            return None
+        file_changes = self._extract_file_changes(raw)
+        patch_text = self._extract_patch_input(raw)
+        if not text and not file_changes and not patch_text:
+            return None
+        return {
+            "index": event["index"],
+            "received_at": event["received_at"],
+            "event_type": event_type,
+            "text": text,
+            "file_changes": file_changes,
+            "patch_text": patch_text,
+            "raw_preview": self._raw_preview(raw),
+        }
+
+    def _compact_events(self, events: list[dict]) -> list[dict]:
+        assistant_response_texts = {
+            self._normalize_message_text(self._text_from_value(event["raw"]))
+            for event in events
+            if isinstance(event.get("raw"), dict) and self._is_assistant_response_item(event["raw"])
+        }
+        assistant_response_texts.discard("")
+        compacted: list[dict] = []
+        for event in events:
+            compact = self._compact_event(event, assistant_response_texts)
+            if compact is not None:
+                compacted.append(compact)
+        return compacted
+
+    def _snapshot(self, session: CodexSession) -> dict:
+        return {**session.summary(), "prompts": session.prompts, "events": self._compact_events(session.events)}
+
+    def snapshot(self, session_id: str) -> dict:
+        session = self.get(session_id)
+        return self._snapshot(session)
 
     def _turn_finished_status(self, events: list[dict]) -> str | None:
         status: str | None = None
@@ -394,6 +687,56 @@ class CodexSessionManager:
             session.run_task = asyncio.create_task(self._run(session, cleaned_prompt, resume=False))
         return session.summary()
 
+    async def enqueue(self, session_id: str, prompt: str, model: str | None = None) -> dict:
+        session = self.get(session_id)
+        cleaned_prompt = prompt.strip()
+        if not cleaned_prompt:
+            raise HTTPException(status_code=400, detail="Prompt is required")
+        now = time.time()
+        item = {
+            "id": uuid.uuid4().hex,
+            "prompt": cleaned_prompt,
+            "created_at": now,
+            "updated_at": now,
+            "model": model.strip() if isinstance(model, str) and model.strip() else None,
+        }
+        session.queue.append(item)
+        session.updated_at = now
+        self._write_meta(session)
+        await self._broadcast(session, {"type": "status", "session": session.summary()})
+        if session.status != "running":
+            await self._start_next_queued(session)
+        return session.summary()
+
+    async def update_queue_item(self, session_id: str, item_id: str, prompt: str, model: str | None = None) -> dict:
+        session = self.get(session_id)
+        cleaned_prompt = prompt.strip()
+        if not cleaned_prompt:
+            raise HTTPException(status_code=400, detail="Prompt is required")
+        for item in session.queue:
+            if item.get("id") != item_id:
+                continue
+            now = time.time()
+            item["prompt"] = cleaned_prompt
+            item["updated_at"] = now
+            item["model"] = model.strip() if isinstance(model, str) and model.strip() else item.get("model")
+            session.updated_at = now
+            self._write_meta(session)
+            await self._broadcast(session, {"type": "status", "session": session.summary()})
+            return session.summary()
+        raise HTTPException(status_code=404, detail="Queued message not found")
+
+    async def delete_queue_item(self, session_id: str, item_id: str) -> dict:
+        session = self.get(session_id)
+        original_count = len(session.queue)
+        session.queue = [item for item in session.queue if item.get("id") != item_id]
+        if len(session.queue) == original_count:
+            raise HTTPException(status_code=404, detail="Queued message not found")
+        session.updated_at = time.time()
+        self._write_meta(session)
+        await self._broadcast(session, {"type": "status", "session": session.summary()})
+        return session.summary()
+
     async def send(self, session_id: str, prompt: str, model: str | None = None) -> dict:
         session = self.get(session_id)
         if not prompt.strip():
@@ -414,6 +757,31 @@ class CodexSessionManager:
         await self._broadcast(session, {"type": "status", "session": session.summary()})
         session.run_task = asyncio.create_task(self._run(session, prompt, resume=resume))
         return session.summary()
+
+    async def _start_next_queued(self, session: CodexSession) -> bool:
+        if session.status == "running" or not session.queue:
+            return False
+        item = session.queue.pop(0)
+        prompt = str(item.get("prompt") or "").strip()
+        if not prompt:
+            self._write_meta(session)
+            await self._broadcast(session, {"type": "status", "session": session.summary()})
+            return await self._start_next_queued(session)
+        model = item.get("model")
+        if isinstance(model, str) and model.strip():
+            session.model = model.strip()
+        now = time.time()
+        session.prompts.append({"text": prompt, "created_at": now})
+        if not session.codex_session_id:
+            session.title = self._title_for(prompt)
+        session.status = "running"
+        session.exit_code = None
+        session.updated_at = now
+        session.suppress_queue_drain = False
+        self._write_meta(session)
+        await self._broadcast(session, {"type": "snapshot", "session": self._snapshot(session)})
+        session.run_task = asyncio.create_task(self._run(session, prompt, resume=bool(session.codex_session_id)))
+        return True
 
     async def delete(self, session_id: str) -> dict[str, str]:
         session = self.get(session_id)
@@ -444,6 +812,7 @@ class CodexSessionManager:
         session.process = None
         if session.status == "running":
             session.status = "exited"
+        session.suppress_queue_drain = True
         session.updated_at = time.time()
         self._write_meta(session)
         await self._broadcast(session, {"type": "status", "session": session.summary()})
@@ -453,7 +822,7 @@ class CodexSessionManager:
         session = self.get(session_id)
         await websocket.accept()
         client = add_client(session.clients, websocket)
-        enqueue(client, {"type": "snapshot", "session": session.snapshot()})
+        enqueue(client, {"type": "snapshot", "session": self._snapshot(session)})
         try:
             while True:
                 await websocket.receive_text()
@@ -469,6 +838,12 @@ class CodexSessionManager:
         for session in list(self.sessions.values()):
             if session.process and session.process.returncode is None:
                 session.process.terminate()
+
+    async def resume_pending_queues(self) -> None:
+        self._ensure_loaded()
+        for session in list(self.sessions.values()):
+            if session.status != "running" and session.queue:
+                await self._start_next_queued(session)
 
     def cli_status(self) -> dict:
         rollouts = self._recent_rollouts()
@@ -640,6 +1015,19 @@ class CodexSessionManager:
             available = [selected, *available]
         return {"selected_model": selected, "available_models": available, "source": "config"}
 
+    def _codex_env(self) -> dict[str, str]:
+        from .files import read_config
+
+        env = dict(os.environ)
+        proxy = read_config().codex.proxy.strip()
+        if proxy:
+            for key in PROXY_ENV_KEYS:
+                env[key] = proxy
+        else:
+            for key in PROXY_ENV_KEYS:
+                env.pop(key, None)
+        return env
+
     async def _run(self, session: CodexSession, prompt: str, *, resume: bool) -> None:
         command = ["codex", "exec"]
         if resume:
@@ -670,13 +1058,7 @@ class CodexSessionManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=session.cwd,
-                env={
-                    **os.environ,
-                    "https_proxy": CODEX_PROXY,
-                    "HTTPS_PROXY": CODEX_PROXY,
-                    "http_proxy": CODEX_PROXY,
-                    "HTTP_PROXY": CODEX_PROXY,
-                },
+                env=self._codex_env(),
             )
         except FileNotFoundError:
             session.status = "failed"
@@ -709,6 +1091,9 @@ class CodexSessionManager:
         self._write_meta(session)
         logger.info("Codex session {} exited code={}", session.id, exit_code)
         await self._broadcast(session, {"type": "status", "session": session.summary()})
+        if not session.suppress_queue_drain:
+            await self._start_next_queued(session)
+        session.suppress_queue_drain = False
 
     async def _read_stdout(self, session: CodexSession, process: asyncio.subprocess.Process) -> None:
         assert process.stdout is not None
@@ -773,7 +1158,14 @@ class CodexSessionManager:
                 await asyncio.sleep(0.5)
 
     async def _sync_and_broadcast_rollout_events(self, session: CodexSession) -> None:
-        for event in self._sync_rollout_events(session):
+        new_events = self._sync_rollout_events(session)
+        assistant_response_texts = {
+            self._normalize_message_text(self._text_from_value(event["raw"]))
+            for event in session.events
+            if isinstance(event.get("raw"), dict) and self._is_assistant_response_item(event["raw"])
+        }
+        assistant_response_texts.discard("")
+        for event in new_events:
             raw = event.get("raw")
             event_type = self._raw_type(raw) if isinstance(raw, dict) else "event"
             logger.debug(
@@ -784,7 +1176,11 @@ class CodexSessionManager:
                 session.status,
                 len(session.clients),
             )
-            await self._broadcast(session, {"type": "event", "event": event, "session": session.summary()})
+            compact = self._compact_event(event, assistant_response_texts)
+            if compact is not None:
+                await self._broadcast(session, {"type": "event", "event": compact, "session": session.summary()})
+            else:
+                await self._broadcast(session, {"type": "status", "session": session.summary()})
 
     async def _read_stderr(self, session: CodexSession, process: asyncio.subprocess.Process) -> None:
         assert process.stderr is not None

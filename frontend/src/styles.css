@@ -100,6 +100,84 @@ body {
   margin-left: auto;
 }
 
+.mobile-pane-menu {
+  display: none;
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.mobile-pane-menu-panel {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 12px 28px rgb(15 23 42 / 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(70vh, 520px);
+  min-width: 220px;
+  overflow: auto;
+  padding: 6px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 40;
+}
+
+.mobile-pane-menu-item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: #253044;
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  line-height: 1.2;
+  min-height: 32px;
+  padding: 6px 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.mobile-pane-menu-item:hover,
+.mobile-pane-menu-item.active {
+  background: #edf4ff;
+  color: #174ea6;
+}
+
+.mobile-pane-menu-item.danger {
+  color: #a33;
+}
+
+.mobile-pane-menu-item .bi,
+.mobile-pane-menu-label {
+  flex: 0 0 18px;
+  text-align: center;
+}
+
+.mobile-pane-menu-label {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.mobile-pane-menu-control {
+  border-top: 1px solid var(--border);
+  color: #44526a;
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 7px 4px 2px;
+}
+
+.mobile-pane-menu-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .pane-toolbar-chips {
   align-items: center;
   display: flex;
@@ -116,6 +194,13 @@ body {
   line-height: 1;
   min-width: 96px;
   padding: 0 20px 0 6px;
+}
+
+.pane-toolbar-select-compact {
+  flex-basis: 66px;
+  min-width: 56px;
+  padding-left: 4px;
+  padding-right: 16px;
 }
 
 .pane-toolbar-chip {
@@ -231,12 +316,45 @@ body {
 
 @media (max-width: 767.98px) {
   .sidebar-drawer.pinned {
-    max-width: none;
-    width: min(var(--sidebar-width), 88vw);
+    flex: 0 0 42px;
+    max-width: 42px;
+    width: 42px;
   }
 
   .sidebar-resizer {
     display: none;
+  }
+
+  .topbar {
+    gap: 3px;
+    padding: 0 4px;
+  }
+
+  .active-pane-title {
+    font-size: 10px;
+    padding: 0 2px;
+  }
+
+  .pane-status {
+    max-width: 64px;
+    overflow: hidden;
+    padding: 3px 5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .topbar > .pane-actions:not(.global-pane-actions),
+  .topbar > .pane-toolbar-select,
+  .topbar > .pane-toolbar-chips {
+    display: none;
+  }
+
+  .mobile-pane-menu {
+    display: block;
+  }
+
+  .global-pane-actions {
+    margin-left: 0;
   }
 }
 

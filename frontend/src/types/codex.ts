@@ -6,6 +6,7 @@ export type CodexSessionInfo = {
   rollout_path?: string | null;
   title: string;
   cwd: string;
+  cwd_relative?: string | null;
   model?: string | null;
   created_at: number;
   updated_at: number;
@@ -15,6 +16,7 @@ export type CodexSessionInfo = {
   model_context_window?: number | null;
   context_used_percent?: number | null;
   total_tokens?: number | null;
+  queue: CodexQueueItem[];
 };
 
 export type CodexPrompt = {
@@ -25,12 +27,30 @@ export type CodexPrompt = {
 export type CodexEvent = {
   index: number;
   received_at: number;
-  raw: Record<string, unknown>;
+  event_type: string;
+  text: string;
+  file_changes: CodexFileChange[];
+  patch_text?: string | null;
+  raw_preview?: Record<string, unknown> | null;
 };
 
 export type CodexSessionSnapshot = CodexSessionInfo & {
   prompts: CodexPrompt[];
   events: CodexEvent[];
+};
+
+export type CodexFileChange = {
+  path: string;
+  change_type: string;
+  diff?: string | null;
+};
+
+export type CodexQueueItem = {
+  id: string;
+  prompt: string;
+  created_at: number;
+  updated_at: number;
+  model?: string | null;
 };
 
 export type CodexCliStatus = {

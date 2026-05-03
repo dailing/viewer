@@ -8,6 +8,7 @@ import VoiceInputButton from "../VoiceInputButton.vue";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useLayoutStore } from "../../stores/layout";
 import { useTerminalsStore } from "../../stores/terminals";
+import { useVoiceStore } from "../../stores/voice";
 import type { PaneToolbarAction } from "../../stores/paneToolbar";
 import type { TerminalInfo, TerminalSnapshot } from "../../types/terminals";
 
@@ -15,6 +16,7 @@ const props = defineProps<{ id: string; paneId: string }>();
 const paneToolbar = usePaneToolbarStore();
 const layout = useLayoutStore();
 const terminals = useTerminalsStore();
+const voice = useVoiceStore();
 const terminal = ref<TerminalSnapshot | null>(null);
 const error = ref("");
 const terminalElement = ref<HTMLElement | null>(null);
@@ -48,6 +50,7 @@ let applyingRemoteLayout = false;
 let slowSendToken = 0;
 let lastTouchTap: { time: number; x: number; y: number } | null = null;
 const isActivePane = computed(() => layout.activePaneId === props.paneId);
+const voiceContextId = computed(() => `terminal:${props.id}:paste`);
 
 type SoftKey = {
   title: string;
@@ -360,6 +363,7 @@ function closePastePad() {
 
 function clearPastePad() {
   pastePadText.value = "";
+  voice.clear(voiceContextId.value);
   void nextTick(() => pastePadTextarea.value?.focus());
 }
 
@@ -367,6 +371,8 @@ function sendPastePadText(extra = "") {
   const data = normalizeTerminalInput(pastePadText.value) + extra;
   if (!data) return;
   send(data);
+  pastePadText.value = "";
+  voice.clear(voiceContextId.value);
   closePastePad();
 }
 
@@ -374,6 +380,8 @@ function sendBracketedPaste() {
   const data = normalizeTerminalInput(pastePadText.value);
   if (!data) return;
   send(`\x1b[200~${data}\x1b[201~`);
+  pastePadText.value = "";
+  voice.clear(voiceContextId.value);
   closePastePad();
 }
 
@@ -385,6 +393,10 @@ async function sendSlowPaste() {
   for (let index = 0; index < data.length && token === slowSendToken; index += 32) {
     send(data.slice(index, index + 32));
     await new Promise((resolve) => window.setTimeout(resolve, 25));
+  }
+  if (token === slowSendToken) {
+    pastePadText.value = "";
+    voice.clear(voiceContextId.value);
   }
   xterm?.focus();
 }
@@ -604,7 +616,7 @@ onUnmounted(() => {
           autocorrect="off"
           spellcheck="false"
         ></textarea>
-        <VoiceInputButton v-model="pastePadText" @start="pastePadOpen = true" />
+        <VoiceInputButton v-model="pastePadText" :context-id="voiceContextId" @start="pastePadOpen = true" />
       </div>
       <div class="terminal-paste-pad-actions">
         <button class="btn btn-sm btn-primary" type="button" @click="sendPastePadText()">Send</button>

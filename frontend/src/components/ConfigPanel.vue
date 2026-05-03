@@ -355,6 +355,19 @@ async function applyJson() {
                 @change="normalizeModelList(($event.target as HTMLTextAreaElement).value)"
               ></textarea>
             </label>
+            <label class="setting-row">
+              <span>Muted message alpha</span>
+              <input v-model.number="draft.codex.muted_message_alpha" class="form-range" type="range" min="0.15" max="1" step="0.01" />
+              <input v-model.number="draft.codex.muted_message_alpha" class="form-control form-control-sm number-input" type="number" min="0.15" max="1" step="0.01" />
+            </label>
+            <label class="compact-field">
+              <span>Proxy</span>
+              <input
+                v-model.trim="draft.codex.proxy"
+                class="form-control form-control-sm"
+                placeholder="http://localhost:7890"
+              />
+            </label>
           </div>
         </section>
 

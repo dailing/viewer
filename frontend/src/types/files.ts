@@ -73,6 +73,8 @@ export interface MarkdownConfig {
 export interface CodexConfig {
   available_models: string[];
   default_model: string;
+  proxy: string;
+  muted_message_alpha: number;
 }
 
 export interface WorkspaceConfig {

@@ -27,6 +27,7 @@ const workspaces = useWorkspacesStore();
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
 const configOpen = ref(false);
+const mobileToolbarOpen = ref(false);
 const sidebarWidth = ref(320);
 const bodyShellStyle = computed(() => ({ "--sidebar-width": `${sidebarWidth.value}px` }));
 const appStyle = computed(() => {
@@ -113,6 +114,7 @@ const globalPaneActions = computed<PaneToolbarAction[]>(() => {
 });
 const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
 const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
+const hasMobilePaneToolbar = computed(() => activePaneActions.value.length > 0 || activePaneControls.value.length > 0);
 const workspaceCount = computed(() => files.workspaceConfig.count);
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
@@ -306,11 +308,21 @@ function runPaneAction(action: PaneToolbarAction) {
   void action.run();
 }
 
+function runMobilePaneAction(action: PaneToolbarAction) {
+  mobileToolbarOpen.value = false;
+  runPaneAction(action);
+}
+
 function updatePaneControl(control: PaneToolbarControl, event: Event) {
   if (control.kind !== "select") return;
   const target = event.target as HTMLSelectElement | null;
   if (!target) return;
   void control.onChange(target.value);
+}
+
+function updateMobilePaneControl(control: PaneToolbarControl, event: Event) {
+  updatePaneControl(control, event);
+  mobileToolbarOpen.value = false;
 }
 
 function splitActivePane(direction: SplitDirection) {
@@ -346,6 +358,51 @@ onUnmounted(() => {
       <span v-if="activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
         {{ activePaneToolbar.status }}
       </span>
+      <div v-if="hasMobilePaneToolbar" class="mobile-pane-menu">
+        <button
+          class="btn btn-outline-secondary icon-button toolbar-action"
+          type="button"
+          title="Pane controls"
+          aria-label="Pane controls"
+          :aria-expanded="mobileToolbarOpen"
+          @click="mobileToolbarOpen = !mobileToolbarOpen"
+        >
+          <i class="bi bi-three-dots-vertical"></i>
+        </button>
+        <div v-if="mobileToolbarOpen" class="mobile-pane-menu-panel" role="menu">
+          <button
+            v-for="action in activePaneActions"
+            :key="action.id"
+            class="mobile-pane-menu-item"
+            :class="[{ active: action.active }, action.variant === 'danger' ? 'danger' : '']"
+            type="button"
+            role="menuitem"
+            @click="runMobilePaneAction(action)"
+          >
+            <i v-if="action.icon" class="bi" :class="action.icon"></i>
+            <span v-else-if="action.label" class="mobile-pane-menu-label">{{ action.label }}</span>
+            <span>{{ action.title }}</span>
+          </button>
+          <template v-for="control in activePaneControls" :key="control.id">
+            <label v-if="control.kind === 'select'" class="mobile-pane-menu-control">
+              <span>{{ control.title }}</span>
+              <select
+                class="form-select form-select-sm"
+                :value="control.value"
+                @change="updateMobilePaneControl(control, $event)"
+              >
+                <option v-for="option in control.options" :key="option" :value="option">{{ option }}</option>
+              </select>
+            </label>
+            <div v-else class="mobile-pane-menu-control">
+              <span>{{ control.title }}</span>
+              <div class="mobile-pane-menu-chips">
+                <span v-for="(item, index) in control.items" :key="`${index}:${item}`" class="pane-toolbar-chip">{{ item }}</span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
       <div v-if="activePaneActions.length" class="pane-actions" aria-label="Active pane actions">
         <button
           v-for="action in activePaneActions"
@@ -365,6 +422,7 @@ onUnmounted(() => {
         <select
           v-if="control.kind === 'select'"
           class="form-select form-select-sm pane-toolbar-select"
+          :class="{ 'pane-toolbar-select-compact': control.size === 'compact' }"
           :title="control.title"
           :value="control.value"
           @change="updatePaneControl(control, $event)"

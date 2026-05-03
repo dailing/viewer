@@ -2,6 +2,7 @@
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { useTerminalsStore } from "../../stores/terminals";
+import { useVoiceStore } from "../../stores/voice";
 
 const emit = defineEmits<{
   "open-terminal": [id: string];
@@ -10,6 +11,20 @@ const emit = defineEmits<{
 const files = useFilesStore();
 const layout = useLayoutStore();
 const terminals = useTerminalsStore();
+const voice = useVoiceStore();
+
+function voiceContextId(terminalId: string) {
+  return `terminal:${terminalId}:paste`;
+}
+
+function hasVoicePending(terminalId: string) {
+  const status = voice.context(voiceContextId(terminalId)).status;
+  return status === "connecting" || status === "recording" || status === "processing";
+}
+
+function hasVoiceReady(terminalId: string) {
+  return voice.hasReadyText(voiceContextId(terminalId));
+}
 
 async function newTerminal() {
   const terminal = await terminals.create(files.currentPath);
@@ -38,7 +53,11 @@ async function closeTerminal(id: string) {
         v-for="terminal in terminals.terminals"
         :key="terminal.id"
         class="sidebar-row"
-        :class="{ active: layout.openTerminalIds.includes(terminal.id) }"
+        :class="{
+          active: layout.openTerminalIds.includes(terminal.id),
+          'voice-pending': hasVoicePending(terminal.id),
+          'voice-ready': hasVoiceReady(terminal.id),
+        }"
       >
         <button class="sidebar-row-main" type="button" @click="emit('open-terminal', terminal.id)">
           <i class="bi" :class="terminal.status === 'running' ? 'bi-terminal-fill' : 'bi-terminal'"></i>
@@ -113,6 +132,24 @@ async function closeTerminal(id: string) {
 .sidebar-row:hover,
 .sidebar-row.active {
   background: #eef3f8;
+}
+
+.sidebar-row.voice-pending {
+  background: #fff6d7;
+}
+
+.sidebar-row.voice-pending:hover,
+.sidebar-row.voice-pending.active {
+  background: #ffedb0;
+}
+
+.sidebar-row.voice-ready {
+  background: #fff0b8;
+}
+
+.sidebar-row.voice-ready:hover,
+.sidebar-row.voice-ready.active {
+  background: #ffe48a;
 }
 
 .sidebar-row-main {

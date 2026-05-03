@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     voice_direct_english_translation: bool = False
     voice_min_chunk_size: float = 0.1
     voice_stop_timeout_seconds: float = 10.0
+    voice_model_idle_timeout_seconds: float = 1200.0
+    voice_offline_beam_size: int = 5
+    voice_offline_vad_filter: bool = True
     voice_vac: bool = True
     voice_vad: bool = True
     debug: bool = False

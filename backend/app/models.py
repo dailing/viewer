@@ -75,6 +75,8 @@ class MarkdownConfig(BaseModel):
 class CodexConfig(BaseModel):
     available_models: list[str] = Field(default_factory=lambda: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"])
     default_model: str = "gpt-5.5"
+    proxy: str = ""
+    muted_message_alpha: float = Field(default=0.56, ge=0.15, le=1.0)
 
 
 class WorkspaceConfig(BaseModel):
@@ -139,6 +141,7 @@ class CodexSessionInfo(BaseModel):
     rollout_path: str | None = None
     title: str
     cwd: str
+    cwd_relative: str | None = None
     model: str | None = None
     created_at: float
     updated_at: float
@@ -148,6 +151,7 @@ class CodexSessionInfo(BaseModel):
     model_context_window: int | None = None
     context_used_percent: float | None = None
     total_tokens: int | None = None
+    queue: list["CodexQueueItem"] = Field(default_factory=list)
 
 
 class CodexPrompt(BaseModel):
@@ -155,10 +159,20 @@ class CodexPrompt(BaseModel):
     created_at: float
 
 
+class CodexFileChange(BaseModel):
+    path: str
+    change_type: str
+    diff: str | None = None
+
+
 class CodexEvent(BaseModel):
     index: int
     received_at: float
-    raw: dict
+    event_type: str
+    text: str = ""
+    file_changes: list[CodexFileChange] = Field(default_factory=list)
+    patch_text: str | None = None
+    raw_preview: dict | None = None
 
 
 class CodexSessionSnapshot(CodexSessionInfo):
@@ -173,6 +187,19 @@ class CodexSessionCreate(BaseModel):
 
 
 class CodexSessionMessage(BaseModel):
+    prompt: str
+    model: str | None = None
+
+
+class CodexQueueItem(BaseModel):
+    id: str
+    prompt: str
+    created_at: float
+    updated_at: float
+    model: str | None = None
+
+
+class CodexQueueMessage(BaseModel):
     prompt: str
     model: str | None = None
 

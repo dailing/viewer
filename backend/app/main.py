@@ -26,7 +26,7 @@ from .files import (
     write_workspace,
 )
 from .logging import current_log_path, ensure_logging
-from .models import ClientLog, CodexCliStatus, CodexModelOptions, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate, WorkspaceSnapshot
+from .models import ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -71,6 +71,7 @@ async def startup() -> None:
     )
     watch_stop_event = asyncio.Event()
     watch_task = asyncio.create_task(watch_root(watch_stop_event))
+    await codex_session_manager.resume_pending_queues()
 
 
 @app.on_event("shutdown")
@@ -281,13 +282,31 @@ async def create_codex_session(config: CodexSessionCreate):
 
 @app.get("/api/codex/sessions/{session_id}")
 async def codex_session(session_id: str):
-    return codex_session_manager.get(session_id).snapshot()
+    return codex_session_manager.snapshot(session_id)
 
 
 @app.post("/api/codex/sessions/{session_id}/messages")
 async def send_codex_message(session_id: str, message: CodexSessionMessage):
     logger.info("Sending Codex message session={}", session_id)
     return await codex_session_manager.send(session_id, message.prompt, message.model)
+
+
+@app.post("/api/codex/sessions/{session_id}/queue")
+async def queue_codex_message(session_id: str, message: CodexQueueMessage):
+    logger.info("Queueing Codex message session={}", session_id)
+    return await codex_session_manager.enqueue(session_id, message.prompt, message.model)
+
+
+@app.put("/api/codex/sessions/{session_id}/queue/{item_id}")
+async def update_codex_queue_message(session_id: str, item_id: str, message: CodexQueueMessage):
+    logger.info("Updating queued Codex message session={} item={}", session_id, item_id)
+    return await codex_session_manager.update_queue_item(session_id, item_id, message.prompt, message.model)
+
+
+@app.delete("/api/codex/sessions/{session_id}/queue/{item_id}")
+async def delete_codex_queue_message(session_id: str, item_id: str):
+    logger.info("Deleting queued Codex message session={} item={}", session_id, item_id)
+    return await codex_session_manager.delete_queue_item(session_id, item_id)
 
 
 @app.post("/api/codex/sessions/{session_id}/terminate")

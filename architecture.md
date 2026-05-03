@@ -222,7 +222,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Sidebar shell with a VS Code-style activity rail and one active tool panel at a time.
 - Persists the active sidebar tool in `localStorage` under `viewer.sidebarActiveTool.v1`.
 - Tools: Files, Terminals, and Codex. Future side tools should be added to this shell instead of mixing all lists into one panel.
-- Renders one-click numbered workspace buttons in the activity rail. Clicking a workspace saves the current workspace and restores the selected workspace without changing the active tool panel.
+- The activity rail stays visible even when the tool panel is closed. Clicking a different tool or workspace changes only the active selection; clicking the already-active tool or workspace toggles the tool panel open/closed.
+- Renders one-click numbered workspace buttons in the activity rail. Clicking a different workspace saves the current workspace and restores the selected workspace without changing the tool panel open/closed state.
 - Re-emits `open-file`, `open-terminal`, and `open-codex-session` events to `App.vue`.
 
 `frontend/src/components/sidebar/FilesPanel.vue`

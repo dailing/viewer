@@ -268,6 +268,10 @@ function toggleSidebarPin() {
   sidebarPinned.value = !sidebarPinned.value;
 }
 
+function toggleToolPanel() {
+  sidebarOpen.value = !sidebarOpen.value;
+}
+
 function clampSidebarWidth(width: number) {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
 }
@@ -335,9 +339,6 @@ onUnmounted(() => {
 <template>
   <div class="app-shell" :style="appStyle">
     <header class="topbar">
-      <button class="btn btn-outline-secondary icon-button" type="button" @click="sidebarOpen = !sidebarOpen" title="Tools">
-        <i class="bi bi-list"></i>
-      </button>
       <button class="btn btn-outline-secondary icon-button" type="button" title="Configuration" @click="configOpen = true">
         <i class="bi bi-gear"></i>
       </button>
@@ -391,41 +392,26 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <div class="body-shell" :class="{ 'sidebar-pinned': sidebarPinned }" :style="bodyShellStyle">
+    <div class="body-shell" :class="{ 'sidebar-pinned': sidebarPinned && sidebarOpen }" :style="bodyShellStyle">
       <div v-if="sidebarOpen && !sidebarPinned" class="sidebar-backdrop" @click="sidebarOpen = false"></div>
-      <aside class="sidebar-drawer" :class="{ open: sidebarOpen, pinned: sidebarPinned }">
-        <div class="sidebar-chrome">
-          <span>Tools</span>
-          <button
-            class="btn btn-sm btn-outline-secondary icon-button"
-            type="button"
-            :title="sidebarPinned ? 'Unpin panel' : 'Pin panel'"
-            @click="toggleSidebarPin"
-          >
-            <i class="bi" :class="sidebarPinned ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i>
-          </button>
-          <button
-            v-if="!sidebarPinned"
-            class="btn btn-sm btn-outline-secondary icon-button"
-            type="button"
-            title="Hide panel"
-            @click="sidebarOpen = false"
-          >
-            <i class="bi bi-x"></i>
-          </button>
-        </div>
+      <aside class="sidebar-drawer" :class="{ 'panel-open': sidebarOpen, pinned: sidebarPinned && sidebarOpen }">
         <FileSidebar
           :workspace-count="workspaceCount"
           :active-workspace-id="workspaces.activeWorkspaceId"
+          :panel-open="sidebarOpen"
+          :panel-pinned="sidebarPinned"
           :switching-workspace="workspaces.switching"
           @open-file="openFile"
           @open-terminal="openTerminal"
           @open-codex-session="openCodexSession"
           @switch-workspace="switchWorkspace"
+          @toggle-tool-panel="toggleToolPanel"
+          @toggle-pin="toggleSidebarPin"
+          @close-panel="sidebarOpen = false"
         />
       </aside>
       <div
-        v-if="sidebarPinned"
+        v-if="sidebarPinned && sidebarOpen"
         class="sidebar-resizer"
         role="separator"
         title="Drag to resize"

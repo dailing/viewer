@@ -11,6 +11,8 @@ const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 const props = defineProps<{
   workspaceCount: number;
   activeWorkspaceId: string;
+  panelOpen: boolean;
+  panelPinned: boolean;
   switchingWorkspace?: boolean;
 }>();
 
@@ -19,6 +21,9 @@ const emit = defineEmits<{
   "open-terminal": [id: string];
   "open-codex-session": [id: string];
   "switch-workspace": [id: string];
+  "toggle-tool-panel": [];
+  "toggle-pin": [];
+  "close-panel": [];
 }>();
 
 const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
@@ -39,10 +44,26 @@ const workspaceIds = computed(() => Array.from({ length: Math.max(1, props.works
 watch(activeTool, (tool) => {
   localStorage.setItem(ACTIVE_TOOL_KEY, tool);
 });
+
+function selectTool(tool: SidebarTool) {
+  if (activeTool.value === tool) {
+    emit("toggle-tool-panel");
+    return;
+  }
+  activeTool.value = tool;
+}
+
+function selectWorkspace(id: string) {
+  if (props.activeWorkspaceId === id) {
+    emit("toggle-tool-panel");
+    return;
+  }
+  emit("switch-workspace", id);
+}
 </script>
 
 <template>
-  <div class="tool-sidebar">
+  <div class="tool-sidebar" :class="{ 'panel-open': props.panelOpen, 'panel-pinned': props.panelPinned }">
     <nav class="activity-bar" aria-label="Sidebar tools">
       <button
         v-for="tool in tools"
@@ -53,7 +74,7 @@ watch(activeTool, (tool) => {
         :title="tool.title"
         :aria-label="tool.title"
         :aria-pressed="activeTool === tool.id"
-        @click="activeTool = tool.id"
+        @click="selectTool(tool.id)"
       >
         <i class="bi" :class="tool.icon"></i>
       </button>
@@ -68,15 +89,36 @@ watch(activeTool, (tool) => {
           :aria-label="`Workspace ${id}`"
           :aria-pressed="props.activeWorkspaceId === id"
           :disabled="props.switchingWorkspace"
-          @click="emit('switch-workspace', id)"
+          @click="selectWorkspace(id)"
         >
           <span>{{ id }}</span>
         </button>
       </div>
     </nav>
 
-    <section class="tool-panel" :aria-label="activeTitle">
-      <div class="tool-panel-title">{{ activeTitle }}</div>
+    <section v-if="props.panelOpen" class="tool-panel" :aria-label="activeTitle">
+      <div class="tool-panel-title">
+        <span>{{ activeTitle }}</span>
+        <button
+          class="panel-title-button"
+          type="button"
+          :title="props.panelPinned ? 'Unpin panel' : 'Pin panel'"
+          :aria-label="props.panelPinned ? 'Unpin panel' : 'Pin panel'"
+          @click="emit('toggle-pin')"
+        >
+          <i class="bi" :class="props.panelPinned ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i>
+        </button>
+        <button
+          v-if="!props.panelPinned"
+          class="panel-title-button"
+          type="button"
+          title="Hide panel"
+          aria-label="Hide panel"
+          @click="emit('close-panel')"
+        >
+          <i class="bi bi-x"></i>
+        </button>
+      </div>
       <FilesPanel v-if="activeTool === 'files'" @open-file="emit('open-file', $event)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" @open-terminal="emit('open-terminal', $event)" />
       <CodexSessionsPanel v-else @open-codex-session="emit('open-codex-session', $event)" />
@@ -90,6 +132,8 @@ watch(activeTool, (tool) => {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
+  overflow: visible;
+  position: relative;
 }
 
 .activity-bar {
@@ -101,6 +145,8 @@ watch(activeTool, (tool) => {
   flex-direction: column;
   gap: 4px;
   padding: 6px 4px;
+  position: relative;
+  z-index: 2;
 }
 
 .activity-button {
@@ -157,23 +203,72 @@ watch(activeTool, (tool) => {
 }
 
 .tool-panel {
+  background: #ffffff;
   display: flex;
-  flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  z-index: 3;
+}
+
+.tool-sidebar:not(.panel-pinned) .tool-panel {
+  bottom: 0;
+  box-shadow: 8px 0 24px rgb(15 23 42 / 0.16);
+  left: 42px;
+  max-width: calc(88vw - 42px);
+  position: absolute;
+  top: 0;
+  width: calc(var(--sidebar-width) - 42px);
+}
+
+.tool-sidebar.panel-pinned .tool-panel {
+  border-right: 1px solid var(--border);
+  flex: 1 1 auto;
 }
 
 .tool-panel-title {
+  align-items: center;
   border-bottom: 1px solid var(--border);
   color: #1f2937;
+  display: flex;
   flex: 0 0 30px;
   font-size: 12px;
   font-weight: 700;
+  gap: 4px;
   line-height: 30px;
   overflow: hidden;
-  padding: 0 10px;
+  padding: 3px 6px 3px 10px;
+}
+
+.tool-panel-title span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.panel-title-button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: #5f6f86;
+  display: inline-flex;
+  flex: 0 0 22px;
+  height: 22px;
+  justify-content: center;
+  padding: 0;
+  width: 22px;
+}
+
+.panel-title-button:hover {
+  background: #e8edf5;
+  color: #1f2937;
+}
+
+.panel-title-button .bi {
+  font-size: 12px;
+  line-height: 1;
 }
 </style>

@@ -5,6 +5,7 @@ import FilesPanel from "./sidebar/FilesPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 
 type SidebarTool = "files" | "terminals" | "codex";
+type WorkspaceNotice = "completed" | "failed";
 
 const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 
@@ -13,6 +14,7 @@ const props = defineProps<{
   activeWorkspaceId: string;
   panelOpen: boolean;
   panelPinned: boolean;
+  workspaceNotices?: Record<string, WorkspaceNotice>;
   switchingWorkspace?: boolean;
 }>();
 
@@ -60,6 +62,18 @@ function selectWorkspace(id: string) {
   }
   emit("switch-workspace", id);
 }
+
+function workspaceTitle(id: string) {
+  const notice = props.workspaceNotices?.[id];
+  if (notice === "failed") return `Workspace ${id}: Codex run failed`;
+  if (notice === "completed") return `Workspace ${id}: Codex run finished`;
+  return `Workspace ${id}`;
+}
+
+function workspaceNoticeClass(id: string) {
+  const notice = props.workspaceNotices?.[id];
+  return notice ? `workspace-notice-${notice}` : "";
+}
 </script>
 
 <template>
@@ -83,10 +97,10 @@ function selectWorkspace(id: string) {
           v-for="id in workspaceIds"
           :key="id"
           class="activity-button workspace-button"
-          :class="{ active: props.activeWorkspaceId === id }"
+          :class="[{ active: props.activeWorkspaceId === id }, workspaceNoticeClass(id)]"
           type="button"
-          :title="`Workspace ${id}`"
-          :aria-label="`Workspace ${id}`"
+          :title="workspaceTitle(id)"
+          :aria-label="workspaceTitle(id)"
           :aria-pressed="props.activeWorkspaceId === id"
           :disabled="props.switchingWorkspace"
           @click="selectWorkspace(id)"
@@ -200,6 +214,36 @@ function selectWorkspace(id: string) {
 .workspace-button {
   font-size: 12px;
   font-weight: 700;
+}
+
+.workspace-button.workspace-notice-completed:not(.active) {
+  background: #fff4c2;
+  color: #7a4f00;
+}
+
+.workspace-button.workspace-notice-failed:not(.active) {
+  background: #ffe0e0;
+  color: #a33;
+}
+
+.workspace-button.workspace-notice-completed:not(.active)::after,
+.workspace-button.workspace-notice-failed:not(.active)::after {
+  border: 2px solid #f3f6fa;
+  border-radius: 999px;
+  content: "";
+  height: 9px;
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  width: 9px;
+}
+
+.workspace-button.workspace-notice-completed:not(.active)::after {
+  background: #f0ad00;
+}
+
+.workspace-button.workspace-notice-failed:not(.active)::after {
+  background: #d1242f;
 }
 
 .tool-panel {

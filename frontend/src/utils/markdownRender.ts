@@ -12,8 +12,13 @@ import hljs from "highlight.js";
 import katex from "katex";
 import mermaid from "mermaid";
 import { nextTick } from "vue";
+import { rawUrl } from "../api/client";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+
+export interface RenderMarkdownOptions {
+  basePath?: string;
+}
 
 function escapeHtml(value: string): string {
   return value
@@ -33,6 +38,13 @@ function normalizeLanguage(info: string): string {
 
 function codeLanguageClass(language: string): string {
   return language ? ` class="language-${escapeAttribute(language)}"` : "";
+}
+
+function isLocalLinkTarget(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("//")) return false;
+  const schemeMatch = trimmed.match(/^([A-Za-z][A-Za-z\d+.-]*):/);
+  return !schemeMatch || schemeMatch[1].toLowerCase() === "file";
 }
 
 function highlightedLine(line: string, language: string): string {
@@ -127,8 +139,30 @@ md.renderer.rules.fence = (tokens: any[], idx: number, options: any, env: any, s
   return fence ? fence(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
 };
 
-export function renderMarkdown(source: string): string {
-  return md.render(source);
+const image = md.renderer.rules.image;
+md.renderer.rules.image = (tokens: any[], idx: number, options: any, env: RenderMarkdownOptions, self: any): string => {
+  const token = tokens[idx];
+  const src = token.attrGet("src");
+  if (env.basePath && src && isLocalLinkTarget(src)) {
+    token.attrSet("src", rawUrl(src, undefined, env.basePath));
+  }
+  return image ? image(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
+};
+
+const linkOpen = md.renderer.rules.link_open;
+md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: RenderMarkdownOptions, self: any): string => {
+  const token = tokens[idx];
+  const href = token.attrGet("href");
+  if (env.basePath && href && isLocalLinkTarget(href)) {
+    token.attrSet("data-viewer-link", "true");
+    token.attrSet("data-viewer-target", href);
+    token.attrSet("href", rawUrl(href, undefined, env.basePath));
+  }
+  return linkOpen ? linkOpen(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
+};
+
+export function renderMarkdown(source: string, options: RenderMarkdownOptions = {}): string {
+  return md.render(source, options);
 }
 
 export async function renderMermaidIn(container: HTMLElement | null, idPrefix = "mermaid"): Promise<void> {

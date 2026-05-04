@@ -20,6 +20,7 @@ from .files import (
     read_config,
     read_text,
     read_workspaces,
+    resolve_markdown_link,
     resolve_path,
     set_active_workspace,
     write_config,
@@ -158,8 +159,9 @@ async def file_content(path: str):
 
 
 @app.get("/api/file/raw")
-async def file_raw(path: str, h: str | None = None):
-    target = resolve_path(path)
+async def file_raw(path: str, h: str | None = None, base: str | None = None):
+    target_path = resolve_markdown_link(base, path) if base is not None else path
+    target = resolve_path(target_path)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
     if not target.is_file():
@@ -171,6 +173,11 @@ async def file_raw(path: str, h: str | None = None):
     response.headers["ETag"] = f"\"{etag}\""
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
+
+
+@app.get("/api/file/resolve-link")
+async def file_resolve_link(base: str, target: str):
+    return {"path": resolve_markdown_link(base, target)}
 
 
 @app.get("/api/config")

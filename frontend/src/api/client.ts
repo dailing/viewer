@@ -17,9 +17,10 @@ function socketUrl(path: string): string {
   return `${protocol}//${window.location.host}${path}`;
 }
 
-export function rawUrl(path: string, contentHash?: string): string {
+export function rawUrl(path: string, contentHash?: string, base?: string): string {
   const hashQuery = contentHash ? `&h=${encodeURIComponent(contentHash)}` : "";
-  return `/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}`;
+  const baseQuery = base !== undefined ? `&base=${encodeURIComponent(base)}` : "";
+  return `/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}${baseQuery}`;
 }
 
 export async function getTree(path = ""): Promise<DirectoryListing> {
@@ -34,6 +35,12 @@ export async function getText(path: string): Promise<string> {
   const response = await fetch(`/api/file/content?path=${encodeURIComponent(path)}`);
   if (!response.ok) throw new Error(await response.text());
   return response.text();
+}
+
+export async function resolveMarkdownLink(base: string, target: string): Promise<{ path: string }> {
+  return request<{ path: string }>(
+    `/api/file/resolve-link?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`,
+  );
 }
 
 export async function getConfig(): Promise<ViewerConfig> {

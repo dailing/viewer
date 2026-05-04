@@ -12,12 +12,14 @@ import { useTerminalsStore } from "./stores/terminals";
 import { useWorkspacesStore } from "./stores/workspaces";
 import { parentPath } from "./utils/paths";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
-import type { SplitDirection } from "./types/layout";
+import type { CodexSessionInfo, CodexStatus } from "./types/codex";
+import type { LayoutNode, SplitDirection } from "./types/layout";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
 const SIDEBAR_WIDTH_KEY = "viewer.sidebarWidth.v1";
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 640;
+type WorkspaceNotice = "completed" | "failed";
 const files = useFilesStore();
 const codex = useCodexStore();
 const layout = useLayoutStore();
@@ -28,6 +30,8 @@ const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
 const configOpen = ref(false);
 const mobileToolbarOpen = ref(false);
+const codexStatusById = ref<Record<string, CodexStatus>>({});
+const workspaceNotices = ref<Record<string, WorkspaceNotice>>({});
 const sidebarWidth = ref(320);
 const bodyShellStyle = computed(() => ({ "--sidebar-width": `${sidebarWidth.value}px` }));
 const appStyle = computed(() => {
@@ -133,6 +137,7 @@ onMounted(async () => {
   layout.load();
   await Promise.all([files.loadConfig(), terminals.load(), codex.load(), workspaces.load()]);
   await restoreInitialWorkspace();
+  updateWorkspaceCodexNotices();
   workspaceAutosaveReady = true;
   source = connectEvents(
     async (event) => {
@@ -170,6 +175,13 @@ watch(sidebarPinned, (pinned) => {
   localStorage.setItem(SIDEBAR_PIN_KEY, String(pinned));
   if (pinned) sidebarOpen.value = true;
 });
+
+watch(
+  () => codex.sessions.map((session) => `${session.id}:${session.status}`).join("|"),
+  () => {
+    updateWorkspaceCodexNotices();
+  },
+);
 
 function openFile(path: string) {
   void files.recordVisit(path);
@@ -234,10 +246,12 @@ async function restoreInitialWorkspace() {
     layout.restore(snapshot.layout, snapshot.active_pane_id);
     restoreWorkspacePins(snapshot.pinned);
     await loadWorkspaceDirectory(snapshot.current_path);
+    clearWorkspaceNotice(activeId);
     return;
   }
   await files.loadDirectory(files.currentPath);
   await workspaces.saveSlot(activeId, currentWorkspaceSnapshot());
+  clearWorkspaceNotice(activeId);
 }
 
 async function switchWorkspace(id: string) {
@@ -261,9 +275,63 @@ async function switchWorkspace(id: string) {
       files.pinned = [];
       await workspaces.saveSlot(targetId, currentWorkspaceSnapshot());
     }
+    clearWorkspaceNotice(targetId);
   } finally {
     workspaces.switching = false;
   }
+}
+
+function updateWorkspaceCodexNotices() {
+  const previous = codexStatusById.value;
+  const next: Record<string, CodexStatus> = {};
+
+  for (const session of codex.sessions) {
+    next[session.id] = session.status;
+    if (!["exited", "failed"].includes(session.status)) continue;
+    const notice: WorkspaceNotice = session.status === "failed" ? "failed" : "completed";
+    for (const workspaceId of workspaceIdsForCodexSession(session.id)) {
+      if (workspaceId === workspaces.activeWorkspaceId) continue;
+      if (previous[session.id] !== "running" && !sessionFinishedAfterWorkspaceSaved(session, workspaceId)) continue;
+      setWorkspaceNotice(workspaceId, notice);
+    }
+  }
+
+  codexStatusById.value = next;
+}
+
+function workspaceIdsForCodexSession(sessionId: string) {
+  const ids: string[] = [];
+  for (let index = 1; index <= workspaceCount.value; index += 1) {
+    const workspaceId = String(index);
+    const root = workspaceId === workspaces.activeWorkspaceId ? layout.root : workspaces.snapshotFor(workspaceId)?.layout;
+    if (root && layoutContainsCodexSession(root, sessionId)) ids.push(workspaceId);
+  }
+  return ids;
+}
+
+function layoutContainsCodexSession(node: LayoutNode, sessionId: string): boolean {
+  if (node.type === "pane") return node.codexSessionId === sessionId;
+  return layoutContainsCodexSession(node.first, sessionId) || layoutContainsCodexSession(node.second, sessionId);
+}
+
+function sessionFinishedAfterWorkspaceSaved(session: CodexSessionInfo, workspaceId: string) {
+  const snapshotUpdatedAt = workspaces.snapshotFor(workspaceId)?.updated_at;
+  return Boolean(snapshotUpdatedAt && session.updated_at > snapshotUpdatedAt);
+}
+
+function setWorkspaceNotice(workspaceId: string, notice: WorkspaceNotice) {
+  const current = workspaceNotices.value[workspaceId];
+  workspaceNotices.value = {
+    ...workspaceNotices.value,
+    [workspaceId]: current === "failed" ? current : notice,
+  };
+}
+
+function clearWorkspaceNotice(workspaceId: string) {
+  if (!workspaceNotices.value[workspaceId]) return;
+  const next = { ...workspaceNotices.value };
+  delete next[workspaceId];
+  workspaceNotices.value = next;
 }
 
 function toggleSidebarPin() {
@@ -458,6 +526,7 @@ onUnmounted(() => {
           :active-workspace-id="workspaces.activeWorkspaceId"
           :panel-open="sidebarOpen"
           :panel-pinned="sidebarPinned"
+          :workspace-notices="workspaceNotices"
           :switching-workspace="workspaces.switching"
           @open-file="openFile"
           @open-terminal="openTerminal"

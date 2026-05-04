@@ -33,7 +33,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/tree`: calls `list_directory()`.
 - `/api/file/meta`: calls `get_meta()`.
 - `/api/file/content`: calls `read_text()`.
-- `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers.
+- `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
+- `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
 - `/api/config` GET/PUT: reads and writes active/legacy pinned paths, last sidebar directory, file/directory visit timestamps, nav appearance, workspace slot count, Codex model options, and Markdown theme config.
 - `/api/workspaces` GET, `/api/workspaces/{id}` PUT, and `/api/workspaces/{id}/activate` POST: read, write, and activate root-local workspace snapshots stored in `.viewer.workspaces.json`.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
@@ -60,6 +61,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - File tree, path normalization, metadata, content reading, and `.viewer.config.json` persistence.
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
 - `resolve_path(path)`: joins normalized relative path to `settings.root_resolved`. Symlinks are allowed by current implementation.
+- `resolve_markdown_link(base_path, target)`: resolves local Markdown image/link targets relative to the Markdown file, including absolute filesystem paths under the served root, and rejects links outside the served root.
 - `resolve_served_directory(path, label)`: resolves a served-root-relative working directory for terminal/Codex launches, logging and falling back to root when unavailable.
 - `relative_for(path)`: returns path relative to root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
@@ -201,6 +203,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
 - Workspace switching: `restoreInitialWorkspace()` loads the active `.viewer.workspaces.json` slot at startup; `switchWorkspace()` saves the current slot, restores the selected slot, and keeps the sidebar tool unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, or sidebar directory changes.
 - Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`.
+- Tracks Codex status transitions by workspace layout: when a Codex session that belongs to an inactive workspace changes from running to exited/failed, that workspace button receives an amber/red notice until the workspace is opened.
 
 `frontend/src/components/Workspace.vue`
 
@@ -230,6 +233,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool or workspace changes only the active selection; clicking the already-active tool or workspace toggles the tool panel open/closed.
 - On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
 - Renders one-click numbered workspace buttons in the activity rail. Clicking a different workspace saves the current workspace and restores the selected workspace without changing the tool panel open/closed state.
+- Workspace buttons can show Codex completion/failure notices supplied by `App.vue`; amber means a run finished, red means a run failed.
 - Re-emits `open-file`, `open-terminal`, and `open-codex-session` events to `App.vue`.
 
 `frontend/src/components/sidebar/FilesPanel.vue`
@@ -286,8 +290,9 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Enables raw HTML and `securityLevel: "loose"` for Mermaid, so trust boundary is local/private content.
 - `escapeHtml(value)`: code-block fallback escaping.
 - Custom fence renderer turns ```mermaid fences into Mermaid blocks.
-- `renderMermaid()`: replaces Mermaid blocks with rendered SVG or marks errors.
-- `load()`: fetches Markdown text, renders HTML, renders Mermaid, restores scroll.
+- `renderMermaidIn()`: replaces Mermaid blocks with rendered SVG or marks errors.
+- `load()`: fetches Markdown text, renders HTML with the current Markdown path as link context, renders Mermaid, restores scroll.
+- Normal clicks on local Markdown links call `/api/file/resolve-link` and open the resolved file in the active viewer pane. Local images are rendered through `/api/file/raw` with the current Markdown path as `base`.
 - `persistCurrentScroll()`: saves scroll position.
 - Uses Markdown and syntax CSS variables from the active theme for headings, paragraphs, links, code blocks, tables, and Highlight.js token colors.
 

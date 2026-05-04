@@ -1,6 +1,7 @@
 import mimetypes
 from hashlib import sha256
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from fastapi import HTTPException
 from loguru import logger
@@ -59,6 +60,46 @@ def normalize_relative(path: str | None) -> str:
 def resolve_path(path: str | None) -> Path:
     rel = normalize_relative(path)
     return settings.root_resolved.joinpath(rel)
+
+
+def _normalize_link_parts(parts: list[str]) -> str:
+    cleaned: list[str] = []
+    for part in parts:
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if not cleaned:
+                raise HTTPException(status_code=400, detail="Markdown link escapes the served root")
+            cleaned.pop()
+            continue
+        cleaned.append(part)
+    return "/".join(cleaned)
+
+
+def resolve_markdown_link(base_path: str, target: str) -> str:
+    parsed = urlsplit((target or "").strip())
+    scheme = parsed.scheme.lower()
+    if scheme and scheme != "file":
+        raise HTTPException(status_code=400, detail="Only local file links can be resolved")
+    if parsed.netloc and scheme != "file":
+        raise HTTPException(status_code=400, detail="Network links cannot be resolved as local files")
+    if scheme == "file" and parsed.netloc and parsed.netloc not in {"localhost", "127.0.0.1"}:
+        raise HTTPException(status_code=400, detail="Remote file links cannot be resolved as local files")
+
+    target_path = unquote(parsed.path).replace("\\", "/")
+    if not target_path:
+        raise HTTPException(status_code=400, detail="Markdown link target is empty")
+
+    if scheme == "file" or target_path.startswith("/"):
+        absolute_target = Path(target_path).expanduser().resolve()
+        try:
+            return absolute_target.relative_to(settings.root_resolved.resolve()).as_posix()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Markdown link target is outside the served root") from exc
+
+    base_rel = normalize_relative(base_path)
+    base_parts = base_rel.split("/")[:-1] if base_rel else []
+    return _normalize_link_parts([*base_parts, *target_path.split("/")])
 
 
 def resolve_served_directory(path: str | None, label: str) -> str:

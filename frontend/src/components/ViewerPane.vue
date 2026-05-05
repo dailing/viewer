@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { defineAsyncComponent, onMounted, onUnmounted, ref, watch } from "vue";
 import type { LayoutNode } from "../types/layout";
 import type { FileMeta, WatchEvent } from "../types/files";
 import { getMeta } from "../api/client";
@@ -8,12 +8,12 @@ import { fileChangeAffectsPath } from "../utils/paths";
 import CodexViewer from "./viewers/CodexViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
-import PdfViewer from "./viewers/PdfViewer.vue";
 import TextViewer from "./viewers/TextViewer.vue";
 import TerminalViewer from "./viewers/TerminalViewer.vue";
 import UnsupportedViewer from "./viewers/UnsupportedViewer.vue";
 
 const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }> }>();
+const PdfViewer = defineAsyncComponent(() => import("./viewers/PdfViewer.vue"));
 const layout = useLayoutStore();
 const meta = ref<FileMeta | null>(null);
 const error = ref("");

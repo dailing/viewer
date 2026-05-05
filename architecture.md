@@ -203,7 +203,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
 - Workspace switching: `restoreInitialWorkspace()` loads the active `.viewer.workspaces.json` slot at startup; `switchWorkspace()` saves the current slot, restores the selected slot, and keeps the sidebar tool unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, or sidebar directory changes.
 - Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`.
-- Tracks Codex status transitions by workspace layout: when a Codex session that belongs to an inactive workspace changes from running to exited/failed, that workspace button receives an amber/red notice until the workspace is opened.
+- Tracks Codex status by workspace layout: workspace buttons show live green running state when any contained Codex session is running, and inactive workspaces receive sticky amber/red completion/failure notices after runs finish until the workspace is opened.
 
 `frontend/src/components/Workspace.vue`
 
@@ -233,7 +233,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool or workspace changes only the active selection; clicking the already-active tool or workspace toggles the tool panel open/closed.
 - On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
 - Renders one-click numbered workspace buttons in the activity rail. Clicking a different workspace saves the current workspace and restores the selected workspace without changing the tool panel open/closed state.
-- Workspace buttons can show Codex completion/failure notices supplied by `App.vue`; amber means a run finished, red means a run failed.
+- Workspace buttons can show Codex notices supplied by `App.vue`; green means a run is active in that workspace, amber means a run finished, and red means a run failed.
 - Re-emits `open-file`, `open-terminal`, and `open-codex-session` events to `App.vue`.
 
 `frontend/src/components/sidebar/FilesPanel.vue`

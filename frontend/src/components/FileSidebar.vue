@@ -5,7 +5,7 @@ import FilesPanel from "./sidebar/FilesPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 
 type SidebarTool = "files" | "terminals" | "codex";
-type WorkspaceNotice = "completed" | "failed";
+type WorkspaceNotice = "running" | "completed" | "failed";
 
 const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 
@@ -65,6 +65,7 @@ function selectWorkspace(id: string) {
 
 function workspaceTitle(id: string) {
   const notice = props.workspaceNotices?.[id];
+  if (notice === "running") return `Workspace ${id}: Codex run is running`;
   if (notice === "failed") return `Workspace ${id}: Codex run failed`;
   if (notice === "completed") return `Workspace ${id}: Codex run finished`;
   return `Workspace ${id}`;
@@ -216,6 +217,19 @@ function workspaceNoticeClass(id: string) {
   font-weight: 700;
 }
 
+.workspace-button.workspace-notice-running {
+  color: #116329;
+}
+
+.workspace-button.workspace-notice-running:not(.active) {
+  background: #dff7e8;
+  color: #116329;
+}
+
+.workspace-button.workspace-notice-running.active {
+  background: #e9f8ef;
+}
+
 .workspace-button.workspace-notice-completed:not(.active) {
   background: #fff4c2;
   color: #7a4f00;
@@ -226,6 +240,7 @@ function workspaceNoticeClass(id: string) {
   color: #a33;
 }
 
+.workspace-button.workspace-notice-running::after,
 .workspace-button.workspace-notice-completed:not(.active)::after,
 .workspace-button.workspace-notice-failed:not(.active)::after {
   border: 2px solid #f3f6fa;
@@ -236,6 +251,10 @@ function workspaceNoticeClass(id: string) {
   right: 4px;
   top: 4px;
   width: 9px;
+}
+
+.workspace-button.workspace-notice-running::after {
+  background: #2da44e;
 }
 
 .workspace-button.workspace-notice-completed:not(.active)::after {

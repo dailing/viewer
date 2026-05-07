@@ -108,8 +108,9 @@ async function openPinned(path: string) {
 .sidebar-row {
   align-items: center;
   background: transparent;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 6px;
+  box-sizing: border-box;
   color: inherit;
   display: flex;
   gap: 7px;
@@ -119,9 +120,13 @@ async function openPinned(path: string) {
   width: 100%;
 }
 
-.sidebar-row:hover,
-.sidebar-row.active {
+.sidebar-row:hover {
   background: #eef3f8;
+}
+
+.sidebar-row.active {
+  border-color: #2f6fdd;
+  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
 }
 
 .parent-row {

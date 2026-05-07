@@ -6,6 +6,7 @@ import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useVoiceStore } from "../../stores/voice";
+import { useWorkspacesStore } from "../../stores/workspaces";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import VoiceInputButton from "../VoiceInputButton.vue";
 import type { PaneToolbarAction } from "../../stores/paneToolbar";
@@ -17,6 +18,7 @@ const files = useFilesStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const voice = useVoiceStore();
+const workspaces = useWorkspacesStore();
 const session = ref<CodexSessionSnapshot | null>(null);
 const promptText = ref("");
 const error = ref("");
@@ -485,6 +487,7 @@ async function createSessionHere() {
   error.value = "";
   try {
     const nextSession = await codex.create("", session.value.cwd);
+    workspaces.rememberActiveCodexSession(nextSession.id);
     layout.openCodexSession(nextSession.id);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);

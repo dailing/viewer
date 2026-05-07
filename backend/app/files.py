@@ -315,6 +315,7 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
         active_pane_id=snapshot.active_pane_id,
         current_path=current_path,
         pinned=pinned,
+        codex_session_ids=list(dict.fromkeys(item.strip() for item in snapshot.codex_session_ids if item.strip())),
         updated_at=snapshot.updated_at,
     )
     return write_workspaces(data)

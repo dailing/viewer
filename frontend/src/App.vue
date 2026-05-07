@@ -167,7 +167,7 @@ onMounted(async () => {
 });
 
 watch(
-  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned],
+  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => workspaces.activeCodexSessionIds],
   () => {
     scheduleWorkspaceSave();
   },
@@ -206,6 +206,7 @@ function openTerminal(id: string) {
 }
 
 function openCodexSession(id: string) {
+  workspaces.rememberActiveCodexSession(id);
   layout.openCodexSession(id);
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
@@ -217,6 +218,7 @@ function currentWorkspaceSnapshot() {
     active_pane_id: snapshot.activePaneId,
     current_path: files.currentPath,
     pinned: [...files.pinned],
+    codex_session_ids: [...workspaces.activeCodexSessionIds],
   };
 }
 
@@ -255,12 +257,14 @@ async function restoreInitialWorkspace() {
   const snapshot = workspaces.snapshotFor(activeId);
   if (snapshot) {
     layout.restore(snapshot.layout, snapshot.active_pane_id);
+    workspaces.restoreActiveCodexSessions(snapshot);
     restoreWorkspacePins(snapshot.pinned);
     await loadWorkspaceDirectory(snapshot.current_path);
     clearWorkspaceNotice(activeId);
     return;
   }
   await files.loadDirectory(files.currentPath);
+  workspaces.restoreActiveCodexSessions(currentWorkspaceSnapshot());
   await workspaces.saveSlot(activeId, currentWorkspaceSnapshot());
   clearWorkspaceNotice(activeId);
 }
@@ -278,11 +282,13 @@ async function switchWorkspace(id: string) {
     const target = workspaces.snapshotFor(targetId);
     if (target) {
       layout.restore(target.layout, target.active_pane_id);
+      workspaces.restoreActiveCodexSessions(target);
       restoreWorkspacePins(target.pinned);
       await loadWorkspaceDirectory(target.current_path);
       await workspaces.activate(targetId);
     } else {
       layout.reset();
+      workspaces.restoreActiveCodexSessions(null);
       files.pinned = [];
       await workspaces.saveSlot(targetId, currentWorkspaceSnapshot());
     }
@@ -535,6 +541,7 @@ onUnmounted(() => {
         <FileSidebar
           :workspace-count="workspaceCount"
           :active-workspace-id="workspaces.activeWorkspaceId"
+          :codex-session-ids="workspaces.activeCodexSessionIds"
           :panel-open="sidebarOpen"
           :panel-pinned="sidebarPinned"
           :workspace-notices="workspaceNotices"

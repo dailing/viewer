@@ -98,6 +98,7 @@ class WorkspaceSnapshot(BaseModel):
     active_pane_id: str | None = None
     current_path: str = ""
     pinned: list[str] | None = None
+    codex_session_ids: list[str] = Field(default_factory=list)
     updated_at: float | None = None
 
 

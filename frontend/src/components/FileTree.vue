@@ -53,17 +53,20 @@ function isActive(entry: FileEntry): boolean {
 
 .tree-row {
   align-items: center;
+  border: 1px solid transparent;
   border-radius: 6px;
+  box-sizing: border-box;
   display: flex;
   min-height: 30px;
 }
 
-.tree-row:hover,
-.tree-row.active {
+.tree-row:hover {
   background: #eef3f8;
 }
 
 .tree-row.active {
+  border-color: #2f6fdd;
+  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
   color: #0b5ed7;
   font-weight: 600;
 }

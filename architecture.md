@@ -73,7 +73,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: root-local `.viewer.config.json`.
 - `read_config()` / `write_config(config)`: load and save pinned paths, last sidebar directory, file/directory visit timestamps, nav appearance, workspace slot count, Codex model options, and Markdown theme config; missing/invalid saved directories fall back to root.
-- `read_workspaces()` / `write_workspace()` / `set_active_workspace()`: load and save `.viewer.workspaces.json`, a root-local user state file for numbered workspace slots. Each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, and update timestamp.
+- `read_workspaces()` / `write_workspace()` / `set_active_workspace()`: load and save `.viewer.workspaces.json`, a root-local user state file for numbered workspace slots. Each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, workspace-associated Codex session ids, and update timestamp.
 
 `backend/app/events.py`
 
@@ -201,8 +201,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Top-bar ownership rule: cross-viewer pane actions such as split belong in `App.vue`; view-specific icons/controls/status belong in the owning viewer and must be registered through `stores/paneToolbar.ts`, not hard-coded in `App.vue`. The global SSE connection dot is intentionally not rendered.
 - Sidebar state functions: `toggleSidebarPin()`, `clampSidebarWidth()`, `startSidebarResize()`.
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
-- Workspace switching: `restoreInitialWorkspace()` loads the active `.viewer.workspaces.json` slot at startup; `switchWorkspace()` saves the current slot, restores the selected slot, and keeps the sidebar tool unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, or sidebar directory changes.
-- Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`.
+- Workspace switching: `restoreInitialWorkspace()` loads the active `.viewer.workspaces.json` slot at startup; `switchWorkspace()` saves the current slot, restores the selected slot, and keeps the sidebar tool unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, or workspace-associated Codex session ids change.
+- Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`. Workspaces keep their own `codex_session_ids` list; new or opened sessions are remembered in the active workspace so the Codex sidebar is workspace-scoped rather than directory-scoped.
 - Tracks Codex status by workspace layout: workspace buttons show live green running state when any contained Codex session is running, and inactive workspaces receive sticky amber/red completion/failure notices after runs finish until the workspace is opened.
 
 `frontend/src/components/Workspace.vue`
@@ -249,9 +249,9 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/components/sidebar/CodexSessionsPanel.vue`
 
-- Codex tool panel: new Codex button plus Codex session list.
+- Codex tool panel: new Codex button plus the active workspace's Codex session list.
 - New Codex creates an idle Codex session in the current sidebar directory and opens it in the active pane. The first message is entered in `CodexViewer.vue`.
-- Filters the session list to the current sidebar directory and its descendants using `CodexSessionInfo.cwd_relative`, so workspace directory changes scope the visible Codex sessions without changing open panes.
+- Filters the global Codex session list to ids remembered by the active workspace. Workspace directory changes no longer change which Codex sessions are visible.
 - Codex session list uses row background color for status (normal idle/exited, green running, red failed) and supports delete, which also clears matching panes.
 
 `frontend/src/components/ConfigPanel.vue`

@@ -12,6 +12,7 @@ const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 const props = defineProps<{
   workspaceCount: number;
   activeWorkspaceId: string;
+  codexSessionIds: string[];
   panelOpen: boolean;
   panelPinned: boolean;
   workspaceNotices?: Record<string, WorkspaceNotice>;
@@ -136,7 +137,7 @@ function workspaceNoticeClass(id: string) {
       </div>
       <FilesPanel v-if="activeTool === 'files'" @open-file="emit('open-file', $event)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" @open-terminal="emit('open-terminal', $event)" />
-      <CodexSessionsPanel v-else @open-codex-session="emit('open-codex-session', $event)" />
+      <CodexSessionsPanel v-else :session-ids="props.codexSessionIds" @open-codex-session="emit('open-codex-session', $event)" />
     </section>
   </div>
 </template>

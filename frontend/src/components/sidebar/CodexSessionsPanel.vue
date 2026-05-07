@@ -4,18 +4,26 @@ import { useCodexStore } from "../../stores/codex";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { useVoiceStore } from "../../stores/voice";
-import type { CodexSessionInfo } from "../../types/codex";
+import { useWorkspacesStore } from "../../stores/workspaces";
 
 const emit = defineEmits<{
   "open-codex-session": [id: string];
+}>();
+
+const props = defineProps<{
+  sessionIds: string[];
 }>();
 
 const codex = useCodexStore();
 const files = useFilesStore();
 const layout = useLayoutStore();
 const voice = useVoiceStore();
+const workspaces = useWorkspacesStore();
 const codexError = ref("");
-const visibleSessions = computed(() => codex.sessions.filter((session) => sessionMatchesCurrentDirectory(session)));
+const visibleSessions = computed(() => {
+  const ids = new Set(props.sessionIds);
+  return codex.sessions.filter((session) => ids.has(session.id));
+});
 
 function voiceContextId(sessionId: string) {
   return `codex:${sessionId}:prompt`;
@@ -30,31 +38,6 @@ function hasVoiceReady(sessionId: string) {
   return voice.hasReadyText(voiceContextId(sessionId));
 }
 
-function normalizeDirectory(path: string) {
-  return path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-}
-
-function matchesRelativeDirectory(sessionDirectory: string, currentDirectory: string) {
-  const sessionPath = normalizeDirectory(sessionDirectory);
-  const currentPath = normalizeDirectory(currentDirectory);
-  if (!currentPath) return true;
-  return sessionPath === currentPath || sessionPath.startsWith(`${currentPath}/`);
-}
-
-function absolutePathMatchesRelativeDirectory(sessionDirectory: string, currentDirectory: string) {
-  const sessionPath = normalizeDirectory(sessionDirectory);
-  const currentPath = normalizeDirectory(currentDirectory);
-  if (!currentPath) return true;
-  return sessionPath.endsWith(`/${currentPath}`) || sessionPath.includes(`/${currentPath}/`);
-}
-
-function sessionMatchesCurrentDirectory(session: CodexSessionInfo) {
-  if (session.cwd_relative) {
-    return matchesRelativeDirectory(session.cwd_relative, files.currentPath);
-  }
-  return absolutePathMatchesRelativeDirectory(session.cwd, files.currentPath);
-}
-
 async function newCodexSession() {
   codexError.value = "";
   try {
@@ -67,6 +50,7 @@ async function newCodexSession() {
 
 async function closeCodexSession(id: string) {
   await codex.remove(id);
+  workspaces.forgetActiveCodexSession(id);
   layout.clearCodexSession(id);
 }
 </script>
@@ -83,7 +67,7 @@ async function closeCodexSession(id: string) {
 
     <div class="sidebar-section list-section">
       <div class="section-title">Codex</div>
-      <div v-if="!visibleSessions.length" class="empty-panel">No Codex sessions in this directory</div>
+      <div v-if="!visibleSessions.length" class="empty-panel">No Codex sessions in this workspace</div>
       <div
         v-for="session in visibleSessions"
         :key="session.id"
@@ -161,8 +145,9 @@ async function closeCodexSession(id: string) {
 .sidebar-row {
   align-items: center;
   background: transparent;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 6px;
+  box-sizing: border-box;
   color: inherit;
   display: flex;
   gap: 7px;
@@ -172,17 +157,20 @@ async function closeCodexSession(id: string) {
   width: 100%;
 }
 
-.sidebar-row:hover,
-.sidebar-row.active {
+.sidebar-row:hover {
   background: #eef3f8;
+}
+
+.sidebar-row.active {
+  border-color: #2f6fdd;
+  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
 }
 
 .sidebar-row.status-running {
   background: #ffe4e4;
 }
 
-.sidebar-row.status-running:hover,
-.sidebar-row.status-running.active {
+.sidebar-row.status-running:hover {
   background: #ffd4d4;
 }
 
@@ -190,8 +178,7 @@ async function closeCodexSession(id: string) {
   background: #fff0f0;
 }
 
-.sidebar-row.status-failed:hover,
-.sidebar-row.status-failed.active {
+.sidebar-row.status-failed:hover {
   background: #f8dddd;
 }
 
@@ -199,8 +186,7 @@ async function closeCodexSession(id: string) {
   background: #fff6d7;
 }
 
-.sidebar-row.voice-pending:hover,
-.sidebar-row.voice-pending.active {
+.sidebar-row.voice-pending:hover {
   background: #ffedb0;
 }
 
@@ -208,8 +194,7 @@ async function closeCodexSession(id: string) {
   background: #fff0b8;
 }
 
-.sidebar-row.voice-ready:hover,
-.sidebar-row.voice-ready.active {
+.sidebar-row.voice-ready:hover {
   background: #ffe48a;
 }
 

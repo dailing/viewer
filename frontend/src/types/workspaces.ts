@@ -5,6 +5,7 @@ export interface WorkspaceSnapshot {
   active_pane_id: string | null;
   current_path: string;
   pinned?: string[] | null;
+  codex_session_ids?: string[];
   updated_at?: number | null;
 }
 

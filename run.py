@@ -16,7 +16,7 @@ DEFAULT_FRONTEND_DIST = FRONTEND_DIR / "dist"
 DEFAULT_ROOT = Path("~/Sync").expanduser()
 DEFAULT_PORT = 18989
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
+DEFAULT_LOG_DIR = Path("~/.view/logs").expanduser()
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,7 +132,10 @@ def build_frontend(debug: bool) -> None:
 
 def default_log_file(log_dir: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return resolve_project_path(log_dir) / f"viewer-{stamp}.log"
+    target = log_dir.expanduser()
+    if target.is_absolute():
+        return target.resolve() / f"viewer-{stamp}.log"
+    return resolve_project_path(target) / f"viewer-{stamp}.log"
 
 
 def main() -> None:

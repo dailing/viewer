@@ -4,12 +4,10 @@ from pathlib import Path
 from loguru import logger
 from watchfiles import Change, awatch
 
-from .config import PROJECT_ROOT, settings
+from .config import settings
 from .events import hub
 from .files import relative_for
 from .models import WatchEvent
-
-LOG_DIR = PROJECT_ROOT / "logs"
 
 
 def event_type(change: Change) -> str:
@@ -23,11 +21,7 @@ def event_type(change: Change) -> str:
 
 
 def is_ignored_path(path: Path) -> bool:
-    try:
-        path.relative_to(LOG_DIR)
-        return True
-    except ValueError:
-        return False
+    return False
 
 
 async def watch_root(stop_event: asyncio.Event) -> None:

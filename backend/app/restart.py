@@ -14,7 +14,7 @@ def _admin_log_dir() -> Path:
     log_file = os.environ.get("VIEWER_LOG_FILE", "")
     if log_file:
         return Path(log_file).expanduser().resolve().parent
-    return PROJECT_ROOT / "logs"
+    return Path.home() / ".view" / "logs"
 
 
 def _run_manager(command: str) -> dict[str, Any]:

@@ -6,7 +6,7 @@ from pathlib import Path
 from loguru import logger
 
 
-DEFAULT_LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
+DEFAULT_LOG_DIR = Path.home() / ".view" / "logs"
 _configured = False
 
 

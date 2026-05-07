@@ -15,10 +15,10 @@ from loguru import logger
 
 from .config import settings
 from .files import resolve_served_directory
+from .storage import TERMINAL_LOG_DIR
 from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
 MAX_OUTPUT_CHARS = 1_000_000
-TERMINAL_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "terminals"
 
 
 @dataclass

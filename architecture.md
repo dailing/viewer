@@ -9,12 +9,13 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 ## Runtime Flow
 
 1. `run.py` parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
-2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()` on startup, stops watcher and terminals on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
+2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()` and the agent-loop scheduler on startup, stops watcher, loops, terminals, and Codex sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
-4. `App.vue` loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, and dispatches `viewer:file-changed` browser events for open panes.
+4. `App.vue` loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, and dispatches `viewer:file-changed` browser events for open panes. The top bar switches between the workspace, full-page settings, and full-page loop task editor.
 5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component. Viewers fetch raw/text content and reload when their `version` prop changes.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run. Raw rollout events stay server-side; REST/WebSocket snapshots send compact display events so hidden tool output is not transmitted to the browser.
+8. Loop tasks are Markdown files in `~/.view/loops/*.md` with generated YAML frontmatter plus a prompt body. `backend/app/agent_loops.py` runs an asyncio scheduler that creates/resumes Codex sessions through `codex_session_manager`, writes state to `~/.view/agent-loops.json`, and writes run logs under `~/.view/logs/agent-loops/`.
 
 ## Backend Structure
 
@@ -35,14 +36,15 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/file/content`: calls `read_text()`.
 - `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
-- `/api/config` GET/PUT: reads and writes active/legacy pinned paths, last sidebar directory, file/directory visit timestamps, nav appearance, workspace slot count, Codex model options, and Markdown theme config.
-- `/api/workspaces` GET, `/api/workspaces/{id}` PUT, and `/api/workspaces/{id}/activate` POST: read, write, and activate root-local workspace snapshots stored in `.viewer.workspaces.json`.
+- `/api/config` GET/PUT: reads and writes active/legacy pinned paths, last sidebar directory, file/directory visit timestamps, nav appearance, workspace slot count, Codex model options, and Markdown theme config in `~/.view/config.json`.
+- `/api/workspaces` GET, `/api/workspaces/{id}` PUT, and `/api/workspaces/{id}/activate` POST: read, write, and activate workspace snapshots stored in `~/.view/workspaces.json`.
+- `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
 - `/api/terminals`: lists or creates terminal sessions; POST accepts an optional relative `cwd`.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
 - `/api/codex/sessions`: lists or creates Codex sessions. POST starts `codex exec --json` in a served-root-relative `cwd`.
 - `/api/codex/status`: returns the latest global Codex CLI rate-limit status parsed from recent `~/.codex/sessions/**/rollout-*.jsonl` `token_count` events by timestamp; pane-level context usage comes from each session's matched rollout file.
-- `/api/codex/models`: returns selected and available models for Codex session creation from `.viewer.config.json` codex defaults only.
+- `/api/codex/models`: returns selected and available models for Codex session creation from `~/.view/config.json` codex defaults only.
 - `/api/codex/sessions/{session_id}` routes: snapshot, send a resumed message via `codex exec resume --json`, append/update/delete server-persisted queued messages, terminate a running Codex subprocess, delete logs/metadata, and WebSocket connect.
 - `/api/voice/ws`: optional voice-input WebSocket endpoint. By default the browser streams encoded audio chunks while recording, the backend saves them, and a single full-file `faster-whisper` transcription runs after the client sends `stop`. A configured upstream ASR WebSocket still bypasses the in-process path.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
@@ -56,9 +58,15 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Important settings: `root`, `host`, `port`, `frontend_dist`, `max_text_preview_bytes`, `show_hidden`, `poll_delay_ms`, `terminal_shell`, `debug`, `log_file`.
 - Voice settings: `voice_enabled`, `voice_model`, `voice_language`, `voice_target_language`, `voice_backend`, `voice_backend_policy`, `voice_direct_english_translation`, `voice_min_chunk_size`, `voice_stop_timeout_seconds`, `voice_model_idle_timeout_seconds`, `voice_offline_beam_size`, `voice_offline_vad_filter`, `voice_vac`, and `voice_vad` configure voice input. `run.py` enables voice by default, uses `large-v3-turbo`, sets the default source language to `en`, and sets the default backend to `faster-whisper` with `localagreement` unless env vars override them. `voice_upstream_ws` bypasses the in-process offline path and proxies microphone audio to a separate streaming ASR WebSocket.
 
+`backend/app/storage.py`
+
+- Central viewer-local storage paths under `~/.view`.
+- Defines `CONFIG_PATH`, `WORKSPACES_PATH`, `LOOPS_DIR`, `LOOP_STATE_PATH`, `LOG_DIR`, `CODEX_LOG_DIR`, `TERMINAL_LOG_DIR`, and `AGENT_LOOP_LOG_DIR`.
+- `migrate_legacy_state()`: copies served-root `.viewer.config.json` and `.viewer.workspaces.json` into `~/.view` on first use when the new files do not exist; it does not delete legacy files.
+
 `backend/app/files.py`
 
-- File tree, path normalization, metadata, content reading, and `.viewer.config.json` persistence.
+- File tree, path normalization, metadata, content reading, and `~/.view/config.json` persistence.
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
 - `resolve_path(path)`: joins normalized relative path to `settings.root_resolved`. Symlinks are allowed by current implementation.
 - `resolve_markdown_link(base_path, target)`: resolves local Markdown image/link targets relative to the Markdown file, including absolute filesystem paths under the served root, and rejects links outside the served root.
@@ -71,9 +79,19 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `list_directory(path)`: validates directory, filters hidden files when configured, sorts directories first.
 - `get_meta(path)`: validates file and returns `FileMeta`, including preview type, text-size limit flag, and `content_hash`.
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
-- `config_path()`: root-local `.viewer.config.json`.
+- `config_path()`: returns `~/.view/config.json` and triggers one-way legacy copy from root-local `.viewer.config.json` when needed.
 - `read_config()` / `write_config(config)`: load and save pinned paths, last sidebar directory, file/directory visit timestamps, nav appearance, workspace slot count, Codex model options, and Markdown theme config; missing/invalid saved directories fall back to root.
-- `read_workspaces()` / `write_workspace()` / `set_active_workspace()`: load and save `.viewer.workspaces.json`, a root-local user state file for numbered workspace slots. Each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, workspace-associated Codex session ids, and update timestamp.
+- `read_workspaces()` / `write_workspace()` / `set_active_workspace()`: load and save `~/.view/workspaces.json`. Each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, workspace-associated Codex session ids, and update timestamp.
+
+`backend/app/agent_loops.py`
+
+- Markdown-backed Codex loop task scheduler.
+- Parses generated YAML frontmatter from `~/.view/loops/*.md`; the Markdown body is the Codex prompt.
+- Supports schedule types `manual`, `once`, `interval`, `daily`, and `multi_daily`; local task times use `Asia/Shanghai` / UTC+8 by default.
+- Supports Codex session policies `new_each_run`, `reuse`, `reuse_until_context`, and `reuse_with_limits`.
+- Persists runtime state in `~/.view/agent-loops.json`, including current session id, current run id, run counts, consecutive failures, next run time, stopped/paused state, and last error.
+- Writes per-task run history and detailed run snapshots under `~/.view/logs/agent-loops/{task_id}/`.
+- Reuses `codex_session_manager` for actual Codex creation/resume and uses compact Codex snapshots for log display.
 
 `backend/app/events.py`
 
@@ -92,7 +110,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Watches `settings.root_resolved` with `watchfiles.awatch`.
 - `event_type(change)`: converts `watchfiles.Change` enum to API strings.
-- `is_ignored_path(path)`: ignores project `logs/` changes.
+- `is_ignored_path(path)`: currently returns false because viewer logs now live outside the served root under `~/.view/logs`.
 - `watch_root(stop_event)`: debounced watch loop; publishes `WatchEvent` with type, relative path, directory flag, and mtime.
 
 `backend/app/terminals.py`
@@ -128,8 +146,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `send(session_id, prompt)`: starts a new `codex exec --json` run when no Codex thread id has been captured yet, otherwise resumes with `codex exec resume --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <thread_id> -`. It rejects concurrent sends while a session is running and appends the prompt to metadata.
 - `enqueue()`, `update_queue_item()`, and `delete_queue_item()`: manage pending prompts in session metadata. Appending to the queue starts the drain loop immediately when the session is not running.
 - `_start_next_queued(session)`: pops the next queued prompt, appends it to normal prompts, broadcasts a snapshot, and starts a Codex run. `_run()` calls it after each completed subprocess unless the current run was terminated by the user. `resume_pending_queues()` runs on backend startup so persisted queued work resumes without a browser connection.
-- Codex subprocess proxying is controlled by `.viewer.config.json` `codex.proxy`; when non-empty it sets `https_proxy`, `HTTPS_PROXY`, `http_proxy`, and `HTTP_PROXY` for Codex runs, and when empty those variables are removed from the Codex subprocess environment. The default is no proxy.
-- Rendered Codex events are read from the canonical `~/.codex/sessions/**/rollout-*.jsonl` file matched by Codex session id. Viewer-local metadata/prompts and the matched `rollout_path` are stored in `logs/codex-sessions/{viewer_session_id}.json`; stderr goes to `{viewer_session_id}.stderr.log`.
+- Codex subprocess proxying is controlled by `~/.view/config.json` `codex.proxy`; when non-empty it sets `https_proxy`, `HTTPS_PROXY`, `http_proxy`, and `HTTP_PROXY` for Codex runs, and when empty those variables are removed from the Codex subprocess environment. The default is no proxy.
+- Rendered Codex events are read from the canonical `~/.codex/sessions/**/rollout-*.jsonl` file matched by Codex session id. Viewer-local metadata/prompts and the matched `rollout_path` are stored in `~/.view/logs/codex-sessions/{viewer_session_id}.json`; stderr goes to `{viewer_session_id}.stderr.log`.
 - API snapshots and WebSocket event messages compact raw rollout entries into a transport/display shape before sending them to the frontend. Full raw events remain in memory/on disk for status parsing; compact events carry `event_type`, rendered `text`, `file_changes`, `patch_text`, and a bounded `raw_preview`.
 - Per-session Codex summaries parse `last_token_usage.total_tokens` from that session's matched rollout `token_count` events to expose `context_used_percent`, `model_context_window`, and `total_tokens`; navbar Codex chips use these session fields instead of the newest global rollout.
 - `_find_session_id(raw)`: extracts `session_id`, `conversation_id`, or `thread_id` from JSON events so later messages can resume the correct Codex thread.
@@ -143,7 +161,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `backend/app/voice.py`
 
 - Optional WebSocket bridge for voice input.
-- `VoiceCapture`: saves the browser-sent audio chunks for each session under `logs/voice/`, using a UTC finish-time filename plus a JSON sidecar with MIME type, size, chunk count, backend, and backend policy.
+- `VoiceCapture`: saves the browser-sent audio chunks for each session under `~/.view/logs/voice/`, using a UTC finish-time filename plus a JSON sidecar with MIME type, size, chunk count, backend, and backend policy.
 - Lazily loads a singleton offline `faster_whisper.WhisperModel` for the first in-process final transcription, keeps it warm across nearby dictations, and unloads it after `voice_model_idle_timeout_seconds` of inactivity to release GPU resources.
 - `connect_voice(websocket)`: accepts browser audio chunks from `/api/voice/ws`, saves them during recording, runs full-file transcription after `stop`, and returns `processing` then `final` transcript JSON to the frontend. When `voice_upstream_ws` is configured, it proxies audio to the upstream ASR WebSocket and normalizes upstream messages.
 - `_connect_whisperlivekit(websocket)`: creates one WhisperLiveKit `AudioProcessor` per browser voice session, forwards binary audio frames into it, saves the transmitted audio, and streams normalized result-state updates back to the client. On client stop, it flushes the processor and waits up to `voice_stop_timeout_seconds` for final model output before closing.
@@ -154,10 +172,10 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `backend/app/models.py`
 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
-- `ConfigData.visit_times` stores per-path last visit timestamps for files and directories in `.viewer.config.json`; the frontend uses it to sort the current folder by most recent visit.
-- `WorkspaceConfig.count` defaults to 5 and controls how many numbered workspace buttons appear in the sidebar activity rail. `WorkspaceData` and `WorkspaceSnapshot` mirror `.viewer.workspaces.json`.
+- `ConfigData.visit_times` stores per-path last visit timestamps for files and directories in `~/.view/config.json`; the frontend uses it to sort the current folder by most recent visit.
+- `WorkspaceConfig.count` defaults to 5 and controls how many numbered workspace buttons appear in the sidebar activity rail. `WorkspaceData` and `WorkspaceSnapshot` mirror `~/.view/workspaces.json`.
 - Codex schemas: `CodexSessionInfo`, `CodexPrompt`, compact `CodexEvent`, `CodexFileChange`, `CodexSessionSnapshot`, `CodexSessionCreate`, `CodexSessionMessage`, `CodexQueueItem`, and `CodexQueueMessage`. `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible.
-- `CodexConfig` stores Codex model options, muted operation-message alpha, and an optional `proxy` for `.viewer.config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
+- `CodexConfig` stores Codex model options, muted operation-message alpha, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
 `backend/app/logging.py`
@@ -189,19 +207,19 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/App.vue`
 
-- Root shell: top bar, sidebar drawer/pinned layout, workspace.
-- Loads config/terminal lists, restores the saved sidebar directory, loads that directory, restores layout, and exposes the top-bar configuration panel button.
+- Root shell: top bar, sidebar drawer/pinned layout, workspace, full-page settings, and full-page loop tasks.
+- Loads config/terminal lists, restores the saved sidebar directory, loads that directory, restores layout, and exposes top-bar buttons for Settings and Loop Tasks.
 - Applies appearance and active Markdown theme settings from `stores/files.ts` as CSS variables on the app shell, including nav height/icon size and Markdown/syntax colors.
 - Connects SSE with `connectEvents()`.
 - Refreshes affected file listings on change events.
 - Dispatches `viewer:file-changed` when an open file changes.
 - Polls terminal list every 3 seconds.
-- Renders active pane toolbar metadata, actions, and generic controls from `stores/paneToolbar.ts` in the top bar, plus global pane split actions.
+- Renders active pane toolbar metadata, actions, and generic controls from `stores/paneToolbar.ts` in the top bar while the workspace page is active, plus global pane split actions.
 - On phone-width screens, active-pane toolbar actions and controls collapse behind a top-bar overflow menu while global pane actions remain inline.
 - Top-bar ownership rule: cross-viewer pane actions such as split belong in `App.vue`; view-specific icons/controls/status belong in the owning viewer and must be registered through `stores/paneToolbar.ts`, not hard-coded in `App.vue`. The global SSE connection dot is intentionally not rendered.
 - Sidebar state functions: `toggleSidebarPin()`, `clampSidebarWidth()`, `startSidebarResize()`.
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
-- Workspace switching: `restoreInitialWorkspace()` loads the active `.viewer.workspaces.json` slot at startup; `switchWorkspace()` saves the current slot, restores the selected slot, and keeps the sidebar tool unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, or workspace-associated Codex session ids change.
+- Workspace switching: `restoreInitialWorkspace()` loads the active `~/.view/workspaces.json` slot at startup; `switchWorkspace()` saves the current slot, restores the selected slot, and keeps the sidebar tool unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, or workspace-associated Codex session ids change.
 - Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`. Workspaces keep their own `codex_session_ids` list; new or opened sessions are remembered in the active workspace so the Codex sidebar is workspace-scoped rather than directory-scoped.
 - Tracks Codex status by workspace layout: workspace buttons show live green running state when any contained Codex session is running, and inactive workspaces receive sticky amber/red completion/failure notices after runs finish until the workspace is opened.
 
@@ -256,13 +274,21 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/components/ConfigPanel.vue`
 
-- Configuration UI opened from the top bar.
-- Edits `.viewer.config.json` through the existing `/api/config` endpoint.
+- Full-page configuration UI opened from the top bar Settings button.
+- Edits `~/.view/config.json` through the existing `/api/config` endpoint.
 - Sections: Server, Appearance, Codex Models, Markdown, Syntax Highlighting, and raw JSON.
 - Server section has confirmed restart and stop buttons. Restart calls `/api/admin/restart`, polls `/api/health` until the PID changes, then reloads the page. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
 - Appearance currently controls nav bar size, which also drives icon/button size via CSS variables.
 - Codex Models controls the default Codex model, the available model list used by `/api/codex/models` and the Codex pane toolbar, and the optional Codex subprocess proxy.
 - Markdown config stores an active theme plus a theme list. The editor can duplicate/reset themes and edit heading/body/paragraph/code font sizes, colors, weights, link/code/border colors, and Highlight.js token colors.
+
+`frontend/src/components/LoopTasksPage.vue`
+
+- Full-page Loop Tasks UI opened from the top bar Loop Tasks button.
+- Left panel lists loop task names, current state, last status, and next run time.
+- Right panel has an Edit/Logs segmented switch.
+- Edit mode exposes generated YAML frontmatter as form controls: enabled, Codex model, working directory, UTC+8 timezone display, schedule type/time fields, run limits, session policy/reset fields, stop regex, and Markdown prompt body.
+- Logs mode lists run records as collapsible panels. Expanding a run loads the backend detail JSON and renders the stored compact Codex session snapshot with prompt, event text, patch text, and file changes.
 
 `frontend/src/components/FileTree.vue`
 
@@ -370,6 +396,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Admin APIs: `restartServer()` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
 - Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `queueCodexMessage()`, `updateCodexQueuedMessage()`, `deleteCodexQueuedMessage()`, `deleteCodexSession()`, `codexSessionSocketUrl()`.
+- Agent loop APIs: `listAgentLoops()`, `createAgentLoop()`, `reloadAgentLoops()`, `updateAgentLoop()`, `deleteAgentLoop()`, `runAgentLoop()`, `pauseAgentLoop()`, `resumeAgentLoop()`, `resetAgentLoopSession()`, `listAgentLoopRuns()`, and `getAgentLoopRun()`.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 
 `frontend/src/api/events.ts`
@@ -378,7 +405,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/stores/files.ts`
 
-- Pinia store for directory listings, current path, expanded dirs, pinned paths, appearance config, Markdown theme config, and loading state. The current path, active workspace's pins, appearance, and Markdown themes are persisted in `.viewer.config.json`; workspace switching also stores pins per slot in `.viewer.workspaces.json`.
+- Pinia store for directory listings, current path, expanded dirs, pinned paths, appearance config, Markdown theme config, and loading state. The current path, active workspace's pins, appearance, and Markdown themes are persisted in `~/.view/config.json`; workspace switching also stores pins per slot in `~/.view/workspaces.json`.
 - Getters: `rootEntries`, `currentEntries`, `parentPath`, `activeMarkdownTheme`.
 - Actions: `loadConfig()`, `saveConfig()`, `saveAppearance()`, `saveMarkdown()`, `saveViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
@@ -392,7 +419,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/stores/workspaces.ts`
 
-- Pinia store for `.viewer.workspaces.json` state.
+- Pinia store for `~/.view/workspaces.json` state.
 - Actions: `load()`, `snapshotFor()`, `saveSlot()`, and `activate()` call `/api/workspaces` endpoints and track the active numbered workspace.
 
 `frontend/src/stores/codex.ts`
@@ -400,6 +427,11 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Pinia store for Codex session summaries.
 - Actions: `load()`, `create(prompt, cwd)`, `send(id, prompt)`, `upsert(session)`, `remove(id)`.
 - Queue actions: `queue(id, prompt)`, `updateQueued(id, itemId, prompt)`, and `deleteQueued(id, itemId)` call the server-backed Codex queue APIs and upsert the returned session summary.
+
+`frontend/src/stores/agentLoops.ts`
+
+- Pinia store for loop task summaries, selected task id, run summaries, and loaded run details.
+- Actions wrap `/api/agent-loops` endpoints: load/reload/create/save/delete, run now, pause/resume, reset session, load runs, and load one run detail.
 
 `frontend/src/stores/paneToolbar.ts`
 
@@ -427,6 +459,10 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `frontend/src/types/codex.ts`
 
 - TypeScript mirror of Codex schemas: `CodexStatus`, `CodexSessionInfo`, `CodexPrompt`, compact `CodexEvent`, `CodexFileChange`, `CodexSessionSnapshot`, and `CodexQueueItem`.
+
+`frontend/src/types/agentLoops.ts`
+
+- TypeScript mirror of agent loop schemas: task definition, schedule/run/session/stop config, runtime state, task info, and run record/detail.
 
 `frontend/src/utils/scrollMemory.ts`
 
@@ -515,14 +551,6 @@ Implementation checks:
 
 - Ignores Python caches, virtualenv/cache dirs, frontend dependencies/build output, local viewer state, `.codex`, logs, editor/OS files.
 
-`.viewer.config.json`
-
-- Root-local runtime config when this repo is itself the served root. Ignored by git.
-
-`.viewer.workspaces.json`
-
-- Root-local workspace layout/session state. Ignored by git.
-
 `.codex`
 
 - Local ignored file currently present but empty. It is not used for project architecture instructions.
@@ -584,21 +612,26 @@ Backend Pydantic models in `backend/app/models.py` should match frontend interfa
 - `WatchEvent` <-> `WatchEvent`
 - `TerminalInfo` <-> `TerminalInfo` including PTY rows/cols and shared layout lock state.
 - `TerminalSnapshot` <-> `TerminalSnapshot` including PTY rows/cols and shared layout lock state.
+- `AgentLoopDefinition` / `AgentLoopInfo` / `AgentLoopRunRecord` <-> matching loop task TypeScript interfaces.
 
 If a backend field changes, update the matching frontend type and all consumers.
 
 ## Persistence
 
-- Root `.viewer.config.json`: active/legacy pinned files/folders, last sidebar directory, file/directory visit timestamps, appearance, workspace slot count, Codex model options, and Markdown themes, managed by `/api/config`.
-- Root `.viewer.workspaces.json`: active workspace id plus per-slot split tree, active pane, open file paths, open terminal/Codex IDs, sidebar directory, pinned files/folders, and update timestamp, managed by `/api/workspaces`.
+- `~/.view/config.json`: active/legacy pinned files/folders, last sidebar directory, file/directory visit timestamps, appearance, workspace slot count, Codex model options, and Markdown themes, managed by `/api/config`. On first use, missing config is copied from served-root `.viewer.config.json` if present.
+- `~/.view/workspaces.json`: active workspace id plus per-slot split tree, active pane, open file paths, open terminal/Codex IDs, sidebar directory, pinned files/folders, and update timestamp, managed by `/api/workspaces`. On first use, missing workspace state is copied from served-root `.viewer.workspaces.json` if present.
+- `~/.view/loops/*.md`: Markdown loop task definitions with generated YAML frontmatter and prompt body.
+- `~/.view/agent-loops.json`: scheduler runtime state for loop tasks.
 - `localStorage viewer.layout.v1`: legacy/fallback split tree, active pane, open file paths, open terminal IDs.
 - `localStorage viewer.sidebarPinned.v1`: sidebar pinned state.
 - `localStorage viewer.sidebarWidth.v1`: sidebar width.
 - `localStorage viewer.scrollPositions.v1`: per-path scroll positions.
-- `logs/viewer-*.log`: timestamped runtime logs from `run.py`.
-- `logs/codex-sessions/*.jsonl`: obsolete viewer-local Codex stdout caches from older versions; rendering now reads canonical rollout JSONL files under `~/.codex/sessions/`.
-- `logs/codex-sessions/*.stderr.log`: stderr from Codex subprocesses.
-- `logs/codex-sessions/*.json`: viewer-local Codex session metadata including prompts, discovered Codex thread id, selected model, status, and matched rollout path.
+- `~/.view/logs/viewer-*.log`: timestamped runtime logs from `run.py`.
+- `~/.view/logs/codex-sessions/*.jsonl`: obsolete viewer-local Codex stdout caches from older versions; rendering now reads canonical rollout JSONL files under `~/.codex/sessions/`.
+- `~/.view/logs/codex-sessions/*.stderr.log`: stderr from Codex subprocesses.
+- `~/.view/logs/codex-sessions/*.json`: viewer-local Codex session metadata including prompts, discovered Codex thread id, selected model, status, and matched rollout path.
+- `~/.view/logs/terminals/*.log`: terminal replay logs.
+- `~/.view/logs/agent-loops/{task_id}/runs.jsonl` and `{run_id}.json`: loop run summaries and detailed compact Codex snapshots.
 
 ## Common Fault Locations
 
@@ -610,9 +643,10 @@ If a backend field changes, update the matching frontend type and all consumers.
 - Terminal creation fails: `settings.terminal_shell`, `TerminalManager.create()`, shell availability, PTY permissions.
 - Terminal output glitches: `TerminalViewer.vue` snapshot/output version logic and `TerminalManager._read_output()`.
 - Terminal resize issues: `TerminalViewer.vue resize()` and `TerminalManager.resize()`.
-- Codex session creation/resume fails: check `codex` availability on PATH, `backend/app/codex_sessions.py` command construction, `logs/codex-sessions/*.stderr.log`, and whether a `thread_id` was captured from raw JSON.
+- Codex session creation/resume fails: check `codex` availability on PATH, `backend/app/codex_sessions.py` command construction, `~/.view/logs/codex-sessions/*.stderr.log`, and whether a `thread_id` was captured from raw JSON.
 - Codex pane rendering looks incomplete: inspect `CodexViewer.vue` `textFrom()` extraction and use the raw JSON toolbar toggle to compare against the matched `~/.codex/sessions/**/rollout-*.jsonl`.
-- Frontend runtime errors: browser console, `/api/debug/client-log`, `backend/app/logging.py`, `logs/`.
+- Loop task does not run: check `~/.view/loops/*.md` frontmatter parse errors in the Loop Tasks page, `backend/app/agent_loops.py`, `~/.view/agent-loops.json`, and `~/.view/logs/agent-loops/{task_id}/`.
+- Frontend runtime errors: browser console, `/api/debug/client-log`, `backend/app/logging.py`, `~/.view/logs/`.
 - Production frontend missing: build `frontend/dist` or set `VIEWER_FRONTEND_DIST`.
 
 ## Maintenance Rules
@@ -620,4 +654,4 @@ If a backend field changes, update the matching frontend type and all consumers.
 - Keep this file synchronized with code when responsibilities move or files are added/removed.
 - Keep backend schemas and frontend TypeScript interfaces aligned.
 - Do not hand-edit generated dependency/build artifacts (`uv.lock`, `frontend/package-lock.json`, `frontend/dist/`, `frontend/node_modules/`).
-- The app is read-only for served files except `.viewer.config.json` pin storage and terminal processes, which can modify files because they run a real shell in the served root.
+- The app is read-only for served files except terminal/Codex/loop processes, which can modify files because they run real commands in the served root. Viewer-owned config/state/log files live under `~/.view`.

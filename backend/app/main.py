@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from .agent_loops import agent_loop_manager
 from .config import settings
 from .codex_sessions import codex_session_manager
 from .events import hub
@@ -27,7 +28,7 @@ from .files import (
     write_workspace,
 )
 from .logging import current_log_path, ensure_logging
-from .models import ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate, WorkspaceSnapshot
+from .models import AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -73,6 +74,7 @@ async def startup() -> None:
     watch_stop_event = asyncio.Event()
     watch_task = asyncio.create_task(watch_root(watch_stop_event))
     await codex_session_manager.resume_pending_queues()
+    await agent_loop_manager.start()
 
 
 @app.on_event("shutdown")
@@ -82,6 +84,7 @@ async def shutdown() -> None:
         watch_stop_event.set()
     if watch_task:
         watch_task.cancel()
+    await agent_loop_manager.shutdown()
     await terminal_manager.shutdown()
     await codex_session_manager.shutdown()
 
@@ -225,6 +228,66 @@ async def put_workspace(workspace_id: str, snapshot: WorkspaceSnapshot):
 @app.post("/api/workspaces/{workspace_id}/activate")
 async def activate_workspace(workspace_id: str):
     return set_active_workspace(workspace_id)
+
+
+@app.get("/api/agent-loops")
+async def agent_loops():
+    return agent_loop_manager.list()
+
+
+@app.post("/api/agent-loops")
+async def create_agent_loop(config: AgentLoopCreate):
+    return agent_loop_manager.create(config)
+
+
+@app.post("/api/agent-loops/reload")
+async def reload_agent_loops():
+    return agent_loop_manager.reload()
+
+
+@app.get("/api/agent-loops/{task_id}")
+async def agent_loop(task_id: str):
+    return agent_loop_manager.get(task_id)
+
+
+@app.put("/api/agent-loops/{task_id}")
+async def update_agent_loop(task_id: str, definition: AgentLoopDefinition):
+    return agent_loop_manager.update(task_id, definition)
+
+
+@app.delete("/api/agent-loops/{task_id}")
+async def delete_agent_loop(task_id: str):
+    return agent_loop_manager.delete(task_id)
+
+
+@app.post("/api/agent-loops/{task_id}/run")
+async def run_agent_loop(task_id: str, request: AgentLoopRunRequest | None = None):
+    return await agent_loop_manager.run_now(task_id, request.trigger if request else "manual")
+
+
+@app.post("/api/agent-loops/{task_id}/pause")
+async def pause_agent_loop(task_id: str):
+    return agent_loop_manager.pause(task_id, True)
+
+
+@app.post("/api/agent-loops/{task_id}/resume")
+async def resume_agent_loop(task_id: str):
+    return agent_loop_manager.pause(task_id, False)
+
+
+@app.post("/api/agent-loops/{task_id}/reset-session")
+async def reset_agent_loop_session(task_id: str):
+    return agent_loop_manager.reset_session(task_id)
+
+
+@app.get("/api/agent-loops/{task_id}/runs")
+async def agent_loop_runs(task_id: str):
+    return agent_loop_manager.runs(task_id)
+
+
+@app.get("/api/agent-loops/{task_id}/runs/{run_id}")
+async def agent_loop_run_detail(task_id: str, run_id: str):
+    return agent_loop_manager.run_detail(task_id, run_id)
 
 
 @app.get("/api/events")

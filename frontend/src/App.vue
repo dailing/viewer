@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import ConfigPanel from "./components/ConfigPanel.vue";
 import FileSidebar from "./components/FileSidebar.vue";
+import LoopTasksPage from "./components/LoopTasksPage.vue";
 import Workspace from "./components/Workspace.vue";
 import { connectEvents } from "./api/events";
 import { useCodexStore } from "./stores/codex";
@@ -29,7 +30,7 @@ const terminals = useTerminalsStore();
 const workspaces = useWorkspacesStore();
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
-const configOpen = ref(false);
+const activePage = ref<"workspace" | "settings" | "loops">("workspace");
 const mobileToolbarOpen = ref(false);
 const codexStatusById = ref<Record<string, CodexStatus>>({});
 const workspaceAlerts = ref<Record<string, WorkspaceAlert>>({});
@@ -436,14 +437,31 @@ onUnmounted(() => {
 <template>
   <div class="app-shell" :style="appStyle">
     <header class="topbar">
-      <button class="btn btn-outline-secondary icon-button" type="button" title="Configuration" @click="configOpen = true">
+      <button
+        class="btn btn-outline-secondary icon-button"
+        :class="{ active: activePage === 'settings' }"
+        type="button"
+        title="Settings"
+        @click="activePage = activePage === 'settings' ? 'workspace' : 'settings'"
+      >
         <i class="bi bi-gear"></i>
       </button>
-      <div class="active-pane-title" :title="activePaneTitle">{{ activePaneTitle }}</div>
-      <span v-if="activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
+      <button
+        class="btn btn-outline-secondary icon-button"
+        :class="{ active: activePage === 'loops' }"
+        type="button"
+        title="Loop Tasks"
+        @click="activePage = activePage === 'loops' ? 'workspace' : 'loops'"
+      >
+        <i class="bi bi-clock-history"></i>
+      </button>
+      <div class="active-pane-title" :title="activePage === 'workspace' ? activePaneTitle : activePage === 'settings' ? 'Settings' : 'Loop Tasks'">
+        {{ activePage === 'workspace' ? activePaneTitle : activePage === 'settings' ? 'Settings' : 'Loop Tasks' }}
+      </div>
+      <span v-if="activePage === 'workspace' && activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
         {{ activePaneToolbar.status }}
       </span>
-      <div v-if="hasMobilePaneToolbar" class="mobile-pane-menu">
+      <div v-if="activePage === 'workspace' && hasMobilePaneToolbar" class="mobile-pane-menu">
         <button
           class="btn btn-outline-secondary icon-button toolbar-action"
           type="button"
@@ -488,7 +506,7 @@ onUnmounted(() => {
           </template>
         </div>
       </div>
-      <div v-if="activePaneActions.length" class="pane-actions" aria-label="Active pane actions">
+      <div v-if="activePage === 'workspace' && activePaneActions.length" class="pane-actions" aria-label="Active pane actions">
         <button
           v-for="action in activePaneActions"
           :key="action.id"
@@ -503,7 +521,7 @@ onUnmounted(() => {
           <span v-else-if="action.label">{{ action.label }}</span>
         </button>
       </div>
-      <template v-for="control in activePaneControls" :key="control.id">
+      <template v-if="activePage === 'workspace'" v-for="control in activePaneControls" :key="control.id">
         <select
           v-if="control.kind === 'select'"
           class="form-select form-select-sm pane-toolbar-select"
@@ -518,7 +536,7 @@ onUnmounted(() => {
           <span v-for="(item, index) in control.items" :key="`${index}:${item}`" class="pane-toolbar-chip">{{ item }}</span>
         </div>
       </template>
-      <div v-if="globalPaneActions.length" class="pane-actions global-pane-actions" aria-label="Global pane actions">
+      <div v-if="activePage === 'workspace' && globalPaneActions.length" class="pane-actions global-pane-actions" aria-label="Global pane actions">
         <button
           v-for="action in globalPaneActions"
           :key="action.id"
@@ -535,7 +553,7 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <div class="body-shell" :class="{ 'sidebar-pinned': sidebarPinned && sidebarOpen }" :style="bodyShellStyle">
+    <div v-if="activePage === 'workspace'" class="body-shell" :class="{ 'sidebar-pinned': sidebarPinned && sidebarOpen }" :style="bodyShellStyle">
       <div v-if="sidebarOpen && !sidebarPinned" class="sidebar-backdrop" @click="sidebarOpen = false"></div>
       <aside class="sidebar-drawer" :class="{ 'panel-open': sidebarOpen, pinned: sidebarPinned && sidebarOpen }">
         <FileSidebar
@@ -566,6 +584,11 @@ onUnmounted(() => {
         <Workspace />
       </main>
     </div>
-    <ConfigPanel v-if="configOpen" @close="configOpen = false" />
+    <main v-else-if="activePage === 'settings'" class="top-level-page">
+      <ConfigPanel @close="activePage = 'workspace'" />
+    </main>
+    <main v-else class="top-level-page">
+      <LoopTasksPage />
+    </main>
   </div>
 </template>

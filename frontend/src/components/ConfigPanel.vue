@@ -250,12 +250,12 @@ async function applyJson() {
 </script>
 
 <template>
-  <div class="config-backdrop" @click.self="emit('close')">
+  <div class="config-page">
     <section class="config-panel" aria-label="Configuration">
       <header class="config-header">
         <div>
           <h2>Configuration</h2>
-          <span>.viewer.config.json</span>
+          <span>~/.view/config.json</span>
         </div>
         <button class="btn btn-outline-secondary icon-button" type="button" title="Close configuration" @click="emit('close')">
           <i class="bi bi-x"></i>
@@ -485,23 +485,22 @@ async function applyJson() {
 </template>
 
 <style scoped>
-.config-backdrop {
-  background: rgb(15 23 42 / 0.35);
-  inset: var(--topbar-height) 0 0;
-  position: fixed;
-  z-index: 40;
+.config-page {
+  background: #f6f8fb;
+  height: 100%;
+  overflow: hidden;
 }
 
 .config-panel {
   background: #ffffff;
   border-left: 1px solid var(--border);
-  box-shadow: -8px 0 26px rgb(15 23 42 / 0.18);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   height: 100%;
-  margin-left: auto;
+  margin: 0 auto;
   max-width: 100vw;
-  width: min(720px, 100vw);
+  width: min(960px, 100vw);
 }
 
 .config-header,

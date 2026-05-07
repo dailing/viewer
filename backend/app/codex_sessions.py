@@ -16,9 +16,9 @@ from watchfiles import awatch
 
 from .config import settings
 from .files import resolve_served_directory
+from .storage import CODEX_LOG_DIR
 from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
-CODEX_LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "codex-sessions"
 CODEX_ROLLOUT_ROOT = Path.home() / ".codex" / "sessions"
 PROXY_ENV_KEYS = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY")
 RAW_PREVIEW_MAX_BYTES = 16 * 1024

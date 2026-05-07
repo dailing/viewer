@@ -8,9 +8,7 @@ from loguru import logger
 
 from .config import settings
 from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, WorkspaceData, WorkspaceSnapshot
-
-CONFIG_NAME = ".viewer.config.json"
-WORKSPACES_NAME = ".viewer.workspaces.json"
+from .storage import CONFIG_PATH, WORKSPACES_PATH, migrate_legacy_state
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
@@ -238,7 +236,8 @@ def read_text(path: str) -> str:
 
 
 def config_path() -> Path:
-    return settings.root_resolved / CONFIG_NAME
+    migrate_legacy_state()
+    return CONFIG_PATH
 
 
 def read_config() -> ConfigData:
@@ -270,12 +269,14 @@ def read_config() -> ConfigData:
 
 def write_config(config: ConfigData) -> ConfigData:
     path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
     return config
 
 
 def workspaces_path() -> Path:
-    return settings.root_resolved / WORKSPACES_NAME
+    migrate_legacy_state()
+    return WORKSPACES_PATH
 
 
 def read_workspaces() -> WorkspaceData:
@@ -292,6 +293,7 @@ def read_workspaces() -> WorkspaceData:
 
 def write_workspaces(data: WorkspaceData) -> WorkspaceData:
     path = workspaces_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(data.model_dump_json(indent=2), encoding="utf-8")
     return data
 

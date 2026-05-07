@@ -2,6 +2,7 @@ import type { DirectoryListing, FileMeta, ViewerConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
+import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -169,6 +170,62 @@ export async function deleteCodexSession(id: string): Promise<void> {
 
 export function codexSessionSocketUrl(id: string): string {
   return socketUrl(`/api/codex/sessions/${encodeURIComponent(id)}/ws`);
+}
+
+export async function listAgentLoops(): Promise<AgentLoopInfo[]> {
+  return request<AgentLoopInfo[]>("/api/agent-loops");
+}
+
+export async function createAgentLoop(name: string): Promise<AgentLoopInfo> {
+  return request<AgentLoopInfo>("/api/agent-loops", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function reloadAgentLoops(): Promise<AgentLoopInfo[]> {
+  return request<AgentLoopInfo[]>("/api/agent-loops/reload", { method: "POST" });
+}
+
+export async function updateAgentLoop(id: string, definition: AgentLoopDefinition): Promise<AgentLoopInfo> {
+  return request<AgentLoopInfo>(`/api/agent-loops/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(definition),
+  });
+}
+
+export async function deleteAgentLoop(id: string): Promise<void> {
+  await request<{ status: string }>(`/api/agent-loops/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function runAgentLoop(id: string): Promise<AgentLoopInfo> {
+  return request<AgentLoopInfo>(`/api/agent-loops/${encodeURIComponent(id)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trigger: "manual" }),
+  });
+}
+
+export async function pauseAgentLoop(id: string): Promise<AgentLoopInfo> {
+  return request<AgentLoopInfo>(`/api/agent-loops/${encodeURIComponent(id)}/pause`, { method: "POST" });
+}
+
+export async function resumeAgentLoop(id: string): Promise<AgentLoopInfo> {
+  return request<AgentLoopInfo>(`/api/agent-loops/${encodeURIComponent(id)}/resume`, { method: "POST" });
+}
+
+export async function resetAgentLoopSession(id: string): Promise<AgentLoopInfo> {
+  return request<AgentLoopInfo>(`/api/agent-loops/${encodeURIComponent(id)}/reset-session`, { method: "POST" });
+}
+
+export async function listAgentLoopRuns(id: string): Promise<AgentLoopRunRecord[]> {
+  return request<AgentLoopRunRecord[]>(`/api/agent-loops/${encodeURIComponent(id)}/runs`);
+}
+
+export async function getAgentLoopRun(id: string, runId: string): Promise<AgentLoopRunRecord> {
+  return request<AgentLoopRunRecord>(`/api/agent-loops/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`);
 }
 
 export function voiceSocketUrl(): string {

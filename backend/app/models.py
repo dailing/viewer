@@ -230,6 +230,95 @@ class CodexModelOptions(BaseModel):
     source: str = "config"
 
 
+class AgentLoopSchedule(BaseModel):
+    type: Literal["manual", "once", "interval", "daily", "multi_daily"] = "manual"
+    at_local: str | None = None
+    start_at_local: str | None = None
+    every_minutes: int = Field(default=30, ge=1)
+    time_local: str = "09:00"
+    times_local: list[str] = Field(default_factory=list)
+
+
+class AgentLoopRunConfig(BaseModel):
+    max_runs: int | None = Field(default=None, ge=1)
+    max_consecutive_failures: int | None = Field(default=3, ge=1)
+    skip_if_previous_running: bool = True
+
+
+class AgentLoopSessionConfig(BaseModel):
+    policy: Literal["new_each_run", "reuse", "reuse_until_context", "reuse_with_limits"] = "reuse_until_context"
+    max_context_percent: float = Field(default=70, ge=1, le=100)
+    reset_after_runs: int | None = Field(default=None, ge=1)
+    reset_on_failure: bool = False
+
+
+class AgentLoopStopConfig(BaseModel):
+    final_message_regex: str | None = None
+
+
+class AgentLoopDefinition(BaseModel):
+    id: str
+    name: str
+    enabled: bool = True
+    agent: Literal["codex"] = "codex"
+    model: str | None = None
+    cwd: str = ""
+    timezone: str = "Asia/Shanghai"
+    schedule: AgentLoopSchedule = Field(default_factory=AgentLoopSchedule)
+    run: AgentLoopRunConfig = Field(default_factory=AgentLoopRunConfig)
+    session: AgentLoopSessionConfig = Field(default_factory=AgentLoopSessionConfig)
+    stop: AgentLoopStopConfig = Field(default_factory=AgentLoopStopConfig)
+    prompt: str = ""
+
+
+class AgentLoopRuntime(BaseModel):
+    paused: bool = False
+    stopped: bool = False
+    stop_reason: str | None = None
+    current_session_id: str | None = None
+    current_run_id: str | None = None
+    current_trigger: str | None = None
+    run_count: int = 0
+    session_run_count: int = 0
+    consecutive_failures: int = 0
+    last_run_at: float | None = None
+    next_run_at: float | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+
+
+class AgentLoopInfo(BaseModel):
+    definition: AgentLoopDefinition
+    runtime: AgentLoopRuntime = Field(default_factory=AgentLoopRuntime)
+    path: str
+    parse_error: str | None = None
+
+
+class AgentLoopRunRecord(BaseModel):
+    run_id: str
+    task_id: str
+    task_name: str
+    codex_session_id: str | None = None
+    trigger: str = "schedule"
+    model: str | None = None
+    cwd: str = ""
+    started_at: float
+    finished_at: float | None = None
+    status: str = "running"
+    exit_code: int | None = None
+    error: str | None = None
+    prompt: str = ""
+    session_snapshot: CodexSessionSnapshot | None = None
+
+
+class AgentLoopCreate(BaseModel):
+    name: str = "New Loop Task"
+
+
+class AgentLoopRunRequest(BaseModel):
+    trigger: str = "manual"
+
+
 class ClientLog(BaseModel):
     level: Literal["debug", "info", "warning", "error"] = "error"
     message: str

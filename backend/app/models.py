@@ -79,10 +79,15 @@ class CodexConfig(BaseModel):
     muted_message_alpha: float = Field(default=0.56, ge=0.15, le=1.0)
 
 
+class WorkspaceConfig(BaseModel):
+    count: int = Field(default=5, ge=1, le=20)
+
+
 class ConfigData(BaseModel):
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
 
 
 class WorkspaceSnapshot(BaseModel):

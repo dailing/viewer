@@ -2,19 +2,22 @@
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
 import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
-import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme } from "../types/files";
+import { useWorkspacesStore } from "../stores/workspaces";
+import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, WorkspaceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
+const workspaces = useWorkspacesStore();
 const saving = ref(false);
 const restarting = ref(false);
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
-const openSections = reactive({ server: true, appearance: true, codex: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, appearance: true, workspace: true, codex: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
+  workspace: clone(files.workspaceConfig) as WorkspaceConfig,
   codex: clone(files.codexConfig) as CodexConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
 });
@@ -32,6 +35,7 @@ const fullConfigJson = computed(() =>
   JSON.stringify(
     {
       appearance: draft.appearance,
+      workspace: draft.workspace,
       codex: draft.codex,
       markdown: draft.markdown,
     },
@@ -50,6 +54,15 @@ watch(
   () => files.codexConfig,
   (codex) => {
     Object.assign(draft.codex, clone(codex));
+    jsonDraft.value = fullConfigJson.value;
+  },
+  { deep: true },
+);
+
+watch(
+  () => files.workspaceConfig,
+  (workspace) => {
+    Object.assign(draft.workspace, clone(workspace));
     jsonDraft.value = fullConfigJson.value;
   },
   { deep: true },
@@ -206,7 +219,8 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.workspace);
+    await workspaces.load();
     emit("close");
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -219,6 +233,7 @@ async function applyJson() {
   try {
     const parsed = JSON.parse(jsonDraft.value);
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
+    if (parsed.workspace) Object.assign(draft.workspace, parsed.workspace);
     if (parsed.codex) Object.assign(draft.codex, parsed.codex);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
     await save();
@@ -274,6 +289,20 @@ async function applyJson() {
               <span>Nav bar size</span>
               <input v-model.number="draft.appearance.navbar_size" class="form-range" type="range" min="22" max="56" step="1" />
               <input v-model.number="draft.appearance.navbar_size" class="form-control form-control-sm number-input" type="number" min="22" max="56" />
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('workspace')">
+            <i class="bi" :class="openSections.workspace ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Workspace</span>
+          </button>
+          <div v-if="openSections.workspace" class="section-body">
+            <label class="setting-row">
+              <span>Workspace count</span>
+              <input v-model.number="draft.workspace.count" class="form-range" type="range" min="1" max="20" step="1" />
+              <input v-model.number="draft.workspace.count" class="form-control form-control-sm number-input" type="number" min="1" max="20" />
             </label>
           </div>
         </section>

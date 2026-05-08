@@ -77,10 +77,15 @@ export interface CodexConfig {
   muted_message_alpha: number;
 }
 
+export interface WorkspaceConfig {
+  count: number;
+}
+
 export interface ViewerConfig {
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
   codex?: CodexConfig;
+  workspace?: WorkspaceConfig;
 }
 
 export interface WatchEvent {

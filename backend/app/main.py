@@ -24,10 +24,11 @@ from .files import (
     resolve_path,
     set_active_workspace,
     write_config,
+    write_workspace_config,
     write_workspace,
 )
 from .logging import current_log_path, ensure_logging
-from .models import AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate, WorkspaceSnapshot
+from .models import AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -194,6 +195,7 @@ async def put_config(config: ConfigData):
             appearance=config.appearance,
             markdown=config.markdown,
             codex=config.codex,
+            workspace=config.workspace,
         )
     )
 
@@ -201,6 +203,16 @@ async def put_config(config: ConfigData):
 @app.get("/api/workspaces")
 async def get_workspaces():
     return read_workspaces()
+
+
+@app.get("/api/workspaces/config")
+async def get_workspace_config():
+    return read_config().workspace
+
+
+@app.put("/api/workspaces/config")
+async def put_workspace_config(config: WorkspaceConfig):
+    return write_workspace_config(config)
 
 
 @app.put("/api/workspaces/{workspace_id}")

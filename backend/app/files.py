@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from .config import settings
-from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, WorkspaceData, WorkspaceSnapshot
+from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, WorkspaceConfig, WorkspaceData, WorkspaceSnapshot
 from .storage import CONFIG_PATH, WORKSPACES_PATH, migrate_legacy_state
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
@@ -244,18 +244,25 @@ def config_path() -> Path:
 def read_config() -> ConfigData:
     path = config_path()
     if not path.exists():
-        return ConfigData()
+        config = ConfigData(workspace=WorkspaceConfig(count=legacy_workspace_count() or stored_workspace_count() or 5))
+        write_config(config)
+        return config
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         config = ConfigData.model_validate(raw)
     except Exception:
         return ConfigData()
+    if isinstance(raw, dict) and "workspace" not in raw:
+        config.workspace.count = legacy_workspace_count() or stored_workspace_count() or config.workspace.count
     cleaned = ConfigData(
         appearance=config.appearance,
         markdown=config.markdown,
         codex=config.codex,
+        workspace=config.workspace,
     )
-    if isinstance(raw, dict) and any(key in raw for key in ("pinned", "current_path", "visit_times", "workspaces")):
+    if isinstance(raw, dict) and (
+        "workspace" not in raw or any(key in raw for key in ("pinned", "current_path", "visit_times", "workspaces"))
+    ):
         read_workspaces()
         write_config(cleaned)
     return cleaned
@@ -268,6 +275,15 @@ def write_config(config: ConfigData) -> ConfigData:
     return config
 
 
+def write_workspace_config(config: WorkspaceConfig) -> WorkspaceData:
+    current = read_config()
+    current.workspace = config
+    write_config(current)
+    data = read_workspaces()
+    data.count = config.count
+    return data
+
+
 def workspaces_path() -> Path:
     migrate_legacy_state()
     return WORKSPACES_PATH
@@ -276,23 +292,30 @@ def workspaces_path() -> Path:
 def read_workspaces() -> WorkspaceData:
     path = workspaces_path()
     if not path.exists():
-        return write_workspaces(legacy_workspace_data())
+        data = write_workspaces(legacy_workspace_data())
+        data.count = configured_workspace_count()
+        return data
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         migrated = migrate_workspace_state(raw)
         data = WorkspaceData.model_validate(migrated)
     except Exception:
         logger.warning("Ignoring invalid workspace state file {}", path)
-        return WorkspaceData()
-    if migrated is not raw:
+        data = WorkspaceData()
+        data.count = configured_workspace_count()
+        return data
+    if isinstance(raw, dict) and "count" in raw:
+        ensure_workspace_config_count(data.count)
+    if migrated is not raw or (isinstance(raw, dict) and "count" in raw):
         write_workspaces(data)
+    data.count = configured_workspace_count()
     return data
 
 
 def write_workspaces(data: WorkspaceData) -> WorkspaceData:
     path = workspaces_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(data.model_dump_json(indent=2), encoding="utf-8")
+    path.write_text(data.model_dump_json(indent=2, exclude={"count"}), encoding="utf-8")
     return data
 
 
@@ -349,6 +372,49 @@ def legacy_workspace_count() -> int | None:
     return max(1, min(20, round(count)))
 
 
+def stored_workspace_count() -> int | None:
+    if not WORKSPACES_PATH.exists():
+        return None
+    try:
+        raw = json.loads(WORKSPACES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    count = raw.get("count") if isinstance(raw, dict) else None
+    if not isinstance(count, (int, float)):
+        return None
+    return max(1, min(20, round(count)))
+
+
+def ensure_workspace_config_count(count: int) -> None:
+    config_path()
+    try:
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    if isinstance(raw, dict) and isinstance(raw.get("workspace"), dict):
+        return
+    try:
+        config = ConfigData.model_validate(raw if isinstance(raw, dict) else {})
+    except Exception:
+        config = ConfigData()
+    config.workspace.count = max(1, min(20, round(count)))
+    write_config(config)
+
+
+def configured_workspace_count() -> int:
+    if CONFIG_PATH.exists():
+        try:
+            raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = None
+        if isinstance(raw, dict):
+            workspace = raw.get("workspace")
+            count = workspace.get("count") if isinstance(workspace, dict) else None
+            if isinstance(count, (int, float)):
+                return max(1, min(20, round(count)))
+    return legacy_workspace_count() or stored_workspace_count() or 5
+
+
 def legacy_visit_times() -> dict[str, float]:
     if not CONFIG_PATH.exists():
         return {}
@@ -367,7 +433,7 @@ def legacy_visit_times() -> dict[str, float]:
 
 
 def legacy_workspace_data() -> WorkspaceData:
-    data = WorkspaceData(count=legacy_workspace_count() or 5)
+    data = WorkspaceData(count=configured_workspace_count())
     if not CONFIG_PATH.exists():
         return data
     try:
@@ -413,7 +479,7 @@ def migrate_workspace_state(raw: object) -> object:
     migrated = dict(raw)
     migrated_slots = dict(slots)
     if "count" not in migrated:
-        migrated["count"] = legacy_workspace_count() or max(5, *(int(key) for key in slots if str(key).isdigit()))
+        migrated["count"] = configured_workspace_count()
         changed = True
     active_workspace_id = str(migrated.get("active_workspace_id") or "1")
     active_visit_times = legacy_visit_times()

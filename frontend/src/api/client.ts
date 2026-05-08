@@ -1,4 +1,4 @@
-import type { DirectoryListing, FileMeta, ViewerConfig } from "../types/files";
+import type { DirectoryListing, FileMeta, ViewerConfig, WorkspaceConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
@@ -58,6 +58,18 @@ export async function putConfig(config: ViewerConfig): Promise<ViewerConfig> {
 
 export async function getWorkspaces(): Promise<WorkspaceData> {
   return request<WorkspaceData>("/api/workspaces");
+}
+
+export async function getWorkspaceConfig(): Promise<WorkspaceConfig> {
+  return request<WorkspaceConfig>("/api/workspaces/config");
+}
+
+export async function putWorkspaceConfig(config: WorkspaceConfig): Promise<WorkspaceData> {
+  return request<WorkspaceData>("/api/workspaces/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
 }
 
 export async function putWorkspace(id: string, snapshot: WorkspaceSnapshot): Promise<WorkspaceData> {

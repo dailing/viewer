@@ -45,7 +45,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/codex/sessions`: lists or creates Codex sessions. POST starts `codex exec --json` in a served-root-relative `cwd`.
 - `/api/codex/status`: returns the latest global Codex CLI rate-limit status parsed from recent `~/.codex/sessions/**/rollout-*.jsonl` `token_count` events by timestamp; pane-level context usage comes from each session's matched rollout file.
 - `/api/codex/models`: returns selected and available models for Codex session creation from `~/.view/config.json` codex defaults only.
-- `/api/codex/sessions/{session_id}` routes: snapshot, send a resumed message via `codex exec resume --json`, append/update/delete server-persisted queued messages, terminate a running Codex subprocess, delete logs/metadata, and WebSocket connect.
+- `/api/codex/sessions/{session_id}` routes: snapshot, send a resumed message via `codex exec resume --json`, append/update/delete server-persisted queued messages, terminate a running Codex subprocess, and WebSocket connect. There is intentionally no API for deleting Codex sessions; workspaces only hide/unassociate sessions from the current workspace.
 - `/api/voice/ws`: optional voice-input WebSocket endpoint. By default the browser streams encoded audio chunks while recording, the backend saves them, and a single full-file `faster-whisper` transcription runs after the client sends `stop`. A configured upstream ASR WebSocket still bypasses the in-process path.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
 
@@ -395,7 +395,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
 - Admin APIs: `restartServer()` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
-- Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `queueCodexMessage()`, `updateCodexQueuedMessage()`, `deleteCodexQueuedMessage()`, `deleteCodexSession()`, `codexSessionSocketUrl()`.
+- Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `queueCodexMessage()`, `updateCodexQueuedMessage()`, `deleteCodexQueuedMessage()`, `codexSessionSocketUrl()`.
 - Agent loop APIs: `listAgentLoops()`, `createAgentLoop()`, `reloadAgentLoops()`, `updateAgentLoop()`, `deleteAgentLoop()`, `runAgentLoop()`, `pauseAgentLoop()`, `resumeAgentLoop()`, `resetAgentLoopSession()`, `listAgentLoopRuns()`, and `getAgentLoopRun()`.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 

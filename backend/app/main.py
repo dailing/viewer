@@ -368,12 +368,6 @@ async def terminate_codex_session(session_id: str):
     return await codex_session_manager.terminate(session_id)
 
 
-@app.delete("/api/codex/sessions/{session_id}")
-async def delete_codex_session(session_id: str):
-    logger.info("Deleting Codex session {}", session_id)
-    return await codex_session_manager.delete(session_id)
-
-
 @app.websocket("/api/codex/sessions/{session_id}/ws")
 async def codex_session_ws(websocket: WebSocket, session_id: str):
     await codex_session_manager.connect(session_id, websocket)

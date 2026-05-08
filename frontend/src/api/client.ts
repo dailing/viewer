@@ -164,10 +164,6 @@ export async function terminateCodexSession(id: string): Promise<CodexSessionInf
   return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/terminate`, { method: "POST" });
 }
 
-export async function deleteCodexSession(id: string): Promise<void> {
-  await request<{ status: string }>(`/api/codex/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
-
 export function codexSessionSocketUrl(id: string): string {
   return socketUrl(`/api/codex/sessions/${encodeURIComponent(id)}/ws`);
 }

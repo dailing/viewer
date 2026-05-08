@@ -783,22 +783,6 @@ class CodexSessionManager:
         session.run_task = asyncio.create_task(self._run(session, prompt, resume=bool(session.codex_session_id)))
         return True
 
-    async def delete(self, session_id: str) -> dict[str, str]:
-        session = self.get(session_id)
-        if session.process and session.process.returncode is None:
-            session.process.terminate()
-            try:
-                await asyncio.wait_for(session.process.wait(), timeout=1.5)
-            except asyncio.TimeoutError:
-                session.process.kill()
-                await session.process.wait()
-        for path in (session.meta_path, session.log_path, session.stderr_path):
-            if path:
-                path.unlink(missing_ok=True)
-        self.sessions.pop(session_id, None)
-        await self._broadcast(session, {"type": "deleted"})
-        return {"status": "deleted"}
-
     async def terminate(self, session_id: str) -> dict:
         session = self.get(session_id)
         if session.process and session.process.returncode is None:

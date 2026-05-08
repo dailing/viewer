@@ -2,7 +2,6 @@ import { defineStore } from "pinia";
 import {
   createCodexSession,
   deleteCodexQueuedMessage,
-  deleteCodexSession,
   getCodexModels,
   getCodexStatus,
   listCodexSessions,
@@ -96,11 +95,6 @@ export const useCodexStore = defineStore("codex", {
     markRead(id: string) {
       if (!this.unreadSessionIds.includes(id)) return;
       this.unreadSessionIds = this.unreadSessionIds.filter((item) => item !== id);
-    },
-    async remove(id: string) {
-      await deleteCodexSession(id);
-      this.sessions = this.sessions.filter((item) => item.id !== id);
-      this.markRead(id);
     },
   },
 });

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import ConfigPanel from "./components/ConfigPanel.vue";
 import FileSidebar from "./components/FileSidebar.vue";
 import LoopTasksPage from "./components/LoopTasksPage.vue";
@@ -34,6 +34,8 @@ const activePage = ref<"workspace" | "settings" | "loops">("workspace");
 const mobileToolbarOpen = ref(false);
 const codexStatusById = ref<Record<string, CodexStatus>>({});
 const workspaceAlerts = ref<Record<string, WorkspaceAlert>>({});
+const switchingWorkspaceId = ref<string | null>(null);
+const workspaceContentLoading = ref(false);
 const sidebarWidth = ref(320);
 const bodyShellStyle = computed(() => ({ "--sidebar-width": `${sidebarWidth.value}px` }));
 const appStyle = computed(() => {
@@ -122,6 +124,7 @@ const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? [])
 const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
 const hasMobilePaneToolbar = computed(() => activePaneActions.value.length > 0 || activePaneControls.value.length > 0);
 const workspaceCount = computed(() => workspaces.count);
+const displayedActiveWorkspaceId = computed(() => switchingWorkspaceId.value ?? workspaces.activeWorkspaceId);
 const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
   const notices: Record<string, WorkspaceNotice> = { ...workspaceAlerts.value };
   for (const session of codex.sessions) {
@@ -233,6 +236,11 @@ function scheduleWorkspaceSave() {
   }, 500);
 }
 
+async function showWorkspaceLoadingFrame() {
+  await nextTick();
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
 function normalizeWorkspaceId(id: string) {
   const index = Number(id);
   if (!Number.isInteger(index) || index < 1 || index > workspaceCount.value) return "1";
@@ -278,32 +286,46 @@ async function restoreInitialWorkspace() {
 
 async function switchWorkspace(id: string) {
   const targetId = normalizeWorkspaceId(id);
-  if (workspaces.switching || targetId === workspaces.activeWorkspaceId) return;
+  if (workspaces.switching || targetId === displayedActiveWorkspaceId.value) return;
+  const previousId = workspaces.activeWorkspaceId;
+  const previousSnapshot = currentWorkspaceSnapshot();
   workspaces.switching = true;
+  switchingWorkspaceId.value = targetId;
+  workspaceContentLoading.value = true;
   if (workspaceSaveTimer !== null) {
     window.clearTimeout(workspaceSaveTimer);
     workspaceSaveTimer = null;
   }
   try {
-    await workspaces.saveSlot(workspaces.activeWorkspaceId, currentWorkspaceSnapshot());
     const target = workspaces.snapshotFor(targetId);
     if (target) {
       layout.restore(target.layout, target.active_pane_id);
       workspaces.restoreActiveCodexSessions(target);
       restoreWorkspacePins(target.pinned);
       restoreWorkspaceVisitTimes(target.visit_times);
-      await loadWorkspaceDirectory(target.current_path);
-      await workspaces.activate(targetId);
+      await showWorkspaceLoadingFrame();
+      workspaceContentLoading.value = false;
+      const directoryLoad = loadWorkspaceDirectory(target.current_path);
+      await workspaces.saveSlot(previousId, previousSnapshot, { restoreActive: false });
+      workspaces.restoreActiveCodexSessions(target);
+      await Promise.all([directoryLoad, workspaces.activate(targetId)]);
     } else {
       layout.reset();
       workspaces.restoreActiveCodexSessions(null);
       files.pinned = [];
       files.visitTimes = {};
-      await workspaces.saveSlot(targetId, currentWorkspaceSnapshot());
+      await showWorkspaceLoadingFrame();
+      workspaceContentLoading.value = false;
+      const targetSnapshot = currentWorkspaceSnapshot();
+      await workspaces.saveSlot(previousId, previousSnapshot, { restoreActive: false });
+      await workspaces.saveSlot(targetId, targetSnapshot, { restoreActive: false });
+      await workspaces.activate(targetId);
     }
     clearWorkspaceNotice(targetId);
   } finally {
+    workspaceContentLoading.value = false;
     workspaces.switching = false;
+    switchingWorkspaceId.value = null;
   }
 }
 
@@ -329,7 +351,7 @@ function workspaceIdsForCodexSession(sessionId: string) {
   const ids: string[] = [];
   for (let index = 1; index <= workspaceCount.value; index += 1) {
     const workspaceId = String(index);
-    const root = workspaceId === workspaces.activeWorkspaceId ? layout.root : workspaces.snapshotFor(workspaceId)?.layout;
+    const root = workspaceId === displayedActiveWorkspaceId.value ? layout.root : workspaces.snapshotFor(workspaceId)?.layout;
     if (root && layoutContainsCodexSession(root, sessionId)) ids.push(workspaceId);
   }
   return ids;
@@ -566,7 +588,7 @@ onUnmounted(() => {
       <aside class="sidebar-drawer" :class="{ 'panel-open': sidebarOpen, pinned: sidebarPinned && sidebarOpen }">
         <FileSidebar
           :workspace-count="workspaceCount"
-          :active-workspace-id="workspaces.activeWorkspaceId"
+          :active-workspace-id="displayedActiveWorkspaceId"
           :codex-session-ids="workspaces.activeCodexSessionIds"
           :panel-open="sidebarOpen"
           :panel-pinned="sidebarPinned"
@@ -589,7 +611,7 @@ onUnmounted(() => {
         @pointerdown="startSidebarResize"
       ></div>
       <main class="workspace-wrap">
-        <Workspace />
+        <Workspace :loading="workspaceContentLoading" />
       </main>
     </div>
     <main v-else-if="activePage === 'settings'" class="top-level-page">

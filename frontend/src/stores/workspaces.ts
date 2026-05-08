@@ -35,12 +35,12 @@ export const useWorkspacesStore = defineStore("workspaces", {
     forgetActiveCodexSession(id: string) {
       this.activeCodexSessionIds = this.activeCodexSessionIds.filter((item) => item !== id);
     },
-    async saveSlot(id: string, snapshot: WorkspaceSnapshot) {
+    async saveSlot(id: string, snapshot: WorkspaceSnapshot, options?: { restoreActive?: boolean }) {
       const data = await putWorkspace(id, { ...snapshot, updated_at: Date.now() / 1000 });
       this.activeWorkspaceId = data.active_workspace_id || id;
       this.count = Math.min(20, Math.max(1, Math.round(Number(data.count || this.count))));
       this.slots = data.slots ?? {};
-      if (this.activeWorkspaceId === id) this.restoreActiveCodexSessions(this.slots[id] ?? snapshot);
+      if (options?.restoreActive !== false && this.activeWorkspaceId === id) this.restoreActiveCodexSessions(this.slots[id] ?? snapshot);
       this.loaded = true;
     },
     async activate(id: string) {

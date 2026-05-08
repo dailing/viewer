@@ -3,7 +3,7 @@ import type { LayoutNode } from "../types/layout";
 import { useLayoutStore } from "../stores/layout";
 import ViewerPane from "./ViewerPane.vue";
 
-const props = defineProps<{ node: LayoutNode }>();
+const props = defineProps<{ node: LayoutNode; loading?: boolean }>();
 const layout = useLayoutStore();
 
 function startDrag(event: PointerEvent) {
@@ -37,14 +37,14 @@ function startDrag(event: PointerEvent) {
 </script>
 
 <template>
-  <ViewerPane v-if="node.type === 'pane'" :pane="node" />
+  <ViewerPane v-if="node.type === 'pane'" :pane="node" :workspace-loading="loading" />
   <div v-else class="split-node" :class="node.direction">
     <div class="split-child" :style="{ flexBasis: `${node.ratio * 100}%` }">
-      <SplitNode :node="node.first" />
+      <SplitNode :node="node.first" :loading="loading" />
     </div>
     <div class="split-resizer" role="separator" title="Drag to resize" @pointerdown="startDrag"></div>
     <div class="split-child" :style="{ flexBasis: `${(1 - node.ratio) * 100}%` }">
-      <SplitNode :node="node.second" />
+      <SplitNode :node="node.second" :loading="loading" />
     </div>
   </div>
 </template>

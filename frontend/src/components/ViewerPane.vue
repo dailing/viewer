@@ -12,7 +12,7 @@ import TextViewer from "./viewers/TextViewer.vue";
 import TerminalViewer from "./viewers/TerminalViewer.vue";
 import UnsupportedViewer from "./viewers/UnsupportedViewer.vue";
 
-const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }> }>();
+const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }>; workspaceLoading?: boolean }>();
 const PdfViewer = defineAsyncComponent(() => import("./viewers/PdfViewer.vue"));
 const layout = useLayoutStore();
 const meta = ref<FileMeta | null>(null);
@@ -22,6 +22,7 @@ const version = ref(0);
 async function load(clearMeta: boolean) {
   error.value = "";
   if (clearMeta) meta.value = null;
+  if (props.workspaceLoading) return;
   if (!props.pane.filePath || props.pane.terminalId || props.pane.codexSessionId) return;
   try {
     meta.value = await getMeta(props.pane.filePath);
@@ -36,8 +37,7 @@ function handleChange(event: Event) {
   if (props.pane.filePath && fileChangeAffectsPath(detail.path, props.pane.filePath)) void load(false);
 }
 
-watch(() => props.pane.filePath, () => load(true), { immediate: true });
-watch(() => props.pane.terminalId, () => load(true));
+watch(() => [props.pane.filePath, props.pane.terminalId, props.pane.codexSessionId, props.workspaceLoading], () => load(true), { immediate: true });
 onMounted(() => window.addEventListener("viewer:file-changed", handleChange));
 onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange));
 </script>
@@ -45,7 +45,10 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
 <template>
   <section class="viewer-pane" :class="{ active: layout.activePaneId === pane.id }" @click="layout.setActive(pane.id)">
     <div class="pane-body">
-      <TerminalViewer v-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
+      <div v-if="workspaceLoading" class="empty-state">
+        <div class="spinner-border spinner-border-sm" role="status" aria-label="Loading workspace pane"></div>
+      </div>
+      <TerminalViewer v-else-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
       <CodexViewer v-else-if="pane.codexSessionId" :id="pane.codexSessionId" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">
         <i class="bi bi-folder2-open"></i>

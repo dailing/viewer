@@ -2,12 +2,13 @@
 import SplitNode from "./SplitNode.vue";
 import { useLayoutStore } from "../stores/layout";
 
+defineProps<{ loading?: boolean }>();
 const layout = useLayoutStore();
 </script>
 
 <template>
   <div class="workspace">
-    <SplitNode :node="layout.root" />
+    <SplitNode :node="layout.root" :loading="loading" />
   </div>
 </template>
 
@@ -19,4 +20,3 @@ const layout = useLayoutStore();
   padding: 8px;
 }
 </style>
-

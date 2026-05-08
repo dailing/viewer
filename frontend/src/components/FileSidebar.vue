@@ -99,7 +99,7 @@ function workspaceNoticeClass(id: string) {
           v-for="id in workspaceIds"
           :key="id"
           class="activity-button workspace-button"
-          :class="[{ active: props.activeWorkspaceId === id }, workspaceNoticeClass(id)]"
+          :class="[{ active: props.activeWorkspaceId === id, 'workspace-switching': props.switchingWorkspace && props.activeWorkspaceId === id }, workspaceNoticeClass(id)]"
           type="button"
           :title="workspaceTitle(id)"
           :aria-label="workspaceTitle(id)"
@@ -241,6 +241,16 @@ function workspaceNoticeClass(id: string) {
   color: #a33;
 }
 
+.workspace-button.workspace-switching {
+  color: transparent;
+}
+
+@keyframes workspace-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .workspace-button.workspace-notice-running::after,
 .workspace-button.workspace-notice-completed:not(.active)::after,
 .workspace-button.workspace-notice-failed:not(.active)::after {
@@ -264,6 +274,18 @@ function workspaceNoticeClass(id: string) {
 
 .workspace-button.workspace-notice-failed:not(.active)::after {
   background: #d1242f;
+}
+
+.workspace-button.workspace-switching::after {
+  animation: workspace-spin 0.75s linear infinite;
+  background: transparent;
+  border: 2px solid #c8d3e3;
+  border-radius: 999px;
+  border-top-color: #1f6feb;
+  content: "";
+  height: 15px;
+  position: absolute;
+  width: 15px;
 }
 
 .tool-panel {

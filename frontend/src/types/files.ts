@@ -77,18 +77,10 @@ export interface CodexConfig {
   muted_message_alpha: number;
 }
 
-export interface WorkspaceConfig {
-  count: number;
-}
-
 export interface ViewerConfig {
-  pinned: string[];
-  current_path: string;
-  visit_times?: Record<string, number>;
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
   codex?: CodexConfig;
-  workspaces?: WorkspaceConfig;
 }
 
 export interface WatchEvent {

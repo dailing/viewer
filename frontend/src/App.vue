@@ -121,7 +121,7 @@ const globalPaneActions = computed<PaneToolbarAction[]>(() => {
 const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
 const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
 const hasMobilePaneToolbar = computed(() => activePaneActions.value.length > 0 || activePaneControls.value.length > 0);
-const workspaceCount = computed(() => files.workspaceConfig.count);
+const workspaceCount = computed(() => workspaces.count);
 const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
   const notices: Record<string, WorkspaceNotice> = { ...workspaceAlerts.value };
   for (const session of codex.sessions) {
@@ -168,7 +168,7 @@ onMounted(async () => {
 });
 
 watch(
-  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => workspaces.activeCodexSessionIds],
+  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => files.visitTimes, () => workspaces.activeCodexSessionIds],
   () => {
     scheduleWorkspaceSave();
   },
@@ -220,6 +220,7 @@ function currentWorkspaceSnapshot() {
     current_path: files.currentPath,
     pinned: [...files.pinned],
     codex_session_ids: [...workspaces.activeCodexSessionIds],
+    visit_times: { ...files.visitTimes },
   };
 }
 
@@ -250,6 +251,10 @@ function restoreWorkspacePins(pinned?: string[] | null) {
   files.pinned = [...(pinned ?? files.pinned)];
 }
 
+function restoreWorkspaceVisitTimes(visitTimes?: Record<string, number> | null) {
+  files.visitTimes = { ...(visitTimes ?? {}) };
+}
+
 async function restoreInitialWorkspace() {
   const activeId = normalizeWorkspaceId(workspaces.activeWorkspaceId);
   if (activeId !== workspaces.activeWorkspaceId) {
@@ -260,6 +265,7 @@ async function restoreInitialWorkspace() {
     layout.restore(snapshot.layout, snapshot.active_pane_id);
     workspaces.restoreActiveCodexSessions(snapshot);
     restoreWorkspacePins(snapshot.pinned);
+    restoreWorkspaceVisitTimes(snapshot.visit_times);
     await loadWorkspaceDirectory(snapshot.current_path);
     clearWorkspaceNotice(activeId);
     return;
@@ -285,12 +291,14 @@ async function switchWorkspace(id: string) {
       layout.restore(target.layout, target.active_pane_id);
       workspaces.restoreActiveCodexSessions(target);
       restoreWorkspacePins(target.pinned);
+      restoreWorkspaceVisitTimes(target.visit_times);
       await loadWorkspaceDirectory(target.current_path);
       await workspaces.activate(targetId);
     } else {
       layout.reset();
       workspaces.restoreActiveCodexSessions(null);
       files.pinned = [];
+      files.visitTimes = {};
       await workspaces.saveSlot(targetId, currentWorkspaceSnapshot());
     }
     clearWorkspaceNotice(targetId);

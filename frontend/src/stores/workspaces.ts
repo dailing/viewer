@@ -1,13 +1,6 @@
 import { defineStore } from "pinia";
 import { activateWorkspace, getWorkspaces, putWorkspace } from "../api/client";
-import type { LayoutNode } from "../types/layout";
 import type { WorkspaceSnapshot } from "../types/workspaces";
-
-function codexSessionIdsFromLayout(node: LayoutNode | null | undefined): string[] {
-  if (!node) return [];
-  if (node.type === "pane") return node.codexSessionId ? [node.codexSessionId] : [];
-  return [...codexSessionIdsFromLayout(node.first), ...codexSessionIdsFromLayout(node.second)];
-}
 
 function uniqueIds(ids: string[]) {
   return [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
@@ -16,6 +9,7 @@ function uniqueIds(ids: string[]) {
 export const useWorkspacesStore = defineStore("workspaces", {
   state: () => ({
     activeWorkspaceId: "1",
+    count: 5,
     slots: {} as Record<string, WorkspaceSnapshot>,
     activeCodexSessionIds: [] as string[],
     loaded: false,
@@ -25,6 +19,7 @@ export const useWorkspacesStore = defineStore("workspaces", {
     async load() {
       const data = await getWorkspaces();
       this.activeWorkspaceId = data.active_workspace_id || "1";
+      this.count = Math.min(20, Math.max(1, Math.round(Number(data.count || 5))));
       this.slots = data.slots ?? {};
       this.loaded = true;
     },
@@ -32,7 +27,7 @@ export const useWorkspacesStore = defineStore("workspaces", {
       return this.slots[id] ?? null;
     },
     restoreActiveCodexSessions(snapshot: WorkspaceSnapshot | null) {
-      this.activeCodexSessionIds = uniqueIds(snapshot?.codex_session_ids?.length ? snapshot.codex_session_ids : codexSessionIdsFromLayout(snapshot?.layout));
+      this.activeCodexSessionIds = uniqueIds(snapshot?.codex_session_ids ?? []);
     },
     rememberActiveCodexSession(id: string) {
       this.activeCodexSessionIds = uniqueIds([...this.activeCodexSessionIds, id]);
@@ -43,6 +38,7 @@ export const useWorkspacesStore = defineStore("workspaces", {
     async saveSlot(id: string, snapshot: WorkspaceSnapshot) {
       const data = await putWorkspace(id, { ...snapshot, updated_at: Date.now() / 1000 });
       this.activeWorkspaceId = data.active_workspace_id || id;
+      this.count = Math.min(20, Math.max(1, Math.round(Number(data.count || this.count))));
       this.slots = data.slots ?? {};
       if (this.activeWorkspaceId === id) this.restoreActiveCodexSessions(this.slots[id] ?? snapshot);
       this.loaded = true;
@@ -50,6 +46,7 @@ export const useWorkspacesStore = defineStore("workspaces", {
     async activate(id: string) {
       const data = await activateWorkspace(id);
       this.activeWorkspaceId = data.active_workspace_id || id;
+      this.count = Math.min(20, Math.max(1, Math.round(Number(data.count || this.count))));
       this.slots = data.slots ?? {};
       this.loaded = true;
     },

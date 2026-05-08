@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
-import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_WORKSPACE_CONFIG, useFilesStore } from "../stores/files";
-import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, WorkspaceConfig } from "../types/files";
+import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
+import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
@@ -11,11 +11,10 @@ const restarting = ref(false);
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
-const openSections = reactive({ server: true, appearance: true, workspaces: true, codex: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, appearance: true, codex: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
-  workspaces: clone(files.workspaceConfig) as WorkspaceConfig,
   codex: clone(files.codexConfig) as CodexConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
 });
@@ -32,11 +31,7 @@ const activeTheme = computed(() => {
 const fullConfigJson = computed(() =>
   JSON.stringify(
     {
-      pinned: files.pinned,
-      current_path: files.currentPath,
-      visit_times: files.visitTimes,
       appearance: draft.appearance,
-      workspaces: draft.workspaces,
       codex: draft.codex,
       markdown: draft.markdown,
     },
@@ -48,15 +43,6 @@ const fullConfigJson = computed(() =>
 watch(
   () => files.appearance,
   (appearance) => Object.assign(draft.appearance, clone(appearance)),
-  { deep: true },
-);
-
-watch(
-  () => files.workspaceConfig,
-  (workspaces) => {
-    Object.assign(draft.workspaces, clone(workspaces));
-    jsonDraft.value = fullConfigJson.value;
-  },
   { deep: true },
 );
 
@@ -176,11 +162,6 @@ function numberValue(value: number | null, fallback: number) {
   return value ?? fallback;
 }
 
-function normalizeWorkspaceCount(value: number | string) {
-  const count = Number(value);
-  draft.workspaces.count = Math.min(20, Math.max(1, Number.isFinite(count) ? Math.round(count) : DEFAULT_WORKSPACE_CONFIG.count));
-}
-
 function updateStyleNumber(style: MarkdownElementStyle, key: "font_size" | "line_height", value: string) {
   const next = Number(value);
   style[key] = Number.isFinite(next) ? next : null;
@@ -225,8 +206,7 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    normalizeWorkspaceCount(draft.workspaces.count);
-    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.workspaces);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex);
     emit("close");
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -239,7 +219,6 @@ async function applyJson() {
   try {
     const parsed = JSON.parse(jsonDraft.value);
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
-    if (parsed.workspaces) Object.assign(draft.workspaces, parsed.workspaces);
     if (parsed.codex) Object.assign(draft.codex, parsed.codex);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
     await save();
@@ -295,35 +274,6 @@ async function applyJson() {
               <span>Nav bar size</span>
               <input v-model.number="draft.appearance.navbar_size" class="form-range" type="range" min="22" max="56" step="1" />
               <input v-model.number="draft.appearance.navbar_size" class="form-control form-control-sm number-input" type="number" min="22" max="56" />
-            </label>
-          </div>
-        </section>
-
-        <section class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('workspaces')">
-            <i class="bi" :class="openSections.workspaces ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Workspaces</span>
-          </button>
-          <div v-if="openSections.workspaces" class="section-body">
-            <label class="setting-row">
-              <span>Workspace slots</span>
-              <input
-                v-model.number="draft.workspaces.count"
-                class="form-range"
-                type="range"
-                min="1"
-                max="20"
-                step="1"
-                @change="normalizeWorkspaceCount(draft.workspaces.count)"
-              />
-              <input
-                v-model.number="draft.workspaces.count"
-                class="form-control form-control-sm number-input"
-                type="number"
-                min="1"
-                max="20"
-                @change="normalizeWorkspaceCount(draft.workspaces.count)"
-              />
             </label>
           </div>
         </section>

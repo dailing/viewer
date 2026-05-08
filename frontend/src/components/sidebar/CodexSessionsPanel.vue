@@ -49,7 +49,6 @@ async function newCodexSession() {
 }
 
 async function closeCodexSession(id: string) {
-  await codex.remove(id);
   workspaces.forgetActiveCodexSession(id);
   layout.clearCodexSession(id);
 }
@@ -85,7 +84,7 @@ async function closeCodexSession(id: string) {
           <span v-if="codex.unreadSessionIds.includes(session.id)" class="unread-dot" aria-label="Unread output"></span>
           <span class="sidebar-row-name">{{ session.title }}</span>
         </button>
-        <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Delete Codex session" @click="closeCodexSession(session.id)">
+        <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Remove from workspace" @click="closeCodexSession(session.id)">
           <i class="bi bi-x"></i>
         </button>
       </div>

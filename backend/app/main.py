@@ -17,7 +17,6 @@ from .files import (
     get_meta,
     guess_mime,
     list_directory,
-    normalize_relative,
     read_config,
     read_text,
     read_workspaces,
@@ -190,27 +189,11 @@ async def get_config():
 
 @app.put("/api/config")
 async def put_config(config: ConfigData):
-    normalized = []
-    seen = set()
-    for item in config.pinned:
-        cleaned = item.replace("\\", "/").strip("/")
-        if cleaned not in seen:
-            normalized.append(cleaned)
-            seen.add(cleaned)
-    current_path = normalize_relative(config.current_path)
-    visit_times = {}
-    for path, visited_at in config.visit_times.items():
-        cleaned = normalize_relative(path)
-        visit_times[cleaned] = visited_at
     return write_config(
         ConfigData(
-            pinned=normalized,
-            current_path=current_path,
-            visit_times=visit_times,
             appearance=config.appearance,
             markdown=config.markdown,
             codex=config.codex,
-            workspaces=config.workspaces,
         )
     )
 

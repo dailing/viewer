@@ -1,3 +1,4 @@
+import json
 import mimetypes
 from hashlib import sha256
 from pathlib import Path
@@ -245,26 +246,19 @@ def read_config() -> ConfigData:
     if not path.exists():
         return ConfigData()
     try:
-        config = ConfigData.model_validate_json(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        config = ConfigData.model_validate(raw)
     except Exception:
         return ConfigData()
-    try:
-        current_path = normalize_relative(config.current_path)
-        current_target = resolve_path(current_path)
-    except HTTPException:
-        current_path = ""
-        current_target = settings.root_resolved
-    if not current_target.exists() or not current_target.is_dir():
-        current_path = ""
-    return ConfigData(
-        pinned=config.pinned,
-        current_path=current_path,
-        visit_times=config.visit_times,
+    cleaned = ConfigData(
         appearance=config.appearance,
         markdown=config.markdown,
         codex=config.codex,
-        workspaces=config.workspaces,
     )
+    if isinstance(raw, dict) and any(key in raw for key in ("pinned", "current_path", "visit_times", "workspaces")):
+        read_workspaces()
+        write_config(cleaned)
+    return cleaned
 
 
 def write_config(config: ConfigData) -> ConfigData:
@@ -282,12 +276,16 @@ def workspaces_path() -> Path:
 def read_workspaces() -> WorkspaceData:
     path = workspaces_path()
     if not path.exists():
-        return WorkspaceData()
+        return write_workspaces(legacy_workspace_data())
     try:
-        data = WorkspaceData.model_validate_json(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        migrated = migrate_workspace_state(raw)
+        data = WorkspaceData.model_validate(migrated)
     except Exception:
         logger.warning("Ignoring invalid workspace state file {}", path)
         return WorkspaceData()
+    if migrated is not raw:
+        write_workspaces(data)
     return data
 
 
@@ -310,6 +308,10 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
         if cleaned not in seen:
             pinned.append(cleaned)
             seen.add(cleaned)
+    visit_times = {}
+    for path, visited_at in snapshot.visit_times.items():
+        cleaned = normalize_relative(path)
+        visit_times[cleaned] = visited_at
     data = read_workspaces()
     data.active_workspace_id = cleaned_id
     data.slots[cleaned_id] = WorkspaceSnapshot(
@@ -318,6 +320,7 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
         current_path=current_path,
         pinned=pinned,
         codex_session_ids=list(dict.fromkeys(item.strip() for item in snapshot.codex_session_ids if item.strip())),
+        visit_times=visit_times,
         updated_at=snapshot.updated_at,
     )
     return write_workspaces(data)
@@ -330,3 +333,102 @@ def set_active_workspace(workspace_id: str) -> WorkspaceData:
     data = read_workspaces()
     data.active_workspace_id = cleaned_id
     return write_workspaces(data)
+
+
+def legacy_workspace_count() -> int | None:
+    if not CONFIG_PATH.exists():
+        return None
+    try:
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = raw.get("workspaces") if isinstance(raw, dict) else None
+    count = value.get("count") if isinstance(value, dict) else None
+    if not isinstance(count, (int, float)):
+        return None
+    return max(1, min(20, round(count)))
+
+
+def legacy_visit_times() -> dict[str, float]:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    value = raw.get("visit_times") if isinstance(raw, dict) else None
+    if not isinstance(value, dict):
+        return {}
+    visit_times = {}
+    for path, visited_at in value.items():
+        if isinstance(visited_at, (int, float)):
+            visit_times[normalize_relative(path)] = float(visited_at)
+    return visit_times
+
+
+def legacy_workspace_data() -> WorkspaceData:
+    data = WorkspaceData(count=legacy_workspace_count() or 5)
+    if not CONFIG_PATH.exists():
+        return data
+    try:
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return data
+    if not isinstance(raw, dict):
+        return data
+
+    pinned = []
+    seen = set()
+    for item in raw.get("pinned") or []:
+        if not isinstance(item, str):
+            continue
+        try:
+            cleaned = normalize_relative(item)
+        except HTTPException:
+            continue
+        if cleaned and cleaned not in seen:
+            pinned.append(cleaned)
+            seen.add(cleaned)
+    try:
+        current_path = normalize_relative(raw.get("current_path") if isinstance(raw.get("current_path"), str) else "")
+    except HTTPException:
+        current_path = ""
+    visit_times = legacy_visit_times()
+    if current_path or pinned or visit_times:
+        data.slots[data.active_workspace_id] = WorkspaceSnapshot(
+            current_path=current_path,
+            pinned=pinned,
+            visit_times=visit_times,
+        )
+    return data
+
+
+def migrate_workspace_state(raw: object) -> object:
+    if not isinstance(raw, dict):
+        return raw
+    slots = raw.get("slots")
+    if not isinstance(slots, dict):
+        slots = {}
+    changed = False
+    migrated = dict(raw)
+    migrated_slots = dict(slots)
+    if "count" not in migrated:
+        migrated["count"] = legacy_workspace_count() or max(5, *(int(key) for key in slots if str(key).isdigit()))
+        changed = True
+    active_workspace_id = str(migrated.get("active_workspace_id") or "1")
+    active_visit_times = legacy_visit_times()
+    for workspace_id, snapshot in slots.items():
+        if not isinstance(snapshot, dict):
+            continue
+        next_snapshot = dict(snapshot)
+        if "codex_session_ids" not in next_snapshot:
+            next_snapshot["codex_session_ids"] = []
+            changed = True
+        if "visit_times" not in next_snapshot:
+            next_snapshot["visit_times"] = active_visit_times if str(workspace_id) == active_workspace_id else {}
+            changed = True
+        migrated_slots[workspace_id] = next_snapshot
+    if not changed:
+        return raw
+    migrated["slots"] = migrated_slots
+    return migrated

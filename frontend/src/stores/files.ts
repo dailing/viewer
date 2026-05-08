@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { getConfig, getTree, putConfig } from "../api/client";
-import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, WorkspaceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig } from "../types/files";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   name: "Default",
@@ -40,10 +40,6 @@ export const DEFAULT_CODEX_CONFIG: CodexConfig = {
   default_model: "gpt-5.5",
   proxy: "",
   muted_message_alpha: 0.56,
-};
-
-export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfig = {
-  count: 5,
 };
 
 function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
@@ -112,11 +108,6 @@ function normalizeAlpha(value: unknown, fallback: number): number {
   return Math.min(1, Math.max(0.15, alpha));
 }
 
-function normalizeWorkspaceConfig(config?: Partial<WorkspaceConfig>): WorkspaceConfig {
-  const count = Number(config?.count ?? DEFAULT_WORKSPACE_CONFIG.count);
-  return { count: Math.min(20, Math.max(1, Number.isFinite(count) ? Math.round(count) : DEFAULT_WORKSPACE_CONFIG.count)) };
-}
-
 export const useFilesStore = defineStore("files", {
   state: () => ({
     listings: {} as Record<string, DirectoryListing>,
@@ -127,7 +118,6 @@ export const useFilesStore = defineStore("files", {
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
     codexConfig: normalizeCodexConfig(),
-    workspaceConfig: normalizeWorkspaceConfig(),
     loading: false,
   }),
   getters: {
@@ -155,32 +145,20 @@ export const useFilesStore = defineStore("files", {
   actions: {
     async loadConfig() {
       const config = await getConfig();
-      this.pinned = config.pinned;
-      this.currentPath = config.current_path;
-      this.visitTimes = config.visit_times ?? {};
       this.appearance = normalizeAppearance(config.appearance);
       this.markdown = normalizeMarkdown(config.markdown);
       this.codexConfig = normalizeCodexConfig(config.codex);
-      this.workspaceConfig = normalizeWorkspaceConfig(config.workspaces);
     },
     async saveConfig() {
       const config: ViewerConfig = {
-        pinned: this.pinned,
-        current_path: this.currentPath,
-        visit_times: this.visitTimes,
         appearance: normalizeAppearance(this.appearance),
         markdown: normalizeMarkdown(this.markdown),
         codex: normalizeCodexConfig(this.codexConfig),
-        workspaces: normalizeWorkspaceConfig(this.workspaceConfig),
       };
       const saved = await putConfig(config);
-      this.pinned = saved.pinned;
-      this.currentPath = saved.current_path;
-      this.visitTimes = saved.visit_times ?? {};
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
       this.codexConfig = normalizeCodexConfig(saved.codex);
-      this.workspaceConfig = normalizeWorkspaceConfig(saved.workspaces);
     },
     async saveAppearance(appearance: AppearanceConfig) {
       this.appearance = normalizeAppearance(appearance);
@@ -195,11 +173,10 @@ export const useFilesStore = defineStore("files", {
       this.markdown = normalizeMarkdown(markdown);
       await this.saveConfig();
     },
-    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, workspaces: WorkspaceConfig) {
+    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig) {
       this.appearance = normalizeAppearance(appearance);
       this.markdown = normalizeMarkdown(markdown);
       this.codexConfig = normalizeCodexConfig(codex);
-      this.workspaceConfig = normalizeWorkspaceConfig(workspaces);
       await this.saveConfig();
     },
     async loadDirectory(path = "") {
@@ -214,11 +191,9 @@ export const useFilesStore = defineStore("files", {
       await this.loadDirectory(path);
       this.currentPath = path;
       this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
-      await this.saveConfig();
     },
     async recordVisit(path: string) {
       this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
-      await this.saveConfig();
     },
     async enterParentDirectory() {
       await this.enterDirectory(this.parentPath);
@@ -242,7 +217,6 @@ export const useFilesStore = defineStore("files", {
       } else {
         this.pinned = [path, ...this.pinned];
       }
-      await this.saveConfig();
     },
   },
 });

@@ -36,7 +36,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/file/content`: calls `read_text()`.
 - `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
-- `/api/config` GET/PUT: reads and writes active/legacy pinned paths, last sidebar directory, file/directory visit timestamps, nav appearance, workspace slot count, Codex model options, and Markdown theme config in `~/.view/config.json`.
+- `/api/config` GET/PUT: reads and writes nav appearance, Codex model options, and Markdown theme config in `~/.view/config.json`. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, workspace count, and workspace-associated Codex ids live in `~/.view/workspaces.json`.
 - `/api/workspaces` GET, `/api/workspaces/{id}` PUT, and `/api/workspaces/{id}/activate` POST: read, write, and activate workspace snapshots stored in `~/.view/workspaces.json`.
 - `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
@@ -80,8 +80,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `get_meta(path)`: validates file and returns `FileMeta`, including preview type, text-size limit flag, and `content_hash`.
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: returns `~/.view/config.json` and triggers one-way legacy copy from root-local `.viewer.config.json` when needed.
-- `read_config()` / `write_config(config)`: load and save pinned paths, last sidebar directory, file/directory visit timestamps, nav appearance, workspace slot count, Codex model options, and Markdown theme config; missing/invalid saved directories fall back to root.
-- `read_workspaces()` / `write_workspace()` / `set_active_workspace()`: load and save `~/.view/workspaces.json`. Each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, workspace-associated Codex session ids, and update timestamp.
+- `read_config()` / `write_config(config)`: load and save nav appearance, Codex model options, and Markdown theme config. Legacy workspace state keys (`pinned`, `current_path`, `visit_times`, and `workspaces`) are pruned from `~/.view/config.json` on read/write.
+- `read_workspaces()` / `write_workspace()` / `set_active_workspace()`: load and save `~/.view/workspaces.json`. The file stores active workspace id and workspace count. Each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, workspace-associated Codex session ids, per-workspace visit timestamps for open ordering, and update timestamp. Older workspace slots without `codex_session_ids` get an empty list, never a layout-derived fallback.
 
 `backend/app/agent_loops.py`
 
@@ -172,8 +172,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 `backend/app/models.py`
 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
-- `ConfigData.visit_times` stores per-path last visit timestamps for files and directories in `~/.view/config.json`; the frontend uses it to sort the current folder by most recent visit.
-- `WorkspaceConfig.count` defaults to 5 and controls how many numbered workspace buttons appear in the sidebar activity rail. `WorkspaceData` and `WorkspaceSnapshot` mirror `~/.view/workspaces.json`.
+- `ConfigData` stores global appearance, Markdown, and Codex defaults only.
+- `WorkspaceData.count` defaults to 5 and controls how many numbered workspace buttons appear in the sidebar activity rail. `WorkspaceData` and `WorkspaceSnapshot` mirror `~/.view/workspaces.json`, including per-workspace visit timestamps used to sort the current folder by most recent visit.
 - Codex schemas: `CodexSessionInfo`, `CodexPrompt`, compact `CodexEvent`, `CodexFileChange`, `CodexSessionSnapshot`, `CodexSessionCreate`, `CodexSessionMessage`, `CodexQueueItem`, and `CodexQueueMessage`. `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible.
 - `CodexConfig` stores Codex model options, muted operation-message alpha, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
@@ -219,8 +219,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Top-bar ownership rule: cross-viewer pane actions such as split belong in `App.vue`; view-specific icons/controls/status belong in the owning viewer and must be registered through `stores/paneToolbar.ts`, not hard-coded in `App.vue`. The global SSE connection dot is intentionally not rendered.
 - Sidebar state functions: `toggleSidebarPin()`, `clampSidebarWidth()`, `startSidebarResize()`.
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
-- Workspace switching: `restoreInitialWorkspace()` loads the active `~/.view/workspaces.json` slot at startup; `switchWorkspace()` saves the current slot, restores the selected slot, and keeps the sidebar tool unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, or workspace-associated Codex session ids change.
-- Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`. Workspaces keep their own `codex_session_ids` list; new or opened sessions are remembered in the active workspace so the Codex sidebar is workspace-scoped rather than directory-scoped.
+- Workspace switching: `restoreInitialWorkspace()` loads the active `~/.view/workspaces.json` slot at startup; `switchWorkspace()` saves the current slot, restores the selected slot, and keeps the sidebar tool unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, visit timestamps/open ordering, or workspace-associated Codex session ids change.
+- Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`. Workspaces keep their own `codex_session_ids` list; new or opened sessions are remembered in the active workspace so the Codex sidebar is workspace-scoped rather than directory-scoped. Removing a Codex row from the sidebar only removes that workspace entry and matching panes; it does not delete viewer session metadata or canonical Codex history.
 - Tracks Codex status by workspace layout: workspace buttons show live green running state when any contained Codex session is running, and inactive workspaces receive sticky amber/red completion/failure notices after runs finish until the workspace is opened.
 
 `frontend/src/components/Workspace.vue`
@@ -270,7 +270,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Codex tool panel: new Codex button plus the active workspace's Codex session list.
 - New Codex creates an idle Codex session in the current sidebar directory and opens it in the active pane. The first message is entered in `CodexViewer.vue`.
 - Filters the global Codex session list to ids remembered by the active workspace. Workspace directory changes no longer change which Codex sessions are visible.
-- Codex session list uses row background color for status (normal idle/exited, green running, red failed) and supports delete, which also clears matching panes.
+- Codex session list uses row background color for status (normal idle/exited, green running, red failed). The row remove action drops only the active workspace's entry and clears matching panes.
 
 `frontend/src/components/ConfigPanel.vue`
 
@@ -405,7 +405,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 `frontend/src/stores/files.ts`
 
-- Pinia store for directory listings, current path, expanded dirs, pinned paths, appearance config, Markdown theme config, and loading state. The current path, active workspace's pins, appearance, and Markdown themes are persisted in `~/.view/config.json`; workspace switching also stores pins per slot in `~/.view/workspaces.json`.
+- Pinia store for directory listings, current path, expanded dirs, pinned paths, per-workspace visit timestamps, appearance config, Markdown theme config, and loading state. Appearance, Markdown themes, and Codex config are persisted in `~/.view/config.json`; current path, pins, and visit timestamps/open ordering are persisted per workspace slot in `~/.view/workspaces.json`.
 - Getters: `rootEntries`, `currentEntries`, `parentPath`, `activeMarkdownTheme`.
 - Actions: `loadConfig()`, `saveConfig()`, `saveAppearance()`, `saveMarkdown()`, `saveViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
@@ -606,7 +606,7 @@ Backend Pydantic models in `backend/app/models.py` should match frontend interfa
 - `FileMeta` <-> `FileMeta`
 - `ConfigData` <-> `ViewerConfig`
 - `AppearanceConfig` <-> `AppearanceConfig`
-- `WorkspaceConfig` <-> `WorkspaceConfig`
+- `WorkspaceData` / `WorkspaceSnapshot` <-> matching workspace TypeScript interfaces.
 - `WorkspaceData` / `WorkspaceSnapshot` <-> `WorkspaceData` / `WorkspaceSnapshot`
 - `MarkdownConfig` / `MarkdownTheme` <-> `MarkdownConfig` / `MarkdownTheme`
 - `WatchEvent` <-> `WatchEvent`
@@ -618,8 +618,8 @@ If a backend field changes, update the matching frontend type and all consumers.
 
 ## Persistence
 
-- `~/.view/config.json`: active/legacy pinned files/folders, last sidebar directory, file/directory visit timestamps, appearance, workspace slot count, Codex model options, and Markdown themes, managed by `/api/config`. On first use, missing config is copied from served-root `.viewer.config.json` if present.
-- `~/.view/workspaces.json`: active workspace id plus per-slot split tree, active pane, open file paths, open terminal/Codex IDs, sidebar directory, pinned files/folders, and update timestamp, managed by `/api/workspaces`. On first use, missing workspace state is copied from served-root `.viewer.workspaces.json` if present.
+- `~/.view/config.json`: appearance, Codex model options, and Markdown themes, managed by `/api/config`. On first use, missing config is copied from served-root `.viewer.config.json` if present; legacy workspace keys (`pinned`, `current_path`, `visit_times`, and `workspaces`) are removed on subsequent reads/writes.
+- `~/.view/workspaces.json`: active workspace id, workspace count, plus per-slot split tree, active pane, open file paths, open terminal/Codex IDs, sidebar directory, pinned files/folders, workspace-associated Codex session ids, per-workspace visit timestamps/open ordering, and update timestamp, managed by `/api/workspaces`. On first use, missing workspace state is copied from served-root `.viewer.workspaces.json` if present.
 - `~/.view/loops/*.md`: Markdown loop task definitions with generated YAML frontmatter and prompt body.
 - `~/.view/agent-loops.json`: scheduler runtime state for loop tasks.
 - `localStorage viewer.layout.v1`: legacy/fallback split tree, active pane, open file paths, open terminal IDs.

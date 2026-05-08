@@ -79,18 +79,10 @@ class CodexConfig(BaseModel):
     muted_message_alpha: float = Field(default=0.56, ge=0.15, le=1.0)
 
 
-class WorkspaceConfig(BaseModel):
-    count: int = Field(default=5, ge=1, le=20)
-
-
 class ConfigData(BaseModel):
-    pinned: list[str] = Field(default_factory=list)
-    current_path: str = ""
-    visit_times: dict[str, float] = Field(default_factory=dict)
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
-    workspaces: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
 
 
 class WorkspaceSnapshot(BaseModel):
@@ -99,11 +91,13 @@ class WorkspaceSnapshot(BaseModel):
     current_path: str = ""
     pinned: list[str] | None = None
     codex_session_ids: list[str] = Field(default_factory=list)
+    visit_times: dict[str, float] = Field(default_factory=dict)
     updated_at: float | None = None
 
 
 class WorkspaceData(BaseModel):
     active_workspace_id: str = "1"
+    count: int = Field(default=5, ge=1, le=20)
     slots: dict[str, WorkspaceSnapshot] = Field(default_factory=dict)
 
 

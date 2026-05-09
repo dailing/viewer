@@ -177,6 +177,10 @@ class CodexSessionInfo(BaseModel):
     updated_at: float
     status: Literal["idle", "running", "exited", "failed"]
     exit_code: int | None = None
+    pid: int | None = None
+    codex_pid: int | None = None
+    run_id: str | None = None
+    run_started_at: float | None = None
     event_count: int = 0
     model_context_window: int | None = None
     context_used_percent: float | None = None

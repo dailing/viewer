@@ -12,6 +12,10 @@ export type CodexSessionInfo = {
   updated_at: number;
   status: CodexStatus;
   exit_code?: number | null;
+  pid?: number | null;
+  codex_pid?: number | null;
+  run_id?: string | null;
+  run_started_at?: number | null;
   event_count: number;
   model_context_window?: number | null;
   context_used_percent?: number | null;

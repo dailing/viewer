@@ -218,22 +218,24 @@ function visibleEvents(run: AgentLoopRunRecord | null): CodexEvent[] {
           </button>
         </div>
       </div>
-      <button
-        v-for="task in loops.tasks"
-        :key="task.definition.id"
-        class="loop-list-item"
-        :class="{ active: task.definition.id === loops.selectedId }"
-        type="button"
-        @click="loops.selectedId = task.definition.id"
-      >
-        <span class="loop-list-name">{{ task.definition.name }}</span>
-        <span class="loop-list-meta">
-          <span class="loop-status-dot" :class="statusClass(task.runtime.last_status)"></span>
-          {{ task.runtime.current_run_id ? "Running" : task.runtime.paused ? "Paused" : task.runtime.stopped ? "Stopped" : "Ready" }}
-        </span>
-        <span class="loop-list-next">Next {{ formatTs(task.runtime.next_run_at) }}</span>
-      </button>
-      <div v-if="!loops.tasks.length" class="loop-empty">No loop tasks yet.</div>
+      <div class="loop-list-scroll">
+        <button
+          v-for="task in loops.tasks"
+          :key="task.definition.id"
+          class="loop-list-item"
+          :class="{ active: task.definition.id === loops.selectedId }"
+          type="button"
+          @click="loops.selectedId = task.definition.id"
+        >
+          <span class="loop-list-name">{{ task.definition.name }}</span>
+          <span class="loop-list-meta">
+            <span class="loop-status-dot" :class="statusClass(task.runtime.last_status)"></span>
+            {{ task.runtime.current_run_id ? "Running" : task.runtime.paused ? "Paused" : task.runtime.stopped ? "Stopped" : "Ready" }}
+          </span>
+          <span class="loop-list-next">Next {{ formatTs(task.runtime.next_run_at) }}</span>
+        </button>
+        <div v-if="!loops.tasks.length" class="loop-empty">No loop tasks yet.</div>
+      </div>
     </aside>
 
     <main class="loop-detail">

@@ -222,6 +222,10 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Calls `installClientLogging()`.
 - Creates Vue app, installs Pinia, mounts `App.vue`.
 
+`frontend/public/favicon.svg`
+
+- Browser tab icon for the Vue app. Vite copies files from `frontend/public` into the built frontend root, and `frontend/index.html` links this SVG favicon directly.
+
 `frontend/src/App.vue`
 
 - Root shell: top bar, sidebar drawer/pinned layout, workspace, full-page settings, and full-page loop tasks.

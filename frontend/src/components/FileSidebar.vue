@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { getGitStatus } from "../api/client";
 import CodexSessionsPanel from "./sidebar/CodexSessionsPanel.vue";
 import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
@@ -7,6 +8,7 @@ import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 
 type SidebarTool = "files" | "git" | "terminals" | "codex";
 type WorkspaceNotice = "running" | "completed" | "failed";
+type GitIndicator = "clean" | "dirty" | "none";
 
 const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 
@@ -45,8 +47,10 @@ function storedTool(): SidebarTool {
 }
 
 const activeTool = ref<SidebarTool>(storedTool());
+const gitIndicator = ref<GitIndicator>("none");
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
 const workspaceIds = computed(() => Array.from({ length: Math.max(1, props.workspaceCount) }, (_, index) => String(index + 1)));
+let gitStatusTimer: number | null = null;
 
 watch(activeTool, (tool) => {
   localStorage.setItem(ACTIVE_TOOL_KEY, tool);
@@ -58,6 +62,7 @@ function selectTool(tool: SidebarTool) {
     return;
   }
   activeTool.value = tool;
+  if (tool === "git") void refreshGitIndicator();
 }
 
 function selectWorkspace(id: string) {
@@ -88,6 +93,31 @@ function workspaceHeatStyle(id: string) {
     backgroundColor: `rgb(218 54 51 / ${0.06 + intensity * 0.34})`,
   };
 }
+
+function toolTitle(tool: { id: SidebarTool; title: string }) {
+  if (tool.id !== "git") return tool.title;
+  if (gitIndicator.value === "dirty") return `${tool.title}: uncommitted changes`;
+  if (gitIndicator.value === "clean") return `${tool.title}: clean`;
+  return tool.title;
+}
+
+async function refreshGitIndicator() {
+  try {
+    const status = await getGitStatus();
+    gitIndicator.value = status.files.length ? "dirty" : "clean";
+  } catch {
+    gitIndicator.value = "none";
+  }
+}
+
+onMounted(() => {
+  void refreshGitIndicator();
+  gitStatusTimer = window.setInterval(() => void refreshGitIndicator(), 5000);
+});
+
+onUnmounted(() => {
+  if (gitStatusTimer !== null) window.clearInterval(gitStatusTimer);
+});
 </script>
 
 <template>
@@ -97,10 +127,10 @@ function workspaceHeatStyle(id: string) {
         v-for="tool in tools"
         :key="tool.id"
         class="activity-button"
-        :class="{ active: activeTool === tool.id }"
+        :class="[{ active: activeTool === tool.id }, tool.id === 'git' && gitIndicator !== 'none' ? `git-indicator-${gitIndicator}` : '']"
         type="button"
-        :title="tool.title"
-        :aria-label="tool.title"
+        :title="toolTitle(tool)"
+        :aria-label="toolTitle(tool)"
         :aria-pressed="activeTool === tool.id"
         @click="selectTool(tool.id)"
       >
@@ -218,6 +248,26 @@ function workspaceHeatStyle(id: string) {
   line-height: 1;
 }
 
+.activity-button.git-indicator-clean::after,
+.activity-button.git-indicator-dirty::after {
+  border: 2px solid #f3f6fa;
+  border-radius: 999px;
+  content: "";
+  height: 9px;
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  width: 9px;
+}
+
+.activity-button.git-indicator-clean::after {
+  background: #2da44e;
+}
+
+.activity-button.git-indicator-dirty::after {
+  background: #d1242f;
+}
+
 .workspace-buttons {
   border-top: 1px solid var(--border);
   display: flex;
@@ -243,8 +293,8 @@ function workspaceHeatStyle(id: string) {
 }
 
 .workspace-button.workspace-notice-running::after,
-.workspace-button.workspace-notice-completed:not(.active)::after,
-.workspace-button.workspace-notice-failed:not(.active)::after {
+.workspace-button.workspace-notice-completed::after,
+.workspace-button.workspace-notice-failed::after {
   border: 2px solid #f3f6fa;
   border-radius: 999px;
   content: "";
@@ -259,11 +309,11 @@ function workspaceHeatStyle(id: string) {
   background: #2da44e;
 }
 
-.workspace-button.workspace-notice-completed:not(.active)::after {
+.workspace-button.workspace-notice-completed::after {
   background: #f0ad00;
 }
 
-.workspace-button.workspace-notice-failed:not(.active)::after {
+.workspace-button.workspace-notice-failed::after {
   background: #d1242f;
 }
 

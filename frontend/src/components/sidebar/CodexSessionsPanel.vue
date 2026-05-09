@@ -5,6 +5,7 @@ import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { useVoiceStore } from "../../stores/voice";
 import { useWorkspacesStore } from "../../stores/workspaces";
+import type { CodexSessionInfo } from "../../types/codex";
 
 const emit = defineEmits<{
   "open-codex-session": [id: string];
@@ -36,6 +37,21 @@ function hasVoicePending(sessionId: string) {
 
 function hasVoiceReady(sessionId: string) {
   return voice.hasReadyText(voiceContextId(sessionId));
+}
+
+function sessionStatusIndicator(session: CodexSessionInfo) {
+  if (session.status === "failed") return "failed";
+  if (session.status === "exited" && codex.unreadSessionIds.includes(session.id)) return "completed";
+  if (session.status === "running") return "running";
+  return "";
+}
+
+function sessionStatusTitle(session: CodexSessionInfo) {
+  const indicator = sessionStatusIndicator(session);
+  if (indicator === "failed") return "Codex run failed";
+  if (indicator === "completed") return "Codex run finished";
+  if (indicator === "running") return "Codex run is running";
+  return "";
 }
 
 async function newCodexSession() {
@@ -72,7 +88,6 @@ async function closeCodexSession(id: string) {
         :key="session.id"
         class="sidebar-row"
         :class="[
-          `status-${session.status}`,
           {
             active: layout.openCodexSessionIds.includes(session.id),
             'voice-pending': hasVoicePending(session.id),
@@ -80,8 +95,13 @@ async function closeCodexSession(id: string) {
           },
         ]"
       >
+        <span
+          class="session-status-dot"
+          :class="sessionStatusIndicator(session) ? `status-${sessionStatusIndicator(session)}` : ''"
+          :title="sessionStatusTitle(session)"
+          :aria-label="sessionStatusTitle(session)"
+        ></span>
         <button class="sidebar-row-main" type="button" @click="emit('open-codex-session', session.id)">
-          <span v-if="codex.unreadSessionIds.includes(session.id)" class="unread-dot" aria-label="Unread output"></span>
           <span class="sidebar-row-name">{{ session.title }}</span>
         </button>
         <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Remove from workspace" @click="closeCodexSession(session.id)">
@@ -165,22 +185,6 @@ async function closeCodexSession(id: string) {
   box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
 }
 
-.sidebar-row.status-running {
-  background: #ffe4e4;
-}
-
-.sidebar-row.status-running:hover {
-  background: #ffd4d4;
-}
-
-.sidebar-row.status-failed {
-  background: #fff0f0;
-}
-
-.sidebar-row.status-failed:hover {
-  background: #f8dddd;
-}
-
 .sidebar-row.voice-pending {
   background: #fff6d7;
 }
@@ -218,12 +222,27 @@ async function closeCodexSession(id: string) {
   white-space: nowrap;
 }
 
-.unread-dot {
-  background: #d1242f;
+.session-status-dot {
   border-radius: 999px;
   flex: 0 0 auto;
-  height: 7px;
-  width: 7px;
+  height: 8px;
+  opacity: 0;
+  width: 8px;
+}
+
+.session-status-dot.status-running {
+  background: #2da44e;
+  opacity: 1;
+}
+
+.session-status-dot.status-completed {
+  background: #f0ad00;
+  opacity: 1;
+}
+
+.session-status-dot.status-failed {
+  background: #d1242f;
+  opacity: 1;
 }
 
 .sidebar-row-action {

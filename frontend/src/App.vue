@@ -21,8 +21,7 @@ const SIDEBAR_WIDTH_KEY = "viewer.sidebarWidth.v1";
 const WORKSPACE_HEAT_KEY = "viewer.workspaceHeat.v1";
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 640;
-type WorkspaceAlert = "completed" | "failed";
-type WorkspaceNotice = WorkspaceAlert | "running";
+type WorkspaceNotice = "completed" | "failed" | "running";
 const files = useFilesStore();
 const codex = useCodexStore();
 const layout = useLayoutStore();
@@ -34,7 +33,6 @@ const sidebarPinned = ref(false);
 const activePage = ref<"workspace" | "settings" | "loops">("workspace");
 const mobileToolbarOpen = ref(false);
 const codexStatusById = ref<Record<string, CodexStatus>>({});
-const workspaceAlerts = ref<Record<string, WorkspaceAlert>>({});
 const workspaceHeat = ref<Record<string, number>>({});
 const switchingWorkspaceId = ref<string | null>(null);
 const workspaceContentLoading = ref(false);
@@ -129,12 +127,16 @@ const hasMobilePaneToolbar = computed(() => activePaneActions.value.length > 0 |
 const workspaceCount = computed(() => workspaces.count);
 const displayedActiveWorkspaceId = computed(() => switchingWorkspaceId.value ?? workspaces.activeWorkspaceId);
 const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
-  const notices: Record<string, WorkspaceNotice> = { ...workspaceAlerts.value };
-  for (const session of codex.sessions) {
-    if (session.status !== "running") continue;
-    for (const workspaceId of workspaceIdsForCodexSession(session.id)) {
-      if (!notices[workspaceId]) notices[workspaceId] = "running";
+  const notices: Record<string, WorkspaceNotice> = {};
+  for (const workspaceId of workspaceHeatIds()) {
+    let notice: WorkspaceNotice | null = null;
+    for (const sessionId of workspaceCodexSessionIds(workspaceId)) {
+      const session = codex.sessions.find((item) => item.id === sessionId);
+      if (!session) continue;
+      notice = higherPriorityWorkspaceNotice(notice, noticeForCodexSession(session));
+      if (notice === "failed") break;
     }
+    if (notice) notices[workspaceId] = notice;
   }
   return notices;
 });
@@ -226,6 +228,7 @@ function openTerminal(id: string) {
 }
 
 function openCodexSession(id: string) {
+  codex.markRead(id);
   workspaces.rememberActiveCodexSession(id);
   layout.openCodexSession(id);
   if (!sidebarPinned.value) sidebarOpen.value = false;
@@ -365,13 +368,11 @@ async function restoreInitialWorkspace() {
     restoreWorkspacePins(snapshot.pinned);
     restoreWorkspaceVisitTimes(snapshot.visit_times);
     await loadWorkspaceDirectory(snapshot.current_path);
-    clearWorkspaceNotice(activeId);
     return;
   }
   await files.loadDirectory(files.currentPath);
   workspaces.restoreActiveCodexSessions(currentWorkspaceSnapshot());
   await workspaces.saveSlot(activeId, currentWorkspaceSnapshot());
-  clearWorkspaceNotice(activeId);
 }
 
 async function switchWorkspace(id: string) {
@@ -412,7 +413,6 @@ async function switchWorkspace(id: string) {
       await workspaces.saveSlot(targetId, targetSnapshot, { restoreActive: false });
       await workspaces.activate(targetId);
     }
-    clearWorkspaceNotice(targetId);
   } finally {
     workspaceContentLoading.value = false;
     workspaces.switching = false;
@@ -427,50 +427,69 @@ function updateWorkspaceCodexNotices() {
   for (const session of codex.sessions) {
     next[session.id] = session.status;
     if (!["exited", "failed"].includes(session.status)) continue;
-    const notice: WorkspaceAlert = session.status === "failed" ? "failed" : "completed";
     for (const workspaceId of workspaceIdsForCodexSession(session.id)) {
-      if (workspaceId === workspaces.activeWorkspaceId) continue;
       if (previous[session.id] !== "running" && !sessionFinishedAfterWorkspaceSaved(session, workspaceId)) continue;
-      setWorkspaceNotice(workspaceId, notice);
+      if (workspaceId === workspaces.activeWorkspaceId && activePaneCodexSessionId() === session.id) continue;
+      codex.markUnread(session.id);
     }
   }
 
   codexStatusById.value = next;
 }
 
+function activePaneCodexSessionId() {
+  const pane = layout.activePane;
+  return pane?.type === "pane" ? pane.codexSessionId : undefined;
+}
+
+function noticePriority(notice: WorkspaceNotice | null) {
+  if (notice === "failed") return 3;
+  if (notice === "completed") return 2;
+  if (notice === "running") return 1;
+  return 0;
+}
+
+function higherPriorityWorkspaceNotice(current: WorkspaceNotice | null, next: WorkspaceNotice | null) {
+  return noticePriority(next) > noticePriority(current) ? next : current;
+}
+
+function noticeForCodexSession(session: CodexSessionInfo): WorkspaceNotice | null {
+  if (session.status === "failed") return "failed";
+  if (session.status === "exited" && codex.unreadSessionIds.includes(session.id)) return "completed";
+  if (session.status === "running") return "running";
+  return null;
+}
+
+function workspaceCodexSessionIds(workspaceId: string) {
+  const ids = new Set<string>();
+  const snapshotIds = workspaceId === displayedActiveWorkspaceId.value ? workspaces.activeCodexSessionIds : workspaces.snapshotFor(workspaceId)?.codex_session_ids ?? [];
+  for (const id of snapshotIds) ids.add(id);
+  const root = workspaceId === displayedActiveWorkspaceId.value ? layout.root : workspaces.snapshotFor(workspaceId)?.layout;
+  if (root) collectLayoutCodexSessionIds(root, ids);
+  return [...ids];
+}
+
 function workspaceIdsForCodexSession(sessionId: string) {
   const ids: string[] = [];
   for (let index = 1; index <= workspaceCount.value; index += 1) {
     const workspaceId = String(index);
-    const root = workspaceId === displayedActiveWorkspaceId.value ? layout.root : workspaces.snapshotFor(workspaceId)?.layout;
-    if (root && layoutContainsCodexSession(root, sessionId)) ids.push(workspaceId);
+    if (workspaceCodexSessionIds(workspaceId).includes(sessionId)) ids.push(workspaceId);
   }
   return ids;
 }
 
-function layoutContainsCodexSession(node: LayoutNode, sessionId: string): boolean {
-  if (node.type === "pane") return node.codexSessionId === sessionId;
-  return layoutContainsCodexSession(node.first, sessionId) || layoutContainsCodexSession(node.second, sessionId);
+function collectLayoutCodexSessionIds(node: LayoutNode, ids: Set<string>) {
+  if (node.type === "pane") {
+    if (node.codexSessionId) ids.add(node.codexSessionId);
+    return;
+  }
+  collectLayoutCodexSessionIds(node.first, ids);
+  collectLayoutCodexSessionIds(node.second, ids);
 }
 
 function sessionFinishedAfterWorkspaceSaved(session: CodexSessionInfo, workspaceId: string) {
   const snapshotUpdatedAt = workspaces.snapshotFor(workspaceId)?.updated_at;
   return Boolean(snapshotUpdatedAt && session.updated_at > snapshotUpdatedAt);
-}
-
-function setWorkspaceNotice(workspaceId: string, notice: WorkspaceAlert) {
-  const current = workspaceAlerts.value[workspaceId];
-  workspaceAlerts.value = {
-    ...workspaceAlerts.value,
-    [workspaceId]: current === "failed" ? current : notice,
-  };
-}
-
-function clearWorkspaceNotice(workspaceId: string) {
-  if (!workspaceAlerts.value[workspaceId]) return;
-  const next = { ...workspaceAlerts.value };
-  delete next[workspaceId];
-  workspaceAlerts.value = next;
 }
 
 function toggleSidebarPin() {

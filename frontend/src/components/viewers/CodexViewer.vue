@@ -419,6 +419,16 @@ async function queuePrompt() {
   }
 }
 
+function handlePromptKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) return;
+  event.preventDefault();
+  if (isEditingQueue.value) {
+    void saveQueuedMessage();
+    return;
+  }
+  void queuePrompt();
+}
+
 function editQueuedMessage(item: CodexQueueItem) {
   editingQueueItemId.value = item.id;
   promptText.value = item.prompt;
@@ -649,7 +659,7 @@ onUnmounted(() => {
         Editing queued message
       </div>
       <div class="codex-input-box">
-        <textarea v-model="promptText" rows="3" placeholder="Send a message to this Codex session"></textarea>
+        <textarea v-model="promptText" rows="3" placeholder="Send a message to this Codex session" @keydown="handlePromptKeydown"></textarea>
       </div>
       <div class="codex-input-actions">
         <template v-if="isEditingQueue">
@@ -668,7 +678,7 @@ onUnmounted(() => {
         </template>
         <template v-else>
           <VoiceInputButton v-model="promptText" :context-id="voiceContextId" />
-          <button class="btn btn-outline-primary" type="button" :disabled="!canQueue" @click="queuePrompt">
+          <button class="btn btn-outline-primary" type="button" :disabled="!canQueue" title="Queue message (Cmd/Ctrl+Enter)" @click="queuePrompt">
             <i class="bi bi-list-ol"></i>
             <span>Queue</span>
           </button>

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import { getGitStatus } from "../../api/client";
+import { useCodexStore } from "../../stores/codex";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
+import { useWorkspacesStore } from "../../stores/workspaces";
 import type { GitDiffFile } from "../../types/git";
 
 const emit = defineEmits<{
@@ -10,11 +12,22 @@ const emit = defineEmits<{
 }>();
 
 const layout = useLayoutStore();
+const codex = useCodexStore();
 const fileStore = useFilesStore();
+const workspaces = useWorkspacesStore();
 const files = ref<GitDiffFile[]>([]);
 const loading = ref(false);
+const autoCommitting = ref(false);
 const error = ref("");
+const message = ref("");
 let refreshTimer: number | null = null;
+
+function setMessage(value: string) {
+  message.value = value;
+  window.setTimeout(() => {
+    if (message.value === value) message.value = "";
+  }, 2600);
+}
 
 async function load() {
   loading.value = true;
@@ -39,6 +52,22 @@ function statusTitle(file: GitDiffFile) {
   return `Open diff for ${file.path}`;
 }
 
+async function autoCommit() {
+  if (autoCommitting.value) return;
+  autoCommitting.value = true;
+  error.value = "";
+  try {
+    const session = await codex.create(fileStore.codexConfig.auto_commit_prompt, fileStore.currentPath);
+    workspaces.rememberActiveCodexSession(session.id);
+    setMessage("Auto commit Codex started");
+    await load();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    autoCommitting.value = false;
+  }
+}
+
 onMounted(() => {
   void load();
   refreshTimer = window.setInterval(() => void load(), 5000);
@@ -54,10 +83,24 @@ onUnmounted(() => {
 <template>
   <div class="sidebar-panel">
     <div class="sidebar-section">
-      <button class="btn btn-sm btn-outline-secondary panel-command" type="button" @click="load">
-        <i class="bi bi-arrow-clockwise"></i>
-        <span>Refresh</span>
-      </button>
+      <div class="panel-command-grid">
+        <button
+          class="btn btn-sm btn-outline-primary panel-command"
+          type="button"
+          :class="{ active: autoCommitting }"
+          :disabled="autoCommitting"
+          title="Start Codex auto commit for the current directory"
+          @click="autoCommit"
+        >
+          <i class="bi" :class="autoCommitting ? 'bi-hourglass-split' : 'bi-magic'"></i>
+          <span>{{ autoCommitting ? "Auto..." : "Auto" }}</span>
+        </button>
+        <button class="btn btn-sm btn-outline-secondary panel-command" type="button" title="Refresh changes" @click="load">
+          <i class="bi bi-arrow-clockwise"></i>
+          <span>Refresh</span>
+        </button>
+      </div>
+      <div v-if="message" class="panel-message">{{ message }}</div>
     </div>
 
     <div class="sidebar-section list-section">
@@ -124,8 +167,15 @@ onUnmounted(() => {
   width: 100%;
 }
 
+.panel-command-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
 .empty-panel,
-.panel-error {
+.panel-error,
+.panel-message {
   color: var(--text-muted);
   font-size: 12px;
   padding: 4px 6px;
@@ -133,6 +183,10 @@ onUnmounted(() => {
 
 .panel-error {
   color: #a33;
+}
+
+.panel-message {
+  padding: 8px 2px 0;
 }
 
 .change-row {

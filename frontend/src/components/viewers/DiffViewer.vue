@@ -2,18 +2,12 @@
 import hljs from "highlight.js";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { commitGit, getGitDiff, pushGit, revertGitPath, stageGitPath } from "../../api/client";
-import { useCodexStore } from "../../stores/codex";
-import { useFilesStore } from "../../stores/files";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
-import { useWorkspacesStore } from "../../stores/workspaces";
 import { fileChangeAffectsPath } from "../../utils/paths";
 import type { WatchEvent } from "../../types/files";
 
 const props = defineProps<{ path: string; cwd: string; paneId: string }>();
 const toolbar = usePaneToolbarStore();
-const codex = useCodexStore();
-const files = useFilesStore();
-const workspaces = useWorkspacesStore();
 type DiffMode = "normal" | "word" | "split";
 type DiffLineKind = "add" | "delete" | "hunk" | "file" | "context";
 type DiffSegment = { text: string; changed: boolean };
@@ -23,7 +17,6 @@ type SplitRow = { kind: DiffLineKind | "empty"; left: DiffLine | null; right: Di
 const diff = ref("");
 const isBinary = ref(false);
 const loading = ref(false);
-const autoCommitting = ref(false);
 const error = ref("");
 const message = ref("");
 const mode = ref<DiffMode>("normal");
@@ -95,23 +88,6 @@ async function pushChanges() {
   await runAction(() => pushGit(props.path), "Pushed branch");
 }
 
-async function autoCommit() {
-  if (autoCommitting.value) return;
-  autoCommitting.value = true;
-  registerToolbar();
-  error.value = "";
-  try {
-    const session = await codex.create(files.codexConfig.auto_commit_prompt, diffCwd());
-    workspaces.rememberActiveCodexSession(session.id);
-    setMessage("Auto commit Codex started");
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    autoCommitting.value = false;
-    registerToolbar();
-  }
-}
-
 function setMode(value: DiffMode) {
   mode.value = value;
   registerToolbar();
@@ -126,7 +102,6 @@ function registerToolbar() {
       { id: "mode-normal", title: "Normal diff", label: "Diff", active: mode.value === "normal", run: () => setMode("normal") },
       { id: "mode-word", title: "Word diff", label: "Word", active: mode.value === "word", run: () => setMode("word") },
       { id: "mode-split", title: "Side-by-side diff", label: "Split", active: mode.value === "split", run: () => setMode("split") },
-      { id: "auto-commit", title: "Start Codex auto commit for this directory", label: autoCommitting.value ? "Auto..." : "Auto", active: autoCommitting.value, run: autoCommit },
       { id: "refresh-diff", title: "Refresh diff", icon: "bi-arrow-clockwise", run: load },
       { id: "stage-file", title: "Stage file", icon: "bi-plus-square", run: stageFile },
       { id: "stage-all", title: "Stage all changes", label: "All", run: stageAll },
@@ -135,12 +110,6 @@ function registerToolbar() {
       { id: "push", title: "Push", icon: "bi-cloud-arrow-up", run: pushChanges },
     ],
   });
-}
-
-function diffCwd(): string {
-  if (props.cwd) return props.cwd;
-  if (!props.path.includes("/")) return "";
-  return props.path.split("/").slice(0, -1).join("/");
 }
 
 function diffLines(text: string): DiffLine[] {

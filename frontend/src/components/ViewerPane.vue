@@ -6,6 +6,7 @@ import { getMeta } from "../api/client";
 import { useLayoutStore } from "../stores/layout";
 import { fileChangeAffectsPath } from "../utils/paths";
 import CodexViewer from "./viewers/CodexViewer.vue";
+import CsvViewer from "./viewers/CsvViewer.vue";
 import DiffViewer from "./viewers/DiffViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
@@ -38,6 +39,10 @@ function handleChange(event: Event) {
   if (props.pane.filePath && fileChangeAffectsPath(detail.path, props.pane.filePath)) void load(false);
 }
 
+function isCsvPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".csv");
+}
+
 watch(() => [props.pane.filePath, props.pane.terminalId, props.pane.codexSessionId, props.workspaceLoading], () => load(true), { immediate: true });
 onMounted(() => window.addEventListener("viewer:file-changed", handleChange));
 onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange));
@@ -61,8 +66,9 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
         <span>{{ error }}</span>
       </div>
       <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" />
-      <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" />
+      <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" :pane-id="pane.id" />
       <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" />
+      <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" />
       <TextViewer v-else-if="meta?.preview === 'text'" :path="pane.filePath" :version="version" />
       <UnsupportedViewer v-else-if="meta" :meta="meta" />
       <div v-else class="empty-state">

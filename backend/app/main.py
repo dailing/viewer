@@ -20,6 +20,7 @@ from .files import (
     read_config,
     read_text,
     read_workspaces,
+    resolve_directory_link,
     resolve_markdown_link,
     resolve_path,
     set_active_workspace,
@@ -182,6 +183,11 @@ async def file_raw(path: str, h: str | None = None, base: str | None = None):
 @app.get("/api/file/resolve-link")
 async def file_resolve_link(base: str, target: str):
     return {"path": resolve_markdown_link(base, target)}
+
+
+@app.get("/api/file/resolve-directory-link")
+async def file_resolve_directory_link(base: str = "", target: str = ""):
+    return {"path": resolve_directory_link(base, target)}
 
 
 @app.get("/api/git/status")

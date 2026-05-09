@@ -75,6 +75,16 @@ def _normalize_link_parts(parts: list[str]) -> str:
     return "/".join(cleaned)
 
 
+def _strip_editor_line_suffix(target_path: str) -> str:
+    path, separator, suffix = target_path.rpartition(":")
+    if not separator or not suffix.isdigit() or not path:
+        return target_path
+    column_path, column_separator, column_suffix = path.rpartition(":")
+    if column_separator and column_suffix.isdigit() and column_path:
+        return column_path
+    return path
+
+
 def resolve_markdown_link(base_path: str, target: str) -> str:
     parsed = urlsplit((target or "").strip())
     scheme = parsed.scheme.lower()
@@ -85,7 +95,7 @@ def resolve_markdown_link(base_path: str, target: str) -> str:
     if scheme == "file" and parsed.netloc and parsed.netloc not in {"localhost", "127.0.0.1"}:
         raise HTTPException(status_code=400, detail="Remote file links cannot be resolved as local files")
 
-    target_path = unquote(parsed.path).replace("\\", "/")
+    target_path = _strip_editor_line_suffix(unquote(parsed.path).replace("\\", "/"))
     if not target_path:
         raise HTTPException(status_code=400, detail="Markdown link target is empty")
 
@@ -98,6 +108,32 @@ def resolve_markdown_link(base_path: str, target: str) -> str:
 
     base_rel = normalize_relative(base_path)
     base_parts = base_rel.split("/")[:-1] if base_rel else []
+    return _normalize_link_parts([*base_parts, *target_path.split("/")])
+
+
+def resolve_directory_link(base_dir: str | None, target: str) -> str:
+    parsed = urlsplit((target or "").strip())
+    scheme = parsed.scheme.lower()
+    if scheme and scheme != "file":
+        raise HTTPException(status_code=400, detail="Only local file links can be resolved")
+    if parsed.netloc and scheme != "file":
+        raise HTTPException(status_code=400, detail="Network links cannot be resolved as local files")
+    if scheme == "file" and parsed.netloc and parsed.netloc not in {"localhost", "127.0.0.1"}:
+        raise HTTPException(status_code=400, detail="Remote file links cannot be resolved as local files")
+
+    target_path = _strip_editor_line_suffix(unquote(parsed.path).replace("\\", "/"))
+    if not target_path:
+        raise HTTPException(status_code=400, detail="Link target is empty")
+
+    if scheme == "file" or target_path.startswith("/"):
+        absolute_target = Path(target_path).expanduser().resolve()
+        try:
+            return absolute_target.relative_to(settings.root_resolved.resolve()).as_posix()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Link target is outside the served root") from exc
+
+    base_rel = normalize_relative(base_dir or "")
+    base_parts = base_rel.split("/") if base_rel else []
     return _normalize_link_parts([*base_parts, *target_path.split("/")])
 
 

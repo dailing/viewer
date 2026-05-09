@@ -36,6 +36,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/file/content`: calls `read_text()`.
 - `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
+- `/api/file/resolve-directory-link`: resolves a local link target against a served-root-relative directory, used by Codex session transcript links whose paths are relative to the session cwd.
 - `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at `settings.root_resolved`.
 - `/api/config` GET/PUT: reads and writes nav appearance, workspace count and workspace heat timing, Codex model options, and Markdown theme config in `~/.view/config.json`. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated Codex ids live in `~/.view/workspaces.json`.
 - `/api/workspaces` GET, `/api/workspaces/config` GET/PUT, `/api/workspaces/{id}` PUT, and `/api/workspaces/{id}/activate` POST: read workspace state, read/update workspace count config, write workspace snapshots, and activate workspaces. Workspace count is stored in `~/.view/config.json`; per-workspace state is stored in `~/.view/workspaces.json`.
@@ -72,6 +73,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
 - `resolve_path(path)`: joins normalized relative path to `settings.root_resolved`. Symlinks are allowed by current implementation.
 - `resolve_markdown_link(base_path, target)`: resolves local Markdown image/link targets relative to the Markdown file, including absolute filesystem paths under the served root, and rejects links outside the served root.
+- `resolve_directory_link(base_dir, target)`: resolves local file links relative to a served-root-relative directory, including absolute/file URLs under the served root, strips common editor `:line[:column]` suffixes, and rejects links outside the served root.
 - `resolve_served_directory(path, label)`: resolves a served-root-relative working directory for terminal/Codex launches, logging and falling back to root when unavailable.
 - `relative_for(path)`: returns path relative to root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
@@ -242,6 +244,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
 - Workspace switching: `restoreInitialWorkspace()` loads the active `~/.view/workspaces.json` slot at startup; `switchWorkspace()` immediately marks the target workspace active in the UI, restores its saved pane layout, shows pane-level loading placeholders for one animation frame, then lets each viewer mount and fetch its content while the previous slot save, sidebar directory load, and backend workspace activation complete. The sidebar tool stays unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, visit timestamps/open ordering, or workspace-associated Codex session ids change.
 - Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`. Workspaces keep their own `codex_session_ids` list; new or opened sessions are remembered in the active workspace so the Codex sidebar is workspace-scoped rather than directory-scoped. Removing a Codex row from the sidebar only removes that workspace entry and matching panes; it does not delete viewer session metadata or canonical Codex history.
+- `LocalFilePreview.vue` is a floating file preview dialog used for transient local-file inspection from Codex transcript links. It resolves to normal viewer components and offers only three navigation actions: open in the active pane, open in a vertical split, or open in a horizontal split.
 
 `frontend/src/components/viewers/CsvViewer.vue`
 
@@ -409,6 +412,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Structured Codex session pane connected to `/api/codex/sessions/{id}/ws`.
 - Loads snapshots with `getCodexSession()`, receives live JSON events/status over WebSocket, and updates `stores/codex.ts`.
 - Renders prompts, normalized event text, status, Codex thread id, cwd, inline patch/file-change details parsed from `patch_apply_end`/`apply_patch` events, wrapped word-level highlights inside paired added/deleted diff lines, derived post-change result snippets below diffs, and optional raw JSON details toggled through the active-pane toolbar.
+- Local links in rendered Codex transcript Markdown are resolved relative to `session.cwd_relative` through `/api/file/resolve-directory-link` and open in the floating `LocalFilePreview` dialog before the user chooses active-pane or split navigation.
 - Registers Codex-specific top-bar controls through `stores/paneToolbar.ts`, including the refresh action, model selector, session-specific context chips, latest global rate-limit-left chips, and raw JSON toggle. The Codex cwd stays in the session content header, not the navbar.
 - Its Codex-specific top-bar actions also include creating a new idle Codex session in the current session's working directory, then opening it in the active pane.
 - Rollout rendering is keyed to canonical `~/.codex/sessions/**/rollout-*.jsonl` shapes: top-level `response_item` and `event_msg`, with turn grouping from `event_msg.payload.type=task_started/task_complete`.
@@ -459,6 +463,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Helpers: `id()`, `defaultLayout()`, `findPane()`, `mapNode()`, `firstPaneId()`, `mapAllPanes()`, `removePane()`.
 - Getters: `activePane`, `openPaths`, `openTerminalIds`, `openCodexSessionIds`, `openDiffPaths`.
 - Actions: `load()`, `save()`, `snapshot()`, `restore()`, `reset()`, `setActive()`, `openFile()`, `openTerminal()`, `openCodexSession()`, `openDiff()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, `clearTerminal()`, `clearCodexSession()`.
+- `openFileInSplit(path, direction)` creates a new split beside the active pane, opens a file in the new pane, and makes that pane active. It is used by floating local-file previews.
 - Persists to `localStorage` key `viewer.layout.v1`.
 
 `frontend/src/stores/workspaces.ts`

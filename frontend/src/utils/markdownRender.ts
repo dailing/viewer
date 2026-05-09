@@ -18,6 +18,7 @@ mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
 
 export interface RenderMarkdownOptions {
   basePath?: string;
+  baseDirectory?: string;
 }
 
 function escapeHtml(value: string): string {
@@ -153,10 +154,10 @@ const linkOpen = md.renderer.rules.link_open;
 md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: RenderMarkdownOptions, self: any): string => {
   const token = tokens[idx];
   const href = token.attrGet("href");
-  if (env.basePath && href && isLocalLinkTarget(href)) {
+  if ((env.basePath || env.baseDirectory !== undefined) && href && isLocalLinkTarget(href)) {
     token.attrSet("data-viewer-link", "true");
     token.attrSet("data-viewer-target", href);
-    token.attrSet("href", rawUrl(href, undefined, env.basePath));
+    token.attrSet("href", env.basePath ? rawUrl(href, undefined, env.basePath) : "#");
   }
   return linkOpen ? linkOpen(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
 };

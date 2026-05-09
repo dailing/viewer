@@ -45,6 +45,12 @@ export async function resolveMarkdownLink(base: string, target: string): Promise
   );
 }
 
+export async function resolveDirectoryLink(base: string, target: string): Promise<{ path: string }> {
+  return request<{ path: string }>(
+    `/api/file/resolve-directory-link?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`,
+  );
+}
+
 export async function getGitStatus(scope?: string): Promise<GitStatus> {
   const query = scope ? `?scope=${encodeURIComponent(scope)}` : "";
   return request<GitStatus>(`/api/git/status${query}`);

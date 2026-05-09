@@ -174,6 +174,20 @@ export const useLayoutStore = defineStore("layout", {
       }));
       this.save();
     },
+    openFileInSplit(path: string, direction: SplitDirection) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      const nextPaneId = id("pane");
+      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
+        type: "split",
+        id: id("split"),
+        direction,
+        ratio: 0.5,
+        first: { ...pane },
+        second: { type: "pane", id: nextPaneId, filePath: path },
+      }));
+      this.activePaneId = nextPaneId;
+      this.save();
+    },
     openTerminal(id: string) {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
       this.root = mapNode(this.root, this.activePaneId, (pane) => ({

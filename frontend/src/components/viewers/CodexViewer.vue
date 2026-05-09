@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { codexSessionSocketUrl, getCodexSession } from "../../api/client";
+import { codexSessionSocketUrl, getCodexSession, resolveDirectoryLink } from "../../api/client";
 import { useCodexStore } from "../../stores/codex";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
@@ -8,6 +8,7 @@ import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useVoiceStore } from "../../stores/voice";
 import { useWorkspacesStore } from "../../stores/workspaces";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
+import LocalFilePreview from "../LocalFilePreview.vue";
 import VoiceInputButton from "../VoiceInputButton.vue";
 import type { PaneToolbarAction } from "../../stores/paneToolbar";
 import type { CodexEvent, CodexQueueItem, CodexSessionInfo, CodexSessionSnapshot } from "../../types/codex";
@@ -28,6 +29,7 @@ const focusMode = ref(true);
 const stopping = ref(false);
 const creatingSession = ref(false);
 const editingQueueItemId = ref<string | null>(null);
+const previewPath = ref<string | null>(null);
 
 type CodexMessage =
   | { type: "snapshot"; session: CodexSessionSnapshot }
@@ -339,7 +341,39 @@ function mergeSegments(segments: DiffSegment[]): DiffSegment[] {
 }
 
 function messageHtml(text: string): string {
-  return renderMarkdown(text);
+  return renderMarkdown(text, { baseDirectory: session.value?.cwd_relative ?? "" });
+}
+
+async function openCodexLink(event: MouseEvent) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  const element = event.target instanceof Element ? event.target : null;
+  const link = element?.closest<HTMLAnchorElement>("a[data-viewer-link]");
+  const target = link?.dataset.viewerTarget;
+  if (!target) return;
+
+  event.preventDefault();
+  error.value = "";
+  try {
+    const resolved = await resolveDirectoryLink(session.value?.cwd_relative ?? "", target);
+    await files.recordVisit(resolved.path);
+    previewPath.value = resolved.path;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function openPreviewInPane(path: string) {
+  previewPath.value = null;
+  void files.recordVisit(path);
+  layout.openFile(path);
+}
+
+function openPreviewInSplit(path: string, direction: "horizontal" | "vertical") {
+  previewPath.value = null;
+  void files.recordVisit(path);
+  layout.openFileInSplit(path, direction);
 }
 
 function applyInfo(info: CodexSessionInfo) {
@@ -644,7 +678,7 @@ onUnmounted(() => {
 
 <template>
   <div class="codex-viewer" :style="codexViewerStyle">
-    <div ref="scroller" class="codex-scroll">
+    <div ref="scroller" class="codex-scroll" @click="openCodexLink">
       <div v-if="error" class="codex-error">{{ error }}</div>
 
       <div v-if="session" class="session-meta">
@@ -749,6 +783,13 @@ onUnmounted(() => {
         </template>
       </div>
     </form>
+    <LocalFilePreview
+      v-if="previewPath"
+      :path="previewPath"
+      @close="previewPath = null"
+      @open-pane="openPreviewInPane"
+      @open-split="openPreviewInSplit"
+    />
   </div>
 </template>
 

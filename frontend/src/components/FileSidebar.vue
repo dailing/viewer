@@ -61,7 +61,6 @@ function selectTool(tool: SidebarTool) {
 
 function selectWorkspace(id: string) {
   if (props.activeWorkspaceId === id) {
-    emit("toggle-tool-panel");
     return;
   }
   emit("switch-workspace", id);

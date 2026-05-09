@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useCodexStore } from "../../stores/codex";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
@@ -53,6 +53,16 @@ function sessionStatusTitle(session: CodexSessionInfo) {
   if (indicator === "running") return "Codex run is running";
   return "";
 }
+
+watch(
+  visibleSessions,
+  (sessions) => {
+    for (const session of sessions) {
+      if (session.status === "exited") codex.markRead(session.id);
+    }
+  },
+  { immediate: true },
+);
 
 async function newCodexSession() {
   codexError.value = "";

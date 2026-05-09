@@ -429,7 +429,10 @@ function updateWorkspaceCodexNotices() {
     if (!["exited", "failed"].includes(session.status)) continue;
     for (const workspaceId of workspaceIdsForCodexSession(session.id)) {
       if (previous[session.id] !== "running" && !sessionFinishedAfterWorkspaceSaved(session, workspaceId)) continue;
-      if (workspaceId === workspaces.activeWorkspaceId && activePaneCodexSessionId() === session.id) continue;
+      if (workspaceId === workspaces.activeWorkspaceId && activePaneCodexSessionId() === session.id) {
+        codex.markRead(session.id);
+        continue;
+      }
       codex.markUnread(session.id);
     }
   }

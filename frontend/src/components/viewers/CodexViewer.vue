@@ -20,7 +20,8 @@ const paneToolbar = usePaneToolbarStore();
 const voice = useVoiceStore();
 const workspaces = useWorkspacesStore();
 const session = ref<CodexSessionSnapshot | null>(null);
-const promptText = ref("");
+const CODEX_DRAFTS_KEY = "viewer.codexDrafts.v1";
+const promptText = ref(loadPromptDraft(props.id));
 const error = ref("");
 const scroller = ref<HTMLElement | null>(null);
 const focusMode = ref(true);
@@ -37,6 +38,52 @@ type CodexMessage =
 let socket: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let mounted = false;
+
+function readPromptDrafts(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(CODEX_DRAFTS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePromptDrafts(drafts: Record<string, string>) {
+  try {
+    if (Object.keys(drafts).length) {
+      localStorage.setItem(CODEX_DRAFTS_KEY, JSON.stringify(drafts));
+    } else {
+      localStorage.removeItem(CODEX_DRAFTS_KEY);
+    }
+  } catch {
+    // Draft persistence is best-effort; the composer should keep working if storage is unavailable.
+  }
+}
+
+function loadPromptDraft(sessionId: string): string {
+  const draft = readPromptDrafts()[sessionId];
+  return typeof draft === "string" ? draft : "";
+}
+
+function savePromptDraft(sessionId: string, text: string) {
+  const drafts = readPromptDrafts();
+  if (text) {
+    drafts[sessionId] = text;
+  } else {
+    delete drafts[sessionId];
+  }
+  writePromptDrafts(drafts);
+}
+
+function clearPromptDraft(sessionId: string) {
+  savePromptDraft(sessionId, "");
+}
+
+function restorePromptDraft() {
+  promptText.value = loadPromptDraft(props.id);
+}
 
 const canQueue = computed(() => Boolean(promptText.value.trim()));
 const isEditingQueue = computed(() => editingQueueItemId.value !== null);
@@ -310,9 +357,10 @@ function applyInfo(info: CodexSessionInfo) {
   session.value.context_used_percent = info.context_used_percent;
   session.value.total_tokens = info.total_tokens;
   session.value.queue = info.queue ?? [];
+  if (isActivePane.value) codex.markRead(props.id);
   if (editingQueueItemId.value && !session.value.queue.some((item) => item.id === editingQueueItemId.value)) {
     editingQueueItemId.value = null;
-    promptText.value = "";
+    restorePromptDraft();
   }
 }
 
@@ -320,7 +368,7 @@ function applySnapshot(snapshot: CodexSessionSnapshot) {
   session.value = snapshot;
   if (editingQueueItemId.value && !snapshot.queue.some((item) => item.id === editingQueueItemId.value)) {
     editingQueueItemId.value = null;
-    promptText.value = "";
+    restorePromptDraft();
   }
   codex.upsert(snapshot);
   updatePaneToolbar();
@@ -409,10 +457,11 @@ async function queuePrompt() {
   const prompt = promptText.value.trim();
   if (!prompt || !session.value || isEditingQueue.value) return;
   error.value = "";
-  promptText.value = "";
-  voice.clear(voiceContextId.value);
   try {
     applyInfo(await codex.queue(props.id, prompt));
+    clearPromptDraft(props.id);
+    promptText.value = "";
+    voice.clear(voiceContextId.value);
     scrollToBottom(true);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -430,6 +479,7 @@ function handlePromptKeydown(event: KeyboardEvent) {
 }
 
 function editQueuedMessage(item: CodexQueueItem) {
+  savePromptDraft(props.id, promptText.value);
   editingQueueItemId.value = item.id;
   promptText.value = item.prompt;
   void nextTick(() => {
@@ -446,8 +496,7 @@ async function saveQueuedMessage() {
   try {
     applyInfo(await codex.updateQueued(props.id, itemId, prompt));
     editingQueueItemId.value = null;
-    promptText.value = "";
-    voice.clear(voiceContextId.value);
+    restorePromptDraft();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -455,8 +504,7 @@ async function saveQueuedMessage() {
 
 function cancelQueuedEdit() {
   editingQueueItemId.value = null;
-  promptText.value = "";
-  voice.clear(voiceContextId.value);
+  restorePromptDraft();
 }
 
 async function deleteQueuedMessage(itemId: string) {
@@ -466,7 +514,7 @@ async function deleteQueuedMessage(itemId: string) {
     applyInfo(await codex.deleteQueued(props.id, itemId));
     if (editingQueueItemId.value === itemId) {
       editingQueueItemId.value = null;
-      promptText.value = "";
+      restorePromptDraft();
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -474,6 +522,7 @@ async function deleteQueuedMessage(itemId: string) {
 }
 
 function clearPrompt() {
+  clearPromptDraft(props.id);
   promptText.value = "";
   voice.clear(voiceContextId.value);
 }
@@ -557,10 +606,16 @@ function updatePaneToolbar() {
   });
 }
 
-watch(() => props.id, () => {
+watch(() => props.id, (id, previousId) => {
+  if (previousId && !isEditingQueue.value) savePromptDraft(previousId, promptText.value);
   socket?.close();
+  editingQueueItemId.value = null;
+  promptText.value = loadPromptDraft(id);
   session.value = null;
   void loadSnapshot();
+});
+watch(promptText, (text) => {
+  if (!isEditingQueue.value) savePromptDraft(props.id, text);
 });
 watch(focusMode, updatePaneToolbar);
 watch(() => [codex.models.selected_model, codex.models.available_models, codex.status], updatePaneToolbar, { deep: true });
@@ -573,6 +628,7 @@ watch(isActivePane, (active) => {
 
 onMounted(() => {
   mounted = true;
+  if (isActivePane.value) codex.markRead(props.id);
   void loadSnapshot();
   connect();
   updatePaneToolbar();

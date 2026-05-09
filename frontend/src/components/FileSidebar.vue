@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { getGitStatus } from "../api/client";
+import { useFilesStore } from "../stores/files";
 import CodexSessionsPanel from "./sidebar/CodexSessionsPanel.vue";
 import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
@@ -41,6 +42,8 @@ const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
   { id: "codex", title: "Codex", icon: "bi-stars" },
 ];
 
+const fileStore = useFilesStore();
+
 function storedTool(): SidebarTool {
   const value = localStorage.getItem(ACTIVE_TOOL_KEY);
   return tools.some((tool) => tool.id === value) ? (value as SidebarTool) : "files";
@@ -51,6 +54,7 @@ const gitIndicator = ref<GitIndicator>("none");
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
 const workspaceIds = computed(() => Array.from({ length: Math.max(1, props.workspaceCount) }, (_, index) => String(index + 1)));
 let gitStatusTimer: number | null = null;
+let gitStatusRequestId = 0;
 
 watch(activeTool, (tool) => {
   localStorage.setItem(ACTIVE_TOOL_KEY, tool);
@@ -102,13 +106,18 @@ function toolTitle(tool: { id: SidebarTool; title: string }) {
 }
 
 async function refreshGitIndicator() {
+  const requestId = ++gitStatusRequestId;
   try {
-    const status = await getGitStatus();
+    const status = await getGitStatus(fileStore.currentPath);
+    if (requestId !== gitStatusRequestId) return;
     gitIndicator.value = status.files.length ? "dirty" : "clean";
   } catch {
+    if (requestId !== gitStatusRequestId) return;
     gitIndicator.value = "none";
   }
 }
+
+watch(() => fileStore.currentPath, () => void refreshGitIndicator());
 
 onMounted(() => {
   void refreshGitIndicator();
@@ -265,7 +274,7 @@ onUnmounted(() => {
 }
 
 .activity-button.git-indicator-dirty::after {
-  background: #d1242f;
+  background: #f0ad00;
 }
 
 .workspace-buttons {

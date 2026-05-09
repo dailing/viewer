@@ -414,6 +414,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Rollout rendering is keyed to canonical `~/.codex/sessions/**/rollout-*.jsonl` shapes: top-level `response_item` and `event_msg`, with turn grouping from `event_msg.payload.type=task_started/task_complete`.
 - Sends follow-up prompts through `stores/codex.ts`, which calls `/api/codex/sessions/{id}/messages`.
 - Renders server-backed queued prompts above the composer. Queue rows can be clicked into the shared composer for edit/save/cancel/delete; the queue button appends to `/api/codex/sessions/{id}/queue`, and queued work drains server-side even after the browser closes.
+- Persists unqueued composer drafts per Codex viewer session in browser `localStorage` under `viewer.codexDrafts.v1`, restores them after pane/workspace remounts, and clears the draft after a queue request succeeds.
 - Uses `VoiceInputButton.vue` to transcribe microphone input into the Codex draft.
 
 `frontend/src/stores/voice.ts`

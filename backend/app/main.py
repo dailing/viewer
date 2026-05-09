@@ -27,8 +27,9 @@ from .files import (
     write_workspace_config,
     write_workspace,
 )
+from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
 from .logging import current_log_path, ensure_logging
-from .models import AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, TerminalCreate, WorkspaceConfig, WorkspaceSnapshot
+from .models import AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -181,6 +182,36 @@ async def file_raw(path: str, h: str | None = None, base: str | None = None):
 @app.get("/api/file/resolve-link")
 async def file_resolve_link(base: str, target: str):
     return {"path": resolve_markdown_link(base, target)}
+
+
+@app.get("/api/git/status")
+async def git_status_route():
+    return git_status()
+
+
+@app.get("/api/git/diff")
+async def git_diff_route(path: str):
+    return git_diff(path)
+
+
+@app.post("/api/git/stage")
+async def git_stage_route(request: GitStageRequest | None = None):
+    return git_stage(request.path if request else None)
+
+
+@app.post("/api/git/revert")
+async def git_revert_route(request: GitRevertRequest):
+    return git_revert(request.path)
+
+
+@app.post("/api/git/commit")
+async def git_commit_route(request: GitCommitRequest):
+    return git_commit(request)
+
+
+@app.post("/api/git/push")
+async def git_push_route():
+    return git_push()
 
 
 @app.get("/api/config")

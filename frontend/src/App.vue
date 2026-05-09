@@ -91,11 +91,12 @@ const activePaneTitle = computed(() => {
   if (!pane || pane.type !== "pane") return "Empty pane";
   if (pane.terminalId) return "Terminal";
   if (pane.codexSessionId) return codex.sessions.find((session) => session.id === pane.codexSessionId)?.title ?? "Codex";
+  if (pane.diffPath) return `Diff: ${pane.diffPath}`;
   return pane.filePath || "Empty pane";
 });
 const activePaneHasContent = computed(() => {
   const pane = layout.activePane;
-  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || pane.codexSessionId));
+  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || pane.codexSessionId || pane.diffPath));
 });
 const globalPaneActions = computed<PaneToolbarAction[]>(() => {
   if (!layout.activePaneId) return [];
@@ -142,7 +143,8 @@ let workspaceSaveTimer: number | null = null;
 let workspaceAutosaveReady = false;
 
 function eventAffectsOpenPath(eventPath: string): boolean {
-  return layout.openPaths.some((openPath) => openPath === eventPath || parentPath(openPath) === eventPath);
+  const paths = [...layout.openPaths, ...layout.openDiffPaths];
+  return paths.some((openPath) => openPath === eventPath || parentPath(openPath) === eventPath);
 }
 
 onMounted(async () => {
@@ -212,6 +214,11 @@ function openTerminal(id: string) {
 function openCodexSession(id: string) {
   workspaces.rememberActiveCodexSession(id);
   layout.openCodexSession(id);
+  if (!sidebarPinned.value) sidebarOpen.value = false;
+}
+
+function openDiff(path: string) {
+  layout.openDiff(path);
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
 
@@ -597,6 +604,7 @@ onUnmounted(() => {
           @open-file="openFile"
           @open-terminal="openTerminal"
           @open-codex-session="openCodexSession"
+          @open-diff="openDiff"
           @switch-workspace="switchWorkspace"
           @toggle-tool-panel="toggleToolPanel"
           @toggle-pin="toggleSidebarPin"

@@ -4,7 +4,7 @@ This document is the working project map for future agents. Read it before chang
 
 ## Purpose
 
-Local Live File Viewer is a private-network, read-only file browser and preview app. A FastAPI backend serves files from `VIEWER_ROOT`, watches that directory, exposes file and terminal APIs, and serves the built Vue frontend. The Vue app provides a sidebar file browser, recursive split panes, file viewers, live refresh on filesystem changes, and browser-local layout persistence.
+Local Live File Viewer is a private-network file browser and preview app. A FastAPI backend serves files from `VIEWER_ROOT`, watches that directory, exposes file, Git, terminal, and Codex APIs, and serves the built Vue frontend. The Vue app provides a sidebar file browser, Git diff panel, recursive split panes, file viewers, live refresh on filesystem changes, and browser-local layout persistence.
 
 ## Runtime Flow
 
@@ -36,6 +36,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `/api/file/content`: calls `read_text()`.
 - `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
+- `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at `settings.root_resolved`.
 - `/api/config` GET/PUT: reads and writes nav appearance, workspace count, Codex model options, and Markdown theme config in `~/.view/config.json`. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated Codex ids live in `~/.view/workspaces.json`.
 - `/api/workspaces` GET, `/api/workspaces/config` GET/PUT, `/api/workspaces/{id}` PUT, and `/api/workspaces/{id}/activate` POST: read workspace state, read/update workspace count config, write workspace snapshots, and activate workspaces. Workspace count is stored in `~/.view/config.json`; per-workspace state is stored in `~/.view/workspaces.json`.
 - `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
@@ -105,6 +106,14 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Shared WebSocket client queue/fanout helpers for backend managers.
 - `WebSocketClient`: websocket, outgoing queue, and writer task.
 - `add_client()`, `enqueue()`, `broadcast()`, `remove_client()`, and `client_writer()`: common JSON message queueing, stale-client cleanup, timeout-bounded writes, and socket close handling used by terminal and Codex session managers.
+
+`backend/app/git_diff.py`
+
+- Git working-tree integration for the Diff sidebar and viewer.
+- Runs Git commands in `settings.root_resolved` after checking that the served root is inside a Git work tree.
+- `git_status()`: parses `git status --porcelain=v1 -z`, adds `git diff --numstat HEAD` counts, marks binary files, and returns relative paths for changed files.
+- `git_diff(path)`: returns a unified text diff against `HEAD`; untracked text files are rendered as new-file diffs and binary files return `is_binary=true` with no diff text.
+- `git_stage(path)`, `git_revert(path)`, `git_commit(request)`, and `git_push()`: implement the toolbar Git actions. Revert removes only untracked files, refusing untracked directories.
 
 `backend/app/watcher.py`
 
@@ -242,18 +251,19 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `load(clearMeta)`: refreshes metadata for current file.
 - Accepts a workspace-level loading flag so workspace switches can render every pane as a lightweight spinner before viewer components mount and start their backend fetches.
 - `handleChange(event)`: reloads metadata when this pane's file changed, or when the pane file's parent directory changes (covers delete/recreate and atomic-save workflows).
-- Chooses `TerminalViewer`, `CodexViewer`, `ImageViewer`, `MarkdownViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
+- Chooses `TerminalViewer`, `CodexViewer`, `DiffViewer`, `ImageViewer`, `MarkdownViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
 
 `frontend/src/components/FileSidebar.vue`
 
 - Sidebar shell with a VS Code-style activity rail and one active tool panel at a time.
 - Persists the active sidebar tool in `localStorage` under `viewer.sidebarActiveTool.v1`.
-- Tools: Files, Terminals, and Codex. Future side tools should be added to this shell instead of mixing all lists into one panel.
+- Tools: Files, Changes, Terminals, and Codex. Future side tools should be added to this shell instead of mixing all lists into one panel.
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool or workspace changes only the active selection; clicking the already-active tool or workspace toggles the tool panel open/closed.
 - On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
 - Renders one-click numbered workspace buttons in the activity rail. Clicking a different workspace saves the current workspace and restores the selected workspace without changing the tool panel open/closed state.
 - Workspace buttons can show Codex notices supplied by `App.vue`; green means a run is active in that workspace, amber means a run finished, and red means a run failed. During a workspace switch, the target button becomes active immediately and displays a small spinner while backend persistence/activation finishes.
 - Re-emits `open-file`, `open-terminal`, and `open-codex-session` events to `App.vue`.
+- Re-emits `open-file`, `open-diff`, `open-terminal`, and `open-codex-session` events to `App.vue`.
 
 `frontend/src/components/sidebar/FilesPanel.vue`
 
@@ -265,6 +275,12 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Terminals tool panel: new terminal button plus terminal list.
 - `newTerminal()`: creates terminal in the current sidebar directory and emits `open-terminal`.
 - `closeTerminal(id)`: deletes terminal and clears matching panes.
+
+`frontend/src/components/sidebar/GitPanel.vue`
+
+- Changes tool panel: lists Git changed files from `/api/git/status`, showing served-root-relative paths, status codes, and small `+/-` line counts.
+- Binary files are displayed with a `bin` chip but disabled so they cannot be opened in the diff viewer.
+- Clicking a text change emits `open-diff` so the active pane becomes a diff pane.
 
 `frontend/src/components/sidebar/CodexSessionsPanel.vue`
 
@@ -310,6 +326,13 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - `copyAll()`: clipboard write with textarea fallback.
 - `load()`: fetches text, highlights, restores scroll.
 - Uses syntax CSS variables from the active Markdown theme for Highlight.js token colors.
+
+`frontend/src/components/viewers/DiffViewer.vue`
+
+- Diff preview pane backed by `/api/git/diff`.
+- Renders unified diffs with Highlight.js `diff` highlighting and a smaller monospace font.
+- Registers Diff-specific top-bar actions through `stores/paneToolbar.ts`: refresh, stage file, stage all, revert file, commit, and push.
+- Binary diffs render a disabled-state message instead of diff text.
 
 `frontend/src/components/viewers/MarkdownViewer.vue`
 
@@ -394,6 +417,7 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 - Shared fetch helpers for REST and raw/WS URLs.
 - `request<T>()`: JSON request with error text on non-2xx.
 - File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
+- Git APIs: `getGitStatus()`, `getGitDiff()`, `stageGitPath()`, `revertGitPath()`, `commitGit()`, and `pushGit()`.
 - Admin APIs: `restartServer()` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
 - Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `queueCodexMessage()`, `updateCodexQueuedMessage()`, `deleteCodexQueuedMessage()`, `codexSessionSocketUrl()`.
@@ -414,8 +438,8 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - Pinia store for recursive split layout and active pane.
 - Helpers: `id()`, `defaultLayout()`, `findPane()`, `mapNode()`, `firstPaneId()`, `mapAllPanes()`, `removePane()`.
-- Getters: `activePane`, `openPaths`, `openTerminalIds`, `openCodexSessionIds`.
-- Actions: `load()`, `save()`, `snapshot()`, `restore()`, `reset()`, `setActive()`, `openFile()`, `openTerminal()`, `openCodexSession()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, `clearTerminal()`, `clearCodexSession()`.
+- Getters: `activePane`, `openPaths`, `openTerminalIds`, `openCodexSessionIds`, `openDiffPaths`.
+- Actions: `load()`, `save()`, `snapshot()`, `restore()`, `reset()`, `setActive()`, `openFile()`, `openTerminal()`, `openCodexSession()`, `openDiff()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, `clearTerminal()`, `clearCodexSession()`.
 - Persists to `localStorage` key `viewer.layout.v1`.
 
 `frontend/src/stores/workspaces.ts`
@@ -449,9 +473,13 @@ Local Live File Viewer is a private-network, read-only file browser and preview 
 
 - TypeScript mirror of backend file/config/watch schemas: `EntryType`, `PreviewType`, `FileEntry`, `DirectoryListing`, `FileMeta`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `ViewerConfig`, `WatchEvent`.
 
+`frontend/src/types/git.ts`
+
+- TypeScript mirror of backend Git schemas: `GitDiffFile`, `GitStatus`, and `GitDiffText`.
+
 `frontend/src/types/layout.ts`
 
-- Recursive `LayoutNode` union and `SplitDirection`; pane nodes may hold `filePath`, `terminalId`, or `codexSessionId`.
+- Recursive `LayoutNode` union and `SplitDirection`; pane nodes may hold `filePath`, `terminalId`, `codexSessionId`, or `diffPath`.
 
 `frontend/src/types/terminals.ts`
 

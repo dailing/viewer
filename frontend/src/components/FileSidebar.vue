@@ -2,9 +2,10 @@
 import { computed, ref, watch } from "vue";
 import CodexSessionsPanel from "./sidebar/CodexSessionsPanel.vue";
 import FilesPanel from "./sidebar/FilesPanel.vue";
+import GitPanel from "./sidebar/GitPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 
-type SidebarTool = "files" | "terminals" | "codex";
+type SidebarTool = "files" | "git" | "terminals" | "codex";
 type WorkspaceNotice = "running" | "completed" | "failed";
 
 const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   "open-file": [path: string];
   "open-terminal": [id: string];
   "open-codex-session": [id: string];
+  "open-diff": [path: string];
   "switch-workspace": [id: string];
   "toggle-tool-panel": [];
   "toggle-pin": [];
@@ -31,6 +33,7 @@ const emit = defineEmits<{
 
 const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
   { id: "files", title: "Files", icon: "bi-files" },
+  { id: "git", title: "Changes", icon: "bi-git" },
   { id: "terminals", title: "Terminals", icon: "bi-terminal" },
   { id: "codex", title: "Codex", icon: "bi-stars" },
 ];
@@ -136,6 +139,7 @@ function workspaceNoticeClass(id: string) {
         </button>
       </div>
       <FilesPanel v-if="activeTool === 'files'" @open-file="emit('open-file', $event)" />
+      <GitPanel v-else-if="activeTool === 'git'" @open-diff="emit('open-diff', $event)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" @open-terminal="emit('open-terminal', $event)" />
       <CodexSessionsPanel v-else :session-ids="props.codexSessionIds" @open-codex-session="emit('open-codex-session', $event)" />
     </section>

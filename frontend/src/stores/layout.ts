@@ -112,6 +112,19 @@ export const useLayoutStore = defineStore("layout", {
       visit(state.root);
       return ids;
     },
+    openDiffPaths(state): string[] {
+      const paths: string[] = [];
+      const visit = (node: LayoutNode) => {
+        if (node.type === "pane") {
+          if (node.diffPath) paths.push(node.diffPath);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(state.root);
+      return paths;
+    },
   },
   actions: {
     load() {
@@ -156,6 +169,7 @@ export const useLayoutStore = defineStore("layout", {
         filePath: path,
         terminalId: undefined,
         codexSessionId: undefined,
+        diffPath: undefined,
       }));
       this.save();
     },
@@ -166,6 +180,7 @@ export const useLayoutStore = defineStore("layout", {
         filePath: undefined,
         terminalId: id,
         codexSessionId: undefined,
+        diffPath: undefined,
       }));
       this.save();
     },
@@ -176,6 +191,18 @@ export const useLayoutStore = defineStore("layout", {
         filePath: undefined,
         terminalId: undefined,
         codexSessionId: id,
+        diffPath: undefined,
+      }));
+      this.save();
+    },
+    openDiff(path: string) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
+        ...pane,
+        filePath: undefined,
+        terminalId: undefined,
+        codexSessionId: undefined,
+        diffPath: path,
       }));
       this.save();
     },
@@ -204,6 +231,7 @@ export const useLayoutStore = defineStore("layout", {
         filePath: undefined,
         terminalId: undefined,
         codexSessionId: undefined,
+        diffPath: undefined,
       }));
       this.save();
     },

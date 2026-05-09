@@ -113,6 +113,36 @@ class WatchEvent(BaseModel):
     mtime: float | None = None
 
 
+class GitDiffFile(BaseModel):
+    path: str
+    status: str
+    added: int | None = None
+    deleted: int | None = None
+    is_binary: bool = False
+
+
+class GitStatus(BaseModel):
+    files: list[GitDiffFile] = Field(default_factory=list)
+
+
+class GitDiffText(BaseModel):
+    path: str
+    diff: str
+    is_binary: bool = False
+
+
+class GitStageRequest(BaseModel):
+    path: str | None = None
+
+
+class GitRevertRequest(BaseModel):
+    path: str
+
+
+class GitCommitRequest(BaseModel):
+    message: str
+
+
 class TerminalInfo(BaseModel):
     id: str
     title: str

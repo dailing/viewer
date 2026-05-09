@@ -3,6 +3,7 @@ import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
+import type { GitDiffText, GitStatus } from "../types/git";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -42,6 +43,42 @@ export async function resolveMarkdownLink(base: string, target: string): Promise
   return request<{ path: string }>(
     `/api/file/resolve-link?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`,
   );
+}
+
+export async function getGitStatus(): Promise<GitStatus> {
+  return request<GitStatus>("/api/git/status");
+}
+
+export async function getGitDiff(path: string): Promise<GitDiffText> {
+  return request<GitDiffText>(`/api/git/diff?path=${encodeURIComponent(path)}`);
+}
+
+export async function stageGitPath(path?: string): Promise<GitStatus> {
+  return request<GitStatus>("/api/git/stage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+}
+
+export async function revertGitPath(path: string): Promise<GitStatus> {
+  return request<GitStatus>("/api/git/revert", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+}
+
+export async function commitGit(message: string): Promise<GitStatus> {
+  return request<GitStatus>("/api/git/commit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+}
+
+export async function pushGit(): Promise<{ status: string; output: string }> {
+  return request<{ status: string; output: string }>("/api/git/push", { method: "POST" });
 }
 
 export async function getConfig(): Promise<ViewerConfig> {

@@ -304,6 +304,16 @@ async function applyJson() {
               <input v-model.number="draft.workspace.count" class="form-range" type="range" min="1" max="20" step="1" />
               <input v-model.number="draft.workspace.count" class="form-control form-control-sm number-input" type="number" min="1" max="20" />
             </label>
+            <label class="setting-row">
+              <span>Heat interval</span>
+              <input v-model.number="draft.workspace.heat_interval_seconds" class="form-range" type="range" min="1" max="300" step="1" />
+              <input v-model.number="draft.workspace.heat_interval_seconds" class="form-control form-control-sm number-input" type="number" min="1" max="300" step="1" />
+            </label>
+            <label class="setting-row">
+              <span>Heat step %</span>
+              <input v-model.number="draft.workspace.heat_step_percent" class="form-range" type="range" min="0.1" max="100" step="0.1" />
+              <input v-model.number="draft.workspace.heat_step_percent" class="form-control form-control-sm number-input" type="number" min="0.1" max="100" step="0.1" />
+            </label>
           </div>
         </section>
 
@@ -346,6 +356,14 @@ async function applyJson() {
                 class="form-control form-control-sm"
                 placeholder="http://localhost:7890"
               />
+            </label>
+            <label class="compact-field model-list-field">
+              <span>Auto commit prompt</span>
+              <textarea
+                v-model="draft.codex.auto_commit_prompt"
+                class="form-control form-control-sm model-list"
+                spellcheck="false"
+              ></textarea>
             </label>
           </div>
         </section>

@@ -260,8 +260,15 @@ def read_config() -> ConfigData:
         codex=config.codex,
         workspace=config.workspace,
     )
+    codex_raw = raw.get("codex") if isinstance(raw, dict) else None
+    workspace_raw = raw.get("workspace") if isinstance(raw, dict) else None
+    missing_codex_defaults = not isinstance(codex_raw, dict) or "auto_commit_prompt" not in codex_raw
+    missing_workspace_defaults = not isinstance(workspace_raw, dict) or "heat_interval_seconds" not in workspace_raw or "heat_step_percent" not in workspace_raw
     if isinstance(raw, dict) and (
-        "workspace" not in raw or any(key in raw for key in ("pinned", "current_path", "visit_times", "workspaces"))
+        missing_codex_defaults
+        or missing_workspace_defaults
+        or "workspace" not in raw
+        or any(key in raw for key in ("pinned", "current_path", "visit_times", "workspaces"))
     ):
         read_workspaces()
         write_config(cleaned)

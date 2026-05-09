@@ -75,10 +75,13 @@ export interface CodexConfig {
   default_model: string;
   proxy: string;
   muted_message_alpha: number;
+  auto_commit_prompt: string;
 }
 
 export interface WorkspaceConfig {
   count: number;
+  heat_interval_seconds: number;
+  heat_step_percent: number;
 }
 
 export interface ViewerConfig {

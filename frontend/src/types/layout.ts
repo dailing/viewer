@@ -8,6 +8,7 @@ export type LayoutNode =
       terminalId?: string;
       codexSessionId?: string;
       diffPath?: string;
+      diffCwd?: string;
     }
   | {
       type: "split";

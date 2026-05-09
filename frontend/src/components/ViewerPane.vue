@@ -51,7 +51,7 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
       </div>
       <TerminalViewer v-else-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
       <CodexViewer v-else-if="pane.codexSessionId" :id="pane.codexSessionId" :pane-id="pane.id" />
-      <DiffViewer v-else-if="pane.diffPath" :path="pane.diffPath" :pane-id="pane.id" />
+      <DiffViewer v-else-if="pane.diffPath" :path="pane.diffPath" :cwd="pane.diffCwd ?? ''" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">
         <i class="bi bi-folder2-open"></i>
         <span>Select a file from the sidebar</span>

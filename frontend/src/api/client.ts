@@ -45,19 +45,20 @@ export async function resolveMarkdownLink(base: string, target: string): Promise
   );
 }
 
-export async function getGitStatus(): Promise<GitStatus> {
-  return request<GitStatus>("/api/git/status");
+export async function getGitStatus(scope?: string): Promise<GitStatus> {
+  const query = scope ? `?scope=${encodeURIComponent(scope)}` : "";
+  return request<GitStatus>(`/api/git/status${query}`);
 }
 
 export async function getGitDiff(path: string): Promise<GitDiffText> {
   return request<GitDiffText>(`/api/git/diff?path=${encodeURIComponent(path)}`);
 }
 
-export async function stageGitPath(path?: string): Promise<GitStatus> {
+export async function stageGitPath(path?: string, scope?: string): Promise<GitStatus> {
   return request<GitStatus>("/api/git/stage", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, scope }),
   });
 }
 
@@ -69,16 +70,17 @@ export async function revertGitPath(path: string): Promise<GitStatus> {
   });
 }
 
-export async function commitGit(message: string): Promise<GitStatus> {
+export async function commitGit(message: string, scope?: string): Promise<GitStatus> {
   return request<GitStatus>("/api/git/commit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, scope }),
   });
 }
 
-export async function pushGit(): Promise<{ status: string; output: string }> {
-  return request<{ status: string; output: string }>("/api/git/push", { method: "POST" });
+export async function pushGit(scope?: string): Promise<{ status: string; output: string }> {
+  const query = scope ? `?scope=${encodeURIComponent(scope)}` : "";
+  return request<{ status: string; output: string }>(`/api/git/push${query}`, { method: "POST" });
 }
 
 export async function getConfig(): Promise<ViewerConfig> {

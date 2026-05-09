@@ -17,6 +17,7 @@ const props = defineProps<{
   panelOpen: boolean;
   panelPinned: boolean;
   workspaceNotices?: Record<string, WorkspaceNotice>;
+  workspaceHeat?: Record<string, number>;
   switchingWorkspace?: boolean;
 }>();
 
@@ -24,7 +25,7 @@ const emit = defineEmits<{
   "open-file": [path: string];
   "open-terminal": [id: string];
   "open-codex-session": [id: string];
-  "open-diff": [path: string];
+  "open-diff": [path: string, cwd: string];
   "switch-workspace": [id: string];
   "toggle-tool-panel": [];
   "toggle-pin": [];
@@ -78,6 +79,15 @@ function workspaceNoticeClass(id: string) {
   const notice = props.workspaceNotices?.[id];
   return notice ? `workspace-notice-${notice}` : "";
 }
+
+function workspaceHeatStyle(id: string) {
+  const heat = Math.min(1, Math.max(0, Number(props.workspaceHeat?.[id] ?? 0)));
+  const intensity = heat > 0 ? Math.log1p(9 * heat) / Math.log(10) : 0;
+  if (intensity <= 0.01) return {};
+  return {
+    backgroundColor: `rgb(218 54 51 / ${0.06 + intensity * 0.34})`,
+  };
+}
 </script>
 
 <template>
@@ -102,6 +112,7 @@ function workspaceNoticeClass(id: string) {
           :key="id"
           class="activity-button workspace-button"
           :class="[{ active: props.activeWorkspaceId === id, 'workspace-switching': props.switchingWorkspace && props.activeWorkspaceId === id }, workspaceNoticeClass(id)]"
+          :style="workspaceHeatStyle(id)"
           type="button"
           :title="workspaceTitle(id)"
           :aria-label="workspaceTitle(id)"
@@ -138,7 +149,7 @@ function workspaceNoticeClass(id: string) {
         </button>
       </div>
       <FilesPanel v-if="activeTool === 'files'" @open-file="emit('open-file', $event)" />
-      <GitPanel v-else-if="activeTool === 'git'" @open-diff="emit('open-diff', $event)" />
+      <GitPanel v-else-if="activeTool === 'git'" @open-diff="(path, cwd) => emit('open-diff', path, cwd)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" @open-terminal="emit('open-terminal', $event)" />
       <CodexSessionsPanel v-else :session-ids="props.codexSessionIds" @open-codex-session="emit('open-codex-session', $event)" />
     </section>
@@ -219,29 +230,6 @@ function workspaceNoticeClass(id: string) {
 .workspace-button {
   font-size: 12px;
   font-weight: 700;
-}
-
-.workspace-button.workspace-notice-running {
-  color: #116329;
-}
-
-.workspace-button.workspace-notice-running:not(.active) {
-  background: #dff7e8;
-  color: #116329;
-}
-
-.workspace-button.workspace-notice-running.active {
-  background: #e9f8ef;
-}
-
-.workspace-button.workspace-notice-completed:not(.active) {
-  background: #fff4c2;
-  color: #7a4f00;
-}
-
-.workspace-button.workspace-notice-failed:not(.active) {
-  background: #ffe0e0;
-  color: #a33;
 }
 
 .workspace-button.workspace-switching {

@@ -37,7 +37,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
 - `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at `settings.root_resolved`.
-- `/api/config` GET/PUT: reads and writes nav appearance, workspace count, Codex model options, and Markdown theme config in `~/.view/config.json`. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated Codex ids live in `~/.view/workspaces.json`.
+- `/api/config` GET/PUT: reads and writes nav appearance, workspace count and workspace heat timing, Codex model options, and Markdown theme config in `~/.view/config.json`. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated Codex ids live in `~/.view/workspaces.json`.
 - `/api/workspaces` GET, `/api/workspaces/config` GET/PUT, `/api/workspaces/{id}` PUT, and `/api/workspaces/{id}/activate` POST: read workspace state, read/update workspace count config, write workspace snapshots, and activate workspaces. Workspace count is stored in `~/.view/config.json`; per-workspace state is stored in `~/.view/workspaces.json`.
 - `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
@@ -82,7 +82,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `get_meta(path)`: validates file and returns `FileMeta`, including preview type, text-size limit flag, and `content_hash`.
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: returns `~/.view/config.json` and triggers one-way legacy copy from root-local `.viewer.config.json` when needed.
-- `read_config()` / `write_config(config)`: load and save nav appearance, workspace count, Codex model options, and Markdown theme config. Legacy workspace state keys (`pinned`, `current_path`, `visit_times`, and `workspaces`) are pruned from `~/.view/config.json` on read/write, with legacy `workspaces.count` migrated to `workspace.count`.
+- `read_config()` / `write_config(config)`: load and save nav appearance, workspace count/heat timing, Codex model options, and Markdown theme config. Legacy workspace state keys (`pinned`, `current_path`, `visit_times`, and `workspaces`) are pruned from `~/.view/config.json` on read/write, with legacy `workspaces.count` migrated to `workspace.count`.
 - `read_workspaces()` / `write_workspace()` / `set_active_workspace()` / `write_workspace_config()`: load and save `~/.view/workspaces.json` state plus `~/.view/config.json` workspace count. `workspaces.json` stores active workspace id and per-slot state only; each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, workspace-associated Codex session ids, per-workspace visit timestamps for open ordering, and update timestamp. Older workspace slots without `codex_session_ids` get an empty list, never a layout-derived fallback.
 
 `backend/app/agent_loops.py`
@@ -111,7 +111,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/git_diff.py`
 
 - Git working-tree integration for the Diff sidebar and viewer.
-- Runs Git commands in `settings.root_resolved` after checking that the served root is inside a Git work tree.
+- Resolves the active Git context from the requested file/sidebar directory, matching the current Files directory model used by Terminal and Codex launches. Status queries are scoped to that directory, while returned paths are mapped back to served-root-relative paths for the frontend.
 - `git_status()`: parses `git status --porcelain=v1 -z`, adds `git diff --numstat HEAD` counts, marks binary files, and returns relative paths for changed files.
 - `git_diff(path)`: returns a unified text diff against `HEAD`; untracked text files are rendered as new-file diffs and binary files return `is_binary=true` with no diff text.
 - `git_stage(path)`, `git_revert(path)`, `git_commit(request)`, and `git_push()`: implement the toolbar Git actions. Revert removes only untracked files, refusing untracked directories.
@@ -189,10 +189,10 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/models.py`
 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
-- `ConfigData` stores global appearance, workspace count, Markdown, and Codex defaults only.
-- `WorkspaceConfig.count` defaults to 5 and controls how many numbered workspace buttons appear in the sidebar activity rail. `WorkspaceData.count` mirrors that config in `/api/workspaces` responses for frontend convenience, while persisted workspace slots in `~/.view/workspaces.json` include per-workspace visit timestamps used to sort the current folder by most recent visit.
+- `ConfigData` stores global appearance, workspace count/heat timing, Markdown, and Codex defaults only.
+- `WorkspaceConfig.count` defaults to 5 and controls how many numbered workspace buttons appear in the sidebar activity rail. `heat_interval_seconds` and `heat_step_percent` control frontend workspace button heat: on each interval the active workspace score moves toward 1 by the configured percentage and inactive scores move toward 0 by the same percentage. `WorkspaceData.count` mirrors the count config in `/api/workspaces` responses for frontend convenience, while persisted workspace slots in `~/.view/workspaces.json` include per-workspace visit timestamps used to sort the current folder by most recent visit.
 - Codex schemas: `CodexSessionInfo`, `CodexPrompt`, compact `CodexEvent`, `CodexFileChange`, `CodexSessionSnapshot`, `CodexSessionCreate`, `CodexSessionMessage`, `CodexQueueItem`, and `CodexQueueMessage`. `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible, and running sessions expose background `pid`, `codex_pid`, `run_id`, and `run_started_at` fields when available.
-- `CodexConfig` stores Codex model options, muted operation-message alpha, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
+- `CodexConfig` stores Codex model options, muted operation-message alpha, the Diff viewer auto-commit prompt, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
 `backend/app/logging.py`
@@ -238,7 +238,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
 - Workspace switching: `restoreInitialWorkspace()` loads the active `~/.view/workspaces.json` slot at startup; `switchWorkspace()` immediately marks the target workspace active in the UI, restores its saved pane layout, shows pane-level loading placeholders for one animation frame, then lets each viewer mount and fetch its content while the previous slot save, sidebar directory load, and backend workspace activation complete. The sidebar tool stays unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, visit timestamps/open ordering, or workspace-associated Codex session ids change.
 - Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`. Workspaces keep their own `codex_session_ids` list; new or opened sessions are remembered in the active workspace so the Codex sidebar is workspace-scoped rather than directory-scoped. Removing a Codex row from the sidebar only removes that workspace entry and matching panes; it does not delete viewer session metadata or canonical Codex history.
-- Tracks Codex status by workspace layout: workspace buttons show live green running state when any contained Codex session is running, and inactive workspaces receive sticky amber/red completion/failure notices after runs finish until the workspace is opened.
+- Tracks Codex status by workspace layout: workspace buttons show small status dots when any contained Codex session is running or when inactive workspaces have sticky completion/failure notices. Button background is reserved for local workspace heat, with scores persisted in browser localStorage and displayed through a logarithmic red intensity curve.
 
 `frontend/src/components/Workspace.vue`
 
@@ -269,7 +269,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool or workspace changes only the active selection; clicking the already-active tool or workspace toggles the tool panel open/closed.
 - On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
 - Renders one-click numbered workspace buttons in the activity rail. Clicking a different workspace saves the current workspace and restores the selected workspace without changing the tool panel open/closed state.
-- Workspace buttons can show Codex notices supplied by `App.vue`; green means a run is active in that workspace, amber means a run finished, and red means a run failed. During a workspace switch, the target button becomes active immediately and displays a small spinner while backend persistence/activation finishes.
+- Workspace buttons receive Codex notices and local heat scores from `App.vue`; status is rendered as a small green/amber/red dot, while the button background uses logarithmic red heat intensity based on recent active workspace time. During a workspace switch, the target button becomes active immediately and displays a small spinner while backend persistence/activation finishes.
 - Re-emits `open-file`, `open-terminal`, and `open-codex-session` events to `App.vue`.
 - Re-emits `open-file`, `open-diff`, `open-terminal`, and `open-codex-session` events to `App.vue`.
 
@@ -288,7 +288,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Changes tool panel: lists Git changed files from `/api/git/status`, showing served-root-relative paths, status codes, and small `+/-` line counts.
 - Binary files are displayed with a `bin` chip but disabled so they cannot be opened in the diff viewer.
-- Clicking a text change emits `open-diff` so the active pane becomes a diff pane.
+- Clicking a text change emits `open-diff` with the current Files directory so the active pane becomes a diff pane scoped to that directory.
 
 `frontend/src/components/sidebar/CodexSessionsPanel.vue`
 
@@ -338,8 +338,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/components/viewers/DiffViewer.vue`
 
 - Diff preview pane backed by `/api/git/diff`.
-- Renders unified diffs with Highlight.js `diff` highlighting and a smaller monospace font.
-- Registers Diff-specific top-bar actions through `stores/paneToolbar.ts`: refresh, stage file, stage all, revert file, commit, and push.
+- Renders unified diffs with Highlight.js `diff` highlighting, word-level diff mode, and side-by-side split diff mode.
+- Registers Diff-specific top-bar actions through `stores/paneToolbar.ts`: view mode switches, auto commit, refresh, stage file, stage all, revert file, commit, and push. Auto commit creates a Codex session in the diff directory using `codex.auto_commit_prompt`, remembers it in the active workspace's Codex session list, and lets the session handle summarize/commit/push.
 - Binary diffs render a disabled-state message instead of diff text.
 
 `frontend/src/components/viewers/MarkdownViewer.vue`
@@ -438,7 +438,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/stores/files.ts`
 
-- Pinia store for directory listings, current path, expanded dirs, pinned paths, per-workspace visit timestamps, appearance config, workspace count config, Markdown theme config, and loading state. Appearance, workspace count, Markdown themes, and Codex config are persisted in `~/.view/config.json`; current path, pins, and visit timestamps/open ordering are persisted per workspace slot in `~/.view/workspaces.json`.
+- Pinia store for directory listings, current path, expanded dirs, pinned paths, per-workspace visit timestamps, appearance config, workspace count/heat config, Markdown theme config, and loading state. Appearance, workspace count/heat timing, Markdown themes, and Codex config are persisted in `~/.view/config.json`; current path, pins, and visit timestamps/open ordering are persisted per workspace slot in `~/.view/workspaces.json`.
 - Getters: `rootEntries`, `currentEntries`, `parentPath`, `activeMarkdownTheme`.
 - Actions: `loadConfig()`, `saveConfig()`, `saveAppearance()`, `saveMarkdown()`, `saveViewerConfig()`, `saveFullViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
@@ -487,7 +487,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/types/layout.ts`
 
-- Recursive `LayoutNode` union and `SplitDirection`; pane nodes may hold `filePath`, `terminalId`, `codexSessionId`, or `diffPath`.
+- Recursive `LayoutNode` union and `SplitDirection`; pane nodes may hold `filePath`, `terminalId`, `codexSessionId`, `diffPath`, or `diffCwd`.
 
 `frontend/src/types/terminals.ts`
 

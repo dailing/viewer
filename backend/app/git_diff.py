@@ -1,5 +1,7 @@
 import difflib
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import HTTPException
 
@@ -8,10 +10,16 @@ from .files import normalize_relative, resolve_path
 from .models import GitCommitRequest, GitDiffFile, GitDiffText, GitStatus
 
 
-def _run_git(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+@dataclass(frozen=True)
+class GitContext:
+    cwd: Path
+    scope_path: str
+
+
+def _run_git(args: list[str], *, check: bool = True, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         ["git", *args],
-        cwd=settings.root_resolved,
+        cwd=cwd or settings.root_resolved,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -22,34 +30,88 @@ def _run_git(args: list[str], *, check: bool = True) -> subprocess.CompletedProc
     return result
 
 
-def _ensure_repo() -> None:
-    result = _run_git(["rev-parse", "--is-inside-work-tree"], check=False)
-    if result.returncode != 0 or result.stdout.strip() != "true":
+def _scope_start(scope: str | None) -> Path:
+    if not scope:
+        return settings.root_resolved
+    target = resolve_path(scope)
+    if target.exists():
+        return target if target.is_dir() else target.parent
+    start = target.parent
+    root = settings.root_resolved
+    while not start.exists() and start != root and start.is_relative_to(root):
+        start = start.parent
+    return start
+
+
+def _discover_single_child_repo() -> Path | None:
+    try:
+        children = list(settings.root_resolved.iterdir())
+    except OSError:
+        return None
+    repos = [child for child in children if child.is_dir() and child.joinpath(".git").exists()]
+    return repos[0] if len(repos) == 1 else None
+
+
+def _git_context(scope: str | None = None) -> GitContext:
+    start = _scope_start(scope)
+    result = _run_git(["rev-parse", "--show-toplevel"], check=False, cwd=start)
+    if result.returncode != 0 and not scope:
+        child_repo = _discover_single_child_repo()
+        if child_repo is not None:
+            start = child_repo
+            result = _run_git(["rev-parse", "--show-toplevel"], check=False, cwd=child_repo)
+    if result.returncode != 0:
         raise HTTPException(status_code=409, detail="Current folder is not inside a Git repository")
 
+    repo_root = Path(result.stdout.strip()).resolve()
+    root = settings.root_resolved
+    if not (repo_root == root or repo_root.is_relative_to(root) or root.is_relative_to(repo_root)):
+        raise HTTPException(status_code=409, detail="Current folder is not inside a Git repository")
+    try:
+        scope_path = start.resolve(strict=False).relative_to(repo_root).as_posix()
+    except ValueError:
+        scope_path = "."
+    return GitContext(cwd=repo_root, scope_path=scope_path or ".")
 
-def _is_binary_path(path: str) -> bool:
-    target = resolve_path(path)
+
+def _git_path(ctx: GitContext, path: str) -> str:
+    target = resolve_path(path).resolve(strict=False)
+    try:
+        return target.relative_to(ctx.cwd).as_posix()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path is outside the active Git repository") from exc
+
+
+def _served_path(ctx: GitContext, git_path: str) -> str:
+    target = ctx.cwd.joinpath(git_path).resolve(strict=False)
+    try:
+        return target.relative_to(settings.root_resolved).as_posix()
+    except ValueError:
+        return git_path
+
+
+def _is_binary_path(ctx: GitContext, path: str) -> bool:
+    target = ctx.cwd / path
     if not target.exists() or not target.is_file():
         return False
     chunk = target.read_bytes()[:8192]
     return b"\0" in chunk
 
 
-def _untracked_added_lines(path: str) -> int:
-    target = resolve_path(path)
+def _untracked_added_lines(ctx: GitContext, path: str) -> int:
+    target = ctx.cwd / path
     try:
         return len(target.read_text(encoding="utf-8", errors="replace").splitlines())
     except OSError:
         return 0
 
 
-def _numstat_for(path: str, status: str) -> tuple[int | None, int | None, bool]:
+def _numstat_for(ctx: GitContext, path: str, status: str) -> tuple[int | None, int | None, bool]:
     if status == "??":
-        is_binary = _is_binary_path(path)
-        return (None, None, True) if is_binary else (_untracked_added_lines(path), 0, False)
+        is_binary = _is_binary_path(ctx, path)
+        return (None, None, True) if is_binary else (_untracked_added_lines(ctx, path), 0, False)
 
-    result = _run_git(["diff", "--numstat", "HEAD", "--", path], check=False)
+    result = _run_git(["diff", "--numstat", "HEAD", "--", path], check=False, cwd=ctx.cwd)
     for line in result.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
@@ -58,17 +120,17 @@ def _numstat_for(path: str, status: str) -> tuple[int | None, int | None, bool]:
         if added_raw == "-" or deleted_raw == "-":
             return None, None, True
         return int(added_raw), int(deleted_raw), False
-    return 0, 0, _is_binary_path(path)
+    return 0, 0, _is_binary_path(ctx, path)
 
 
-def _exists_in_head(path: str) -> bool:
-    result = _run_git(["cat-file", "-e", f"HEAD:{path}"], check=False)
+def _exists_in_head(ctx: GitContext, path: str) -> bool:
+    result = _run_git(["cat-file", "-e", f"HEAD:{path}"], check=False, cwd=ctx.cwd)
     return result.returncode == 0
 
 
-def git_status() -> GitStatus:
-    _ensure_repo()
-    result = _run_git(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+def git_status(scope: str | None = None) -> GitStatus:
+    ctx = _git_context(scope)
+    result = _run_git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ctx.scope_path], cwd=ctx.cwd)
     raw_entries = [entry for entry in result.stdout.split("\0") if entry]
     files: list[GitDiffFile] = []
     index = 0
@@ -79,15 +141,15 @@ def git_status() -> GitStatus:
         if "R" in status or "C" in status:
             index += 1
         path = normalize_relative(path)
-        added, deleted, is_binary = _numstat_for(path, status)
-        files.append(GitDiffFile(path=path, status=status, added=added, deleted=deleted, is_binary=is_binary))
+        added, deleted, is_binary = _numstat_for(ctx, path, status)
+        files.append(GitDiffFile(path=_served_path(ctx, path), status=status, added=added, deleted=deleted, is_binary=is_binary))
         index += 1
     files.sort(key=lambda item: item.path)
     return GitStatus(files=files)
 
 
-def _untracked_diff(path: str) -> str:
-    target = resolve_path(path)
+def _untracked_diff(ctx: GitContext, path: str, served_path: str) -> str:
+    target = ctx.cwd / path
     try:
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
@@ -97,23 +159,24 @@ def _untracked_diff(path: str) -> str:
             [],
             lines,
             fromfile="/dev/null",
-            tofile=f"b/{path}",
+            tofile=f"b/{served_path}",
             lineterm="",
         )
     ) + "\n"
 
 
 def git_diff(path: str) -> GitDiffText:
-    _ensure_repo()
     normalized = normalize_relative(path)
-    status = next((item.status for item in git_status().files if item.path == normalized), "")
+    ctx = _git_context(normalized)
+    git_path = _git_path(ctx, normalized)
+    status = next((item.status for item in git_status(normalized).files if item.path == normalized), "")
     if not status:
         raise HTTPException(status_code=404, detail="File has no Git changes")
-    if _is_binary_path(normalized):
+    if _is_binary_path(ctx, git_path):
         return GitDiffText(path=normalized, diff="", is_binary=True)
     if status == "??":
-        return GitDiffText(path=normalized, diff=_untracked_diff(normalized), is_binary=False)
-    result = _run_git(["diff", "--no-ext-diff", "--find-renames", "HEAD", "--", normalized], check=False)
+        return GitDiffText(path=normalized, diff=_untracked_diff(ctx, git_path, normalized), is_binary=False)
+    result = _run_git(["diff", "--no-ext-diff", "--find-renames", "HEAD", "--", git_path], check=False, cwd=ctx.cwd)
     if result.returncode not in (0, 1):
         message = result.stderr.strip() or "Unable to read diff"
         raise HTTPException(status_code=400, detail=message)
@@ -122,18 +185,19 @@ def git_diff(path: str) -> GitDiffText:
     return GitDiffText(path=normalized, diff=result.stdout, is_binary=False)
 
 
-def git_stage(path: str | None = None) -> GitStatus:
-    _ensure_repo()
+def git_stage(path: str | None = None, scope: str | None = None) -> GitStatus:
+    ctx = _git_context(path or scope)
     args = ["add"]
-    args.extend(["--", normalize_relative(path)] if path else ["--all"])
-    _run_git(args)
-    return git_status()
+    args.extend(["--", _git_path(ctx, normalize_relative(path))] if path else ["--all", "--", ctx.scope_path])
+    _run_git(args, cwd=ctx.cwd)
+    return git_status(path or scope)
 
 
 def git_revert(path: str) -> GitStatus:
-    _ensure_repo()
     normalized = normalize_relative(path)
-    status = next((item.status for item in git_status().files if item.path == normalized), "")
+    ctx = _git_context(normalized)
+    git_path = _git_path(ctx, normalized)
+    status = next((item.status for item in git_status(normalized).files if item.path == normalized), "")
     if not status:
         raise HTTPException(status_code=404, detail="File has no Git changes")
     if status == "??":
@@ -141,24 +205,24 @@ def git_revert(path: str) -> GitStatus:
         if target.is_dir():
             raise HTTPException(status_code=400, detail="Refusing to remove untracked directory")
         target.unlink(missing_ok=True)
-    elif not _exists_in_head(normalized):
-        _run_git(["rm", "-f", "--", normalized])
+    elif not _exists_in_head(ctx, git_path):
+        _run_git(["rm", "-f", "--", git_path], cwd=ctx.cwd)
     else:
-        _run_git(["restore", "--source=HEAD", "--staged", "--worktree", "--", normalized])
-    return git_status()
+        _run_git(["restore", "--source=HEAD", "--staged", "--worktree", "--", git_path], cwd=ctx.cwd)
+    return git_status(normalized)
 
 
 def git_commit(request: GitCommitRequest) -> GitStatus:
-    _ensure_repo()
+    ctx = _git_context(request.scope)
     message = request.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Commit message is required")
-    _run_git(["commit", "-m", message])
-    return git_status()
+    _run_git(["commit", "-m", message], cwd=ctx.cwd)
+    return git_status(request.scope)
 
 
-def git_push() -> dict[str, str]:
-    _ensure_repo()
-    result = _run_git(["push"])
+def git_push(scope: str | None = None) -> dict[str, str]:
+    ctx = _git_context(scope)
+    result = _run_git(["push"], cwd=ctx.cwd)
     output = (result.stdout + result.stderr).strip()
     return {"status": "ok", "output": output}

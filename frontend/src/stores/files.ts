@@ -40,10 +40,19 @@ export const DEFAULT_CODEX_CONFIG: CodexConfig = {
   default_model: "gpt-5.5",
   proxy: "",
   muted_message_alpha: 0.56,
+  auto_commit_prompt: `Review the Git changes in the current directory only.
+
+Summarize the changes briefly, stage the relevant files in this directory, create a concise commit message, and commit them.
+
+If a remote/tracking branch is configured, push the commit after it succeeds.
+
+Do not amend, rebase, reset, or rewrite history. If there are no changes, unrelated changes outside this directory, or anything unsafe or unclear, stop and explain instead of committing.`,
 };
 
 export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfig = {
   count: 5,
+  heat_interval_seconds: 10,
+  heat_step_percent: 5,
 };
 
 function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
@@ -103,6 +112,7 @@ function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
     default_model: defaultModel,
     proxy: config?.proxy?.trim() ?? DEFAULT_CODEX_CONFIG.proxy,
     muted_message_alpha: normalizeAlpha(config?.muted_message_alpha, DEFAULT_CODEX_CONFIG.muted_message_alpha),
+    auto_commit_prompt: config?.auto_commit_prompt?.trim() || DEFAULT_CODEX_CONFIG.auto_commit_prompt,
   };
 }
 
@@ -114,7 +124,13 @@ function normalizeAlpha(value: unknown, fallback: number): number {
 
 function normalizeWorkspaceConfig(config?: Partial<WorkspaceConfig>): WorkspaceConfig {
   const count = Number(config?.count ?? DEFAULT_WORKSPACE_CONFIG.count);
-  return { count: Math.min(20, Math.max(1, Math.round(Number.isFinite(count) ? count : DEFAULT_WORKSPACE_CONFIG.count))) };
+  const interval = Number(config?.heat_interval_seconds ?? DEFAULT_WORKSPACE_CONFIG.heat_interval_seconds);
+  const step = Number(config?.heat_step_percent ?? DEFAULT_WORKSPACE_CONFIG.heat_step_percent);
+  return {
+    count: Math.min(20, Math.max(1, Math.round(Number.isFinite(count) ? count : DEFAULT_WORKSPACE_CONFIG.count))),
+    heat_interval_seconds: Math.min(300, Math.max(1, Number.isFinite(interval) ? interval : DEFAULT_WORKSPACE_CONFIG.heat_interval_seconds)),
+    heat_step_percent: Math.min(100, Math.max(0.1, Number.isFinite(step) ? step : DEFAULT_WORKSPACE_CONFIG.heat_step_percent)),
+  };
 }
 
 export const useFilesStore = defineStore("files", {

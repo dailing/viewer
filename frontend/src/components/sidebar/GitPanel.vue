@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { getGitStatus } from "../../api/client";
+import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import type { GitDiffFile } from "../../types/git";
 
 const emit = defineEmits<{
-  "open-diff": [path: string];
+  "open-diff": [path: string, cwd: string];
 }>();
 
 const layout = useLayoutStore();
+const fileStore = useFilesStore();
 const files = ref<GitDiffFile[]>([]);
 const loading = ref(false);
 const error = ref("");
@@ -18,7 +20,7 @@ async function load() {
   loading.value = true;
   error.value = "";
   try {
-    files.value = (await getGitStatus()).files;
+    files.value = (await getGitStatus(fileStore.currentPath)).files;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
     files.value = [];
@@ -29,7 +31,7 @@ async function load() {
 
 function open(file: GitDiffFile) {
   if (file.is_binary) return;
-  emit("open-diff", file.path);
+  emit("open-diff", file.path, fileStore.currentPath);
 }
 
 function statusTitle(file: GitDiffFile) {
@@ -41,6 +43,8 @@ onMounted(() => {
   void load();
   refreshTimer = window.setInterval(() => void load(), 5000);
 });
+
+watch(() => fileStore.currentPath, () => void load());
 
 onUnmounted(() => {
   if (refreshTimer !== null) window.clearInterval(refreshTimer);

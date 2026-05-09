@@ -18,6 +18,7 @@ import type { LayoutNode, SplitDirection } from "./types/layout";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
 const SIDEBAR_WIDTH_KEY = "viewer.sidebarWidth.v1";
+const WORKSPACE_HEAT_KEY = "viewer.workspaceHeat.v1";
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 640;
 type WorkspaceAlert = "completed" | "failed";
@@ -34,6 +35,7 @@ const activePage = ref<"workspace" | "settings" | "loops">("workspace");
 const mobileToolbarOpen = ref(false);
 const codexStatusById = ref<Record<string, CodexStatus>>({});
 const workspaceAlerts = ref<Record<string, WorkspaceAlert>>({});
+const workspaceHeat = ref<Record<string, number>>({});
 const switchingWorkspaceId = ref<string | null>(null);
 const workspaceContentLoading = ref(false);
 const sidebarWidth = ref(320);
@@ -139,6 +141,7 @@ const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 let codexRefresh: number | null = null;
+let workspaceHeatTimer: number | null = null;
 let workspaceSaveTimer: number | null = null;
 let workspaceAutosaveReady = false;
 
@@ -153,8 +156,10 @@ onMounted(async () => {
   sidebarOpen.value = sidebarPinned.value;
   layout.load();
   await Promise.all([files.loadConfig(), terminals.load(), codex.load(), workspaces.load()]);
+  loadWorkspaceHeat();
   await restoreInitialWorkspace();
   updateWorkspaceCodexNotices();
+  startWorkspaceHeatTimer();
   workspaceAutosaveReady = true;
   source = connectEvents(
     async (event) => {
@@ -182,11 +187,20 @@ watch(
 
 watch(workspaceCount, () => {
   if (!workspaceAutosaveReady) return;
+  normalizeWorkspaceHeat();
   const activeId = normalizeWorkspaceId(workspaces.activeWorkspaceId);
   if (activeId !== workspaces.activeWorkspaceId) {
     void switchWorkspace(activeId);
   }
 });
+
+watch(
+  () => [files.workspaceConfig.heat_interval_seconds, files.workspaceConfig.heat_step_percent],
+  () => {
+    if (!workspaceAutosaveReady) return;
+    startWorkspaceHeatTimer();
+  },
+);
 
 watch(sidebarPinned, (pinned) => {
   localStorage.setItem(SIDEBAR_PIN_KEY, String(pinned));
@@ -217,8 +231,8 @@ function openCodexSession(id: string) {
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
 
-function openDiff(path: string) {
-  layout.openDiff(path);
+function openDiff(path: string, cwd = "") {
+  layout.openDiff(path, cwd);
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
 
@@ -252,6 +266,75 @@ function normalizeWorkspaceId(id: string) {
   const index = Number(id);
   if (!Number.isInteger(index) || index < 1 || index > workspaceCount.value) return "1";
   return String(index);
+}
+
+function workspaceHeatIds() {
+  return Array.from({ length: Math.max(1, workspaceCount.value) }, (_, index) => String(index + 1));
+}
+
+function clampHeat(value: unknown) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return 0;
+  return Math.min(1, Math.max(0, next));
+}
+
+function heatStep() {
+  return Math.min(1, Math.max(0.001, files.workspaceConfig.heat_step_percent / 100));
+}
+
+function heatIntervalMs() {
+  return Math.max(1000, files.workspaceConfig.heat_interval_seconds * 1000);
+}
+
+function normalizeWorkspaceHeat() {
+  const next: Record<string, number> = {};
+  for (const id of workspaceHeatIds()) {
+    next[id] = clampHeat(workspaceHeat.value[id]);
+  }
+  workspaceHeat.value = next;
+  saveWorkspaceHeat();
+}
+
+function loadWorkspaceHeat() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(WORKSPACE_HEAT_KEY) || "{}");
+    const values = typeof parsed?.values === "object" && parsed.values ? parsed.values : parsed;
+    const elapsedMs = Math.max(0, Date.now() - Number(parsed?.updated_at ?? Date.now()));
+    const intervals = Math.floor(elapsedMs / heatIntervalMs());
+    const decay = Math.pow(1 - heatStep(), intervals);
+    const next: Record<string, number> = {};
+    for (const id of workspaceHeatIds()) {
+      const value = clampHeat(values?.[id]);
+      next[id] = id === workspaces.activeWorkspaceId ? 1 - (1 - value) * decay : value * decay;
+    }
+    workspaceHeat.value = next;
+  } catch {
+    workspaceHeat.value = {};
+    normalizeWorkspaceHeat();
+  }
+  saveWorkspaceHeat();
+}
+
+function saveWorkspaceHeat() {
+  localStorage.setItem(WORKSPACE_HEAT_KEY, JSON.stringify({ values: workspaceHeat.value, updated_at: Date.now() }));
+}
+
+function tickWorkspaceHeat() {
+  const activeId = displayedActiveWorkspaceId.value;
+  const step = heatStep();
+  const next: Record<string, number> = {};
+  for (const id of workspaceHeatIds()) {
+    const current = clampHeat(workspaceHeat.value[id]);
+    next[id] = id === activeId ? current + (1 - current) * step : current * (1 - step);
+  }
+  workspaceHeat.value = next;
+  saveWorkspaceHeat();
+}
+
+function startWorkspaceHeatTimer() {
+  if (workspaceHeatTimer !== null) window.clearInterval(workspaceHeatTimer);
+  tickWorkspaceHeat();
+  workspaceHeatTimer = window.setInterval(tickWorkspaceHeat, heatIntervalMs());
 }
 
 async function loadWorkspaceDirectory(path: string) {
@@ -298,6 +381,7 @@ async function switchWorkspace(id: string) {
   const previousSnapshot = currentWorkspaceSnapshot();
   workspaces.switching = true;
   switchingWorkspaceId.value = targetId;
+  tickWorkspaceHeat();
   workspaceContentLoading.value = true;
   if (workspaceSaveTimer !== null) {
     window.clearTimeout(workspaceSaveTimer);
@@ -468,6 +552,7 @@ onUnmounted(() => {
   if (workspaceSaveTimer !== null) window.clearTimeout(workspaceSaveTimer);
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
   if (codexRefresh !== null) window.clearInterval(codexRefresh);
+  if (workspaceHeatTimer !== null) window.clearInterval(workspaceHeatTimer);
 });
 </script>
 
@@ -600,6 +685,7 @@ onUnmounted(() => {
           :panel-open="sidebarOpen"
           :panel-pinned="sidebarPinned"
           :workspace-notices="workspaceNotices"
+          :workspace-heat="workspaceHeat"
           :switching-workspace="workspaces.switching"
           @open-file="openFile"
           @open-terminal="openTerminal"

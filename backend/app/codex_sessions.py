@@ -314,6 +314,11 @@ class CodexSessionManager:
             session.status = "exited" if state_status == "exited" else "failed"
             return
 
+        if state_status in ("starting", "running") and self._pid_alive(session.pid):
+            session.status = "running"
+            session.exit_code = None
+            return
+
         if session.status == "running" and not self._pid_alive(session.pid):
             session.status = "failed"
             if session.exit_code is None:
@@ -740,7 +745,8 @@ class CodexSessionManager:
         self._apply_session_rollout_status(session, events)
         new_events = events[old_count:]
         turn_status = self._turn_finished_status(new_events)
-        if session.status == "running" and turn_status is not None:
+        runner_active = self._background_run_active(session)
+        if session.status == "running" and turn_status is not None and not runner_active:
             session.status = turn_status
             if turn_status == "exited" and session.exit_code is None:
                 session.exit_code = 0

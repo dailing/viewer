@@ -185,8 +185,8 @@ async def file_resolve_link(base: str, target: str):
 
 
 @app.get("/api/git/status")
-async def git_status_route():
-    return git_status()
+async def git_status_route(scope: str | None = None):
+    return git_status(scope)
 
 
 @app.get("/api/git/diff")
@@ -196,7 +196,7 @@ async def git_diff_route(path: str):
 
 @app.post("/api/git/stage")
 async def git_stage_route(request: GitStageRequest | None = None):
-    return git_stage(request.path if request else None)
+    return git_stage(request.path if request else None, request.scope if request else None)
 
 
 @app.post("/api/git/revert")
@@ -210,8 +210,8 @@ async def git_commit_route(request: GitCommitRequest):
 
 
 @app.post("/api/git/push")
-async def git_push_route():
-    return git_push()
+async def git_push_route(scope: str | None = None):
+    return git_push(scope)
 
 
 @app.get("/api/config")

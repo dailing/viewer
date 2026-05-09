@@ -72,15 +72,27 @@ class MarkdownConfig(BaseModel):
     themes: list[MarkdownTheme] = Field(default_factory=lambda: [MarkdownTheme()])
 
 
+DEFAULT_AUTO_COMMIT_PROMPT = """Review the Git changes in the current directory only.
+
+Summarize the changes briefly, stage the relevant files in this directory, create a concise commit message, and commit them.
+
+If a remote/tracking branch is configured, push the commit after it succeeds.
+
+Do not amend, rebase, reset, or rewrite history. If there are no changes, unrelated changes outside this directory, or anything unsafe or unclear, stop and explain instead of committing."""
+
+
 class CodexConfig(BaseModel):
     available_models: list[str] = Field(default_factory=lambda: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"])
     default_model: str = "gpt-5.5"
     proxy: str = ""
     muted_message_alpha: float = Field(default=0.56, ge=0.15, le=1.0)
+    auto_commit_prompt: str = DEFAULT_AUTO_COMMIT_PROMPT
 
 
 class WorkspaceConfig(BaseModel):
     count: int = Field(default=5, ge=1, le=20)
+    heat_interval_seconds: float = Field(default=10.0, ge=1.0, le=300.0)
+    heat_step_percent: float = Field(default=5.0, ge=0.1, le=100.0)
 
 
 class ConfigData(BaseModel):
@@ -133,6 +145,7 @@ class GitDiffText(BaseModel):
 
 class GitStageRequest(BaseModel):
     path: str | None = None
+    scope: str | None = None
 
 
 class GitRevertRequest(BaseModel):
@@ -141,6 +154,7 @@ class GitRevertRequest(BaseModel):
 
 class GitCommitRequest(BaseModel):
     message: str
+    scope: str | None = None
 
 
 class TerminalInfo(BaseModel):

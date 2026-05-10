@@ -11,8 +11,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 1. `run.py` parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
 2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()` and the agent-loop scheduler on startup, stops watcher, loops, terminals, and Codex sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
-4. `App.vue` loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, and dispatches `viewer:file-changed` browser events for open panes. The top bar switches between the workspace, full-page settings, and full-page loop task editor.
-5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer. Viewers fetch raw/text content and reload when their `version` prop changes.
+4. `App.vue` loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The top bar switches between the workspace, full-page settings, and full-page loop task editor.
+5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer. Viewers fetch raw/text content and reload when their `version` prop changes; Markdown panes also track local image dependencies and reload/cache-bust embedded images when those image files change.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Raw rollout events stay server-side; REST/WebSocket snapshots send compact display events so hidden tool output is not transmitted to the browser.
 8. Loop tasks are Markdown files in `~/.view/loops/*.md` with generated YAML frontmatter plus a prompt body. `backend/app/agent_loops.py` runs an asyncio scheduler that creates/resumes Codex sessions through `codex_session_manager`, writes state to `~/.view/agent-loops.json`, and writes run logs under `~/.view/logs/agent-loops/`.
@@ -235,7 +235,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Applies appearance and active Markdown theme settings from `stores/files.ts` as CSS variables on the app shell, including nav height/icon size and Markdown/syntax colors.
 - Connects SSE with `connectEvents()`.
 - Refreshes affected file listings on change events.
-- Dispatches `viewer:file-changed` when an open file changes.
+- Dispatches every filesystem SSE as `viewer:file-changed`; individual panes filter these events against their own file path or viewer-specific dependency set.
 - Polls terminal list every 3 seconds.
 - Renders active pane toolbar metadata, actions, and generic controls from `stores/paneToolbar.ts` in the top bar while the workspace page is active, plus global pane split actions.
 - On phone-width screens, active-pane toolbar actions and controls collapse behind a top-bar overflow menu while global pane actions remain inline.
@@ -362,8 +362,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `escapeHtml(value)`: code-block fallback escaping.
 - Custom fence renderer turns ```mermaid fences into Mermaid blocks.
 - `renderMermaidIn()`: replaces Mermaid blocks with rendered SVG or marks errors.
-- `load()`: fetches Markdown text, renders HTML with the current Markdown path as link context, renders Mermaid, restores scroll.
-- Normal clicks on local Markdown links call `/api/file/resolve-link` and open the resolved file in the active viewer pane. Local images are rendered through `/api/file/raw` with the current Markdown path as `base`.
+- `load()`: fetches Markdown text, renders HTML with the current Markdown path as link context, tracks local image dependencies, renders Mermaid, restores scroll.
+- Registers Markdown-specific top-bar actions for manual reload and rendered/raw view switching.
+- Normal clicks on local Markdown links call `/api/file/resolve-link` and open the resolved file in the active viewer pane. Local images are rendered through `/api/file/raw` with the current Markdown path as `base` and a viewer version cache key.
 - `persistCurrentScroll()`: saves scroll position.
 - Uses Markdown and syntax CSS variables from the active theme for headings, paragraphs, links, code blocks, tables, and Highlight.js token colors.
 

@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import hljs from "highlight.js";
-import { computed, nextTick, onUnmounted, ref } from "vue";
-import { getText, resolveMarkdownLink } from "../../api/client";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { getText, rawUrl, resolveMarkdownLink } from "../../api/client";
 import { useReloadingScrollMemory } from "../../composables/useScrollMemory";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
-import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
+import { extractMarkdownImageTargets, isLocalLinkTarget, renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
+import { fileChangeAffectsPath } from "../../utils/paths";
 import { restoreScrollPosition } from "../../utils/scrollMemory";
+import type { WatchEvent } from "../../types/files";
 
 type MarkdownMode = "rendered" | "raw";
 
@@ -20,6 +22,8 @@ const text = ref("");
 const html = ref("");
 const error = ref("");
 const container = ref<HTMLElement | null>(null);
+const imageDependencies = ref<Set<string>>(new Set());
+const assetVersion = ref(0);
 
 const highlightedRaw = computed(() => {
   if (!text.value) return "";
@@ -39,23 +43,52 @@ function registerToolbar() {
   toolbar.setPaneToolbar(props.paneId, {
     title: props.path,
     actions: [
+      { id: "markdown-reload", title: "Reload Markdown", icon: "bi-arrow-clockwise", run: load },
       { id: "markdown-rendered", title: "Rendered Markdown", label: "Rendered", active: mode.value === "rendered", run: () => setMode("rendered") },
       { id: "markdown-raw", title: "Raw Markdown", label: "Raw", active: mode.value === "raw", run: () => setMode("raw") },
     ],
   });
 }
 
+async function updateImageDependencies(source: string) {
+  const targets = extractMarkdownImageTargets(source);
+  const resolved = await Promise.allSettled(targets.map((target) => resolveMarkdownLink(props.path, target)));
+  imageDependencies.value = new Set(
+    resolved
+      .filter((result): result is PromiseFulfilledResult<{ path: string }> => result.status === "fulfilled")
+      .map((result) => result.value.path),
+  );
+}
+
 async function load() {
   error.value = "";
   try {
+    assetVersion.value += 1;
     text.value = await getText(props.path);
-    html.value = renderMarkdown(text.value, { basePath: props.path });
+    html.value = renderMarkdown(text.value, { basePath: props.path, assetVersion: assetVersion.value });
+    await updateImageDependencies(text.value);
     registerToolbar();
     await nextTick();
+    rewriteLocalHtmlImages();
     if (mode.value === "rendered") await renderMermaidIn(container.value);
     await restoreScrollPosition(props.path, container.value);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function rewriteLocalHtmlImages() {
+  for (const image of Array.from(container.value?.querySelectorAll<HTMLImageElement>("img[src]") ?? [])) {
+    const src = image.getAttribute("src") ?? "";
+    if (src.startsWith("/api/file/raw") || !isLocalLinkTarget(src)) continue;
+    image.setAttribute("src", rawUrl(src, String(assetVersion.value), props.path));
+  }
+}
+
+function handleFileChanged(event: Event) {
+  const detail = (event as CustomEvent<WatchEvent>).detail;
+  if ([...imageDependencies.value].some((path) => fileChangeAffectsPath(detail.path, path))) {
+    void load();
   }
 }
 
@@ -88,7 +121,12 @@ async function openMarkdownLink(event: MouseEvent) {
   }
 }
 
+onMounted(() => {
+  window.addEventListener("viewer:file-changed", handleFileChanged);
+});
+
 onUnmounted(() => {
+  window.removeEventListener("viewer:file-changed", handleFileChanged);
   toolbar.clearPaneToolbar(props.paneId);
 });
 </script>

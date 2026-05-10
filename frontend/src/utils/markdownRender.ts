@@ -19,6 +19,7 @@ mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
 export interface RenderMarkdownOptions {
   basePath?: string;
   baseDirectory?: string;
+  assetVersion?: string | number;
 }
 
 function escapeHtml(value: string): string {
@@ -41,7 +42,7 @@ function codeLanguageClass(language: string): string {
   return language ? ` class="language-${escapeAttribute(language)}"` : "";
 }
 
-function isLocalLinkTarget(value: string): boolean {
+export function isLocalLinkTarget(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("//")) return false;
   const schemeMatch = trimmed.match(/^([A-Za-z][A-Za-z\d+.-]*):/);
@@ -145,7 +146,7 @@ md.renderer.rules.image = (tokens: any[], idx: number, options: any, env: Render
   const token = tokens[idx];
   const src = token.attrGet("src");
   if (env.basePath && src && isLocalLinkTarget(src)) {
-    token.attrSet("src", rawUrl(src, undefined, env.basePath));
+    token.attrSet("src", rawUrl(src, env.assetVersion === undefined ? undefined : String(env.assetVersion), env.basePath));
   }
   return image ? image(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
 };
@@ -164,6 +165,36 @@ md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: Re
 
 export function renderMarkdown(source: string, options: RenderMarkdownOptions = {}): string {
   return md.render(source, options);
+}
+
+function visitTokens(tokens: any[], visitor: (token: any) => void) {
+  for (const token of tokens) {
+    visitor(token);
+    if (Array.isArray(token.children)) visitTokens(token.children, visitor);
+  }
+}
+
+function extractHtmlImageTargets(source: string): string[] {
+  const targets: string[] = [];
+  const imgPattern = /<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+  let match: RegExpExecArray | null;
+  while ((match = imgPattern.exec(source))) {
+    const target = match[1] ?? match[2] ?? match[3] ?? "";
+    if (target) targets.push(target);
+  }
+  return targets;
+}
+
+export function extractMarkdownImageTargets(source: string): string[] {
+  const targets: string[] = [];
+  const tokens = md.parse(source, {});
+  visitTokens(tokens, (token) => {
+    if (token.type !== "image") return;
+    const src = token.attrGet("src");
+    if (src) targets.push(src);
+  });
+  targets.push(...extractHtmlImageTargets(source));
+  return [...new Set(targets.filter(isLocalLinkTarget))];
 }
 
 export async function renderMermaidIn(container: HTMLElement | null, idPrefix = "mermaid"): Promise<void> {

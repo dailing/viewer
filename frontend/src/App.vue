@@ -11,7 +11,6 @@ import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
 import { useWorkspacesStore } from "./stores/workspaces";
-import { parentPath } from "./utils/paths";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { CodexSessionInfo, CodexStatus } from "./types/codex";
 import type { LayoutNode, SplitDirection } from "./types/layout";
@@ -147,11 +146,6 @@ let workspaceHeatTimer: number | null = null;
 let workspaceSaveTimer: number | null = null;
 let workspaceAutosaveReady = false;
 
-function eventAffectsOpenPath(eventPath: string): boolean {
-  const paths = [...layout.openPaths, ...layout.openDiffPaths];
-  return paths.some((openPath) => openPath === eventPath || parentPath(openPath) === eventPath);
-}
-
 onMounted(async () => {
   sidebarPinned.value = localStorage.getItem(SIDEBAR_PIN_KEY) === "true";
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || sidebarWidth.value);
@@ -166,9 +160,7 @@ onMounted(async () => {
   source = connectEvents(
     async (event) => {
       await files.refreshAffected(event.path, event.is_dir);
-      if (eventAffectsOpenPath(event.path)) {
-        window.dispatchEvent(new CustomEvent("viewer:file-changed", { detail: event }));
-      }
+      window.dispatchEvent(new CustomEvent("viewer:file-changed", { detail: event }));
     },
   );
   terminalRefresh = window.setInterval(() => {

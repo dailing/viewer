@@ -5,17 +5,17 @@ import FileSidebar from "./components/FileSidebar.vue";
 import LoopTasksPage from "./components/LoopTasksPage.vue";
 import Workspace from "./components/Workspace.vue";
 import { connectEvents } from "./api/events";
+import { useAgentsStore } from "./stores/agents";
 import { useCodexStore } from "./stores/codex";
 import { useFilesStore } from "./stores/files";
-import { useHermesStore } from "./stores/hermes";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
 import { useWorkspacesStore } from "./stores/workspaces";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
-import type { CodexSessionInfo, CodexStatus } from "./types/codex";
-import type { HermesSessionInfo, HermesStatus } from "./types/hermes";
+import type { AgentSessionInfo, AgentStatus } from "./types/agents";
 import type { LayoutNode, SplitDirection } from "./types/layout";
+import { agentRef, legacyAgentRefForPane, parseAgentRef } from "./utils/agents";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
 const SIDEBAR_WIDTH_KEY = "viewer.sidebarWidth.v1";
@@ -24,8 +24,8 @@ const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 640;
 type WorkspaceNotice = "completed" | "failed" | "running";
 const files = useFilesStore();
+const agents = useAgentsStore();
 const codex = useCodexStore();
-const hermes = useHermesStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
@@ -34,8 +34,7 @@ const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
 const activePage = ref<"workspace" | "settings" | "loops">("workspace");
 const mobileToolbarOpen = ref(false);
-const codexStatusById = ref<Record<string, CodexStatus>>({});
-const hermesStatusById = ref<Record<string, HermesStatus>>({});
+const agentStatusByRef = ref<Record<string, AgentStatus>>({});
 const workspaceHeat = ref<Record<string, number>>({});
 const switchingWorkspaceId = ref<string | null>(null);
 const workspaceContentLoading = ref(false);
@@ -93,14 +92,18 @@ const activePaneTitle = computed(() => {
   const pane = layout.activePane;
   if (!pane || pane.type !== "pane") return "Empty pane";
   if (pane.terminalId) return "Terminal";
-  if (pane.codexSessionId) return codex.sessions.find((session) => session.id === pane.codexSessionId)?.title ?? "Codex";
-  if (pane.hermesSessionId) return hermes.sessions.find((session) => session.id === pane.hermesSessionId)?.title ?? "Hermes";
+  const paneAgent = legacyAgentRefForPane(pane);
+  if (paneAgent) {
+    const session = agents.sessions.find((item) => item.ref === paneAgent);
+    const parsed = parseAgentRef(paneAgent);
+    return session?.title ?? (parsed ? agents.providerById(parsed.provider).name : "Agent");
+  }
   if (pane.diffPath) return `Diff: ${pane.diffPath}`;
   return pane.filePath || "Empty pane";
 });
 const activePaneHasContent = computed(() => {
   const pane = layout.activePane;
-  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || pane.codexSessionId || pane.hermesSessionId || pane.diffPath));
+  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || legacyAgentRefForPane(pane) || pane.diffPath));
 });
 const globalPaneActions = computed<PaneToolbarAction[]>(() => {
   if (!layout.activePaneId) return [];
@@ -134,19 +137,11 @@ const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
   const notices: Record<string, WorkspaceNotice> = {};
   for (const workspaceId of workspaceHeatIds()) {
     let notice: WorkspaceNotice | null = null;
-    for (const sessionId of workspaceCodexSessionIds(workspaceId)) {
-      const session = codex.sessions.find((item) => item.id === sessionId);
+    for (const ref of workspaceAgentSessionRefs(workspaceId)) {
+      const session = agents.sessions.find((item) => item.ref === ref);
       if (!session) continue;
-      notice = higherPriorityWorkspaceNotice(notice, noticeForCodexSession(session));
+      notice = higherPriorityWorkspaceNotice(notice, noticeForAgentSession(session));
       if (notice === "failed") break;
-    }
-    if (notice !== "failed") {
-      for (const sessionId of workspaceHermesSessionIds(workspaceId)) {
-        const session = hermes.sessions.find((item) => item.id === sessionId);
-        if (!session) continue;
-        notice = higherPriorityWorkspaceNotice(notice, noticeForHermesSession(session));
-        if (notice === "failed") break;
-      }
     }
     if (notice) notices[workspaceId] = notice;
   }
@@ -155,7 +150,7 @@ const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 let codexRefresh: number | null = null;
-let hermesRefresh: number | null = null;
+let agentRefresh: number | null = null;
 let workspaceHeatTimer: number | null = null;
 let workspaceSaveTimer: number | null = null;
 let workspaceAutosaveReady = false;
@@ -165,10 +160,10 @@ onMounted(async () => {
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || sidebarWidth.value);
   sidebarOpen.value = sidebarPinned.value;
   layout.load();
-  await Promise.all([files.loadConfig(), terminals.load(), codex.load(), hermes.load(), workspaces.load()]);
+  await Promise.all([files.loadConfig(), terminals.load(), codex.load(), agents.load(), workspaces.load()]);
   loadWorkspaceHeat();
   await restoreInitialWorkspace();
-  updateWorkspaceCodexNotices();
+  updateWorkspaceAgentNotices();
   startWorkspaceHeatTimer();
   workspaceAutosaveReady = true;
   source = connectEvents(
@@ -183,13 +178,13 @@ onMounted(async () => {
   codexRefresh = window.setInterval(() => {
     void codex.load();
   }, 3000);
-  hermesRefresh = window.setInterval(() => {
-    void hermes.load();
+  agentRefresh = window.setInterval(() => {
+    void agents.load();
   }, 3000);
 });
 
 watch(
-  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => files.visitTimes, () => workspaces.activeCodexSessionIds, () => workspaces.activeHermesSessionIds],
+  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => files.visitTimes, () => workspaces.activeAgentSessionRefs],
   () => {
     scheduleWorkspaceSave();
   },
@@ -219,16 +214,9 @@ watch(sidebarPinned, (pinned) => {
 });
 
 watch(
-  () => codex.sessions.map((session) => `${session.id}:${session.status}`).join("|"),
+  () => agents.sessions.map((session) => `${session.ref}:${session.status}`).join("|"),
   () => {
-    updateWorkspaceCodexNotices();
-  },
-);
-
-watch(
-  () => hermes.sessions.map((session) => `${session.id}:${session.status}`).join("|"),
-  () => {
-    updateWorkspaceHermesNotices();
+    updateWorkspaceAgentNotices();
   },
 );
 
@@ -243,17 +231,10 @@ function openTerminal(id: string) {
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
 
-function openCodexSession(id: string) {
-  codex.markRead(id);
-  workspaces.rememberActiveCodexSession(id);
-  layout.openCodexSession(id);
-  if (!sidebarPinned.value) sidebarOpen.value = false;
-}
-
-function openHermesSession(id: string) {
-  hermes.markRead(id);
-  workspaces.rememberActiveHermesSession(id);
-  layout.openHermesSession(id);
+function openAgentSession(ref: string) {
+  agents.markRead(ref);
+  workspaces.rememberActiveAgentSession(ref);
+  layout.openAgentSession(ref);
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
 
@@ -264,13 +245,15 @@ function openDiff(path: string, cwd = "") {
 
 function currentWorkspaceSnapshot() {
   const snapshot = layout.snapshot();
+  const refs = [...workspaces.activeAgentSessionRefs];
   return {
     layout: snapshot.root,
     active_pane_id: snapshot.activePaneId,
     current_path: files.currentPath,
     pinned: [...files.pinned],
-    codex_session_ids: [...workspaces.activeCodexSessionIds],
-    hermes_session_ids: [...workspaces.activeHermesSessionIds],
+    agent_session_ids: refs,
+    codex_session_ids: refs.flatMap((ref) => (ref.startsWith("codex:") ? [ref.slice("codex:".length)] : [])),
+    hermes_session_ids: refs.flatMap((ref) => (ref.startsWith("hermes:") ? [ref.slice("hermes:".length)] : [])),
     visit_times: { ...files.visitTimes },
   };
 }
@@ -444,54 +427,29 @@ async function switchWorkspace(id: string) {
   }
 }
 
-function updateWorkspaceCodexNotices() {
-  const previous = codexStatusById.value;
-  const next: Record<string, CodexStatus> = {};
+function updateWorkspaceAgentNotices() {
+  const previous = agentStatusByRef.value;
+  const next: Record<string, AgentStatus> = {};
 
-  for (const session of codex.sessions) {
-    next[session.id] = session.status;
+  for (const session of agents.sessions) {
+    next[session.ref] = session.status;
     if (!["exited", "failed"].includes(session.status)) continue;
-    for (const workspaceId of workspaceIdsForCodexSession(session.id)) {
-      if (previous[session.id] !== "running" && !sessionFinishedAfterWorkspaceSaved(session, workspaceId)) continue;
-      if (workspaceId === workspaces.activeWorkspaceId && activePaneCodexSessionId() === session.id) {
-        codex.markRead(session.id);
+    for (const workspaceId of workspaceIdsForAgentSession(session.ref)) {
+      if (previous[session.ref] !== "running" && !sessionFinishedAfterWorkspaceSaved(session, workspaceId)) continue;
+      if (workspaceId === workspaces.activeWorkspaceId && activePaneAgentRef() === session.ref) {
+        agents.markRead(session.ref);
         continue;
       }
-      codex.markUnread(session.id);
+      agents.markUnread(session.ref);
     }
   }
 
-  codexStatusById.value = next;
+  agentStatusByRef.value = next;
 }
 
-function updateWorkspaceHermesNotices() {
-  const previous = hermesStatusById.value;
-  const next: Record<string, HermesStatus> = {};
-
-  for (const session of hermes.sessions) {
-    next[session.id] = session.status;
-    if (!["exited", "failed"].includes(session.status)) continue;
-    for (const workspaceId of workspaceIdsForHermesSession(session.id)) {
-      if (previous[session.id] !== "running" && !sessionFinishedAfterWorkspaceSaved(session, workspaceId)) continue;
-      if (workspaceId === workspaces.activeWorkspaceId && activePaneHermesSessionId() === session.id) {
-        hermes.markRead(session.id);
-        continue;
-      }
-      hermes.markUnread(session.id);
-    }
-  }
-
-  hermesStatusById.value = next;
-}
-
-function activePaneCodexSessionId() {
+function activePaneAgentRef() {
   const pane = layout.activePane;
-  return pane?.type === "pane" ? pane.codexSessionId : undefined;
-}
-
-function activePaneHermesSessionId() {
-  const pane = layout.activePane;
-  return pane?.type === "pane" ? pane.hermesSessionId : undefined;
+  return pane?.type === "pane" ? legacyAgentRefForPane(pane) : undefined;
 }
 
 function noticePriority(notice: WorkspaceNotice | null) {
@@ -505,75 +463,45 @@ function higherPriorityWorkspaceNotice(current: WorkspaceNotice | null, next: Wo
   return noticePriority(next) > noticePriority(current) ? next : current;
 }
 
-function noticeForCodexSession(session: CodexSessionInfo): WorkspaceNotice | null {
+function noticeForAgentSession(session: AgentSessionInfo): WorkspaceNotice | null {
   if (session.status === "failed") return "failed";
-  if (session.status === "exited" && codex.unreadSessionIds.includes(session.id)) return "completed";
+  if (session.status === "exited" && agents.unreadSessionRefs.includes(session.ref)) return "completed";
   if (session.status === "running") return "running";
   return null;
 }
 
-function noticeForHermesSession(session: HermesSessionInfo): WorkspaceNotice | null {
-  if (session.status === "failed") return "failed";
-  if (session.status === "exited" && hermes.unreadSessionIds.includes(session.id)) return "completed";
-  if (session.status === "running") return "running";
-  return null;
+function workspaceAgentSessionRefs(workspaceId: string) {
+  const refs = new Set<string>();
+  const snapshot = workspaceId === displayedActiveWorkspaceId.value ? null : workspaces.snapshotFor(workspaceId);
+  const snapshotRefs = workspaceId === displayedActiveWorkspaceId.value ? workspaces.activeAgentSessionRefs : snapshot?.agent_session_ids ?? [];
+  for (const ref of snapshotRefs) refs.add(ref);
+  for (const id of snapshot?.codex_session_ids ?? []) refs.add(agentRef("codex", id));
+  for (const id of snapshot?.hermes_session_ids ?? []) refs.add(agentRef("hermes", id));
+  const root = workspaceId === displayedActiveWorkspaceId.value ? layout.root : snapshot?.layout;
+  if (root) collectLayoutAgentSessionRefs(root, refs);
+  return [...refs];
 }
 
-function workspaceCodexSessionIds(workspaceId: string) {
-  const ids = new Set<string>();
-  const snapshotIds = workspaceId === displayedActiveWorkspaceId.value ? workspaces.activeCodexSessionIds : workspaces.snapshotFor(workspaceId)?.codex_session_ids ?? [];
-  for (const id of snapshotIds) ids.add(id);
-  const root = workspaceId === displayedActiveWorkspaceId.value ? layout.root : workspaces.snapshotFor(workspaceId)?.layout;
-  if (root) collectLayoutCodexSessionIds(root, ids);
-  return [...ids];
-}
-
-function workspaceHermesSessionIds(workspaceId: string) {
-  const ids = new Set<string>();
-  const snapshotIds = workspaceId === displayedActiveWorkspaceId.value ? workspaces.activeHermesSessionIds : workspaces.snapshotFor(workspaceId)?.hermes_session_ids ?? [];
-  for (const id of snapshotIds) ids.add(id);
-  const root = workspaceId === displayedActiveWorkspaceId.value ? layout.root : workspaces.snapshotFor(workspaceId)?.layout;
-  if (root) collectLayoutHermesSessionIds(root, ids);
-  return [...ids];
-}
-
-function workspaceIdsForCodexSession(sessionId: string) {
+function workspaceIdsForAgentSession(ref: string) {
   const ids: string[] = [];
   for (let index = 1; index <= workspaceCount.value; index += 1) {
     const workspaceId = String(index);
-    if (workspaceCodexSessionIds(workspaceId).includes(sessionId)) ids.push(workspaceId);
+    if (workspaceAgentSessionRefs(workspaceId).includes(ref)) ids.push(workspaceId);
   }
   return ids;
 }
 
-function workspaceIdsForHermesSession(sessionId: string) {
-  const ids: string[] = [];
-  for (let index = 1; index <= workspaceCount.value; index += 1) {
-    const workspaceId = String(index);
-    if (workspaceHermesSessionIds(workspaceId).includes(sessionId)) ids.push(workspaceId);
-  }
-  return ids;
-}
-
-function collectLayoutCodexSessionIds(node: LayoutNode, ids: Set<string>) {
+function collectLayoutAgentSessionRefs(node: LayoutNode, refs: Set<string>) {
   if (node.type === "pane") {
-    if (node.codexSessionId) ids.add(node.codexSessionId);
+    const ref = legacyAgentRefForPane(node);
+    if (ref) refs.add(ref);
     return;
   }
-  collectLayoutCodexSessionIds(node.first, ids);
-  collectLayoutCodexSessionIds(node.second, ids);
+  collectLayoutAgentSessionRefs(node.first, refs);
+  collectLayoutAgentSessionRefs(node.second, refs);
 }
 
-function collectLayoutHermesSessionIds(node: LayoutNode, ids: Set<string>) {
-  if (node.type === "pane") {
-    if (node.hermesSessionId) ids.add(node.hermesSessionId);
-    return;
-  }
-  collectLayoutHermesSessionIds(node.first, ids);
-  collectLayoutHermesSessionIds(node.second, ids);
-}
-
-function sessionFinishedAfterWorkspaceSaved(session: CodexSessionInfo | HermesSessionInfo, workspaceId: string) {
+function sessionFinishedAfterWorkspaceSaved(session: AgentSessionInfo, workspaceId: string) {
   const snapshotUpdatedAt = workspaces.snapshotFor(workspaceId)?.updated_at;
   return Boolean(snapshotUpdatedAt && session.updated_at > snapshotUpdatedAt);
 }
@@ -657,7 +585,7 @@ onUnmounted(() => {
   if (workspaceSaveTimer !== null) window.clearTimeout(workspaceSaveTimer);
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
   if (codexRefresh !== null) window.clearInterval(codexRefresh);
-  if (hermesRefresh !== null) window.clearInterval(hermesRefresh);
+  if (agentRefresh !== null) window.clearInterval(agentRefresh);
   if (workspaceHeatTimer !== null) window.clearInterval(workspaceHeatTimer);
 });
 </script>
@@ -787,8 +715,7 @@ onUnmounted(() => {
         <FileSidebar
           :workspace-count="workspaceCount"
           :active-workspace-id="displayedActiveWorkspaceId"
-          :codex-session-ids="workspaces.activeCodexSessionIds"
-          :hermes-session-ids="workspaces.activeHermesSessionIds"
+          :agent-session-refs="workspaces.activeAgentSessionRefs"
           :panel-open="sidebarOpen"
           :panel-pinned="sidebarPinned"
           :workspace-notices="workspaceNotices"
@@ -796,8 +723,7 @@ onUnmounted(() => {
           :switching-workspace="workspaces.switching"
           @open-file="openFile"
           @open-terminal="openTerminal"
-          @open-codex-session="openCodexSession"
-          @open-hermes-session="openHermesSession"
+          @open-agent-session="openAgentSession"
           @open-diff="openDiff"
           @switch-workspace="switchWorkspace"
           @toggle-tool-panel="toggleToolPanel"

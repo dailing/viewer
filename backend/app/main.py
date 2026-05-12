@@ -49,6 +49,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+AGENT_PROVIDERS = {
+    "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars"},
+    "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge"},
+}
+
+AGENT_MANAGERS = {
+    "codex": codex_session_manager,
+    "hermes": hermes_session_manager,
+}
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -365,11 +375,15 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
 
 
 def _agent_manager(provider: str):
-    if provider == "codex":
-        return codex_session_manager
-    if provider == "hermes":
-        return hermes_session_manager
+    manager = AGENT_MANAGERS.get(provider)
+    if manager:
+        return manager
     raise HTTPException(status_code=400, detail="Unsupported agent provider")
+
+
+@app.get("/api/agents/providers")
+async def agent_providers():
+    return list(AGENT_PROVIDERS.values())
 
 
 @app.get("/api/agents/sessions")
@@ -377,8 +391,7 @@ async def agent_sessions(provider: str | None = None):
     if provider:
         return _agent_manager(provider).list()
     return {
-        "codex": codex_session_manager.list(),
-        "hermes": hermes_session_manager.list(),
+        provider: manager.list() for provider, manager in AGENT_MANAGERS.items()
     }
 
 

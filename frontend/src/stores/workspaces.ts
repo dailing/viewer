@@ -11,6 +11,7 @@ export const useWorkspacesStore = defineStore("workspaces", {
     activeWorkspaceId: "1",
     count: 5,
     slots: {} as Record<string, WorkspaceSnapshot>,
+    activeAgentSessionRefs: [] as string[],
     activeCodexSessionIds: [] as string[],
     activeHermesSessionIds: [] as string[],
     loaded: false,
@@ -34,20 +35,39 @@ export const useWorkspacesStore = defineStore("workspaces", {
       this.activeHermesSessionIds = uniqueIds(snapshot?.hermes_session_ids ?? []);
     },
     restoreActiveAgentSessions(snapshot: WorkspaceSnapshot | null) {
+      this.activeAgentSessionRefs = uniqueIds([
+        ...(snapshot?.agent_session_ids ?? []),
+        ...(snapshot?.codex_session_ids ?? []).map((id) => `codex:${id}`),
+        ...(snapshot?.hermes_session_ids ?? []).map((id) => `hermes:${id}`),
+      ]);
       this.restoreActiveCodexSessions(snapshot);
       this.restoreActiveHermesSessions(snapshot);
     },
+    rememberActiveAgentSession(ref: string) {
+      this.activeAgentSessionRefs = uniqueIds([...this.activeAgentSessionRefs, ref]);
+      if (ref.startsWith("codex:")) this.rememberActiveCodexSession(ref.slice("codex:".length));
+      if (ref.startsWith("hermes:")) this.rememberActiveHermesSession(ref.slice("hermes:".length));
+    },
+    forgetActiveAgentSession(ref: string) {
+      this.activeAgentSessionRefs = this.activeAgentSessionRefs.filter((item) => item !== ref);
+      if (ref.startsWith("codex:")) this.forgetActiveCodexSession(ref.slice("codex:".length));
+      if (ref.startsWith("hermes:")) this.forgetActiveHermesSession(ref.slice("hermes:".length));
+    },
     rememberActiveCodexSession(id: string) {
       this.activeCodexSessionIds = uniqueIds([...this.activeCodexSessionIds, id]);
+      this.activeAgentSessionRefs = uniqueIds([...this.activeAgentSessionRefs, `codex:${id}`]);
     },
     forgetActiveCodexSession(id: string) {
       this.activeCodexSessionIds = this.activeCodexSessionIds.filter((item) => item !== id);
+      this.activeAgentSessionRefs = this.activeAgentSessionRefs.filter((item) => item !== `codex:${id}`);
     },
     rememberActiveHermesSession(id: string) {
       this.activeHermesSessionIds = uniqueIds([...this.activeHermesSessionIds, id]);
+      this.activeAgentSessionRefs = uniqueIds([...this.activeAgentSessionRefs, `hermes:${id}`]);
     },
     forgetActiveHermesSession(id: string) {
       this.activeHermesSessionIds = this.activeHermesSessionIds.filter((item) => item !== id);
+      this.activeAgentSessionRefs = this.activeAgentSessionRefs.filter((item) => item !== `hermes:${id}`);
     },
     async saveSlot(id: string, snapshot: WorkspaceSnapshot, options?: { restoreActive?: boolean }) {
       const data = await putWorkspace(id, { ...snapshot, updated_at: Date.now() / 1000 });

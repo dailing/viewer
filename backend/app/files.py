@@ -362,6 +362,35 @@ def write_workspaces(data: WorkspaceData) -> WorkspaceData:
     return data
 
 
+def _unique_nonempty_strings(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item.strip() for item in items if item.strip()))
+
+
+def _layout_session_ids(layout: object, key: str) -> list[str]:
+    ids: list[str] = []
+
+    def visit(node: object) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "pane":
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                ids.append(value.strip())
+            return
+        visit(node.get("first"))
+        visit(node.get("second"))
+
+    visit(layout)
+    return _unique_nonempty_strings(ids)
+
+
+def _layout_agent_refs(layout: object) -> list[str]:
+    refs = _layout_session_ids(layout, "agentSession")
+    refs.extend(f"codex:{item}" for item in _layout_session_ids(layout, "codexSessionId"))
+    refs.extend(f"hermes:{item}" for item in _layout_session_ids(layout, "hermesSessionId"))
+    return _unique_nonempty_strings(refs)
+
+
 def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> WorkspaceData:
     cleaned_id = workspace_id.strip()
     if not cleaned_id:
@@ -378,6 +407,10 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
     for path, visited_at in snapshot.visit_times.items():
         cleaned = normalize_relative(path)
         visit_times[cleaned] = visited_at
+    agent_refs = list(snapshot.agent_session_ids)
+    agent_refs.extend(f"codex:{item}" for item in snapshot.codex_session_ids)
+    agent_refs.extend(f"hermes:{item}" for item in snapshot.hermes_session_ids)
+    agent_refs.extend(_layout_agent_refs(snapshot.layout))
     data = read_workspaces()
     data.active_workspace_id = cleaned_id
     data.slots[cleaned_id] = WorkspaceSnapshot(
@@ -385,7 +418,9 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
         active_pane_id=snapshot.active_pane_id,
         current_path=current_path,
         pinned=pinned,
-        codex_session_ids=list(dict.fromkeys(item.strip() for item in snapshot.codex_session_ids if item.strip())),
+        agent_session_ids=_unique_nonempty_strings(agent_refs),
+        codex_session_ids=_unique_nonempty_strings(snapshot.codex_session_ids),
+        hermes_session_ids=_unique_nonempty_strings(snapshot.hermes_session_ids),
         visit_times=visit_times,
         updated_at=snapshot.updated_at,
     )
@@ -530,9 +565,33 @@ def migrate_workspace_state(raw: object) -> object:
         if not isinstance(snapshot, dict):
             continue
         next_snapshot = dict(snapshot)
-        if "codex_session_ids" not in next_snapshot:
-            next_snapshot["codex_session_ids"] = []
+        if "agent_session_ids" not in next_snapshot:
+            refs = _layout_agent_refs(next_snapshot.get("layout"))
+            refs.extend(f"codex:{item}" for item in next_snapshot.get("codex_session_ids", []) if isinstance(item, str))
+            refs.extend(f"hermes:{item}" for item in next_snapshot.get("hermes_session_ids", []) if isinstance(item, str))
+            next_snapshot["agent_session_ids"] = _unique_nonempty_strings(refs)
             changed = True
+        elif not next_snapshot.get("agent_session_ids"):
+            layout_agent_refs = _layout_agent_refs(next_snapshot.get("layout"))
+            if layout_agent_refs:
+                next_snapshot["agent_session_ids"] = layout_agent_refs
+                changed = True
+        if "codex_session_ids" not in next_snapshot:
+            next_snapshot["codex_session_ids"] = _layout_session_ids(next_snapshot.get("layout"), "codexSessionId")
+            changed = True
+        elif not next_snapshot.get("codex_session_ids"):
+            layout_codex_ids = _layout_session_ids(next_snapshot.get("layout"), "codexSessionId")
+            if layout_codex_ids:
+                next_snapshot["codex_session_ids"] = layout_codex_ids
+                changed = True
+        if "hermes_session_ids" not in next_snapshot:
+            next_snapshot["hermes_session_ids"] = _layout_session_ids(next_snapshot.get("layout"), "hermesSessionId")
+            changed = True
+        elif not next_snapshot.get("hermes_session_ids"):
+            layout_hermes_ids = _layout_session_ids(next_snapshot.get("layout"), "hermesSessionId")
+            if layout_hermes_ids:
+                next_snapshot["hermes_session_ids"] = layout_hermes_ids
+                changed = True
         if "visit_times" not in next_snapshot:
             next_snapshot["visit_times"] = active_visit_times if str(workspace_id) == active_workspace_id else {}
             changed = True

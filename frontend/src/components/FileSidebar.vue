@@ -2,13 +2,12 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { getGitStatus } from "../api/client";
 import { useFilesStore } from "../stores/files";
-import CodexSessionsPanel from "./sidebar/CodexSessionsPanel.vue";
+import AgentSessionsPanel from "./sidebar/AgentSessionsPanel.vue";
 import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
-import HermesSessionsPanel from "./sidebar/HermesSessionsPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 
-type SidebarTool = "files" | "git" | "terminals" | "codex" | "hermes";
+type SidebarTool = "files" | "git" | "terminals" | "agents";
 type WorkspaceNotice = "running" | "completed" | "failed";
 type GitIndicator = "clean" | "dirty" | "none";
 
@@ -17,8 +16,7 @@ const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 const props = defineProps<{
   workspaceCount: number;
   activeWorkspaceId: string;
-  codexSessionIds: string[];
-  hermesSessionIds: string[];
+  agentSessionRefs: string[];
   panelOpen: boolean;
   panelPinned: boolean;
   workspaceNotices?: Record<string, WorkspaceNotice>;
@@ -29,8 +27,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "open-file": [path: string];
   "open-terminal": [id: string];
-  "open-codex-session": [id: string];
-  "open-hermes-session": [id: string];
+  "open-agent-session": [ref: string];
   "open-diff": [path: string, cwd: string];
   "switch-workspace": [id: string];
   "toggle-tool-panel": [];
@@ -42,8 +39,7 @@ const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
   { id: "files", title: "Files", icon: "bi-files" },
   { id: "git", title: "Changes", icon: "bi-git" },
   { id: "terminals", title: "Terminals", icon: "bi-terminal" },
-  { id: "codex", title: "Codex", icon: "bi-stars" },
-  { id: "hermes", title: "Hermes", icon: "bi-lightning-charge" },
+  { id: "agents", title: "Agents", icon: "bi-stars" },
 ];
 
 const fileStore = useFilesStore();
@@ -194,8 +190,7 @@ onUnmounted(() => {
       <FilesPanel v-if="activeTool === 'files'" @open-file="emit('open-file', $event)" />
       <GitPanel v-else-if="activeTool === 'git'" @open-diff="(path, cwd) => emit('open-diff', path, cwd)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" @open-terminal="emit('open-terminal', $event)" />
-      <CodexSessionsPanel v-else-if="activeTool === 'codex'" :session-ids="props.codexSessionIds" @open-codex-session="emit('open-codex-session', $event)" />
-      <HermesSessionsPanel v-else :session-ids="props.hermesSessionIds" @open-hermes-session="emit('open-hermes-session', $event)" />
+      <AgentSessionsPanel v-else :session-refs="props.agentSessionRefs" @open-agent-session="emit('open-agent-session', $event)" />
     </section>
   </div>
 </template>

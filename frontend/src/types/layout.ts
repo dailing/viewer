@@ -6,6 +6,7 @@ export type LayoutNode =
       id: string;
       filePath?: string;
       terminalId?: string;
+      agentSession?: string;
       codexSessionId?: string;
       hermesSessionId?: string;
       diffPath?: string;

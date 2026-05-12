@@ -39,13 +39,14 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
 - `/api/file/resolve-directory-link`: resolves a local link target against a served-root-relative directory, used by Codex session transcript links whose paths are relative to the session cwd.
 - `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at `settings.root_resolved`.
-- `/api/config` GET/PUT: reads and writes nav appearance, workspace count and workspace heat timing, Codex model options, and Markdown theme config in `~/.view/config.json`. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated Codex ids live in `~/.view/workspaces.json`.
+- `/api/config` GET/PUT: reads and writes nav appearance, workspace count and workspace heat timing, Codex model options, and Markdown theme config in `~/.view/config.json`. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated agent refs live in `~/.view/workspaces.json`.
 - `/api/workspaces` GET, `/api/workspaces/config` GET/PUT, `/api/workspaces/{id}` PUT, and `/api/workspaces/{id}/activate` POST: read workspace state, read/update workspace count config, write workspace snapshots, and activate workspaces. Workspace count is stored in `~/.view/config.json`; per-workspace state is stored in `~/.view/workspaces.json`.
 - `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
 - `/api/terminals`: lists or creates terminal sessions; POST accepts an optional relative `cwd`.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
-- `/api/agents/sessions`: shared agent session API. GET accepts optional `provider=codex|hermes` and POST accepts a JSON `provider` plus prompt/cwd/model; it dispatches to the provider manager.
+- `/api/agents/providers`: returns registered agent providers with frontend display metadata such as name and Bootstrap icon.
+- `/api/agents/sessions`: shared agent session API. GET accepts optional `provider`, and POST accepts a JSON `provider` plus prompt/cwd/model; it dispatches to the provider manager.
 - `/api/agents/sessions/{session_id}` routes: shared snapshot, send, queue append/update/delete, terminate, and WebSocket connect. Non-WebSocket mutating requests carry `provider` in the JSON body; GET/DELETE/WebSocket use a `provider` query parameter because they have no request JSON body.
 - `/api/codex/sessions`: lists or creates Codex sessions. POST records metadata and, when a prompt is supplied, starts a detached background `codex exec --json` run in a served-root-relative `cwd`.
 - `/api/codex/status`: returns the latest global Codex CLI rate-limit status parsed from recent `~/.codex/sessions/**/rollout-*.jsonl` `token_count` events by timestamp; pane-level context usage comes from each session's matched rollout file.
@@ -91,8 +92,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: returns `~/.view/config.json` and triggers one-way legacy copy from root-local `.viewer.config.json` when needed.
 - `read_config()` / `write_config(config)`: load and save nav appearance, workspace count/heat timing, Codex model options, and Markdown theme config. Legacy workspace state keys (`pinned`, `current_path`, `visit_times`, and `workspaces`) are pruned from `~/.view/config.json` on read/write, with legacy `workspaces.count` migrated to `workspace.count`.
-- `read_workspaces()` / `write_workspace()` / `set_active_workspace()` / `write_workspace_config()`: load and save `~/.view/workspaces.json` state plus `~/.view/config.json` workspace count. `workspaces.json` stores active workspace id and per-slot state only; each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, workspace-associated Codex session ids, per-workspace visit timestamps for open ordering, and update timestamp. Older workspace slots without `codex_session_ids` get an empty list, never a layout-derived fallback.
-- Workspace snapshots also store `hermes_session_ids` for workspace-scoped Hermes side panel visibility; pane layout still stores the actual open Hermes pane ids.
+- `read_workspaces()` / `write_workspace()` / `set_active_workspace()` / `write_workspace_config()`: load and save `~/.view/workspaces.json` state plus `~/.view/config.json` workspace count. `workspaces.json` stores active workspace id and per-slot state only; each slot stores the frontend layout JSON, active pane id, current sidebar directory, pinned paths, workspace-associated agent refs (`provider:session_id` in `agent_session_ids`), legacy Codex/Hermes session id lists for compatibility, per-workspace visit timestamps for open ordering, and update timestamp. Older workspace slots are migrated from layout and legacy fields into `agent_session_ids`.
 
 `backend/app/agent_loops.py`
 
@@ -261,9 +261,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Top-bar ownership rule: cross-viewer pane actions such as split belong in `App.vue`; view-specific icons/controls/status belong in the owning viewer and must be registered through `stores/paneToolbar.ts`, not hard-coded in `App.vue`. The global SSE connection dot is intentionally not rendered.
 - Sidebar state functions: `toggleSidebarPin()`, `clampSidebarWidth()`, `startSidebarResize()`.
 - Workspace actions: `openFile()`, `openTerminal()`, `splitActivePane()`, `closeActivePane()`.
-- Workspace switching: `restoreInitialWorkspace()` loads the active `~/.view/workspaces.json` slot at startup; `switchWorkspace()` immediately marks the target workspace active in the UI, restores its saved pane layout, shows pane-level loading placeholders for one animation frame, then lets each viewer mount and fetch its content while the previous slot save, sidebar directory load, and backend workspace activation complete. The sidebar tool stays unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, visit timestamps/open ordering, or workspace-associated Codex/Hermes session ids change.
-- Codex session list is loaded on startup, polled every 3 seconds like terminals, and opened through `layout.openCodexSession()`. Workspaces keep their own `codex_session_ids` list; new or opened sessions are remembered in the active workspace so the Codex sidebar is workspace-scoped rather than directory-scoped. Removing a Codex row from the sidebar only removes that workspace entry and matching panes; it does not delete viewer session metadata or canonical Codex history.
-- Hermes session list is loaded on startup, polled every 3 seconds like Codex, and opened through `layout.openHermesSession()`. Workspaces keep their own `hermes_session_ids` list; new or opened sessions are remembered in the active workspace so the Hermes sidebar is workspace-scoped.
+- Workspace switching: `restoreInitialWorkspace()` loads the active `~/.view/workspaces.json` slot at startup; `switchWorkspace()` immediately marks the target workspace active in the UI, restores its saved pane layout, shows pane-level loading placeholders for one animation frame, then lets each viewer mount and fetch its content while the previous slot save, sidebar directory load, and backend workspace activation complete. The sidebar tool stays unchanged. A debounced watcher autosaves the active workspace after layout, active pane, pinned paths, sidebar directory, visit timestamps/open ordering, or workspace-associated agent refs change.
+- Agent provider/session list is loaded on startup and polled every 3 seconds like terminals through `stores/agents.ts`. Workspaces keep one `agent_session_ids` list using `provider:session_id` refs; new or opened sessions are remembered in the active workspace so the Agents sidebar is workspace-scoped rather than directory-scoped. Removing a row from the sidebar only removes that workspace entry and matching panes; it does not delete viewer session metadata or canonical provider history.
 - `LocalFilePreview.vue` is a floating file preview dialog used for transient local-file inspection from Codex transcript links. It resolves to normal viewer components and offers only three navigation actions: open in the active pane, open in a vertical split, or open in a horizontal split.
 
 `frontend/src/components/viewers/CsvViewer.vue`
@@ -271,7 +270,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Dedicated CSV viewer for `.csv` files that otherwise arrive as text previews from the backend.
 - Fetches text content with `/api/file/content`, parses RFC-style quoted fields including embedded commas/newlines and escaped quotes, and renders the first row as sticky table headers.
 - Registers Table/Raw actions through `stores/paneToolbar.ts`; Raw mode displays plain CSV text without syntax highlighting.
-- Tracks Codex status by workspace layout: workspace buttons show small status dots when any contained Codex session is running or when inactive workspaces have sticky completion/failure notices. Button background is reserved for local workspace heat, with scores persisted in browser localStorage and displayed through a logarithmic red intensity curve.
+- Workspace button agent status is tracked by `App.vue`: workspace buttons show small status dots when any contained agent session is running or when inactive workspaces have sticky completion/failure notices. Button background is reserved for local workspace heat, with scores persisted in browser localStorage and displayed through a logarithmic red intensity curve.
 
 `frontend/src/components/Workspace.vue`
 
@@ -292,18 +291,18 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `load(clearMeta)`: refreshes metadata for current file.
 - Accepts a workspace-level loading flag so workspace switches can render every pane as a lightweight spinner before viewer components mount and start their backend fetches.
 - `handleChange(event)`: reloads metadata when this pane's file changed, or when the pane file's parent directory changes (covers delete/recreate and atomic-save workflows).
-- Chooses `TerminalViewer`, `CodexViewer`, `HermesViewer`, `DiffViewer`, `ImageViewer`, `MarkdownViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
+- Chooses `TerminalViewer`, unified `AgentViewer`, `DiffViewer`, `ImageViewer`, `MarkdownViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
 
 `frontend/src/components/FileSidebar.vue`
 
 - Sidebar shell with a VS Code-style activity rail and one active tool panel at a time.
 - Persists the active sidebar tool in `localStorage` under `viewer.sidebarActiveTool.v1`.
-- Tools: Files, Changes, Terminals, Codex, and Hermes. Future side tools should be added to this shell instead of mixing all lists into one panel.
+- Tools: Files, Changes, Terminals, and Agents. Future side tools should be added to this shell instead of mixing unrelated lists into one panel.
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool or workspace changes only the active selection; clicking the already-active tool or workspace toggles the tool panel open/closed.
 - On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
 - Renders one-click numbered workspace buttons in the activity rail. Clicking a different workspace saves the current workspace and restores the selected workspace without changing the tool panel open/closed state.
 - Workspace buttons receive agent notices and local heat scores from `App.vue`; status is rendered as a small green/amber/red dot, while the button background uses logarithmic red heat intensity based on recent active workspace time. During a workspace switch, the target button becomes active immediately and displays a small spinner while backend persistence/activation finishes.
-- Re-emits `open-file`, `open-diff`, `open-terminal`, `open-codex-session`, and `open-hermes-session` events to `App.vue`.
+- Re-emits `open-file`, `open-diff`, `open-terminal`, and `open-agent-session` events to `App.vue`.
 
 `frontend/src/components/sidebar/FilesPanel.vue`
 
@@ -322,18 +321,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Binary files are displayed with a `bin` chip but disabled so they cannot be opened in the diff viewer.
 - Clicking a text change emits `open-diff` with the current Files directory so the active pane becomes a diff pane scoped to that directory.
 
-`frontend/src/components/sidebar/CodexSessionsPanel.vue`
+`frontend/src/components/sidebar/AgentSessionsPanel.vue`
 
-- Codex tool panel: new Codex button plus the active workspace's Codex session list.
-- New Codex creates an idle Codex session in the current sidebar directory and opens it in the active pane. The first message is entered in `CodexViewer.vue`.
-- Filters the global Codex session list to ids remembered by the active workspace. Workspace directory changes no longer change which Codex sessions are visible.
-- Codex session list uses row background color for status (normal idle/exited, green running, red failed). The row remove action drops only the active workspace's entry and clears matching panes.
-
-`frontend/src/components/sidebar/HermesSessionsPanel.vue`
-
-- Hermes tool panel: new Hermes button plus the active workspace's Hermes session list.
-- New Hermes creates an idle Hermes session in the current sidebar directory and opens it in the active pane. The first message is entered in `HermesViewer.vue`.
-- Filters the global Hermes session list to ids remembered by the active workspace. Removing a Hermes row drops only the active workspace entry and clears matching panes.
+- Unified Agents tool panel. Fetches provider metadata from the backend-backed `stores/agents.ts`, shows a provider dropdown for new sessions, creates the selected agent in the current sidebar directory, filters the global agent session list to refs remembered by the active workspace, and opens rows through `layout.openAgentSession(ref)`. Rows render provider icons, active row state, voice pending/ready row state, status dots, unread completion indicators, error display, and remove-from-workspace action from one shared appearance layer.
 
 `frontend/src/components/ConfigPanel.vue`
 
@@ -433,27 +423,23 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `load()`: starts connection.
 - `endTerminal()`: calls terminal terminate API.
 
-`frontend/src/components/viewers/CodexViewer.vue`
+`frontend/src/components/viewers/AgentViewer.vue`
 
-- Structured Codex session pane connected to `/api/codex/sessions/{id}/ws`.
-- Loads snapshots with `getCodexSession()`, receives live JSON events/status over WebSocket, and updates `stores/codex.ts`.
-- Renders prompts, normalized event text, status, Codex thread id, cwd, inline patch/file-change details parsed from `patch_apply_end`/`apply_patch` events, wrapped word-level highlights inside paired added/deleted diff lines, derived post-change result snippets below diffs, and optional raw JSON details toggled through the active-pane toolbar.
-- Local links in rendered Codex transcript Markdown are resolved relative to `session.cwd_relative` through `/api/file/resolve-directory-link` and open in the floating `LocalFilePreview` dialog before the user chooses active-pane or split navigation.
-- Registers Codex-specific top-bar controls through `stores/paneToolbar.ts`, including the refresh action, model selector, session-specific context chips, latest global rate-limit-left chips, and raw JSON toggle. The Codex cwd stays in the session content header, not the navbar.
-- Its Codex-specific top-bar actions also include creating a new idle Codex session in the current session's working directory, then opening it in the active pane.
-- Rollout rendering is keyed to canonical `~/.codex/sessions/**/rollout-*.jsonl` shapes: top-level `response_item` and `event_msg`, with turn grouping from `event_msg.payload.type=task_started/task_complete`.
-- Sends follow-up prompts through `stores/codex.ts`, which calls `/api/codex/sessions/{id}/messages`.
-- Renders server-backed queued prompts above the composer. Queue rows can be clicked into the shared composer for edit/save/cancel/delete; the queue button appends to `/api/codex/sessions/{id}/queue`, and queued work drains server-side even after the browser closes.
-- Persists unqueued composer drafts per Codex viewer session in browser `localStorage` under `viewer.codexDrafts.v1`, restores them after pane/workspace remounts, and clears the draft after a queue request succeeds.
-- Uses `VoiceInputButton.vue` to transcribe microphone input into the Codex draft.
+- Unified structured agent session pane connected to `/api/agents/sessions/{id}/ws?provider={provider}`.
+- Accepts one `agentRef` (`provider:session_id`), loads snapshots through `stores/agents.ts`, receives live JSON events/status over WebSocket, and keeps the generic agent session list fresh.
+- Uses `AgentSessionTranscript.vue` for shared prompt/event rendering, status, provider session id, cwd, local transcript links, inline patch/file-change details, wrapped word-level highlights inside paired added/deleted diff lines, derived post-change result snippets below diffs, and raw JSON preview.
+- Local links in rendered transcript Markdown are resolved relative to `session.cwd_relative` through `/api/file/resolve-directory-link` and open in the floating `LocalFilePreview` dialog before the user chooses active-pane or split navigation.
+- Registers provider-aware top-bar controls through `stores/paneToolbar.ts`: refresh, create another same-provider session in the same working directory, focus composer, raw JSON toggle, token/context chips, and Codex model/rate-limit controls when the provider is Codex.
+- Sends follow-up prompts and server-backed queue operations through the generic `/api/agents/sessions/*` REST APIs. Queue rows can be clicked into `AgentPromptComposer.vue` for edit/save/cancel/delete, and queued work drains server-side even after the browser closes.
+- Persists unqueued composer drafts per provider/session ref in browser `localStorage` under `viewer.agentDrafts.v1`, restores them after pane/workspace remounts, and clears the draft after a queue request succeeds.
 
-`frontend/src/components/viewers/HermesViewer.vue`
+`frontend/src/components/AgentPromptComposer.vue`
 
-- Structured Hermes session pane connected to `/api/hermes/sessions/{id}/ws`.
-- Loads snapshots with `getHermesSession()`, receives live JSON events/status over WebSocket, and updates `stores/hermes.ts`.
-- Renders compact events built from Hermes SQLite `messages`, resolves local transcript links through `/api/file/resolve-directory-link`, exposes refresh/new-session/raw-JSON toolbar actions, and shows token count chips when available.
-- Sends follow-up prompts and queued prompts through `stores/hermes.ts`, which calls the Hermes session REST APIs. Queue editing/deleting mirrors the Codex composer workflow.
-- Persists unqueued composer drafts per Hermes viewer session in browser `localStorage` under `viewer.hermesDrafts.v1`, restores them after pane/workspace remounts, and clears the draft after a queue request succeeds.
+- Shared Codex/Hermes prompt composer with the Codex input styling and behavior: server-backed queue list, queued-message edit/save/cancel/delete controls, microphone transcription through `VoiceInputButton.vue`, queue, clear, and stop actions. Parent viewers own persistence and API calls through emitted events.
+
+`frontend/src/components/AgentSessionTranscript.vue`
+
+- Shared Codex/Hermes transcript display layer. Owns agent content appearance and behavior: session metadata, idle/running/error rows, prompt/event timeline ordering, Markdown rendering, Mermaid rendering, local link click emission, focus-mode muted operation filtering, raw JSON preview, file-change/patch diffs, word-level diff highlighting, derived result snippets, and scroll-to-bottom helpers exposed to parent viewers.
 
 `frontend/src/stores/voice.ts`
 
@@ -718,7 +704,7 @@ If a backend field changes, update the matching frontend type and all consumers.
 ## Persistence
 
 - `~/.view/config.json`: appearance, workspace count, Codex model options, and Markdown themes, managed by `/api/config` and `/api/workspaces/config`. On first use, missing config is copied from served-root `.viewer.config.json` if present; legacy workspace keys (`pinned`, `current_path`, `visit_times`, and `workspaces`) are removed on subsequent reads/writes after `workspaces.count` is migrated to `workspace.count`.
-- `~/.view/workspaces.json`: active workspace id plus per-slot split tree, active pane, open file paths, open terminal/Codex IDs, sidebar directory, pinned files/folders, workspace-associated Codex session ids, per-workspace visit timestamps/open ordering, and update timestamp, managed by `/api/workspaces`. On first use, missing workspace state is copied from served-root `.viewer.workspaces.json` if present; legacy `count` is migrated into `~/.view/config.json` and pruned from the workspace state file on write.
+- `~/.view/workspaces.json`: active workspace id plus per-slot split tree, active pane, open file paths, open terminal IDs, sidebar directory, pinned files/folders, workspace-associated agent refs, legacy Codex/Hermes session id compatibility lists, per-workspace visit timestamps/open ordering, and update timestamp, managed by `/api/workspaces`. On first use, missing workspace state is copied from served-root `.viewer.workspaces.json` if present; legacy `count` is migrated into `~/.view/config.json` and pruned from the workspace state file on write.
 - `~/.view/loops/*.md`: Markdown loop task definitions with generated YAML frontmatter and prompt body.
 - `~/.view/agent-loops.json`: scheduler runtime state for loop tasks.
 - `localStorage viewer.layout.v1`: legacy/fallback split tree, active pane, open file paths, open terminal IDs.
@@ -743,7 +729,7 @@ If a backend field changes, update the matching frontend type and all consumers.
 - Terminal output glitches: `TerminalViewer.vue` snapshot/output version logic and `TerminalManager._read_output()`.
 - Terminal resize issues: `TerminalViewer.vue resize()` and `TerminalManager.resize()`.
 - Codex session creation/resume fails: check `codex` availability on PATH, `backend/app/codex_sessions.py` command construction, `~/.view/logs/codex-sessions/*.stderr.log`, and whether a `thread_id` was captured from raw JSON.
-- Codex pane rendering looks incomplete: inspect `CodexViewer.vue` `textFrom()` extraction and use the raw JSON toolbar toggle to compare against the matched `~/.codex/sessions/**/rollout-*.jsonl`.
+- Agent pane rendering looks incomplete: inspect `AgentSessionTranscript.vue` extraction/rendering and use `AgentViewer.vue` raw JSON toggle to compare against the provider's raw session log.
 - Loop task does not run: check `~/.view/loops/*.md` frontmatter parse errors in the Loop Tasks page, `backend/app/agent_loops.py`, `~/.view/agent-loops.json`, and `~/.view/logs/agent-loops/{task_id}/`.
 - Frontend runtime errors: browser console, `/api/debug/client-log`, `backend/app/logging.py`, `~/.view/logs/`.
 - Production frontend missing: build `frontend/dist` or set `VIEWER_FRONTEND_DIST`.

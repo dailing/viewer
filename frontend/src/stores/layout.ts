@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import type { LayoutNode, SplitDirection } from "../types/layout";
+import { agentRef, legacyAgentRefForPane } from "../utils/agents";
 
 const STORAGE_KEY = "viewer.layout.v1";
 
@@ -30,7 +31,21 @@ function hasPane(node: LayoutNode, paneId: string): boolean {
 }
 
 function cloneLayout(node: LayoutNode): LayoutNode {
-  return JSON.parse(JSON.stringify(node)) as LayoutNode;
+  return normalizeLayoutNode(JSON.parse(JSON.stringify(node)) as LayoutNode);
+}
+
+function normalizeLayoutNode(node: LayoutNode): LayoutNode {
+  if (node.type === "pane") {
+    const next = { ...node };
+    const ref = legacyAgentRefForPane(next);
+    if (ref) {
+      next.agentSession = ref;
+      next.codexSessionId = undefined;
+      next.hermesSessionId = undefined;
+    }
+    return next;
+  }
+  return { ...node, first: normalizeLayoutNode(node.first), second: normalizeLayoutNode(node.second) };
 }
 
 function mapAllPanes(node: LayoutNode, update: (pane: Extract<LayoutNode, { type: "pane" }>) => LayoutNode): LayoutNode {
@@ -103,6 +118,7 @@ export const useLayoutStore = defineStore("layout", {
       const ids: string[] = [];
       const visit = (node: LayoutNode) => {
         if (node.type === "pane") {
+          if (node.agentSession?.startsWith("codex:")) ids.push(node.agentSession.slice("codex:".length));
           if (node.codexSessionId) ids.push(node.codexSessionId);
           return;
         }
@@ -116,6 +132,7 @@ export const useLayoutStore = defineStore("layout", {
       const ids: string[] = [];
       const visit = (node: LayoutNode) => {
         if (node.type === "pane") {
+          if (node.agentSession?.startsWith("hermes:")) ids.push(node.agentSession.slice("hermes:".length));
           if (node.hermesSessionId) ids.push(node.hermesSessionId);
           return;
         }
@@ -124,6 +141,20 @@ export const useLayoutStore = defineStore("layout", {
       };
       visit(state.root);
       return ids;
+    },
+    openAgentSessionRefs(state): string[] {
+      const refs: string[] = [];
+      const visit = (node: LayoutNode) => {
+        if (node.type === "pane") {
+          const ref = legacyAgentRefForPane(node);
+          if (ref) refs.push(ref);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(state.root);
+      return refs;
     },
     openDiffPaths(state): string[] {
       const paths: string[] = [];
@@ -145,8 +176,8 @@ export const useLayoutStore = defineStore("layout", {
       if (raw) {
         try {
           const parsed = JSON.parse(raw) as { root: LayoutNode; activePaneId?: string };
-          this.root = parsed.root;
-          this.activePaneId = parsed.activePaneId || firstPaneId(parsed.root);
+          this.root = normalizeLayoutNode(parsed.root);
+          this.activePaneId = parsed.activePaneId || firstPaneId(this.root);
           return;
         } catch {
           localStorage.removeItem(STORAGE_KEY);
@@ -181,6 +212,7 @@ export const useLayoutStore = defineStore("layout", {
         ...pane,
         filePath: path,
         terminalId: undefined,
+        agentSession: undefined,
         codexSessionId: undefined,
         hermesSessionId: undefined,
         diffPath: undefined,
@@ -208,6 +240,7 @@ export const useLayoutStore = defineStore("layout", {
         ...pane,
         filePath: undefined,
         terminalId: id,
+        agentSession: undefined,
         codexSessionId: undefined,
         hermesSessionId: undefined,
         diffPath: undefined,
@@ -221,6 +254,7 @@ export const useLayoutStore = defineStore("layout", {
         ...pane,
         filePath: undefined,
         terminalId: undefined,
+        agentSession: agentRef("codex", id),
         codexSessionId: id,
         hermesSessionId: undefined,
         diffPath: undefined,
@@ -234,8 +268,23 @@ export const useLayoutStore = defineStore("layout", {
         ...pane,
         filePath: undefined,
         terminalId: undefined,
+        agentSession: agentRef("hermes", id),
         codexSessionId: undefined,
         hermesSessionId: id,
+        diffPath: undefined,
+        diffCwd: undefined,
+      }));
+      this.save();
+    },
+    openAgentSession(ref: string) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
+        ...pane,
+        filePath: undefined,
+        terminalId: undefined,
+        agentSession: ref,
+        codexSessionId: undefined,
+        hermesSessionId: undefined,
         diffPath: undefined,
         diffCwd: undefined,
       }));
@@ -247,6 +296,7 @@ export const useLayoutStore = defineStore("layout", {
         ...pane,
         filePath: undefined,
         terminalId: undefined,
+        agentSession: undefined,
         codexSessionId: undefined,
         hermesSessionId: undefined,
         diffPath: path,
@@ -278,6 +328,7 @@ export const useLayoutStore = defineStore("layout", {
         ...pane,
         filePath: undefined,
         terminalId: undefined,
+        agentSession: undefined,
         codexSessionId: undefined,
         hermesSessionId: undefined,
         diffPath: undefined,
@@ -301,11 +352,15 @@ export const useLayoutStore = defineStore("layout", {
       this.save();
     },
     clearCodexSession(id: string) {
-      this.root = mapAllPanes(this.root, (pane) => (pane.codexSessionId === id ? { ...pane, codexSessionId: undefined } : pane));
+      this.root = mapAllPanes(this.root, (pane) => (pane.codexSessionId === id || pane.agentSession === agentRef("codex", id) ? { ...pane, codexSessionId: undefined, agentSession: undefined } : pane));
       this.save();
     },
     clearHermesSession(id: string) {
-      this.root = mapAllPanes(this.root, (pane) => (pane.hermesSessionId === id ? { ...pane, hermesSessionId: undefined } : pane));
+      this.root = mapAllPanes(this.root, (pane) => (pane.hermesSessionId === id || pane.agentSession === agentRef("hermes", id) ? { ...pane, hermesSessionId: undefined, agentSession: undefined } : pane));
+      this.save();
+    },
+    clearAgentSession(ref: string) {
+      this.root = mapAllPanes(this.root, (pane) => (legacyAgentRefForPane(pane) === ref ? { ...pane, agentSession: undefined, codexSessionId: undefined, hermesSessionId: undefined } : pane));
       this.save();
     },
   },

@@ -107,6 +107,7 @@ class WorkspaceSnapshot(BaseModel):
     active_pane_id: str | None = None
     current_path: str = ""
     pinned: list[str] | None = None
+    agent_session_ids: list[str] = Field(default_factory=list)
     codex_session_ids: list[str] = Field(default_factory=list)
     hermes_session_ids: list[str] = Field(default_factory=list)
     visit_times: dict[str, float] = Field(default_factory=dict)
@@ -293,26 +294,26 @@ class HermesQueueMessage(BaseModel):
 
 
 class AgentSessionCreate(BaseModel):
-    provider: Literal["codex", "hermes"]
+    provider: str
     prompt: str = ""
     cwd: str | None = None
     model: str | None = None
 
 
 class AgentSessionMessage(BaseModel):
-    provider: Literal["codex", "hermes"]
+    provider: str
     prompt: str
     model: str | None = None
 
 
 class AgentQueueMessage(BaseModel):
-    provider: Literal["codex", "hermes"]
+    provider: str
     prompt: str
     model: str | None = None
 
 
 class AgentProviderRequest(BaseModel):
-    provider: Literal["codex", "hermes"]
+    provider: str
 
 
 class CodexCliStatus(BaseModel):

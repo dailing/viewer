@@ -23,7 +23,6 @@ TEXT_EXTENSIONS = {
     ".vue",
     ".css",
     ".scss",
-    ".html",
     ".json",
     ".yaml",
     ".yml",
@@ -46,6 +45,7 @@ TEXT_EXTENSIONS = {
     ".log",
     ".csv",
 }
+HTML_EXTENSIONS = {".html", ".htm"}
 
 
 def normalize_relative(path: str | None) -> str:
@@ -177,6 +177,8 @@ def preview_kind(path: Path, mime: str, size: int) -> str:
         return "image"
     if suffix in MARKDOWN_EXTENSIONS:
         return "markdown"
+    if suffix in HTML_EXTENSIONS or mime == "text/html":
+        return "html"
     if suffix == ".pdf" or mime == "application/pdf":
         return "pdf"
     if suffix in TEXT_EXTENSIONS or mime.startswith("text/"):
@@ -257,7 +259,7 @@ def get_meta(path: str) -> FileMeta:
         content_hash=content_hash(target),
         mime=mime,
         preview=preview,
-        text_too_large=preview in {"text", "markdown"} and stat.st_size > settings.max_text_preview_bytes,
+        text_too_large=preview in {"text", "markdown", "html"} and stat.st_size > settings.max_text_preview_bytes,
     )
 
 

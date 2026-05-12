@@ -1,5 +1,5 @@
 export type EntryType = "file" | "directory" | "symlink" | "other";
-export type PreviewType = "image" | "markdown" | "pdf" | "text" | "unsupported";
+export type PreviewType = "image" | "markdown" | "html" | "pdf" | "text" | "unsupported";
 
 export interface FileEntry {
   name: string;

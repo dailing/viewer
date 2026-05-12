@@ -9,6 +9,7 @@ import { legacyAgentRefForPane } from "../utils/agents";
 import AgentViewer from "./viewers/AgentViewer.vue";
 import CsvViewer from "./viewers/CsvViewer.vue";
 import DiffViewer from "./viewers/DiffViewer.vue";
+import HtmlViewer from "./viewers/HtmlViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
 import TextViewer from "./viewers/TextViewer.vue";
@@ -72,6 +73,7 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
       </div>
       <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" />
       <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" :pane-id="pane.id" />
+      <HtmlViewer v-else-if="meta?.preview === 'html'" :path="pane.filePath" :version="version" :pane-id="pane.id" :content-hash="meta.content_hash" />
       <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" />
       <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" />
       <TextViewer v-else-if="meta?.preview === 'text'" :path="pane.filePath" :version="version" />

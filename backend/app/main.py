@@ -1,10 +1,11 @@
 import asyncio
 import os
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -190,6 +191,122 @@ async def file_raw(path: str, h: str | None = None, base: str | None = None):
     response = FileResponse(target, media_type=mime, filename=target.name)
     response.headers["ETag"] = f"\"{etag}\""
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
+def _html_base_href(path: str) -> str:
+    normalized = path.replace("\\", "/").strip("/")
+    directory = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+    prefix = "/api/file/site/"
+    if directory:
+        return f"{prefix}{'/'.join(quote_path_segment(part) for part in directory.split('/') if part)}/"
+    return prefix
+
+
+def quote_path_segment(value: str) -> str:
+    from urllib.parse import quote
+
+    return quote(value, safe="")
+
+
+def site_url_for_root_relative(value: str) -> str:
+    from urllib.parse import unquote, urlsplit
+
+    parsed = urlsplit(value)
+    path = unquote(parsed.path).strip("/")
+    encoded_path = "/".join(quote_path_segment(part) for part in path.split("/") if part)
+    suffix = ""
+    if parsed.query:
+        suffix += f"?{parsed.query}"
+    if parsed.fragment:
+        suffix += f"#{parsed.fragment}"
+    return f"/api/file/site/{encoded_path}{suffix}"
+
+
+def rewrite_html_root_relative_urls(source: str) -> str:
+    def replace_attr(match: re.Match[str]) -> str:
+        prefix, quote, value = match.groups()
+        if not value.startswith("/") or value.startswith("//"):
+            return match.group(0)
+        return f"{prefix}{quote}{site_url_for_root_relative(value)}{quote}"
+
+    rewritten = re.sub(r'(\b(?:src|href|poster|data|action)\s*=\s*)(["\'])(/[^"\']*)\2', replace_attr, source, flags=re.IGNORECASE)
+
+    def replace_srcset(match: re.Match[str]) -> str:
+        prefix, quote, value = match.groups()
+        parts = []
+        for candidate in value.split(","):
+            stripped = candidate.strip()
+            if not stripped:
+                continue
+            url, *descriptor = stripped.split()
+            if url.startswith("/") and not url.startswith("//"):
+                url = site_url_for_root_relative(url)
+            parts.append(" ".join([url, *descriptor]))
+        return f"{prefix}{quote}{', '.join(parts)}{quote}"
+
+    return re.sub(r'(\bsrcset\s*=\s*)(["\'])([^"\']*)\2', replace_srcset, rewritten, flags=re.IGNORECASE)
+
+
+def rewrite_css_root_relative_urls(source: str) -> str:
+    def replace_url(match: re.Match[str]) -> str:
+        prefix, value, suffix = match.groups()
+        stripped = value.strip()
+        if not stripped.startswith("/") or stripped.startswith("//"):
+            return match.group(0)
+        return f"{prefix}{site_url_for_root_relative(stripped)}{suffix}"
+
+    rewritten = re.sub(r'(url\(\s*["\']?)(/[^)"\']*)(["\']?\s*\))', replace_url, source, flags=re.IGNORECASE)
+    return re.sub(r'(@import\s+["\'])(/[^"\']*)(["\'])', replace_url, rewritten, flags=re.IGNORECASE)
+
+
+def inject_html_base(source: str, href: str) -> str:
+    base = f'<base href="{href}">'
+    source = rewrite_html_root_relative_urls(source)
+    if "<base" in source[:2048].lower():
+        return source
+    lower = source.lower()
+    head_index = lower.find("<head")
+    if head_index >= 0:
+        head_end = source.find(">", head_index)
+        if head_end >= 0:
+            return f"{source[:head_end + 1]}{base}{source[head_end + 1:]}"
+    return f"{base}{source}"
+
+
+@app.get("/api/file/site/{path:path}")
+async def file_site(path: str, h: str | None = None):
+    target = resolve_path(path)
+    if target.exists() and target.is_dir():
+        index = target / "index.html"
+        if index.exists() and index.is_file():
+            target = index
+        else:
+            raise HTTPException(status_code=400, detail="Directory has no index.html")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+
+    mime = guess_mime(target)
+    if mime == "text/html" or target.suffix.lower() in {".html", ".htm"}:
+        try:
+            source = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            source = target.read_text(encoding="utf-8", errors="replace")
+        relative_path = target.relative_to(settings.root_resolved).as_posix()
+        response = HTMLResponse(inject_html_base(source, _html_base_href(relative_path)))
+    elif mime == "text/css" or target.suffix.lower() == ".css":
+        try:
+            source = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            source = target.read_text(encoding="utf-8", errors="replace")
+        response = Response(rewrite_css_root_relative_urls(source), media_type="text/css")
+    else:
+        response = FileResponse(target, media_type=mime, filename=target.name)
+
+    response.headers["ETag"] = f"\"{h or content_hash(target)}\""
+    response.headers["Cache-Control"] = "no-cache"
     return response
 
 

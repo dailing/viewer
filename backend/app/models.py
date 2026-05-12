@@ -27,7 +27,7 @@ class FileMeta(BaseModel):
     mtime: float
     content_hash: str
     mime: str
-    preview: Literal["image", "markdown", "pdf", "text", "unsupported"]
+    preview: Literal["image", "markdown", "html", "pdf", "text", "unsupported"]
     text_too_large: bool = False
 
 

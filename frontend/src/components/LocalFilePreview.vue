@@ -3,6 +3,7 @@ import { defineAsyncComponent, onMounted, onUnmounted, ref, watch } from "vue";
 import { getMeta } from "../api/client";
 import { fileChangeAffectsPath } from "../utils/paths";
 import CsvViewer from "./viewers/CsvViewer.vue";
+import HtmlViewer from "./viewers/HtmlViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
 import TextViewer from "./viewers/TextViewer.vue";
@@ -98,6 +99,7 @@ onUnmounted(() => {
         </div>
         <ImageViewer v-else-if="meta?.preview === 'image'" :path="path" :content-hash="meta.content_hash" />
         <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="path" :version="version" :pane-id="previewPaneId" />
+        <HtmlViewer v-else-if="meta?.preview === 'html'" :path="path" :version="version" :pane-id="previewPaneId" :content-hash="meta.content_hash" />
         <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="path" :content-hash="meta.content_hash" />
         <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(path)" :path="path" :version="version" :pane-id="previewPaneId" />
         <TextViewer v-else-if="meta?.preview === 'text'" :path="path" :version="version" />

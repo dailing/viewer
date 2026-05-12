@@ -12,7 +12,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()` and the agent-loop scheduler on startup, stops watcher, loops, terminals, and Codex sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
 4. `App.vue` loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The top bar switches between the workspace, full-page settings, and full-page loop task editor.
-5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer. Viewers fetch raw/text content and reload when their `version` prop changes; Markdown panes also track local image dependencies and reload/cache-bust embedded images when those image files change.
+5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer. Viewers fetch raw/text content and reload when their `version` prop changes; Markdown panes track local image dependencies and reload/cache-bust embedded images when those image files change. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Raw rollout events stay server-side; REST/WebSocket snapshots send compact display events so hidden tool output is not transmitted to the browser.
 8. Hermes panes mirror the Codex pane lifecycle shape through REST and WebSocket `/api/hermes/sessions/{id}/ws`, but the provider backend talks to the local Hermes API server at `VIEWER_HERMES_BASE_URL` / `http://127.0.0.1:8642` and reads canonical session history directly from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`. Viewer-local Hermes metadata lives under `~/.view/logs/hermes-sessions/`; the SQLite `sessions` and `messages` rows are compacted into the same frontend event shape used by Codex panes.
@@ -36,6 +36,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/file/meta`: calls `get_meta()`.
 - `/api/file/content`: calls `read_text()`.
 - `/api/file/raw`: streams a file via `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
+- `/api/file/site/{path:path}`: serves files under the viewer root as a static-site namespace for HTML preview iframes. HTML responses inject a `<base>` tag for relative assets and rewrite root-relative HTML/CSS asset URLs to the same `/api/file/site/` prefix; CSS responses rewrite root-relative `url(...)` and `@import` references. Cache headers are `no-cache` so local edits show after pane refreshes.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
 - `/api/file/resolve-directory-link`: resolves a local link target against a served-root-relative directory, used by Codex session transcript links whose paths are relative to the session cwd.
 - `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at `settings.root_resolved`.
@@ -84,7 +85,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `resolve_served_directory(path, label)`: resolves a served-root-relative working directory for terminal/Codex launches, logging and falling back to root when unavailable.
 - `relative_for(path)`: returns path relative to root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
-- `preview_kind(path, mime, size)`: maps file extension/MIME to `image`, `markdown`, `pdf`, `text`, or `unsupported`.
+- `preview_kind(path, mime, size)`: maps file extension/MIME to `image`, `markdown`, `html`, `pdf`, `text`, or `unsupported`.
 - `content_hash(path)`: computes SHA-256 for cache tagging.
 - `entry_for(path)`: builds `FileEntry` for a directory child.
 - `list_directory(path)`: validates directory, filters hidden files when configured, sorts directories first.
@@ -291,7 +292,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `load(clearMeta)`: refreshes metadata for current file.
 - Accepts a workspace-level loading flag so workspace switches can render every pane as a lightweight spinner before viewer components mount and start their backend fetches.
 - `handleChange(event)`: reloads metadata when this pane's file changed, or when the pane file's parent directory changes (covers delete/recreate and atomic-save workflows).
-- Chooses `TerminalViewer`, unified `AgentViewer`, `DiffViewer`, `ImageViewer`, `MarkdownViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
+- Chooses `TerminalViewer`, unified `AgentViewer`, `DiffViewer`, `ImageViewer`, `MarkdownViewer`, `HtmlViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
 
 `frontend/src/components/FileSidebar.vue`
 
@@ -369,6 +370,14 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Renders unified diffs with Highlight.js `diff` highlighting, word-level diff mode, and side-by-side split diff mode.
 - Registers Diff-specific top-bar actions through `stores/paneToolbar.ts`: view mode switches, auto commit, refresh, stage file, stage all, revert file, commit, and push. Auto commit creates a Codex session in the diff directory using `codex.auto_commit_prompt`, remembers it in the active workspace's Codex session list, and lets the session handle summarize/commit/push.
 - Binary diffs render a disabled-state message instead of diff text.
+
+`frontend/src/components/viewers/HtmlViewer.vue`
+
+- HTML preview with rendered/raw modes.
+- Rendered mode uses an iframe pointed at `/api/file/site/{path}` so normal browser loading handles local scripts, stylesheets, images, media, and in-document navigation.
+- Raw mode fetches `/api/file/content` and highlights as XML/HTML with Highlight.js.
+- Registers HTML-specific top-bar actions for reload, rendered/raw switching, and opening the static-site URL in a new tab.
+- Tracks direct local `src`, `href`, `poster`, `data`, and `srcset` dependencies from the HTML source and reloads the iframe when those files change. For `index.html`, changes under the same directory also trigger reloads so simple static folders update without precise dependency discovery.
 
 `frontend/src/components/viewers/MarkdownViewer.vue`
 

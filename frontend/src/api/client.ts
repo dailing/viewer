@@ -27,6 +27,19 @@ export function rawUrl(path: string, contentHash?: string, base?: string): strin
   return `/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}${baseQuery}`;
 }
 
+function encodePathSegments(path: string): string {
+  return path
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+}
+
+export function siteUrl(path: string, contentHash?: string): string {
+  const hashQuery = contentHash ? `?h=${encodeURIComponent(contentHash)}` : "";
+  return `/api/file/site/${encodePathSegments(path)}${hashQuery}`;
+}
+
 export async function getTree(path = ""): Promise<DirectoryListing> {
   return request<DirectoryListing>(`/api/tree?path=${encodeURIComponent(path)}`);
 }

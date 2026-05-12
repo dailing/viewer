@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import type { AgentEvent, AgentPrompt } from "../types/agents";
+import { sendClientLog } from "../utils/clientLog";
 import { renderMarkdown, renderMermaidIn } from "../utils/markdownRender";
 
 type AgentSession = {
@@ -21,6 +22,24 @@ type DiffLineKind = "add" | "delete" | "hunk" | "file" | "context";
 type DiffSegment = { text: string; changed: boolean };
 type DiffLine = { text: string; kind: DiffLineKind; segments: DiffSegment[] };
 type AgentEventDisplayKind = "message" | "reasoning" | "tool_call" | "tool_result" | "file_update" | "operation";
+const AGENT_EVENT_DISPLAY_KIND_BY_TYPE: Record<string, AgentEventDisplayKind> = {
+  "agent_message": "message",
+  "message:assistant": "message",
+  "operation": "operation",
+  "reasoning": "reasoning",
+  "custom_tool_call": "tool_call",
+  "exec_command_begin": "tool_call",
+  "function_call": "tool_call",
+  "tool_call": "tool_call",
+  "view_image_tool_call": "tool_call",
+  "custom_tool_call_output": "tool_result",
+  "exec_command_end": "tool_result",
+  "function_call_output": "tool_result",
+  "tool": "tool_result",
+  "tool_result": "tool_result",
+  "patch_apply_end": "file_update",
+};
+const loggedUnknownAgentEventTypes = new Set<string>();
 
 const emit = defineEmits<{
   "open-link": [target: string];
@@ -65,7 +84,7 @@ const transcriptEntries = computed<TranscriptEntry[]>(() => {
   for (const event of sortedEvents.value) {
     const text = event.text ?? "";
     const eventType = event.event_type;
-    const muted = isMutedEventType(eventType);
+    const muted = agentEventDisplayKindForEvent(event) !== "message";
     if (props.focusMode && muted) continue;
     const fileChanges = event.file_changes.map((change) => ({
       path: change.path,
@@ -109,34 +128,45 @@ function isMutedEvent(entry: Extract<TranscriptEntry, { kind: "event" }>): boole
 }
 
 function isMutedEventType(eventType: string): boolean {
-  return agentEventDisplayKind(eventType) !== "message";
+  return eventDisplayKind(eventType) !== "message";
 }
 
-function agentEventDisplayKind(eventType: string): AgentEventDisplayKind {
-  const normalized = eventType.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-  if (eventType === "message:assistant" || normalized === "agent_message") return "message";
-  if (normalized.includes("reasoning") || normalized.includes("thinking") || normalized === "thought") return "reasoning";
-  if (
-    normalized === "tool" ||
-    normalized.includes("tool_output") ||
-    normalized.includes("tool_result") ||
-    normalized.includes("function_call_output") ||
-    normalized.includes("custom_tool_call_output") ||
-    normalized === "exec_command_end"
-  ) {
-    return "tool_result";
-  }
-  if (
-    eventType.startsWith("tool:") ||
-    normalized.includes("tool_call") ||
-    normalized.includes("function_call") ||
-    normalized === "exec_command_begin" ||
-    normalized === "view_image_tool_call"
-  ) {
-    return "tool_call";
-  }
-  if (normalized.includes("patch") || normalized.includes("file_change") || normalized.includes("file_update")) return "file_update";
+function eventDisplayKind(eventType: string): AgentEventDisplayKind {
+  return AGENT_EVENT_DISPLAY_KIND_BY_TYPE[eventType] ?? "operation";
+}
+
+function agentEventDisplayKindForEvent(event: AgentEvent): AgentEventDisplayKind {
+  const kind = AGENT_EVENT_DISPLAY_KIND_BY_TYPE[event.event_type];
+  if (kind) return kind;
+  logUnknownAgentEventType(event);
   return "operation";
+}
+
+function logUnknownAgentEventType(event: AgentEvent) {
+  if (loggedUnknownAgentEventTypes.has(event.event_type)) return;
+  loggedUnknownAgentEventTypes.add(event.event_type);
+  sendClientLog({
+    level: "warning",
+    source: "agent-transcript",
+    message: `Unmapped agent event_type=${event.event_type} preview=${agentEventPreview(event)}`,
+  });
+}
+
+function agentEventPreview(event: AgentEvent): string {
+  const payload = {
+    index: event.index,
+    event_type: event.event_type,
+    text: event.text.slice(0, 700),
+    file_changes: event.file_changes.map((change) => ({ path: change.path, change_type: change.change_type })),
+    has_patch_text: Boolean(event.patch_text),
+    raw_preview: event.raw_preview,
+  };
+  try {
+    const encoded = JSON.stringify(payload);
+    return encoded.length <= 1200 ? encoded : `${encoded.slice(0, 1200)}...<truncated>`;
+  } catch {
+    return event.text.slice(0, 700);
+  }
 }
 
 function messageHtml(text: string): string {

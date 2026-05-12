@@ -16,6 +16,7 @@ from loguru import logger
 
 from .config import settings
 from .files import resolve_served_directory
+from .models import AgentEventType
 from .storage import HERMES_LOG_DIR
 from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
@@ -23,6 +24,14 @@ HERMES_BASE_URL = os.environ.get("VIEWER_HERMES_BASE_URL", "http://127.0.0.1:864
 HERMES_API_KEY = os.environ.get("VIEWER_HERMES_API_KEY", "").strip()
 HERMES_STATE_DB = Path(os.environ.get("VIEWER_HERMES_STATE_DB", "~/.hermes/state.db")).expanduser()
 RAW_PREVIEW_MAX_BYTES = 16 * 1024
+HERMES_SOURCE_EVENT_MAP = {
+    "role:assistant:content": AgentEventType.MESSAGE_ASSISTANT,
+    "role:assistant:reasoning": AgentEventType.REASONING,
+    "role:assistant:reasoning_content": AgentEventType.REASONING,
+    "role:assistant:tool_calls": AgentEventType.TOOL_CALL,
+    "role:tool:content": AgentEventType.TOOL_RESULT,
+}
+HERMES_UNMAPPED_DB_FIELDS = ("reasoning_details", "codex_reasoning_items", "codex_message_items")
 
 
 def relative_cwd(cwd: str) -> str:
@@ -78,6 +87,7 @@ class HermesSessionManager:
     def __init__(self) -> None:
         self.sessions: dict[str, HermesSession] = {}
         self._loaded = False
+        self._logged_unmapped_fields: set[tuple[str, int | str, str]] = set()
 
     def _paths(self, session_id: str) -> Path:
         return HERMES_LOG_DIR / f"{session_id}.json"
@@ -173,7 +183,46 @@ class HermesSessionManager:
             return raw
         return {"type": raw.get("type"), "role": raw.get("role"), "omitted_bytes": len(encoded)}
 
-    def _add_event(self, events: list[dict], timestamp: float, event_type: str, text: str, raw: dict) -> None:
+    def _mapped_event_type(self, source: str, raw: dict) -> AgentEventType:
+        event_type = HERMES_SOURCE_EVENT_MAP.get(source)
+        if event_type:
+            return event_type
+        logger.warning(
+            "Unmapped Hermes event source source={} row_id={} role={} preview={}",
+            source,
+            raw.get("id"),
+            raw.get("role"),
+            self._preview_text(raw),
+        )
+        return AgentEventType.OPERATION
+
+    def _preview_text(self, value: Any, limit: int = 1200) -> str:
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, ensure_ascii=False, default=str)
+            except TypeError:
+                text = str(value)
+        text = text.replace("\r\n", "\n")
+        return text if len(text) <= limit else f"{text[:limit]}...<truncated>"
+
+    def _log_unmapped_field(self, session: HermesSession, row: sqlite3.Row, field: str, value: Any) -> None:
+        row_id = row["id"] if "id" in row.keys() else "unknown"
+        key = (session.hermes_session_id or session.id, row_id, field)
+        if key in self._logged_unmapped_fields:
+            return
+        self._logged_unmapped_fields.add(key)
+        logger.warning(
+            "Unmapped Hermes message field session={} row_id={} role={} field={} preview={}",
+            session.hermes_session_id or session.id,
+            row_id,
+            row["role"] if "role" in row.keys() else None,
+            field,
+            self._preview_text(value),
+        )
+
+    def _add_event(self, events: list[dict], timestamp: float, event_type: AgentEventType, text: str, raw: dict) -> None:
         cleaned = text.strip()
         if not cleaned:
             return
@@ -188,6 +237,11 @@ class HermesSessionManager:
                 "raw_preview": self._raw_preview(raw),
             }
         )
+
+    def _add_mapped_event(self, events: list[dict], timestamp: float, source: str, text: str, raw: dict) -> None:
+        if not text.strip():
+            return
+        self._add_event(events, timestamp, self._mapped_event_type(source, raw), text, raw)
 
     def _tool_call_text(self, row: sqlite3.Row) -> str:
         tool_calls = row["tool_calls"] if isinstance(row["tool_calls"], str) else ""
@@ -234,7 +288,8 @@ class HermesSessionManager:
                 rows = connection.execute(
                     """
                     SELECT id, role, content, tool_call_id, tool_calls, tool_name, timestamp,
-                           token_count, finish_reason, reasoning, reasoning_content
+                           token_count, finish_reason, reasoning, reasoning_content,
+                           reasoning_details, codex_reasoning_items, codex_message_items
                     FROM messages
                     WHERE session_id = ?
                     ORDER BY timestamp, id
@@ -259,13 +314,16 @@ class HermesSessionManager:
             last_ts = max(last_ts or timestamp, timestamp)
             if role == "user":
                 continue
-            reasoning = row["reasoning_content"] if isinstance(row["reasoning_content"], str) else row["reasoning"] if isinstance(row["reasoning"], str) else ""
             raw = {key: row[key] for key in row.keys()}
-            self._add_event(events, timestamp, "reasoning", reasoning, raw)
+            for field in HERMES_UNMAPPED_DB_FIELDS:
+                if isinstance(row[field], str) and row[field].strip():
+                    self._log_unmapped_field(session, row, field, row[field])
+            reasoning_source = "role:assistant:reasoning_content" if isinstance(row["reasoning_content"], str) and row["reasoning_content"].strip() else "role:assistant:reasoning"
+            reasoning = row["reasoning_content"] if reasoning_source.endswith("reasoning_content") else row["reasoning"] if isinstance(row["reasoning"], str) else ""
+            self._add_mapped_event(events, timestamp, reasoning_source, reasoning, raw)
             message_text = self._message_text(row)
-            message_type = "tool" if role == "tool" else f"message:{role}" if role else "message"
-            self._add_event(events, timestamp, message_type, message_text, raw)
-            self._add_event(events, timestamp, "tool_call", self._tool_call_text(row), raw)
+            self._add_mapped_event(events, timestamp, f"role:{role}:content", message_text, raw)
+            self._add_mapped_event(events, timestamp, f"role:{role}:tool_calls", self._tool_call_text(row), raw)
         return events, total_tokens or None, last_ts
 
     def _sync_db_events(self, session: HermesSession) -> list[dict]:

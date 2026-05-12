@@ -1,3 +1,4 @@
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -215,10 +216,26 @@ class AgentFileChange(BaseModel):
     diff: str | None = None
 
 
+class AgentEventType(StrEnum):
+    MESSAGE_ASSISTANT = "message:assistant"
+    REASONING = "reasoning"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    CUSTOM_TOOL_CALL = "custom_tool_call"
+    EXEC_COMMAND_BEGIN = "exec_command_begin"
+    EXEC_COMMAND_END = "exec_command_end"
+    FUNCTION_CALL = "function_call"
+    FUNCTION_CALL_OUTPUT = "function_call_output"
+    CUSTOM_TOOL_CALL_OUTPUT = "custom_tool_call_output"
+    VIEW_IMAGE_TOOL_CALL = "view_image_tool_call"
+    PATCH_APPLY_END = "patch_apply_end"
+    OPERATION = "operation"
+
+
 class AgentEvent(BaseModel):
     index: int
     received_at: float
-    event_type: str
+    event_type: AgentEventType
     text: str = ""
     file_changes: list[AgentFileChange] = Field(default_factory=list)
     patch_text: str | None = None

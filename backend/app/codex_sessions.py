@@ -19,6 +19,7 @@ from watchfiles import awatch
 
 from .config import settings
 from .files import resolve_served_directory
+from .models import AgentEventType
 from .storage import CODEX_LOG_DIR, CODEX_RUN_DIR
 from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
@@ -44,6 +45,16 @@ HIDDEN_DISPLAY_EVENT_TYPES = {
     "custom_tool_call_output",
     "web_search_call",
     "web_search_end",
+}
+CODEX_AGENT_EVENT_TYPE_MAP = {
+    "agent_message": AgentEventType.MESSAGE_ASSISTANT,
+    "custom_tool_call": AgentEventType.CUSTOM_TOOL_CALL,
+    "exec_command_begin": AgentEventType.EXEC_COMMAND_BEGIN,
+    "exec_command_end": AgentEventType.EXEC_COMMAND_END,
+    "function_call": AgentEventType.FUNCTION_CALL,
+    "message:assistant": AgentEventType.MESSAGE_ASSISTANT,
+    "patch_apply_end": AgentEventType.PATCH_APPLY_END,
+    "view_image_tool_call": AgentEventType.VIEW_IMAGE_TOOL_CALL,
 }
 
 
@@ -425,7 +436,7 @@ class CodexSessionManager:
             if isinstance(payload_type, str):
                 return payload_type
         if raw.get("type") == "custom_tool_call" and isinstance(raw.get("name"), str):
-            return f"tool:{raw['name']}"
+            return "custom_tool_call"
         item = raw.get("item")
         if isinstance(item, dict) and isinstance(item.get("type"), str):
             return item["type"]
@@ -434,8 +445,19 @@ class CodexSessionManager:
             return raw_type
         nested = raw.get("msg")
         if isinstance(nested, dict) and isinstance(nested.get("type"), str):
-            return nested["type"]
+                return nested["type"]
         return "event"
+
+    def _agent_event_type(self, display_event_type: str, raw: dict) -> AgentEventType:
+        event_type = CODEX_AGENT_EVENT_TYPE_MAP.get(display_event_type)
+        if event_type:
+            return event_type
+        logger.warning(
+            "Unmapped Codex display event type event_type={} raw_preview={}",
+            display_event_type,
+            self._raw_preview(raw),
+        )
+        return AgentEventType.OPERATION
 
     def _content_text(self, content: Any) -> str:
         if not isinstance(content, list):
@@ -616,8 +638,8 @@ class CodexSessionManager:
         raw = event.get("raw")
         if not isinstance(raw, dict):
             return None
-        event_type = self._display_event_type(raw)
-        if event_type in HIDDEN_DISPLAY_EVENT_TYPES:
+        display_event_type = self._display_event_type(raw)
+        if display_event_type in HIDDEN_DISPLAY_EVENT_TYPES:
             return None
         text = self._text_from_value(raw)
         if self._is_duplicate_agent_message(raw, text, assistant_response_texts):
@@ -626,6 +648,7 @@ class CodexSessionManager:
         patch_text = self._extract_patch_input(raw)
         if not text and not file_changes and not patch_text:
             return None
+        event_type = self._agent_event_type(display_event_type, raw)
         return {
             "index": event["index"],
             "received_at": event["received_at"],

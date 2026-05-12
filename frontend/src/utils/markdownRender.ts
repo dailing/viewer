@@ -59,6 +59,7 @@ function highlightedLine(line: string, language: string): string {
 
 function renderCodeFence(code: string, language: string): string {
   const lines = code.replace(/\n$/, "").split("\n");
+  const lineNumberWidth = String(lines.length || 1).length;
   const rows = (lines.length ? lines : [""]).map((line, index) => {
     const number = String(index + 1);
     return [
@@ -68,7 +69,7 @@ function renderCodeFence(code: string, language: string): string {
       "</span>",
     ].join("");
   });
-  return `<pre class="hljs markdown-code-block"><code${codeLanguageClass(language)}>${rows.join("")}</code></pre>`;
+  return `<pre class="hljs markdown-code-block" style="--markdown-code-line-number-width: ${lineNumberWidth}ch"><code${codeLanguageClass(language)}>${rows.join("")}</code></pre>`;
 }
 
 function looksLikeMathOnly(content: string): boolean {

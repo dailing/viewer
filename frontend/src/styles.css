@@ -857,15 +857,15 @@ body {
 
 .markdown-content .markdown-code-line {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-columns: calc(var(--markdown-code-line-number-width, 1ch) + 18px) minmax(0, 1fr);
   min-height: 1.4em;
 }
 
 .markdown-content .markdown-code-line-number {
   border-right: 1px solid var(--markdown-border-color);
   color: var(--text-muted);
-  margin-right: 10px;
-  min-width: 2.5ch;
+  font-variant-numeric: tabular-nums;
+  min-width: var(--markdown-code-line-number-width, 1ch);
   padding-right: 8px;
   text-align: right;
   user-select: none;

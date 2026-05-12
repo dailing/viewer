@@ -1,18 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { CodexEvent, CodexPrompt } from "../types/codex";
+import type { AgentEvent, AgentPrompt } from "../types/agents";
 import { renderMarkdown, renderMermaidIn } from "../utils/markdownRender";
 
 type AgentSession = {
   cwd: string;
   cwd_relative?: string | null;
   status: "idle" | "running" | "exited" | "failed";
-  prompts: CodexPrompt[];
-  events: CodexEvent[];
+  prompts: AgentPrompt[];
+  events: AgentEvent[];
 };
 type TranscriptEntry =
   | { kind: "prompt"; id: string; text: string }
-  | { kind: "event"; id: string; event: CodexEvent; text: string; eventType: string; fileChanges: FileChange[]; patchText: string | null };
+  | { kind: "event"; id: string; event: AgentEvent; text: string; eventType: string; fileChanges: FileChange[]; patchText: string | null };
 type TranscriptTimelineItem =
   | { kind: "prompt"; orderTime: number; orderIndex: number; entry: Extract<TranscriptEntry, { kind: "prompt" }> }
   | { kind: "event"; orderTime: number; orderIndex: number; entry: Extract<TranscriptEntry, { kind: "event" }> };
@@ -20,6 +20,7 @@ type FileChange = { path: string; changeType: string; diff: string | null };
 type DiffLineKind = "add" | "delete" | "hunk" | "file" | "context";
 type DiffSegment = { text: string; changed: boolean };
 type DiffLine = { text: string; kind: DiffLineKind; segments: DiffSegment[] };
+type AgentEventDisplayKind = "message" | "reasoning" | "tool_call" | "tool_result" | "file_update" | "operation";
 
 const emit = defineEmits<{
   "open-link": [target: string];
@@ -108,16 +109,34 @@ function isMutedEvent(entry: Extract<TranscriptEntry, { kind: "event" }>): boole
 }
 
 function isMutedEventType(eventType: string): boolean {
-  if (eventType === "message:assistant" || eventType === "agent_message") return false;
-  if (eventType.startsWith("tool:")) return true;
-  return [
-    "custom_tool_call",
-    "exec_command_begin",
-    "exec_command_end",
-    "function_call",
-    "patch_apply_end",
-    "view_image_tool_call",
-  ].includes(eventType);
+  return agentEventDisplayKind(eventType) !== "message";
+}
+
+function agentEventDisplayKind(eventType: string): AgentEventDisplayKind {
+  const normalized = eventType.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (eventType === "message:assistant" || normalized === "agent_message") return "message";
+  if (normalized.includes("reasoning") || normalized.includes("thinking") || normalized === "thought") return "reasoning";
+  if (
+    normalized === "tool" ||
+    normalized.includes("tool_output") ||
+    normalized.includes("tool_result") ||
+    normalized.includes("function_call_output") ||
+    normalized.includes("custom_tool_call_output") ||
+    normalized === "exec_command_end"
+  ) {
+    return "tool_result";
+  }
+  if (
+    eventType.startsWith("tool:") ||
+    normalized.includes("tool_call") ||
+    normalized.includes("function_call") ||
+    normalized === "exec_command_begin" ||
+    normalized === "view_image_tool_call"
+  ) {
+    return "tool_call";
+  }
+  if (normalized.includes("patch") || normalized.includes("file_change") || normalized.includes("file_update")) return "file_update";
+  return "operation";
 }
 
 function messageHtml(text: string): string {

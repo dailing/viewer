@@ -1,3 +1,5 @@
+import type { AgentEvent, AgentFileChange, AgentPrompt, AgentQueueItem } from "./agents";
+
 export type CodexStatus = "idle" | "running" | "exited" | "failed";
 
 export type CodexSessionInfo = {
@@ -20,42 +22,19 @@ export type CodexSessionInfo = {
   model_context_window?: number | null;
   context_used_percent?: number | null;
   total_tokens?: number | null;
-  queue: CodexQueueItem[];
+  queue: AgentQueueItem[];
 };
 
-export type CodexPrompt = {
-  text: string;
-  created_at: number;
-};
-
-export type CodexEvent = {
-  index: number;
-  received_at: number;
-  event_type: string;
-  text: string;
-  file_changes: CodexFileChange[];
-  patch_text?: string | null;
-  raw_preview?: Record<string, unknown> | null;
-};
+export type CodexPrompt = AgentPrompt;
+export type CodexEvent = AgentEvent;
 
 export type CodexSessionSnapshot = CodexSessionInfo & {
-  prompts: CodexPrompt[];
-  events: CodexEvent[];
+  prompts: AgentPrompt[];
+  events: AgentEvent[];
 };
 
-export type CodexFileChange = {
-  path: string;
-  change_type: string;
-  diff?: string | null;
-};
-
-export type CodexQueueItem = {
-  id: string;
-  prompt: string;
-  created_at: number;
-  updated_at: number;
-  model?: string | null;
-};
+export type CodexFileChange = AgentFileChange;
+export type CodexQueueItem = AgentQueueItem;
 
 export type CodexCliStatus = {
   available: boolean;

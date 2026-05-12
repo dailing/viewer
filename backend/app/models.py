@@ -201,33 +201,41 @@ class CodexSessionInfo(BaseModel):
     model_context_window: int | None = None
     context_used_percent: float | None = None
     total_tokens: int | None = None
-    queue: list["CodexQueueItem"] = Field(default_factory=list)
+    queue: list["AgentQueueItem"] = Field(default_factory=list)
 
 
-class CodexPrompt(BaseModel):
+class AgentPrompt(BaseModel):
     text: str
     created_at: float
 
 
-class CodexFileChange(BaseModel):
+class AgentFileChange(BaseModel):
     path: str
     change_type: str
     diff: str | None = None
 
 
-class CodexEvent(BaseModel):
+class AgentEvent(BaseModel):
     index: int
     received_at: float
     event_type: str
     text: str = ""
-    file_changes: list[CodexFileChange] = Field(default_factory=list)
+    file_changes: list[AgentFileChange] = Field(default_factory=list)
     patch_text: str | None = None
     raw_preview: dict | None = None
 
 
+class AgentQueueItem(BaseModel):
+    id: str
+    prompt: str
+    created_at: float
+    updated_at: float
+    model: str | None = None
+
+
 class CodexSessionSnapshot(CodexSessionInfo):
-    prompts: list[CodexPrompt] = Field(default_factory=list)
-    events: list[CodexEvent] = Field(default_factory=list)
+    prompts: list[AgentPrompt] = Field(default_factory=list)
+    events: list[AgentEvent] = Field(default_factory=list)
 
 
 class CodexSessionCreate(BaseModel):
@@ -238,14 +246,6 @@ class CodexSessionCreate(BaseModel):
 
 class CodexSessionMessage(BaseModel):
     prompt: str
-    model: str | None = None
-
-
-class CodexQueueItem(BaseModel):
-    id: str
-    prompt: str
-    created_at: float
-    updated_at: float
     model: str | None = None
 
 
@@ -269,12 +269,12 @@ class HermesSessionInfo(BaseModel):
     exit_code: int | None = None
     event_count: int = 0
     total_tokens: int | None = None
-    queue: list[CodexQueueItem] = Field(default_factory=list)
+    queue: list[AgentQueueItem] = Field(default_factory=list)
 
 
 class HermesSessionSnapshot(HermesSessionInfo):
-    prompts: list[CodexPrompt] = Field(default_factory=list)
-    events: list[CodexEvent] = Field(default_factory=list)
+    prompts: list[AgentPrompt] = Field(default_factory=list)
+    events: list[AgentEvent] = Field(default_factory=list)
 
 
 class HermesSessionCreate(BaseModel):

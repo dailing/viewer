@@ -4,7 +4,7 @@ import { useAgentLoopsStore } from "../stores/agentLoops";
 import { useCodexStore } from "../stores/codex";
 import { renderMarkdown } from "../utils/markdownRender";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
-import type { CodexEvent } from "../types/codex";
+import type { AgentEvent } from "../types/agents";
 
 const loops = useAgentLoopsStore();
 const codex = useCodexStore();
@@ -199,7 +199,7 @@ function rendered(text: string) {
   return renderMarkdown(text || "");
 }
 
-function visibleEvents(run: AgentLoopRunRecord | null): CodexEvent[] {
+function visibleEvents(run: AgentLoopRunRecord | null): AgentEvent[] {
   return run?.session_snapshot?.events ?? [];
 }
 </script>

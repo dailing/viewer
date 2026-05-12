@@ -9,8 +9,7 @@ import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useVoiceStore } from "../../stores/voice";
 import { useWorkspacesStore } from "../../stores/workspaces";
 import type { PaneToolbarAction, PaneToolbarControl } from "../../stores/paneToolbar";
-import type { AgentSessionInfo, AgentSessionSnapshot, AgentSocketMessage } from "../../types/agents";
-import type { CodexEvent, CodexQueueItem } from "../../types/codex";
+import type { AgentEvent, AgentQueueItem, AgentSessionInfo, AgentSessionSnapshot, AgentSocketMessage } from "../../types/agents";
 import { agentSessionSocketUrl } from "../../api/client";
 import { agentRef, parseAgentRef, toAgentSessionInfo, toAgentSessionSnapshot } from "../../utils/agents";
 import AgentPromptComposer from "../AgentPromptComposer.vue";
@@ -171,7 +170,7 @@ function applySnapshot(snapshot: AgentSessionSnapshot) {
   transcript.value?.scrollToBottom(true);
 }
 
-function applyEvent(event: CodexEvent, info: AgentSessionInfo) {
+function applyEvent(event: AgentEvent, info: AgentSessionInfo) {
   if (!session.value) return;
   if (!session.value.events.some((item) => item.index === event.index)) session.value.events.push(event);
   applyInfo(info);
@@ -244,7 +243,7 @@ async function queuePrompt() {
   }
 }
 
-function editQueuedMessage(item: CodexQueueItem) {
+function editQueuedMessage(item: AgentQueueItem) {
   savePromptDraft(props.agentRef, promptText.value);
   editingQueueItemId.value = item.id;
   promptText.value = item.prompt;

@@ -173,16 +173,55 @@ class HermesSessionManager:
             return raw
         return {"type": raw.get("type"), "role": raw.get("role"), "omitted_bytes": len(encoded)}
 
+    def _add_event(self, events: list[dict], timestamp: float, event_type: str, text: str, raw: dict) -> None:
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        events.append(
+            {
+                "index": len(events),
+                "received_at": timestamp,
+                "event_type": event_type,
+                "text": cleaned,
+                "file_changes": [],
+                "patch_text": None,
+                "raw_preview": self._raw_preview(raw),
+            }
+        )
+
+    def _tool_call_text(self, row: sqlite3.Row) -> str:
+        tool_calls = row["tool_calls"] if isinstance(row["tool_calls"], str) else ""
+        tool_name = row["tool_name"] if isinstance(row["tool_name"], str) else ""
+        if not tool_calls:
+            return ""
+        try:
+            parsed = json.loads(tool_calls)
+        except json.JSONDecodeError:
+            return f"Tool call: {tool_name}" if tool_name else "Tool call"
+        calls = parsed if isinstance(parsed, list) else [parsed]
+        rows: list[str] = []
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            name = ""
+            arguments = ""
+            if isinstance(function, dict):
+                name = function.get("name") if isinstance(function.get("name"), str) else ""
+                arguments = function.get("arguments") if isinstance(function.get("arguments"), str) else ""
+            if not name:
+                name = call.get("name") if isinstance(call.get("name"), str) else tool_name
+            label = f"Tool call: {name}" if name else "Tool call"
+            rows.append("\n".join(part for part in (label, arguments.strip()) if part))
+        return "\n\n".join(rows) if rows else (f"Tool call: {tool_name}" if tool_name else "Tool call")
+
     def _message_text(self, row: sqlite3.Row) -> str:
         role = str(row["role"] or "")
         content = row["content"] if isinstance(row["content"], str) else ""
-        tool_name = row["tool_name"] if isinstance(row["tool_name"], str) else ""
-        tool_calls = row["tool_calls"] if isinstance(row["tool_calls"], str) else ""
         if role == "tool":
+            tool_name = row["tool_name"] if isinstance(row["tool_name"], str) else ""
             prefix = f"Tool output: {tool_name}" if tool_name else "Tool output"
             return "\n".join(part for part in (prefix, content) if part)
-        if tool_calls and not content:
-            return f"Tool call: {tool_name}" if tool_name else "Tool call"
         return content
 
     def _events_from_db(self, session: HermesSession) -> tuple[list[dict], int | None, float | None]:
@@ -220,29 +259,13 @@ class HermesSessionManager:
             last_ts = max(last_ts or timestamp, timestamp)
             if role == "user":
                 continue
-            text = self._message_text(row).strip()
             reasoning = row["reasoning_content"] if isinstance(row["reasoning_content"], str) else row["reasoning"] if isinstance(row["reasoning"], str) else ""
-            if reasoning and text:
-                text = f"{reasoning.strip()}\n\n{text}"
-            elif reasoning:
-                text = reasoning.strip()
-            if not text:
-                continue
             raw = {key: row[key] for key in row.keys()}
-            event_type = f"message:{role}" if role else "message"
-            if row["tool_calls"] or role == "tool":
-                event_type = "tool" if role == "tool" else "tool_call"
-            events.append(
-                {
-                    "index": len(events),
-                    "received_at": timestamp,
-                    "event_type": event_type,
-                    "text": text,
-                    "file_changes": [],
-                    "patch_text": None,
-                    "raw_preview": self._raw_preview(raw),
-                }
-            )
+            self._add_event(events, timestamp, "reasoning", reasoning, raw)
+            message_text = self._message_text(row)
+            message_type = "tool" if role == "tool" else f"message:{role}" if role else "message"
+            self._add_event(events, timestamp, message_type, message_text, raw)
+            self._add_event(events, timestamp, "tool_call", self._tool_call_text(row), raw)
         return events, total_tokens or None, last_ts
 
     def _sync_db_events(self, session: HermesSession) -> list[dict]:

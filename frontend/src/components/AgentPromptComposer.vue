@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import type { CodexQueueItem } from "../types/codex";
+import type { AgentQueueItem } from "../types/agents";
 import VoiceInputButton from "./VoiceInputButton.vue";
 
 const props = defineProps<{
   modelValue: string;
-  queue: CodexQueueItem[];
+  queue: AgentQueueItem[];
   editingQueueItemId: string | null;
   voiceContextId: string;
   placeholder: string;
@@ -16,7 +16,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
-  "edit-queued": [item: CodexQueueItem];
+  "edit-queued": [item: AgentQueueItem];
   "delete-queued": [itemId: string];
   "save-queued": [];
   "cancel-queued": [];
@@ -41,7 +41,7 @@ function focusTextarea() {
   void nextTick(() => textarea.value?.focus());
 }
 
-function editQueuedMessage(item: CodexQueueItem) {
+function editQueuedMessage(item: AgentQueueItem) {
   emit("edit-queued", item);
   focusTextarea();
 }

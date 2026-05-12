@@ -1,4 +1,4 @@
-import type { CodexEvent, CodexPrompt, CodexQueueItem } from "./codex";
+import type { AgentEvent, AgentPrompt, AgentQueueItem } from "./agents";
 
 export type HermesStatus = "idle" | "running" | "exited" | "failed";
 
@@ -17,10 +17,10 @@ export type HermesSessionInfo = {
   exit_code?: number | null;
   event_count: number;
   total_tokens?: number | null;
-  queue: CodexQueueItem[];
+  queue: AgentQueueItem[];
 };
 
 export type HermesSessionSnapshot = HermesSessionInfo & {
-  prompts: CodexPrompt[];
-  events: CodexEvent[];
+  prompts: AgentPrompt[];
+  events: AgentEvent[];
 };

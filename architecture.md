@@ -191,7 +191,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `create(prompt, cwd)`: creates idle viewer metadata with `hermes_session_id` seeded from the viewer session id; a non-empty prompt immediately starts a Hermes `/v1/runs` request.
 - `send(session_id, prompt)`: rejects concurrent running sends, persists the prompt, starts `/v1/runs` with `session_id`, and monitors run status through `/v1/runs/{run_id}` while polling `~/.hermes/state.db` for new messages.
 - `enqueue()`, `update_queue_item()`, and `delete_queue_item()`: mirror Codex queue behavior and drain server-side when the session is not running.
-- `_sync_db_events()`: reads `sessions` and `messages` from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`, hides user messages already represented by prompts, and converts assistant/tool rows into the compact `CodexEvent` transport shape used by the frontend.
+- `_sync_db_events()`: reads `sessions` and `messages` from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`, hides user messages already represented by prompts, and converts assistant/tool rows into the compact `AgentEvent` transport shape used by the frontend. Hermes reasoning, assistant content, tool calls, and tool output are emitted as separate event types so focus mode can show only the assistant answer while detail mode can still inspect operation events.
 - `terminate(session_id)`: calls Hermes `/v1/runs/{run_id}/stop` when a run id is known, cancels local monitoring, persists status, and broadcasts a session update.
 - `connect(session_id, websocket)`: sends snapshots and broadcasts live event/status messages to Hermes panes.
 - `hermes_session_manager`: singleton used by routes.
@@ -212,7 +212,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
 - `ConfigData` stores global appearance, workspace count/heat timing, Markdown, and Codex defaults only.
 - `WorkspaceConfig.count` defaults to 5 and controls how many numbered workspace buttons appear in the sidebar activity rail. `heat_interval_seconds` and `heat_step_percent` control frontend workspace button heat: on each interval the active workspace score moves toward 1 by the configured percentage and inactive scores move toward 0 by the same percentage. `WorkspaceData.count` mirrors the count config in `/api/workspaces` responses for frontend convenience, while persisted workspace slots in `~/.view/workspaces.json` include per-workspace visit timestamps used to sort the current folder by most recent visit.
-- Codex schemas: `CodexSessionInfo`, `CodexPrompt`, compact `CodexEvent`, `CodexFileChange`, `CodexSessionSnapshot`, `CodexSessionCreate`, `CodexSessionMessage`, `CodexQueueItem`, and `CodexQueueMessage`. `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible, and running sessions expose background `pid`, `codex_pid`, `run_id`, and `run_started_at` fields when available. Hermes schemas reuse `CodexPrompt`, `CodexEvent`, and `CodexQueueItem` for the shared frontend event/queue shape, with Hermes-specific ids and DB path in `HermesSessionInfo`.
+- Agent schemas: shared `AgentPrompt`, compact `AgentEvent`, `AgentFileChange`, and `AgentQueueItem` describe normalized prompt, message, reasoning, tool, tool-result, and file-update/patch display data across providers. Codex schemas add `CodexSessionInfo`, `CodexSessionSnapshot`, `CodexSessionCreate`, `CodexSessionMessage`, and `CodexQueueMessage`; `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible, and running sessions expose background `pid`, `codex_pid`, `run_id`, and `run_started_at` fields when available. Hermes schemas reuse the shared agent prompt/event/queue shape, with Hermes-specific ids and DB path in `HermesSessionInfo`.
 - `CodexConfig` stores Codex model options, muted operation-message alpha, the Diff viewer auto-commit prompt, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
@@ -439,7 +439,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/components/AgentSessionTranscript.vue`
 
-- Shared Codex/Hermes transcript display layer. Owns agent content appearance and behavior: session metadata, idle/running/error rows, prompt/event timeline ordering, Markdown rendering, Mermaid rendering, local link click emission, focus-mode muted operation filtering, raw JSON preview, file-change/patch diffs, word-level diff highlighting, derived result snippets, and scroll-to-bottom helpers exposed to parent viewers.
+- Shared Codex/Hermes transcript display layer. Owns agent content appearance and behavior: session metadata, idle/running/error rows, prompt/event timeline ordering, Markdown rendering, Mermaid rendering, local link click emission, focus-mode muted operation filtering for tool/reasoning events, raw JSON preview, file-change/patch diffs, word-level diff highlighting, derived result snippets, and scroll-to-bottom helpers exposed to parent viewers.
 
 `frontend/src/stores/voice.ts`
 
@@ -539,11 +539,15 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/types/codex.ts`
 
-- TypeScript mirror of Codex schemas: `CodexStatus`, `CodexSessionInfo`, `CodexPrompt`, compact `CodexEvent`, `CodexFileChange`, `CodexSessionSnapshot`, and `CodexQueueItem`. `CodexSessionInfo` includes optional detached-run pid/run metadata.
+- TypeScript mirror of Codex schemas: `CodexStatus`, `CodexSessionInfo`, `CodexSessionSnapshot`, and Codex-specific status/model fields. Shared prompt/event/file-change/queue item shapes live in `types/agents.ts` as `AgentPrompt`, `AgentEvent`, `AgentFileChange`, and `AgentQueueItem`; `types/codex.ts` keeps Codex aliases for compatibility.
+
+`frontend/src/types/agents.ts`
+
+- Shared agent provider/session types plus normalized `AgentPrompt`, `AgentEvent`, `AgentFileChange`, and `AgentQueueItem` shapes used by Codex, Hermes, and the shared agent transcript UI.
 
 `frontend/src/types/hermes.ts`
 
-- TypeScript mirror of Hermes schemas: `HermesStatus`, `HermesSessionInfo`, and `HermesSessionSnapshot`; it reuses the shared Codex prompt/event/queue item shapes for normalized transcript display.
+- TypeScript mirror of Hermes schemas: `HermesStatus`, `HermesSessionInfo`, and `HermesSessionSnapshot`; it reuses the shared agent prompt/event/queue item shapes for normalized transcript display.
 
 `frontend/src/types/agentLoops.ts`
 

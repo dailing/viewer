@@ -1,7 +1,34 @@
-import type { CodexEvent, CodexPrompt, CodexQueueItem } from "./codex";
-
 export type AgentProvider = string;
 export type AgentStatus = "idle" | "running" | "exited" | "failed";
+
+export type AgentPrompt = {
+  text: string;
+  created_at: number;
+};
+
+export type AgentFileChange = {
+  path: string;
+  change_type: string;
+  diff?: string | null;
+};
+
+export type AgentEvent = {
+  index: number;
+  received_at: number;
+  event_type: string;
+  text: string;
+  file_changes: AgentFileChange[];
+  patch_text?: string | null;
+  raw_preview?: Record<string, unknown> | null;
+};
+
+export type AgentQueueItem = {
+  id: string;
+  prompt: string;
+  created_at: number;
+  updated_at: number;
+  model?: string | null;
+};
 
 export type AgentProviderInfo = {
   id: AgentProvider;
@@ -24,17 +51,17 @@ export type AgentSessionInfo = {
   exit_code?: number | null;
   event_count: number;
   total_tokens?: number | null;
-  queue: CodexQueueItem[];
+  queue: AgentQueueItem[];
   raw: Record<string, unknown>;
 };
 
 export type AgentSessionSnapshot = AgentSessionInfo & {
-  prompts: CodexPrompt[];
-  events: CodexEvent[];
+  prompts: AgentPrompt[];
+  events: AgentEvent[];
 };
 
 export type AgentSocketMessage =
   | { type: "snapshot"; session: AgentSessionSnapshot; source?: string }
-  | { type: "event"; event: CodexEvent; session: AgentSessionInfo; source?: string }
+  | { type: "event"; event: AgentEvent; session: AgentSessionInfo; source?: string }
   | { type: "status"; session: AgentSessionInfo; source?: string }
   | { type: "deleted"; source?: string };

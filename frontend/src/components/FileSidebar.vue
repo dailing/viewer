@@ -5,9 +5,10 @@ import { useFilesStore } from "../stores/files";
 import CodexSessionsPanel from "./sidebar/CodexSessionsPanel.vue";
 import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
+import HermesSessionsPanel from "./sidebar/HermesSessionsPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 
-type SidebarTool = "files" | "git" | "terminals" | "codex";
+type SidebarTool = "files" | "git" | "terminals" | "codex" | "hermes";
 type WorkspaceNotice = "running" | "completed" | "failed";
 type GitIndicator = "clean" | "dirty" | "none";
 
@@ -17,6 +18,7 @@ const props = defineProps<{
   workspaceCount: number;
   activeWorkspaceId: string;
   codexSessionIds: string[];
+  hermesSessionIds: string[];
   panelOpen: boolean;
   panelPinned: boolean;
   workspaceNotices?: Record<string, WorkspaceNotice>;
@@ -28,6 +30,7 @@ const emit = defineEmits<{
   "open-file": [path: string];
   "open-terminal": [id: string];
   "open-codex-session": [id: string];
+  "open-hermes-session": [id: string];
   "open-diff": [path: string, cwd: string];
   "switch-workspace": [id: string];
   "toggle-tool-panel": [];
@@ -40,6 +43,7 @@ const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
   { id: "git", title: "Changes", icon: "bi-git" },
   { id: "terminals", title: "Terminals", icon: "bi-terminal" },
   { id: "codex", title: "Codex", icon: "bi-stars" },
+  { id: "hermes", title: "Hermes", icon: "bi-lightning-charge" },
 ];
 
 const fileStore = useFilesStore();
@@ -78,9 +82,9 @@ function selectWorkspace(id: string) {
 
 function workspaceTitle(id: string) {
   const notice = props.workspaceNotices?.[id];
-  if (notice === "running") return `Workspace ${id}: Codex run is running`;
-  if (notice === "failed") return `Workspace ${id}: Codex run failed`;
-  if (notice === "completed") return `Workspace ${id}: Codex run finished`;
+  if (notice === "running") return `Workspace ${id}: agent run is running`;
+  if (notice === "failed") return `Workspace ${id}: agent run failed`;
+  if (notice === "completed") return `Workspace ${id}: agent run finished`;
   return `Workspace ${id}`;
 }
 
@@ -190,7 +194,8 @@ onUnmounted(() => {
       <FilesPanel v-if="activeTool === 'files'" @open-file="emit('open-file', $event)" />
       <GitPanel v-else-if="activeTool === 'git'" @open-diff="(path, cwd) => emit('open-diff', path, cwd)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" @open-terminal="emit('open-terminal', $event)" />
-      <CodexSessionsPanel v-else :session-ids="props.codexSessionIds" @open-codex-session="emit('open-codex-session', $event)" />
+      <CodexSessionsPanel v-else-if="activeTool === 'codex'" :session-ids="props.codexSessionIds" @open-codex-session="emit('open-codex-session', $event)" />
+      <HermesSessionsPanel v-else :session-ids="props.hermesSessionIds" @open-hermes-session="emit('open-hermes-session', $event)" />
     </section>
   </div>
 </template>

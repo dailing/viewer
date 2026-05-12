@@ -29,8 +29,9 @@ from .files import (
     write_workspace,
 )
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
+from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
-from .models import AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate, WorkspaceConfig, WorkspaceSnapshot
+from .models import AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -76,6 +77,7 @@ async def startup() -> None:
     watch_stop_event = asyncio.Event()
     watch_task = asyncio.create_task(watch_root(watch_stop_event))
     await codex_session_manager.resume_pending_queues()
+    await hermes_session_manager.resume_pending_queues()
     await agent_loop_manager.start()
 
 
@@ -89,6 +91,7 @@ async def shutdown() -> None:
     await agent_loop_manager.shutdown()
     await terminal_manager.shutdown()
     await codex_session_manager.shutdown()
+    await hermes_session_manager.shutdown()
 
 
 @app.get("/api/health")
@@ -361,6 +364,70 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
     await terminal_manager.connect(terminal_id, websocket)
 
 
+def _agent_manager(provider: str):
+    if provider == "codex":
+        return codex_session_manager
+    if provider == "hermes":
+        return hermes_session_manager
+    raise HTTPException(status_code=400, detail="Unsupported agent provider")
+
+
+@app.get("/api/agents/sessions")
+async def agent_sessions(provider: str | None = None):
+    if provider:
+        return _agent_manager(provider).list()
+    return {
+        "codex": codex_session_manager.list(),
+        "hermes": hermes_session_manager.list(),
+    }
+
+
+@app.post("/api/agents/sessions")
+async def create_agent_session(config: AgentSessionCreate):
+    logger.info("Creating {} session cwd={}", config.provider, config.cwd or "")
+    return await _agent_manager(config.provider).create(config.prompt, config.cwd, config.model)
+
+
+@app.get("/api/agents/sessions/{session_id}")
+async def agent_session(session_id: str, provider: str):
+    return _agent_manager(provider).snapshot(session_id)
+
+
+@app.post("/api/agents/sessions/{session_id}/messages")
+async def send_agent_message(session_id: str, message: AgentSessionMessage):
+    logger.info("Sending {} message session={}", message.provider, session_id)
+    return await _agent_manager(message.provider).send(session_id, message.prompt, message.model)
+
+
+@app.post("/api/agents/sessions/{session_id}/queue")
+async def queue_agent_message(session_id: str, message: AgentQueueMessage):
+    logger.info("Queueing {} message session={}", message.provider, session_id)
+    return await _agent_manager(message.provider).enqueue(session_id, message.prompt, message.model)
+
+
+@app.put("/api/agents/sessions/{session_id}/queue/{item_id}")
+async def update_agent_queue_message(session_id: str, item_id: str, message: AgentQueueMessage):
+    logger.info("Updating queued {} message session={} item={}", message.provider, session_id, item_id)
+    return await _agent_manager(message.provider).update_queue_item(session_id, item_id, message.prompt, message.model)
+
+
+@app.delete("/api/agents/sessions/{session_id}/queue/{item_id}")
+async def delete_agent_queue_message(session_id: str, item_id: str, provider: str):
+    logger.info("Deleting queued {} message session={} item={}", provider, session_id, item_id)
+    return await _agent_manager(provider).delete_queue_item(session_id, item_id)
+
+
+@app.post("/api/agents/sessions/{session_id}/terminate")
+async def terminate_agent_session(session_id: str, message: AgentProviderRequest):
+    logger.info("Terminating {} session {}", message.provider, session_id)
+    return await _agent_manager(message.provider).terminate(session_id)
+
+
+@app.websocket("/api/agents/sessions/{session_id}/ws")
+async def agent_session_ws(websocket: WebSocket, session_id: str, provider: str):
+    await _agent_manager(provider).connect(session_id, websocket)
+
+
 @app.get("/api/codex/sessions")
 async def codex_sessions():
     return codex_session_manager.list()
@@ -420,6 +487,57 @@ async def terminate_codex_session(session_id: str):
 @app.websocket("/api/codex/sessions/{session_id}/ws")
 async def codex_session_ws(websocket: WebSocket, session_id: str):
     await codex_session_manager.connect(session_id, websocket)
+
+
+@app.get("/api/hermes/sessions")
+async def hermes_sessions():
+    return hermes_session_manager.list()
+
+
+@app.post("/api/hermes/sessions")
+async def create_hermes_session(config: HermesSessionCreate):
+    logger.info("Creating Hermes session cwd={}", config.cwd or "")
+    return await hermes_session_manager.create(config.prompt, config.cwd, config.model)
+
+
+@app.get("/api/hermes/sessions/{session_id}")
+async def hermes_session(session_id: str):
+    return hermes_session_manager.snapshot(session_id)
+
+
+@app.post("/api/hermes/sessions/{session_id}/messages")
+async def send_hermes_message(session_id: str, message: HermesSessionMessage):
+    logger.info("Sending Hermes message session={}", session_id)
+    return await hermes_session_manager.send(session_id, message.prompt, message.model)
+
+
+@app.post("/api/hermes/sessions/{session_id}/queue")
+async def queue_hermes_message(session_id: str, message: HermesQueueMessage):
+    logger.info("Queueing Hermes message session={}", session_id)
+    return await hermes_session_manager.enqueue(session_id, message.prompt, message.model)
+
+
+@app.put("/api/hermes/sessions/{session_id}/queue/{item_id}")
+async def update_hermes_queue_message(session_id: str, item_id: str, message: HermesQueueMessage):
+    logger.info("Updating queued Hermes message session={} item={}", session_id, item_id)
+    return await hermes_session_manager.update_queue_item(session_id, item_id, message.prompt, message.model)
+
+
+@app.delete("/api/hermes/sessions/{session_id}/queue/{item_id}")
+async def delete_hermes_queue_message(session_id: str, item_id: str):
+    logger.info("Deleting queued Hermes message session={} item={}", session_id, item_id)
+    return await hermes_session_manager.delete_queue_item(session_id, item_id)
+
+
+@app.post("/api/hermes/sessions/{session_id}/terminate")
+async def terminate_hermes_session(session_id: str):
+    logger.info("Terminating Hermes session {}", session_id)
+    return await hermes_session_manager.terminate(session_id)
+
+
+@app.websocket("/api/hermes/sessions/{session_id}/ws")
+async def hermes_session_ws(websocket: WebSocket, session_id: str):
+    await hermes_session_manager.connect(session_id, websocket)
 
 
 @app.websocket("/api/voice/ws")

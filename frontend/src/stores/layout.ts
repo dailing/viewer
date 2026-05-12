@@ -112,6 +112,19 @@ export const useLayoutStore = defineStore("layout", {
       visit(state.root);
       return ids;
     },
+    openHermesSessionIds(state): string[] {
+      const ids: string[] = [];
+      const visit = (node: LayoutNode) => {
+        if (node.type === "pane") {
+          if (node.hermesSessionId) ids.push(node.hermesSessionId);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(state.root);
+      return ids;
+    },
     openDiffPaths(state): string[] {
       const paths: string[] = [];
       const visit = (node: LayoutNode) => {
@@ -169,6 +182,7 @@ export const useLayoutStore = defineStore("layout", {
         filePath: path,
         terminalId: undefined,
         codexSessionId: undefined,
+        hermesSessionId: undefined,
         diffPath: undefined,
         diffCwd: undefined,
       }));
@@ -195,6 +209,7 @@ export const useLayoutStore = defineStore("layout", {
         filePath: undefined,
         terminalId: id,
         codexSessionId: undefined,
+        hermesSessionId: undefined,
         diffPath: undefined,
         diffCwd: undefined,
       }));
@@ -207,6 +222,20 @@ export const useLayoutStore = defineStore("layout", {
         filePath: undefined,
         terminalId: undefined,
         codexSessionId: id,
+        hermesSessionId: undefined,
+        diffPath: undefined,
+        diffCwd: undefined,
+      }));
+      this.save();
+    },
+    openHermesSession(id: string) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
+        ...pane,
+        filePath: undefined,
+        terminalId: undefined,
+        codexSessionId: undefined,
+        hermesSessionId: id,
         diffPath: undefined,
         diffCwd: undefined,
       }));
@@ -219,6 +248,7 @@ export const useLayoutStore = defineStore("layout", {
         filePath: undefined,
         terminalId: undefined,
         codexSessionId: undefined,
+        hermesSessionId: undefined,
         diffPath: path,
         diffCwd: cwd,
       }));
@@ -249,6 +279,7 @@ export const useLayoutStore = defineStore("layout", {
         filePath: undefined,
         terminalId: undefined,
         codexSessionId: undefined,
+        hermesSessionId: undefined,
         diffPath: undefined,
         diffCwd: undefined,
       }));
@@ -271,6 +302,10 @@ export const useLayoutStore = defineStore("layout", {
     },
     clearCodexSession(id: string) {
       this.root = mapAllPanes(this.root, (pane) => (pane.codexSessionId === id ? { ...pane, codexSessionId: undefined } : pane));
+      this.save();
+    },
+    clearHermesSession(id: string) {
+      this.root = mapAllPanes(this.root, (pane) => (pane.hermesSessionId === id ? { ...pane, hermesSessionId: undefined } : pane));
       this.save();
     },
   },

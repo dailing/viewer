@@ -944,7 +944,7 @@ class CodexSessionManager:
         session = self.get(session_id)
         await websocket.accept()
         client = add_client(session.clients, websocket)
-        enqueue(client, {"type": "snapshot", "session": self._snapshot(session)})
+        enqueue(client, {"type": "snapshot", "session": self._snapshot(session), "source": "codex"})
         try:
             while True:
                 await websocket.receive_text()
@@ -1382,6 +1382,7 @@ class CodexSessionManager:
             logger.debug("Codex session {} stderr: {}", session.id, text.rstrip())
 
     async def _broadcast(self, session: CodexSession, message: dict) -> None:
+        message.setdefault("source", "codex")
         stale = await broadcast(session.clients, message)
         logger.debug(
             "Codex session {} websocket broadcast type={} clients={} stale_removed={}",

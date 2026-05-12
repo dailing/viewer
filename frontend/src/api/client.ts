@@ -1,6 +1,7 @@
 import type { DirectoryListing, FileMeta, ViewerConfig, WorkspaceConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
+import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
 import type { GitDiffText, GitStatus } from "../types/git";
@@ -18,6 +19,8 @@ function socketUrl(path: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}${path}`;
 }
+
+type AgentProvider = "codex" | "hermes";
 
 export function rawUrl(path: string, contentHash?: string, base?: string): string {
   const hashQuery = contentHash ? `&h=${encodeURIComponent(contentHash)}` : "";
@@ -166,7 +169,7 @@ export function terminalSocketUrl(id: string): string {
 }
 
 export async function listCodexSessions(): Promise<CodexSessionInfo[]> {
-  return request<CodexSessionInfo[]>("/api/codex/sessions");
+  return request<CodexSessionInfo[]>("/api/agents/sessions?provider=codex");
 }
 
 export async function getCodexStatus(): Promise<CodexCliStatus> {
@@ -178,51 +181,115 @@ export async function getCodexModels(): Promise<CodexModelOptions> {
 }
 
 export async function createCodexSession(prompt: string, cwd = "", model?: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>("/api/codex/sessions", {
+  return request<CodexSessionInfo>("/api/agents/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, cwd, model }),
+    body: JSON.stringify({ provider: "codex", prompt, cwd, model }),
   });
 }
 
 export async function getCodexSession(id: string): Promise<CodexSessionSnapshot> {
-  return request<CodexSessionSnapshot>(`/api/codex/sessions/${encodeURIComponent(id)}`);
+  return request<CodexSessionSnapshot>(`/api/agents/sessions/${encodeURIComponent(id)}?provider=codex`);
 }
 
 export async function sendCodexMessage(id: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/messages`, {
+  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model }),
+    body: JSON.stringify({ provider: "codex", prompt, model }),
   });
 }
 
 export async function queueCodexMessage(id: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/queue`, {
+  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model }),
+    body: JSON.stringify({ provider: "codex", prompt, model }),
   });
 }
 
 export async function updateCodexQueuedMessage(id: string, itemId: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
+  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model }),
+    body: JSON.stringify({ provider: "codex", prompt, model }),
   });
 }
 
 export async function deleteCodexQueuedMessage(id: string, itemId: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}?provider=codex`, { method: "DELETE" });
 }
 
 export async function terminateCodexSession(id: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/codex/sessions/${encodeURIComponent(id)}/terminate`, { method: "POST" });
+  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/terminate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "codex" }),
+  });
 }
 
 export function codexSessionSocketUrl(id: string): string {
-  return socketUrl(`/api/codex/sessions/${encodeURIComponent(id)}/ws`);
+  return agentSessionSocketUrl("codex", id);
+}
+
+export async function listHermesSessions(): Promise<HermesSessionInfo[]> {
+  return request<HermesSessionInfo[]>("/api/agents/sessions?provider=hermes");
+}
+
+export async function createHermesSession(prompt: string, cwd = "", model?: string): Promise<HermesSessionInfo> {
+  return request<HermesSessionInfo>("/api/agents/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "hermes", prompt, cwd, model }),
+  });
+}
+
+export async function getHermesSession(id: string): Promise<HermesSessionSnapshot> {
+  return request<HermesSessionSnapshot>(`/api/agents/sessions/${encodeURIComponent(id)}?provider=hermes`);
+}
+
+export async function sendHermesMessage(id: string, prompt: string, model?: string): Promise<HermesSessionInfo> {
+  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "hermes", prompt, model }),
+  });
+}
+
+export async function queueHermesMessage(id: string, prompt: string, model?: string): Promise<HermesSessionInfo> {
+  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "hermes", prompt, model }),
+  });
+}
+
+export async function updateHermesQueuedMessage(id: string, itemId: string, prompt: string, model?: string): Promise<HermesSessionInfo> {
+  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "hermes", prompt, model }),
+  });
+}
+
+export async function deleteHermesQueuedMessage(id: string, itemId: string): Promise<HermesSessionInfo> {
+  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}?provider=hermes`, { method: "DELETE" });
+}
+
+export async function terminateHermesSession(id: string): Promise<HermesSessionInfo> {
+  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/terminate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "hermes" }),
+  });
+}
+
+export function agentSessionSocketUrl(provider: AgentProvider, id: string): string {
+  return socketUrl(`/api/agents/sessions/${encodeURIComponent(id)}/ws?provider=${encodeURIComponent(provider)}`);
+}
+
+export function hermesSessionSocketUrl(id: string): string {
+  return agentSessionSocketUrl("hermes", id);
 }
 
 export async function listAgentLoops(): Promise<AgentLoopInfo[]> {

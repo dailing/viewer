@@ -9,6 +9,7 @@ import CodexViewer from "./viewers/CodexViewer.vue";
 import CsvViewer from "./viewers/CsvViewer.vue";
 import DiffViewer from "./viewers/DiffViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
+import HermesViewer from "./viewers/HermesViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
 import TextViewer from "./viewers/TextViewer.vue";
 import TerminalViewer from "./viewers/TerminalViewer.vue";
@@ -25,7 +26,7 @@ async function load(clearMeta: boolean) {
   error.value = "";
   if (clearMeta) meta.value = null;
   if (props.workspaceLoading) return;
-  if (!props.pane.filePath || props.pane.terminalId || props.pane.codexSessionId) return;
+  if (!props.pane.filePath || props.pane.terminalId || props.pane.codexSessionId || props.pane.hermesSessionId) return;
   try {
     meta.value = await getMeta(props.pane.filePath);
     version.value += 1;
@@ -43,7 +44,7 @@ function isCsvPath(path: string): boolean {
   return path.toLowerCase().endsWith(".csv");
 }
 
-watch(() => [props.pane.filePath, props.pane.terminalId, props.pane.codexSessionId, props.workspaceLoading], () => load(true), { immediate: true });
+watch(() => [props.pane.filePath, props.pane.terminalId, props.pane.codexSessionId, props.pane.hermesSessionId, props.workspaceLoading], () => load(true), { immediate: true });
 onMounted(() => window.addEventListener("viewer:file-changed", handleChange));
 onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange));
 </script>
@@ -56,6 +57,7 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
       </div>
       <TerminalViewer v-else-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
       <CodexViewer v-else-if="pane.codexSessionId" :id="pane.codexSessionId" :pane-id="pane.id" />
+      <HermesViewer v-else-if="pane.hermesSessionId" :id="pane.hermesSessionId" :pane-id="pane.id" />
       <DiffViewer v-else-if="pane.diffPath" :path="pane.diffPath" :cwd="pane.diffCwd ?? ''" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">
         <i class="bi bi-folder2-open"></i>

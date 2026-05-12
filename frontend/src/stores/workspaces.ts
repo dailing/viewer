@@ -12,6 +12,7 @@ export const useWorkspacesStore = defineStore("workspaces", {
     count: 5,
     slots: {} as Record<string, WorkspaceSnapshot>,
     activeCodexSessionIds: [] as string[],
+    activeHermesSessionIds: [] as string[],
     loaded: false,
     switching: false,
   }),
@@ -29,18 +30,31 @@ export const useWorkspacesStore = defineStore("workspaces", {
     restoreActiveCodexSessions(snapshot: WorkspaceSnapshot | null) {
       this.activeCodexSessionIds = uniqueIds(snapshot?.codex_session_ids ?? []);
     },
+    restoreActiveHermesSessions(snapshot: WorkspaceSnapshot | null) {
+      this.activeHermesSessionIds = uniqueIds(snapshot?.hermes_session_ids ?? []);
+    },
+    restoreActiveAgentSessions(snapshot: WorkspaceSnapshot | null) {
+      this.restoreActiveCodexSessions(snapshot);
+      this.restoreActiveHermesSessions(snapshot);
+    },
     rememberActiveCodexSession(id: string) {
       this.activeCodexSessionIds = uniqueIds([...this.activeCodexSessionIds, id]);
     },
     forgetActiveCodexSession(id: string) {
       this.activeCodexSessionIds = this.activeCodexSessionIds.filter((item) => item !== id);
     },
+    rememberActiveHermesSession(id: string) {
+      this.activeHermesSessionIds = uniqueIds([...this.activeHermesSessionIds, id]);
+    },
+    forgetActiveHermesSession(id: string) {
+      this.activeHermesSessionIds = this.activeHermesSessionIds.filter((item) => item !== id);
+    },
     async saveSlot(id: string, snapshot: WorkspaceSnapshot, options?: { restoreActive?: boolean }) {
       const data = await putWorkspace(id, { ...snapshot, updated_at: Date.now() / 1000 });
       this.activeWorkspaceId = data.active_workspace_id || id;
       this.count = Math.min(20, Math.max(1, Math.round(Number(data.count || this.count))));
       this.slots = data.slots ?? {};
-      if (options?.restoreActive !== false && this.activeWorkspaceId === id) this.restoreActiveCodexSessions(this.slots[id] ?? snapshot);
+      if (options?.restoreActive !== false && this.activeWorkspaceId === id) this.restoreActiveAgentSessions(this.slots[id] ?? snapshot);
       this.loaded = true;
     },
     async activate(id: string) {

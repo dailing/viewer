@@ -108,6 +108,7 @@ class WorkspaceSnapshot(BaseModel):
     current_path: str = ""
     pinned: list[str] | None = None
     codex_session_ids: list[str] = Field(default_factory=list)
+    hermes_session_ids: list[str] = Field(default_factory=list)
     visit_times: dict[str, float] = Field(default_factory=dict)
     updated_at: float | None = None
 
@@ -250,6 +251,68 @@ class CodexQueueItem(BaseModel):
 class CodexQueueMessage(BaseModel):
     prompt: str
     model: str | None = None
+
+
+class HermesSessionInfo(BaseModel):
+    id: str
+    hermes_session_id: str | None = None
+    hermes_run_id: str | None = None
+    db_path: str | None = None
+    title: str
+    cwd: str
+    cwd_relative: str | None = None
+    model: str | None = None
+    created_at: float
+    updated_at: float
+    status: Literal["idle", "running", "exited", "failed"]
+    exit_code: int | None = None
+    event_count: int = 0
+    total_tokens: int | None = None
+    queue: list[CodexQueueItem] = Field(default_factory=list)
+
+
+class HermesSessionSnapshot(HermesSessionInfo):
+    prompts: list[CodexPrompt] = Field(default_factory=list)
+    events: list[CodexEvent] = Field(default_factory=list)
+
+
+class HermesSessionCreate(BaseModel):
+    prompt: str = ""
+    cwd: str | None = None
+    model: str | None = None
+
+
+class HermesSessionMessage(BaseModel):
+    prompt: str
+    model: str | None = None
+
+
+class HermesQueueMessage(BaseModel):
+    prompt: str
+    model: str | None = None
+
+
+class AgentSessionCreate(BaseModel):
+    provider: Literal["codex", "hermes"]
+    prompt: str = ""
+    cwd: str | None = None
+    model: str | None = None
+
+
+class AgentSessionMessage(BaseModel):
+    provider: Literal["codex", "hermes"]
+    prompt: str
+    model: str | None = None
+
+
+class AgentQueueMessage(BaseModel):
+    provider: Literal["codex", "hermes"]
+    prompt: str
+    model: str | None = None
+
+
+class AgentProviderRequest(BaseModel):
+    provider: Literal["codex", "hermes"]
 
 
 class CodexCliStatus(BaseModel):

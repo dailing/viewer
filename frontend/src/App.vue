@@ -7,12 +7,14 @@ import Workspace from "./components/Workspace.vue";
 import { connectEvents } from "./api/events";
 import { useCodexStore } from "./stores/codex";
 import { useFilesStore } from "./stores/files";
+import { useHermesStore } from "./stores/hermes";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
 import { useWorkspacesStore } from "./stores/workspaces";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { CodexSessionInfo, CodexStatus } from "./types/codex";
+import type { HermesSessionInfo, HermesStatus } from "./types/hermes";
 import type { LayoutNode, SplitDirection } from "./types/layout";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
@@ -23,6 +25,7 @@ const SIDEBAR_MAX_WIDTH = 640;
 type WorkspaceNotice = "completed" | "failed" | "running";
 const files = useFilesStore();
 const codex = useCodexStore();
+const hermes = useHermesStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
@@ -32,6 +35,7 @@ const sidebarPinned = ref(false);
 const activePage = ref<"workspace" | "settings" | "loops">("workspace");
 const mobileToolbarOpen = ref(false);
 const codexStatusById = ref<Record<string, CodexStatus>>({});
+const hermesStatusById = ref<Record<string, HermesStatus>>({});
 const workspaceHeat = ref<Record<string, number>>({});
 const switchingWorkspaceId = ref<string | null>(null);
 const workspaceContentLoading = ref(false);
@@ -90,12 +94,13 @@ const activePaneTitle = computed(() => {
   if (!pane || pane.type !== "pane") return "Empty pane";
   if (pane.terminalId) return "Terminal";
   if (pane.codexSessionId) return codex.sessions.find((session) => session.id === pane.codexSessionId)?.title ?? "Codex";
+  if (pane.hermesSessionId) return hermes.sessions.find((session) => session.id === pane.hermesSessionId)?.title ?? "Hermes";
   if (pane.diffPath) return `Diff: ${pane.diffPath}`;
   return pane.filePath || "Empty pane";
 });
 const activePaneHasContent = computed(() => {
   const pane = layout.activePane;
-  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || pane.codexSessionId || pane.diffPath));
+  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || pane.codexSessionId || pane.hermesSessionId || pane.diffPath));
 });
 const globalPaneActions = computed<PaneToolbarAction[]>(() => {
   if (!layout.activePaneId) return [];
@@ -135,6 +140,14 @@ const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
       notice = higherPriorityWorkspaceNotice(notice, noticeForCodexSession(session));
       if (notice === "failed") break;
     }
+    if (notice !== "failed") {
+      for (const sessionId of workspaceHermesSessionIds(workspaceId)) {
+        const session = hermes.sessions.find((item) => item.id === sessionId);
+        if (!session) continue;
+        notice = higherPriorityWorkspaceNotice(notice, noticeForHermesSession(session));
+        if (notice === "failed") break;
+      }
+    }
     if (notice) notices[workspaceId] = notice;
   }
   return notices;
@@ -142,6 +155,7 @@ const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 let codexRefresh: number | null = null;
+let hermesRefresh: number | null = null;
 let workspaceHeatTimer: number | null = null;
 let workspaceSaveTimer: number | null = null;
 let workspaceAutosaveReady = false;
@@ -151,7 +165,7 @@ onMounted(async () => {
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || sidebarWidth.value);
   sidebarOpen.value = sidebarPinned.value;
   layout.load();
-  await Promise.all([files.loadConfig(), terminals.load(), codex.load(), workspaces.load()]);
+  await Promise.all([files.loadConfig(), terminals.load(), codex.load(), hermes.load(), workspaces.load()]);
   loadWorkspaceHeat();
   await restoreInitialWorkspace();
   updateWorkspaceCodexNotices();
@@ -169,10 +183,13 @@ onMounted(async () => {
   codexRefresh = window.setInterval(() => {
     void codex.load();
   }, 3000);
+  hermesRefresh = window.setInterval(() => {
+    void hermes.load();
+  }, 3000);
 });
 
 watch(
-  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => files.visitTimes, () => workspaces.activeCodexSessionIds],
+  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => files.visitTimes, () => workspaces.activeCodexSessionIds, () => workspaces.activeHermesSessionIds],
   () => {
     scheduleWorkspaceSave();
   },
@@ -208,6 +225,13 @@ watch(
   },
 );
 
+watch(
+  () => hermes.sessions.map((session) => `${session.id}:${session.status}`).join("|"),
+  () => {
+    updateWorkspaceHermesNotices();
+  },
+);
+
 function openFile(path: string) {
   void files.recordVisit(path);
   layout.openFile(path);
@@ -226,6 +250,13 @@ function openCodexSession(id: string) {
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
 
+function openHermesSession(id: string) {
+  hermes.markRead(id);
+  workspaces.rememberActiveHermesSession(id);
+  layout.openHermesSession(id);
+  if (!sidebarPinned.value) sidebarOpen.value = false;
+}
+
 function openDiff(path: string, cwd = "") {
   layout.openDiff(path, cwd);
   if (!sidebarPinned.value) sidebarOpen.value = false;
@@ -239,6 +270,7 @@ function currentWorkspaceSnapshot() {
     current_path: files.currentPath,
     pinned: [...files.pinned],
     codex_session_ids: [...workspaces.activeCodexSessionIds],
+    hermes_session_ids: [...workspaces.activeHermesSessionIds],
     visit_times: { ...files.visitTimes },
   };
 }
@@ -356,14 +388,14 @@ async function restoreInitialWorkspace() {
   const snapshot = workspaces.snapshotFor(activeId);
   if (snapshot) {
     layout.restore(snapshot.layout, snapshot.active_pane_id);
-    workspaces.restoreActiveCodexSessions(snapshot);
+    workspaces.restoreActiveAgentSessions(snapshot);
     restoreWorkspacePins(snapshot.pinned);
     restoreWorkspaceVisitTimes(snapshot.visit_times);
     await loadWorkspaceDirectory(snapshot.current_path);
     return;
   }
   await files.loadDirectory(files.currentPath);
-  workspaces.restoreActiveCodexSessions(currentWorkspaceSnapshot());
+  workspaces.restoreActiveAgentSessions(currentWorkspaceSnapshot());
   await workspaces.saveSlot(activeId, currentWorkspaceSnapshot());
 }
 
@@ -384,18 +416,18 @@ async function switchWorkspace(id: string) {
     const target = workspaces.snapshotFor(targetId);
     if (target) {
       layout.restore(target.layout, target.active_pane_id);
-      workspaces.restoreActiveCodexSessions(target);
+      workspaces.restoreActiveAgentSessions(target);
       restoreWorkspacePins(target.pinned);
       restoreWorkspaceVisitTimes(target.visit_times);
       await showWorkspaceLoadingFrame();
       workspaceContentLoading.value = false;
       const directoryLoad = loadWorkspaceDirectory(target.current_path);
       await workspaces.saveSlot(previousId, previousSnapshot, { restoreActive: false });
-      workspaces.restoreActiveCodexSessions(target);
+      workspaces.restoreActiveAgentSessions(target);
       await Promise.all([directoryLoad, workspaces.activate(targetId)]);
     } else {
       layout.reset();
-      workspaces.restoreActiveCodexSessions(null);
+      workspaces.restoreActiveAgentSessions(null);
       files.pinned = [];
       files.visitTimes = {};
       await showWorkspaceLoadingFrame();
@@ -432,9 +464,34 @@ function updateWorkspaceCodexNotices() {
   codexStatusById.value = next;
 }
 
+function updateWorkspaceHermesNotices() {
+  const previous = hermesStatusById.value;
+  const next: Record<string, HermesStatus> = {};
+
+  for (const session of hermes.sessions) {
+    next[session.id] = session.status;
+    if (!["exited", "failed"].includes(session.status)) continue;
+    for (const workspaceId of workspaceIdsForHermesSession(session.id)) {
+      if (previous[session.id] !== "running" && !sessionFinishedAfterWorkspaceSaved(session, workspaceId)) continue;
+      if (workspaceId === workspaces.activeWorkspaceId && activePaneHermesSessionId() === session.id) {
+        hermes.markRead(session.id);
+        continue;
+      }
+      hermes.markUnread(session.id);
+    }
+  }
+
+  hermesStatusById.value = next;
+}
+
 function activePaneCodexSessionId() {
   const pane = layout.activePane;
   return pane?.type === "pane" ? pane.codexSessionId : undefined;
+}
+
+function activePaneHermesSessionId() {
+  const pane = layout.activePane;
+  return pane?.type === "pane" ? pane.hermesSessionId : undefined;
 }
 
 function noticePriority(notice: WorkspaceNotice | null) {
@@ -455,6 +512,13 @@ function noticeForCodexSession(session: CodexSessionInfo): WorkspaceNotice | nul
   return null;
 }
 
+function noticeForHermesSession(session: HermesSessionInfo): WorkspaceNotice | null {
+  if (session.status === "failed") return "failed";
+  if (session.status === "exited" && hermes.unreadSessionIds.includes(session.id)) return "completed";
+  if (session.status === "running") return "running";
+  return null;
+}
+
 function workspaceCodexSessionIds(workspaceId: string) {
   const ids = new Set<string>();
   const snapshotIds = workspaceId === displayedActiveWorkspaceId.value ? workspaces.activeCodexSessionIds : workspaces.snapshotFor(workspaceId)?.codex_session_ids ?? [];
@@ -464,11 +528,29 @@ function workspaceCodexSessionIds(workspaceId: string) {
   return [...ids];
 }
 
+function workspaceHermesSessionIds(workspaceId: string) {
+  const ids = new Set<string>();
+  const snapshotIds = workspaceId === displayedActiveWorkspaceId.value ? workspaces.activeHermesSessionIds : workspaces.snapshotFor(workspaceId)?.hermes_session_ids ?? [];
+  for (const id of snapshotIds) ids.add(id);
+  const root = workspaceId === displayedActiveWorkspaceId.value ? layout.root : workspaces.snapshotFor(workspaceId)?.layout;
+  if (root) collectLayoutHermesSessionIds(root, ids);
+  return [...ids];
+}
+
 function workspaceIdsForCodexSession(sessionId: string) {
   const ids: string[] = [];
   for (let index = 1; index <= workspaceCount.value; index += 1) {
     const workspaceId = String(index);
     if (workspaceCodexSessionIds(workspaceId).includes(sessionId)) ids.push(workspaceId);
+  }
+  return ids;
+}
+
+function workspaceIdsForHermesSession(sessionId: string) {
+  const ids: string[] = [];
+  for (let index = 1; index <= workspaceCount.value; index += 1) {
+    const workspaceId = String(index);
+    if (workspaceHermesSessionIds(workspaceId).includes(sessionId)) ids.push(workspaceId);
   }
   return ids;
 }
@@ -482,7 +564,16 @@ function collectLayoutCodexSessionIds(node: LayoutNode, ids: Set<string>) {
   collectLayoutCodexSessionIds(node.second, ids);
 }
 
-function sessionFinishedAfterWorkspaceSaved(session: CodexSessionInfo, workspaceId: string) {
+function collectLayoutHermesSessionIds(node: LayoutNode, ids: Set<string>) {
+  if (node.type === "pane") {
+    if (node.hermesSessionId) ids.add(node.hermesSessionId);
+    return;
+  }
+  collectLayoutHermesSessionIds(node.first, ids);
+  collectLayoutHermesSessionIds(node.second, ids);
+}
+
+function sessionFinishedAfterWorkspaceSaved(session: CodexSessionInfo | HermesSessionInfo, workspaceId: string) {
   const snapshotUpdatedAt = workspaces.snapshotFor(workspaceId)?.updated_at;
   return Boolean(snapshotUpdatedAt && session.updated_at > snapshotUpdatedAt);
 }
@@ -566,6 +657,7 @@ onUnmounted(() => {
   if (workspaceSaveTimer !== null) window.clearTimeout(workspaceSaveTimer);
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
   if (codexRefresh !== null) window.clearInterval(codexRefresh);
+  if (hermesRefresh !== null) window.clearInterval(hermesRefresh);
   if (workspaceHeatTimer !== null) window.clearInterval(workspaceHeatTimer);
 });
 </script>
@@ -696,6 +788,7 @@ onUnmounted(() => {
           :workspace-count="workspaceCount"
           :active-workspace-id="displayedActiveWorkspaceId"
           :codex-session-ids="workspaces.activeCodexSessionIds"
+          :hermes-session-ids="workspaces.activeHermesSessionIds"
           :panel-open="sidebarOpen"
           :panel-pinned="sidebarPinned"
           :workspace-notices="workspaceNotices"
@@ -704,6 +797,7 @@ onUnmounted(() => {
           @open-file="openFile"
           @open-terminal="openTerminal"
           @open-codex-session="openCodexSession"
+          @open-hermes-session="openHermesSession"
           @open-diff="openDiff"
           @switch-workspace="switchWorkspace"
           @toggle-tool-panel="toggleToolPanel"

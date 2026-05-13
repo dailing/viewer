@@ -245,6 +245,30 @@ def list_directory(path: str | None) -> DirectoryListing:
     return DirectoryListing(path=normalize_relative(path), entries=entries)
 
 
+def upload_target(directory: str | None, filename: str) -> Path:
+    if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid file name")
+    target_dir = resolve_path(directory)
+    if not target_dir.exists():
+        raise HTTPException(status_code=404, detail="Upload directory not found")
+    if not target_dir.is_dir():
+        raise HTTPException(status_code=400, detail="Upload target is not a directory")
+    target = target_dir / filename
+    if target.exists() and target.is_dir():
+        raise HTTPException(status_code=400, detail="Cannot overwrite a directory")
+    return target
+
+
+def delete_file(path: str) -> dict[str, str]:
+    target = resolve_path(path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail="Directory deletion is not supported")
+    target.unlink()
+    return {"status": "deleted", "path": normalize_relative(path)}
+
+
 def get_meta(path: str) -> FileMeta:
     target = resolve_path(path)
     if not target.exists():

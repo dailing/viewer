@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
+import type { FileEntry } from "../../types/files";
 import FileTree from "../FileTree.vue";
 
 const emit = defineEmits<{
@@ -13,6 +14,11 @@ const layout = useLayoutStore();
 
 const pinned = computed(() => files.pinned);
 const currentLabel = computed(() => files.currentPath || "/");
+const fileInput = ref<HTMLInputElement | null>(null);
+const dragDepth = ref(0);
+const uploadError = ref("");
+const uploading = ref(false);
+const isDragging = computed(() => dragDepth.value > 0);
 
 async function openPinned(path: string) {
   try {
@@ -21,10 +27,72 @@ async function openPinned(path: string) {
     emit("open-file", path);
   }
 }
+
+function chooseFiles() {
+  fileInput.value?.click();
+}
+
+async function uploadSelection(fileList: FileList | null | undefined) {
+  const selected = Array.from(fileList ?? []).filter((file) => file.name);
+  if (!selected.length) return;
+  uploadError.value = "";
+  uploading.value = true;
+  try {
+    await files.uploadToCurrent(selected);
+  } catch (error) {
+    uploadError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    uploading.value = false;
+  }
+}
+
+function onFileInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  void uploadSelection(input.files);
+  input.value = "";
+}
+
+function onDragEnter(event: DragEvent) {
+  event.preventDefault();
+  dragDepth.value += 1;
+}
+
+function onDragOver(event: DragEvent) {
+  event.preventDefault();
+}
+
+function onDragLeave(event: DragEvent) {
+  event.preventDefault();
+  dragDepth.value = Math.max(0, dragDepth.value - 1);
+}
+
+function onDrop(event: DragEvent) {
+  event.preventDefault();
+  dragDepth.value = 0;
+  void uploadSelection(event.dataTransfer?.files);
+}
+
+async function deleteEntry(entry: FileEntry) {
+  if (entry.is_dir) return;
+  if (!window.confirm(`Delete "${entry.path}"? This cannot be undone.`)) return;
+  uploadError.value = "";
+  try {
+    await files.deletePath(entry.path);
+  } catch (error) {
+    uploadError.value = error instanceof Error ? error.message : String(error);
+  }
+}
 </script>
 
 <template>
-  <div class="sidebar-panel files-panel">
+  <div
+    class="sidebar-panel files-panel"
+    :class="{ dragging: isDragging, uploading }"
+    @dragenter="onDragEnter"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
     <div class="sidebar-section" v-if="pinned.length">
       <div class="section-title">Pinned</div>
       <div
@@ -44,16 +112,32 @@ async function openPinned(path: string) {
     </div>
 
     <div class="sidebar-section tree-section">
-      <div class="section-title">Files</div>
+      <div class="files-header">
+        <div class="section-title">Files</div>
+        <button class="btn btn-sm btn-outline-secondary icon-button upload-button" type="button" title="Upload files" :disabled="uploading" @click="chooseFiles">
+          <i class="bi" :class="uploading ? 'bi-arrow-repeat' : 'bi-upload'"></i>
+        </button>
+        <input ref="fileInput" class="file-input" type="file" multiple @change="onFileInput" />
+      </div>
       <div class="current-path" :title="files.currentPath || '/'">
         <i class="bi bi-folder2-open"></i>
         <span>{{ currentLabel }}</span>
       </div>
+      <div v-if="isDragging" class="drop-target">
+        <i class="bi bi-cloud-arrow-up"></i>
+        <span>Drop to upload here</span>
+      </div>
+      <div v-if="uploadError" class="upload-error" role="alert">{{ uploadError }}</div>
       <button v-if="files.currentPath" class="sidebar-row parent-row" type="button" @click="files.enterParentDirectory()">
         <i class="bi bi-arrow-90deg-up"></i>
         <span class="sidebar-row-name">..</span>
       </button>
-      <FileTree :entries="files.currentEntries" :active-paths="layout.openPaths" @open-file="emit('open-file', $event)" />
+      <FileTree
+        :entries="files.currentEntries"
+        :active-paths="layout.openPaths"
+        @open-file="emit('open-file', $event)"
+        @delete-file="deleteEntry"
+      />
     </div>
   </div>
 </template>
@@ -76,6 +160,32 @@ async function openPinned(path: string) {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
+}
+
+.files-panel.dragging {
+  box-shadow: inset 0 0 0 2px #2f6fdd;
+}
+
+.files-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.files-header .section-title {
+  flex: 1 1 auto;
+  margin-bottom: 0;
+}
+
+.upload-button {
+  --nav-button-size: 26px;
+  --nav-icon-size: 14px;
+  flex: 0 0 auto;
+}
+
+.file-input {
+  display: none;
 }
 
 .section-title {
@@ -103,6 +213,32 @@ async function openPinned(path: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.drop-target {
+  align-items: center;
+  background: #eaf2ff;
+  border: 1px dashed #2f6fdd;
+  border-radius: 6px;
+  color: #174ea6;
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  margin-bottom: 6px;
+  min-height: 34px;
+  padding: 7px 8px;
+}
+
+.upload-error {
+  background: #fff1f0;
+  border: 1px solid #ffc9c2;
+  border-radius: 6px;
+  color: #8a1f14;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-bottom: 6px;
+  padding: 7px 8px;
+  word-break: break-word;
 }
 
 .sidebar-row {

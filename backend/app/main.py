@@ -16,6 +16,8 @@ from .events import hub
 from .files import (
     add_workspace_agent_session,
     content_hash,
+    delete_file,
+    entry_for,
     get_meta,
     guess_mime,
     list_directory,
@@ -27,6 +29,7 @@ from .files import (
     resolve_path,
     remove_workspace_agent_session,
     set_active_workspace,
+    upload_target,
     write_config,
     write_workspace_config,
     write_workspace,
@@ -195,6 +198,20 @@ async def file_meta(path: str):
 @app.get("/api/file/content", response_class=PlainTextResponse)
 async def file_content(path: str):
     return read_text(path)
+
+
+@app.post("/api/file/upload")
+async def file_upload(request: Request, directory: str = Query(default=""), filename: str = Query(...)):
+    target = upload_target(directory, filename)
+    with target.open("wb") as handle:
+        async for chunk in request.stream():
+            handle.write(chunk)
+    return {"status": "ok", "directory": directory, "entry": entry_for(target)}
+
+
+@app.delete("/api/file")
+async def file_delete(path: str):
+    return delete_file(path)
 
 
 @app.get("/api/file/raw")

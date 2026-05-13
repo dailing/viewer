@@ -33,6 +33,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/admin/stop`: launches the detached process manager to stop the current backend PID.
 - `/api/debug/client-log`: receives frontend errors and writes them through Loguru.
 - `/api/tree`: calls `list_directory()`.
+- `/api/file/upload`: streams one request body into a file under the requested served-root-relative directory. The directory must exist, filenames cannot contain path separators, and existing files are overwritten while directories are protected.
+- `/api/file` DELETE: deletes a served-root-relative file only; directory deletion is intentionally rejected.
 - `/api/file/meta`: calls `get_meta()`.
 - `/api/file/content`: calls `read_text()`.
 - `/api/file/raw`: streams a file via inline `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
@@ -85,7 +87,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `backend/app/files.py`
 
-- File tree, path normalization, metadata, content reading, and `~/.view/config.json` persistence.
+- File tree, path normalization, metadata, upload/delete helpers, content reading, and `~/.view/config.json` persistence.
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
 - `resolve_path(path)`: joins normalized relative path to `settings.root_resolved`. Symlinks are allowed by current implementation.
 - `resolve_markdown_link(base_path, target)`: resolves local Markdown image/link targets relative to the Markdown file, including absolute filesystem paths under the served root, and rejects links outside the served root.
@@ -97,6 +99,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `content_hash(path)`: computes SHA-256 for cache tagging.
 - `entry_for(path)`: builds `FileEntry` for a directory child.
 - `list_directory(path)`: validates directory, filters hidden files when configured, sorts directories first.
+- `upload_target(directory, filename)`: validates a target upload directory and basename-only filename, rejects directory overwrite, and returns the filesystem path that the route streams into.
+- `delete_file(path)`: deletes a single file under `VIEWER_ROOT`; directories are rejected to avoid recursive destructive actions from the sidebar.
 - `get_meta(path)`: validates file and returns `FileMeta`, including preview type, text-size limit flag, and `content_hash`.
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: returns `~/.view/config.json` and triggers one-way legacy copy from root-local `.viewer.config.json` when needed.
@@ -322,7 +326,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/components/sidebar/FilesPanel.vue`
 
-- Files tool panel: pinned paths, current folder, parent button, and `FileTree`.
+- Files tool panel: pinned paths, current folder, parent button, upload button, drag-and-drop upload target, file delete confirmation/error display, and `FileTree`.
 - `openPinned(path)`: tries to enter pinned path as directory, otherwise emits `open-file`.
 
 `frontend/src/components/sidebar/TerminalsPanel.vue`
@@ -366,6 +370,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `select(entry)`: opens files and enters directories on single click.
 - `isActive(entry)`: highlights open files.
 - Pin button calls `files.togglePin(entry.path)`.
+- File rows expose a delete button that emits `delete-file`; `FilesPanel` owns the confirmation and backend delete call.
 
 `frontend/src/components/viewers/TextViewer.vue`
 

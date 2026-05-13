@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { getConfig, getTree, putConfig } from "../api/client";
+import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
 import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, WorkspaceConfig } from "../types/files";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
@@ -240,6 +240,19 @@ export const useFilesStore = defineStore("files", {
       if (isDir && this.expanded.has(path)) await this.loadDirectory(path);
       const parent = path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
       if (this.listings[parent]) await this.loadDirectory(parent);
+    },
+    async uploadToCurrent(files: File[]) {
+      for (const file of files) {
+        await uploadFile(this.currentPath, file);
+      }
+      await this.loadDirectory(this.currentPath);
+    },
+    async deletePath(path: string) {
+      await deleteFile(path);
+      this.pinned = this.pinned.filter((item) => item !== path);
+      const parent = path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
+      await this.loadDirectory(parent);
+      if (this.currentPath !== parent && this.listings[this.currentPath]) await this.loadDirectory(this.currentPath);
     },
     async togglePin(path: string) {
       if (this.pinned.includes(path)) {

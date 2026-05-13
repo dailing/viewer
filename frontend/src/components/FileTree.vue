@@ -3,7 +3,7 @@ import type { FileEntry } from "../types/files";
 import { useFilesStore } from "../stores/files";
 
 const props = defineProps<{ entries: FileEntry[]; activePaths?: string[] }>();
-const emit = defineEmits<{ "open-file": [path: string] }>();
+const emit = defineEmits<{ "open-file": [path: string]; "delete-file": [entry: FileEntry] }>();
 const files = useFilesStore();
 
 function icon(entry: FileEntry): string {
@@ -36,8 +36,17 @@ function isActive(entry: FileEntry): boolean {
           <span class="entry-name">{{ entry.name }}</span>
           <i v-if="entry.is_symlink" class="bi bi-link-45deg muted"></i>
         </button>
-        <button class="btn btn-sm icon-button pin-button" type="button" title="Pin" @click="files.togglePin(entry.path)">
+        <button class="btn btn-sm icon-button pin-button" type="button" title="Pin" @click.stop="files.togglePin(entry.path)">
           <i class="bi" :class="files.pinned.includes(entry.path) ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i>
+        </button>
+        <button
+          v-if="!entry.is_dir"
+          class="btn btn-sm icon-button delete-button"
+          type="button"
+          title="Delete file"
+          @click.stop="emit('delete-file', entry)"
+        >
+          <i class="bi bi-trash"></i>
         </button>
       </div>
     </div>
@@ -95,5 +104,18 @@ function isActive(entry: FileEntry): boolean {
   height: 24px;
   opacity: 0.72;
   width: 24px;
+}
+
+.delete-button {
+  color: #b42318;
+  flex: 0 0 auto;
+  height: 24px;
+  opacity: 0.72;
+  width: 24px;
+}
+
+.delete-button:hover {
+  background: #fff1f0;
+  color: #8a1f14;
 }
 </style>

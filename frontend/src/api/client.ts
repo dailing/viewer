@@ -66,6 +66,21 @@ export async function getText(path: string): Promise<string> {
   return response.text();
 }
 
+export async function uploadFile(directory: string, file: File): Promise<void> {
+  const query = `directory=${encodeURIComponent(directory)}&filename=${encodeURIComponent(file.name)}`;
+  const response = await fetch(withUser(`/api/file/upload?${query}`), {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (!response.ok) throw new Error(await response.text());
+}
+
+export async function deleteFile(path: string): Promise<void> {
+  const response = await fetch(withUser(`/api/file?path=${encodeURIComponent(path)}`), { method: "DELETE" });
+  if (!response.ok) throw new Error(await response.text());
+}
+
 export async function resolveMarkdownLink(base: string, target: string): Promise<{ path: string }> {
   return request<{ path: string }>(
     `/api/file/resolve-link?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`,

@@ -32,7 +32,7 @@ from .files import (
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
 from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
-from .models import AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceConfig, WorkspaceSnapshot
+from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -568,6 +568,12 @@ async def delete_agent_queue_message(session_id: str, item_id: str, provider: st
 async def terminate_agent_session(session_id: str, message: AgentProviderRequest):
     logger.info("Terminating {} session {}", message.provider, session_id)
     return await _agent_manager(message.provider).terminate(session_id)
+
+
+@app.post("/api/agents/sessions/{session_id}/approvals/{approval_id}")
+async def resolve_agent_approval(session_id: str, approval_id: str, message: AgentApprovalDecision):
+    logger.info("Resolving {} approval session={} approval={} choice={}", message.provider, session_id, approval_id, message.choice)
+    return await _agent_manager(message.provider).resolve_approval(session_id, approval_id, message.choice, message.all)
 
 
 @app.websocket("/api/agents/sessions/{session_id}/ws")

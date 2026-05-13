@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { AgentEvent, AgentPrompt } from "../types/agents";
+import type { AgentApproval, AgentEvent, AgentPrompt } from "../types/agents";
 import { sendClientLog } from "../utils/clientLog";
 import { renderMarkdown, renderMermaidIn } from "../utils/markdownRender";
 
@@ -10,13 +10,16 @@ type AgentSession = {
   status: "idle" | "running" | "exited" | "failed";
   prompts: AgentPrompt[];
   events: AgentEvent[];
+  pending_approvals?: AgentApproval[];
 };
 type TranscriptEntry =
   | { kind: "prompt"; id: string; text: string }
-  | { kind: "event"; id: string; event: AgentEvent; text: string; eventType: string; fileChanges: FileChange[]; patchText: string | null };
+  | { kind: "event"; id: string; event: AgentEvent; text: string; eventType: string; fileChanges: FileChange[]; patchText: string | null }
+  | { kind: "approval"; id: string; approval: AgentApproval };
 type TranscriptTimelineItem =
   | { kind: "prompt"; orderTime: number; orderIndex: number; entry: Extract<TranscriptEntry, { kind: "prompt" }> }
-  | { kind: "event"; orderTime: number; orderIndex: number; entry: Extract<TranscriptEntry, { kind: "event" }> };
+  | { kind: "event"; orderTime: number; orderIndex: number; entry: Extract<TranscriptEntry, { kind: "event" }> }
+  | { kind: "approval"; orderTime: number; orderIndex: number; entry: Extract<TranscriptEntry, { kind: "approval" }> };
 type FileChange = { path: string; changeType: string; diff: string | null };
 type DiffLineKind = "add" | "delete" | "hunk" | "file" | "context";
 type DiffSegment = { text: string; changed: boolean };
@@ -43,6 +46,7 @@ const loggedUnknownAgentEventTypes = new Set<string>();
 
 const emit = defineEmits<{
   "open-link": [target: string];
+  "resolve-approval": [payload: { approvalId: string; choice: string; all?: boolean }];
 }>();
 
 const props = defineProps<{
@@ -103,6 +107,14 @@ const transcriptEntries = computed<TranscriptEntry[]>(() => {
       });
     }
   }
+  for (const approval of props.session?.pending_approvals ?? []) {
+    timeline.push({
+      kind: "approval",
+      orderTime: finiteTime(approval.created_at),
+      orderIndex: Number.MAX_SAFE_INTEGER,
+      entry: { kind: "approval", id: `approval-${approval.id}`, approval },
+    });
+  }
   return timeline.sort(compareTranscriptTimelineItems).map((item) => item.entry);
 });
 
@@ -115,6 +127,22 @@ function compareTranscriptTimelineItems(left: TranscriptTimelineItem, right: Tra
   if (timeDelta !== 0) return timeDelta;
   if (left.kind !== right.kind) return left.kind === "prompt" ? -1 : 1;
   return left.orderIndex - right.orderIndex;
+}
+
+function approvalChoiceLabel(choice: string): string {
+  if (choice === "once") return "Approve Once";
+  if (choice === "session") return "Approve Session";
+  if (choice === "always") return "Approve Always";
+  if (choice === "deny") return "Deny";
+  return choice;
+}
+
+function approvalChoiceClass(choice: string): string {
+  return choice === "deny" ? "btn-outline-danger" : "btn-outline-primary";
+}
+
+function resolveApproval(approvalId: string, choice: string, all = false) {
+  emit("resolve-approval", { approvalId, choice, all });
 }
 
 function clampAlpha(value: unknown): number {
@@ -367,6 +395,30 @@ defineExpose({ scrollToBottom, renderRichContent });
         <div class="message-text markdown-content" v-html="messageHtml(entry.text)"></div>
       </div>
 
+      <div v-else-if="entry.kind === 'approval'" class="approval-message">
+        <div class="approval-title">
+          <i class="bi bi-shield-exclamation"></i>
+          <span>{{ entry.approval.title }}</span>
+        </div>
+        <div v-if="entry.approval.description" class="approval-description">{{ entry.approval.description }}</div>
+        <pre v-if="entry.approval.command" class="approval-command">{{ entry.approval.command }}</pre>
+        <div class="approval-actions">
+          <button
+            v-for="choice in entry.approval.choices"
+            :key="`${entry.id}:${choice}`"
+            class="btn btn-sm"
+            :class="approvalChoiceClass(choice)"
+            type="button"
+            @click.stop="resolveApproval(entry.approval.id, choice)"
+          >
+            {{ approvalChoiceLabel(choice) }}
+          </button>
+          <button class="btn btn-sm btn-outline-secondary" type="button" @click.stop="resolveApproval(entry.approval.id, 'once', true)">
+            Approve All
+          </button>
+        </div>
+      </div>
+
       <div v-else class="message event-message" :class="{ 'event-message-muted': isMutedEvent(entry) }">
         <div v-if="entry.text" class="message-text markdown-content" v-html="messageHtml(entry.text)"></div>
         <pre v-if="showRawJson && entry.event.raw_preview" class="raw-json">{{ JSON.stringify(entry.event.raw_preview, null, 2) }}</pre>
@@ -430,6 +482,56 @@ defineExpose({ scrollToBottom, renderRichContent });
 
 .event-message {
   background: transparent;
+}
+
+.approval-message {
+  background: #fff8e5;
+  border: 1px solid #e3c45f;
+  border-left: 3px solid #c28b00;
+  border-radius: 6px;
+  color: #4a3a09;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+}
+
+.approval-title {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 6px;
+}
+
+.approval-description {
+  font-size: 11px;
+  margin-top: 5px;
+}
+
+.approval-command {
+  background: rgb(255 255 255 / 0.72);
+  border: 1px solid #e6d28c;
+  border-radius: 5px;
+  color: #3b2f08;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.3;
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  padding: 6px;
+  white-space: pre-wrap;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.approval-actions .btn {
+  font-size: 11px;
+  line-height: 1.15;
+  padding: 4px 7px;
 }
 
 .event-message-muted {

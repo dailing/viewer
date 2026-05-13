@@ -6,6 +6,7 @@ import {
   listAgentProviders,
   listAgentSessions,
   queueAgentMessage,
+  resolveAgentApproval,
   sendAgentMessage,
   terminateAgentSession,
   updateAgentQueuedMessage,
@@ -115,6 +116,14 @@ export const useAgentsStore = defineStore("agents", {
       const parsed = parseAgentRef(ref);
       if (!parsed) throw new Error("Invalid agent session reference");
       const session = await terminateAgentSession(parsed.provider, parsed.id);
+      const next = toAgentSessionInfo(session as CodexSessionInfo | HermesSessionInfo, parsed.provider);
+      this.upsert(next);
+      return next;
+    },
+    async resolveApproval(ref: string, approvalId: string, choice: string, all = false) {
+      const parsed = parseAgentRef(ref);
+      if (!parsed) throw new Error("Invalid agent session reference");
+      const session = await resolveAgentApproval(parsed.provider, parsed.id, approvalId, choice, all);
       const next = toAgentSessionInfo(session as CodexSessionInfo | HermesSessionInfo, parsed.provider);
       this.upsert(next);
       return next;

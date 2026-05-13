@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentFileChange, AgentPrompt, AgentQueueItem } from "./agents";
+import type { AgentApproval, AgentEvent, AgentFileChange, AgentPrompt, AgentQueueItem } from "./agents";
 
 export type CodexStatus = "idle" | "running" | "exited" | "failed";
 
@@ -23,6 +23,7 @@ export type CodexSessionInfo = {
   context_used_percent?: number | null;
   total_tokens?: number | null;
   queue: AgentQueueItem[];
+  pending_approvals: AgentApproval[];
 };
 
 export type CodexPrompt = AgentPrompt;

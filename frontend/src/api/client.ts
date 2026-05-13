@@ -236,6 +236,14 @@ export async function terminateAgentSession(provider: AgentProvider, id: string)
   });
 }
 
+export async function resolveAgentApproval(provider: AgentProvider, id: string, approvalId: string, choice: string, all = false): Promise<unknown> {
+  return request<unknown>(`/api/agents/sessions/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, choice, all }),
+  });
+}
+
 export function agentSessionSocketUrl(provider: AgentProvider, id: string): string {
   return socketUrl(`/api/agents/sessions/${encodeURIComponent(id)}/ws?provider=${encodeURIComponent(provider)}`);
 }

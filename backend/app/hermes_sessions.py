@@ -57,11 +57,14 @@ class HermesSession:
     prompts: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     queue: list[dict] = field(default_factory=list)
+    pending_approvals: list[dict] = field(default_factory=list)
     clients: dict[WebSocket, WebSocketClient] = field(default_factory=dict)
     run_task: asyncio.Task | None = None
+    approval_stream_task: asyncio.Task | None = None
     meta_path: Path | None = None
     total_tokens: int | None = None
     suppress_queue_drain: bool = False
+    local_approval_responses: int = 0
 
     def summary(self) -> dict:
         return {
@@ -80,6 +83,7 @@ class HermesSession:
             "event_count": len(self.events),
             "total_tokens": self.total_tokens,
             "queue": self.queue,
+            "pending_approvals": self.pending_approvals,
         }
 
 
@@ -116,6 +120,7 @@ class HermesSessionManager:
                     exit_code=meta.get("exit_code"),
                     prompts=list(meta.get("prompts") or []),
                     queue=self._queue_from_meta(meta.get("queue")),
+                    pending_approvals=self._approvals_from_meta(meta.get("pending_approvals")),
                     meta_path=meta_path,
                 )
                 self._sync_db_events(session)
@@ -148,6 +153,32 @@ class HermesSessionManager:
             )
         return queue
 
+    def _approvals_from_meta(self, value: Any) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        approvals: list[dict] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            approval_id = item.get("id")
+            if not isinstance(approval_id, str) or not approval_id:
+                continue
+            approvals.append(
+                {
+                    "id": approval_id,
+                    "provider": "hermes",
+                    "session_id": str(item.get("session_id") or ""),
+                    "run_id": item.get("run_id") if isinstance(item.get("run_id"), str) else None,
+                    "title": str(item.get("title") or "Approval required"),
+                    "description": str(item.get("description") or ""),
+                    "command": item.get("command") if isinstance(item.get("command"), str) else None,
+                    "choices": item.get("choices") if isinstance(item.get("choices"), list) else ["once", "session", "always", "deny"],
+                    "created_at": float(item.get("created_at") or time.time()),
+                    "raw": item.get("raw") if isinstance(item.get("raw"), dict) else None,
+                }
+            )
+        return approvals
+
     def _write_meta(self, session: HermesSession) -> None:
         if session.meta_path is None:
             return
@@ -166,6 +197,7 @@ class HermesSessionManager:
                 "exit_code": session.exit_code,
                 "prompts": session.prompts,
                 "queue": session.queue,
+                "pending_approvals": session.pending_approvals,
             },
             indent=2,
         )
@@ -533,6 +565,13 @@ class HermesSessionManager:
             raise HTTPException(status_code=502, detail="Hermes API server returned invalid JSON") from exc
         return value if isinstance(value, dict) else {}
 
+    def _request_stream(self, path: str, timeout: float = 5.0):
+        headers = {"Accept": "text/event-stream"}
+        if HERMES_API_KEY:
+            headers["Authorization"] = f"Bearer {HERMES_API_KEY}"
+        request = Request(f"{HERMES_BASE_URL}{path}", headers=headers, method="GET")
+        return urlopen(request, timeout=timeout)
+
     def _run_payload(self, session: HermesSession, prompt: str) -> dict:
         payload: dict[str, Any] = {
             "input": prompt,
@@ -549,6 +588,7 @@ class HermesSessionManager:
             run_id = response.get("id") or response.get("run_id")
             if isinstance(run_id, str) and run_id:
                 session.hermes_run_id = run_id
+                self._start_approval_stream(session, run_id)
             hermes_session_id = response.get("session_id")
             if isinstance(hermes_session_id, str) and hermes_session_id:
                 session.hermes_session_id = hermes_session_id
@@ -581,8 +621,90 @@ class HermesSessionManager:
             logger.exception("Hermes run failed session={}", session.id)
         finally:
             session.run_task = None
+            if session.approval_stream_task:
+                session.approval_stream_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await session.approval_stream_task
+                session.approval_stream_task = None
             if session.status != "running" and not session.suppress_queue_drain:
                 await self._start_next_queued(session)
+
+    def _start_approval_stream(self, session: HermesSession, run_id: str) -> None:
+        if session.approval_stream_task and not session.approval_stream_task.done():
+            session.approval_stream_task.cancel()
+        session.approval_stream_task = asyncio.create_task(self._stream_run_events(session.id, run_id))
+
+    async def _stream_run_events(self, session_id: str, run_id: str) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.to_thread(self._consume_run_events, session_id, run_id, loop)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Hermes run event stream ended session={} run={} error={}", session_id, run_id, exc)
+
+    def _consume_run_events(self, session_id: str, run_id: str, loop: asyncio.AbstractEventLoop) -> None:
+        data_lines: list[str] = []
+        with self._request_stream(f"/v1/runs/{run_id}/events", 5.0) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line:
+                    if data_lines:
+                        payload = "\n".join(data_lines)
+                        data_lines = []
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        loop.call_soon_threadsafe(lambda event=event: asyncio.create_task(self._handle_run_event(session_id, event)))
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+
+    async def _handle_run_event(self, session_id: str, event: dict) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+        event_name = event.get("event")
+        if event_name == "approval.request":
+            approval = self._approval_from_event(session, event)
+            if not any(item.get("id") == approval["id"] for item in session.pending_approvals):
+                session.pending_approvals.append(approval)
+            session.updated_at = time.time()
+            self._write_meta(session)
+            await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
+            return
+        if event_name == "approval.responded":
+            resolved = event.get("resolved")
+            count = resolved if isinstance(resolved, int) and resolved > 0 else 1
+            local_count = min(session.local_approval_responses, count)
+            session.local_approval_responses -= local_count
+            external_count = count - local_count
+            if external_count > 0:
+                session.pending_approvals = session.pending_approvals[external_count:]
+            session.updated_at = time.time()
+            self._write_meta(session)
+            await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
+
+    def _approval_from_event(self, session: HermesSession, event: dict) -> dict:
+        run_id = event.get("run_id") if isinstance(event.get("run_id"), str) else session.hermes_run_id
+        timestamp = float(event.get("timestamp") or time.time())
+        command = event.get("command") if isinstance(event.get("command"), str) else None
+        description = event.get("description") if isinstance(event.get("description"), str) else ""
+        approval_id = f"{run_id or session.id}:{len(session.pending_approvals) + 1}:{int(timestamp * 1000)}"
+        choices = event.get("choices") if isinstance(event.get("choices"), list) else ["once", "session", "always", "deny"]
+        return {
+            "id": approval_id,
+            "provider": "hermes",
+            "session_id": session.id,
+            "run_id": run_id,
+            "title": "Command approval required",
+            "description": description,
+            "command": command,
+            "choices": [str(choice) for choice in choices if str(choice)],
+            "created_at": timestamp,
+            "raw": event,
+        }
 
     async def _monitor_run(self, session: HermesSession) -> None:
         idle_polls = 0
@@ -615,6 +737,33 @@ class HermesSessionManager:
         status = response.get("status")
         return status if isinstance(status, str) else None
 
+    async def resolve_approval(self, session_id: str, approval_id: str, choice: str, resolve_all: bool = False) -> dict:
+        session = self.get(session_id)
+        approval = next((item for item in session.pending_approvals if item.get("id") == approval_id), None)
+        if not approval:
+            raise HTTPException(status_code=404, detail="Pending approval not found")
+        run_id = approval.get("run_id") or session.hermes_run_id
+        if not isinstance(run_id, str) or not run_id:
+            raise HTTPException(status_code=409, detail="Approval has no Hermes run id")
+        normalized = {"approve": "once", "allow": "once"}.get(choice, choice)
+        response = await asyncio.to_thread(
+            self._request_json,
+            "POST",
+            f"/v1/runs/{run_id}/approval",
+            {"choice": normalized, "all": resolve_all},
+            10.0,
+        )
+        resolved_count = response.get("resolved")
+        session.local_approval_responses += resolved_count if isinstance(resolved_count, int) and resolved_count > 0 else 1
+        if resolve_all:
+            session.pending_approvals = []
+        else:
+            session.pending_approvals = [item for item in session.pending_approvals if item.get("id") != approval_id]
+        session.updated_at = time.time()
+        self._write_meta(session)
+        await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
+        return {**session.summary(), "approval_response": response}
+
     async def terminate(self, session_id: str) -> dict:
         session = self.get(session_id)
         session.suppress_queue_drain = True
@@ -626,6 +775,11 @@ class HermesSessionManager:
             with suppress(asyncio.CancelledError):
                 await session.run_task
             session.run_task = None
+        if session.approval_stream_task:
+            session.approval_stream_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await session.approval_stream_task
+            session.approval_stream_task = None
         if session.status == "running":
             session.status = "exited"
         session.updated_at = time.time()
@@ -659,6 +813,8 @@ class HermesSessionManager:
         self._ensure_loaded()
         for session in list(self.sessions.values()):
             if session.status == "running":
+                if session.hermes_run_id:
+                    self._start_approval_stream(session, session.hermes_run_id)
                 session.run_task = asyncio.create_task(self._monitor_run(session))
                 continue
             if session.queue:
@@ -668,10 +824,15 @@ class HermesSessionManager:
         for session in list(self.sessions.values()):
             if session.run_task:
                 session.run_task.cancel()
+            if session.approval_stream_task:
+                session.approval_stream_task.cancel()
         for session in list(self.sessions.values()):
             if session.run_task:
                 with suppress(asyncio.CancelledError):
                     await session.run_task
+            if session.approval_stream_task:
+                with suppress(asyncio.CancelledError):
+                    await session.approval_stream_task
 
 
 hermes_session_manager = HermesSessionManager()

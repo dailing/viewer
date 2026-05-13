@@ -58,7 +58,7 @@ function hasVoiceReady(session: AgentSessionInfo) {
 }
 
 function sessionStatusIndicator(session: AgentSessionInfo) {
-  if (session.status === "failed") return "failed";
+  if (session.status === "failed" && agents.unreadSessionRefs.includes(session.ref)) return "failed";
   if (session.status === "exited" && agents.unreadSessionRefs.includes(session.ref)) return "completed";
   if (session.status === "running") return "running";
   return "";

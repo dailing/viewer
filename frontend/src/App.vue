@@ -464,7 +464,7 @@ function higherPriorityWorkspaceNotice(current: WorkspaceNotice | null, next: Wo
 }
 
 function noticeForAgentSession(session: AgentSessionInfo): WorkspaceNotice | null {
-  if (session.status === "failed") return "failed";
+  if (session.status === "failed" && agents.unreadSessionRefs.includes(session.ref)) return "failed";
   if (session.status === "exited" && agents.unreadSessionRefs.includes(session.ref)) return "completed";
   if (session.status === "running") return "running";
   return null;

@@ -203,6 +203,7 @@ class CodexSessionInfo(BaseModel):
     context_used_percent: float | None = None
     total_tokens: int | None = None
     queue: list["AgentQueueItem"] = Field(default_factory=list)
+    pending_approvals: list["AgentApproval"] = Field(default_factory=list)
 
 
 class AgentPrompt(BaseModel):
@@ -250,6 +251,19 @@ class AgentQueueItem(BaseModel):
     model: str | None = None
 
 
+class AgentApproval(BaseModel):
+    id: str
+    provider: str
+    session_id: str
+    run_id: str | None = None
+    title: str = "Approval required"
+    description: str = ""
+    command: str | None = None
+    choices: list[str] = Field(default_factory=lambda: ["once", "session", "always", "deny"])
+    created_at: float
+    raw: dict | None = None
+
+
 class CodexSessionSnapshot(CodexSessionInfo):
     prompts: list[AgentPrompt] = Field(default_factory=list)
     events: list[AgentEvent] = Field(default_factory=list)
@@ -287,6 +301,7 @@ class HermesSessionInfo(BaseModel):
     event_count: int = 0
     total_tokens: int | None = None
     queue: list[AgentQueueItem] = Field(default_factory=list)
+    pending_approvals: list[AgentApproval] = Field(default_factory=list)
 
 
 class HermesSessionSnapshot(HermesSessionInfo):
@@ -331,6 +346,12 @@ class AgentQueueMessage(BaseModel):
 
 class AgentProviderRequest(BaseModel):
     provider: str
+
+
+class AgentApprovalDecision(BaseModel):
+    provider: str
+    choice: Literal["once", "session", "always", "deny", "approve", "allow"]
+    all: bool = False
 
 
 class CodexCliStatus(BaseModel):

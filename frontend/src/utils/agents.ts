@@ -45,6 +45,7 @@ export function toAgentSessionInfo(session: CodexSessionInfo | HermesSessionInfo
     event_count: session.event_count,
     total_tokens: session.total_tokens,
     queue: session.queue,
+    pending_approvals: session.pending_approvals ?? [],
     raw: session as unknown as Record<string, unknown>,
   };
 }

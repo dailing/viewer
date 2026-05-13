@@ -149,6 +149,7 @@ function applyInfo(info: AgentSessionInfo) {
   session.value.model = info.model;
   session.value.total_tokens = info.total_tokens;
   session.value.queue = info.queue ?? [];
+  session.value.pending_approvals = info.pending_approvals ?? [];
   session.value.raw = info.raw;
   if (isActivePane.value) agents.markRead(props.agentRef);
   if (editingQueueItemId.value && !session.value.queue.some((item) => item.id === editingQueueItemId.value)) {
@@ -301,6 +302,16 @@ async function stopRun() {
   }
 }
 
+async function resolveApproval(payload: { approvalId: string; choice: string; all?: boolean }) {
+  if (!session.value) return;
+  error.value = "";
+  try {
+    applyInfo(await agents.resolveApproval(props.agentRef, payload.approvalId, payload.choice, payload.all ?? false));
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
 async function createSessionHere() {
   if (!session.value || creatingSession.value || !provider.value) return;
   creatingSession.value = true;
@@ -407,6 +418,7 @@ onUnmounted(() => {
       :show-raw-json="rawJson"
       :muted-alpha="files.codexConfig.muted_message_alpha"
       @open-link="openAgentLink"
+      @resolve-approval="resolveApproval"
     />
     <AgentPromptComposer
       v-model="promptText"

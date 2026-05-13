@@ -81,6 +81,15 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
       <div v-else class="empty-state">
         <div class="spinner-border spinner-border-sm" role="status"></div>
       </div>
+      <button
+        v-if="meta?.preview === 'html' && layout.activePaneId !== pane.id"
+        class="pane-activation-shield"
+        type="button"
+        title="Activate pane"
+        aria-label="Activate HTML preview pane"
+        @pointerdown.stop.prevent="layout.setActive(pane.id)"
+        @click.stop.prevent
+      ></button>
     </div>
   </section>
 </template>
@@ -108,6 +117,17 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.pane-activation-shield {
+  background: transparent;
+  border: 0;
+  cursor: default;
+  inset: 0;
+  padding: 0;
+  position: absolute;
+  z-index: 2;
 }
 
 .empty-state {

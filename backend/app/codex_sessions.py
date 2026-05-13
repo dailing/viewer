@@ -122,6 +122,7 @@ class CodexSession:
             "context_used_percent": self.context_used_percent,
             "total_tokens": self.total_tokens,
             "queue": self.queue,
+            "pending_approvals": [],
         }
 
     def snapshot(self) -> dict:
@@ -962,6 +963,10 @@ class CodexSessionManager:
         self._write_meta(session)
         await self._broadcast(session, {"type": "status", "session": session.summary()})
         return session.summary()
+
+    async def resolve_approval(self, session_id: str, approval_id: str, choice: str, resolve_all: bool = False) -> dict:
+        self.get(session_id)
+        raise HTTPException(status_code=409, detail="Codex session has no pending approvals")
 
     async def connect(self, session_id: str, websocket: WebSocket) -> None:
         session = self.get(session_id)

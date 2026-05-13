@@ -30,6 +30,19 @@ export type AgentQueueItem = {
   model?: string | null;
 };
 
+export type AgentApproval = {
+  id: string;
+  provider: AgentProvider;
+  session_id: string;
+  run_id?: string | null;
+  title: string;
+  description: string;
+  command?: string | null;
+  choices: string[];
+  created_at: number;
+  raw?: Record<string, unknown> | null;
+};
+
 export type AgentProviderInfo = {
   id: AgentProvider;
   name: string;
@@ -52,6 +65,7 @@ export type AgentSessionInfo = {
   event_count: number;
   total_tokens?: number | null;
   queue: AgentQueueItem[];
+  pending_approvals: AgentApproval[];
   raw: Record<string, unknown>;
 };
 

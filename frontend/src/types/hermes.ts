@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentPrompt, AgentQueueItem } from "./agents";
+import type { AgentApproval, AgentEvent, AgentPrompt, AgentQueueItem } from "./agents";
 
 export type HermesStatus = "idle" | "running" | "exited" | "failed";
 
@@ -18,6 +18,7 @@ export type HermesSessionInfo = {
   event_count: number;
   total_tokens?: number | null;
   queue: AgentQueueItem[];
+  pending_approvals: AgentApproval[];
 };
 
 export type HermesSessionSnapshot = HermesSessionInfo & {

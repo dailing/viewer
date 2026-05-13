@@ -29,6 +29,60 @@ body {
   height: 100%;
 }
 
+.user-select-page {
+  align-items: center;
+  background: #f5f7fa;
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  padding: 20px;
+}
+
+.user-select-panel {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 420px;
+  padding: 18px;
+  width: 100%;
+}
+
+.user-select-panel h1 {
+  font-size: 18px;
+  margin: 0 0 6px;
+}
+
+.user-profile-button {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.user-profile-button:hover {
+  background: #edf4ff;
+  border-color: #b7cef6;
+}
+
+.user-profile-button span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.user-profile-button small {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-left: 12px;
+}
+
 .topbar {
   align-items: center;
   background: #ffffff;

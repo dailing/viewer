@@ -12,6 +12,7 @@ import type { PaneToolbarAction, PaneToolbarControl } from "../../stores/paneToo
 import type { AgentEvent, AgentQueueItem, AgentSessionInfo, AgentSessionSnapshot, AgentSocketMessage } from "../../types/agents";
 import { agentSessionSocketUrl } from "../../api/client";
 import { agentRef, parseAgentRef, toAgentSessionInfo, toAgentSessionSnapshot } from "../../utils/agents";
+import { namespacedStorageKey } from "../../utils/userProfile";
 import AgentPromptComposer from "../AgentPromptComposer.vue";
 import AgentSessionTranscript from "../AgentSessionTranscript.vue";
 import LocalFilePreview from "../LocalFilePreview.vue";
@@ -69,7 +70,7 @@ const selectedModel = computed(() => (isCodex.value ? codex.models.selected_mode
 
 function readPromptDrafts(): Record<string, string> {
   try {
-    const raw = localStorage.getItem(AGENT_DRAFTS_KEY);
+    const raw = localStorage.getItem(namespacedStorageKey(AGENT_DRAFTS_KEY));
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
@@ -80,8 +81,9 @@ function readPromptDrafts(): Record<string, string> {
 
 function writePromptDrafts(drafts: Record<string, string>) {
   try {
-    if (Object.keys(drafts).length) localStorage.setItem(AGENT_DRAFTS_KEY, JSON.stringify(drafts));
-    else localStorage.removeItem(AGENT_DRAFTS_KEY);
+    const key = namespacedStorageKey(AGENT_DRAFTS_KEY);
+    if (Object.keys(drafts).length) localStorage.setItem(key, JSON.stringify(drafts));
+    else localStorage.removeItem(key);
   } catch {
     // Draft persistence is best-effort.
   }

@@ -96,11 +96,19 @@ class WorkspaceConfig(BaseModel):
     heat_step_percent: float = Field(default=5.0, ge=0.1, le=100.0)
 
 
+class UserProfile(BaseModel):
+    id: str
+    name: str = ""
+    home: str = ""
+
+
 class ConfigData(BaseModel):
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    users: list[UserProfile] = Field(default_factory=list)
+    default_user: str = ""
 
 
 class WorkspaceSnapshot(BaseModel):

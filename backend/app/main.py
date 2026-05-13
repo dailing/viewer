@@ -37,6 +37,7 @@ from .logging import current_log_path, ensure_logging
 from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceAgentSessionRequest, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
+from .users import get_user_profile, list_user_profiles, user_home_relative
 from .voice import connect_voice
 from .watcher import watch_root
 
@@ -81,6 +82,9 @@ async def log_requests(request: Request, call_next):
 async def startup() -> None:
     global watch_stop_event, watch_task
     settings.root_resolved.mkdir(parents=True, exist_ok=True)
+    for profile in list_user_profiles():
+        if profile.home:
+            (settings.root_resolved / profile.home).mkdir(parents=True, exist_ok=True)
     logger.info(
         "Starting viewer root={} frontend_dist={} debug={}",
         settings.root_resolved,
@@ -121,6 +125,17 @@ async def debug_info() -> dict[str, str | bool | None]:
         "frontend_dist": settings.frontend_dist_resolved.as_posix() if settings.frontend_dist_resolved else None,
         "log_file": log_path.as_posix() if log_path else None,
     }
+
+
+@app.get("/api/users")
+async def users():
+    return list_user_profiles()
+
+
+@app.get("/api/users/current")
+async def current_user(user: str | None = None):
+    profile = get_user_profile(user)
+    return {**profile.model_dump(), "home": user_home_relative(profile.id)}
 
 
 @app.get("/api/debug/log")
@@ -376,19 +391,22 @@ async def get_config():
 
 @app.put("/api/config")
 async def put_config(config: ConfigData):
+    current = read_config()
     return write_config(
         ConfigData(
             appearance=config.appearance,
             markdown=config.markdown,
             codex=config.codex,
             workspace=config.workspace,
+            users=config.users or current.users,
+            default_user=config.default_user or current.default_user,
         )
     )
 
 
 @app.get("/api/workspaces")
-async def get_workspaces():
-    return read_workspaces()
+async def get_workspaces(user: str | None = None):
+    return read_workspaces(user)
 
 
 @app.get("/api/workspaces/config")
@@ -397,28 +415,28 @@ async def get_workspace_config():
 
 
 @app.put("/api/workspaces/config")
-async def put_workspace_config(config: WorkspaceConfig):
-    return write_workspace_config(config)
+async def put_workspace_config(config: WorkspaceConfig, user: str | None = None):
+    return write_workspace_config(config, user)
 
 
 @app.put("/api/workspaces/{workspace_id}")
-async def put_workspace(workspace_id: str, snapshot: WorkspaceSnapshot):
-    return write_workspace(workspace_id, snapshot)
+async def put_workspace(workspace_id: str, snapshot: WorkspaceSnapshot, user: str | None = None):
+    return write_workspace(workspace_id, snapshot, user)
 
 
 @app.post("/api/workspaces/{workspace_id}/agent-sessions")
-async def add_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest):
-    return add_workspace_agent_session(workspace_id, request.ref)
+async def add_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
+    return add_workspace_agent_session(workspace_id, request.ref, user)
 
 
 @app.delete("/api/workspaces/{workspace_id}/agent-sessions")
-async def remove_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest):
-    return remove_workspace_agent_session(workspace_id, request.ref)
+async def remove_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
+    return remove_workspace_agent_session(workspace_id, request.ref, user)
 
 
 @app.post("/api/workspaces/{workspace_id}/activate")
-async def activate_workspace(workspace_id: str):
-    return set_active_workspace(workspace_id)
+async def activate_workspace(workspace_id: str, user: str | None = None):
+    return set_active_workspace(workspace_id, user)
 
 
 @app.get("/api/agent-loops")
@@ -487,15 +505,15 @@ async def events():
 
 
 @app.get("/api/terminals")
-async def terminals():
-    return terminal_manager.list()
+async def terminals(user: str | None = None):
+    return terminal_manager.list(user)
 
 
 @app.post("/api/terminals")
-async def create_terminal(config: TerminalCreate | None = None):
+async def create_terminal(config: TerminalCreate | None = None, user: str | None = None):
     cwd = config.cwd if config else None
     logger.info("Creating terminal cwd={}", cwd or "")
-    return await terminal_manager.create(cwd)
+    return await terminal_manager.create(cwd, user)
 
 
 @app.get("/api/terminals/{terminal_id}")
@@ -533,18 +551,18 @@ async def agent_providers():
 
 
 @app.get("/api/agents/sessions")
-async def agent_sessions(provider: str | None = None):
+async def agent_sessions(provider: str | None = None, user: str | None = None):
     if provider:
-        return _agent_manager(provider).list()
+        return _agent_manager(provider).list(user)
     return {
-        provider: manager.list() for provider, manager in AGENT_MANAGERS.items()
+        provider: manager.list(user) for provider, manager in AGENT_MANAGERS.items()
     }
 
 
 @app.post("/api/agents/sessions")
-async def create_agent_session(config: AgentSessionCreate):
+async def create_agent_session(config: AgentSessionCreate, user: str | None = None):
     logger.info("Creating {} session cwd={}", config.provider, config.cwd or "")
-    return await _agent_manager(config.provider).create(config.prompt, config.cwd, config.model)
+    return await _agent_manager(config.provider).create(config.prompt, config.cwd, config.model, user)
 
 
 @app.get("/api/agents/sessions/{session_id}")
@@ -594,8 +612,8 @@ async def agent_session_ws(websocket: WebSocket, session_id: str, provider: str)
 
 
 @app.get("/api/codex/sessions")
-async def codex_sessions():
-    return codex_session_manager.list()
+async def codex_sessions(user: str | None = None):
+    return codex_session_manager.list(user)
 
 
 @app.get("/api/codex/status", response_model=CodexCliStatus)
@@ -609,9 +627,9 @@ async def codex_models():
 
 
 @app.post("/api/codex/sessions")
-async def create_codex_session(config: CodexSessionCreate):
+async def create_codex_session(config: CodexSessionCreate, user: str | None = None):
     logger.info("Creating Codex session cwd={}", config.cwd or "")
-    return await codex_session_manager.create(config.prompt, config.cwd, config.model)
+    return await codex_session_manager.create(config.prompt, config.cwd, config.model, user)
 
 
 @app.get("/api/codex/sessions/{session_id}")
@@ -655,14 +673,14 @@ async def codex_session_ws(websocket: WebSocket, session_id: str):
 
 
 @app.get("/api/hermes/sessions")
-async def hermes_sessions():
-    return hermes_session_manager.list()
+async def hermes_sessions(user: str | None = None):
+    return hermes_session_manager.list(user)
 
 
 @app.post("/api/hermes/sessions")
-async def create_hermes_session(config: HermesSessionCreate):
+async def create_hermes_session(config: HermesSessionCreate, user: str | None = None):
     logger.info("Creating Hermes session cwd={}", config.cwd or "")
-    return await hermes_session_manager.create(config.prompt, config.cwd, config.model)
+    return await hermes_session_manager.create(config.prompt, config.cwd, config.model, user)
 
 
 @app.get("/api/hermes/sessions/{session_id}")

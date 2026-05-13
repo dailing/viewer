@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import type { LayoutNode, SplitDirection } from "../types/layout";
 import { agentRef, legacyAgentRefForPane } from "../utils/agents";
+import { namespacedStorageKey } from "../utils/userProfile";
 
 const STORAGE_KEY = "viewer.layout.v1";
 
@@ -172,7 +173,8 @@ export const useLayoutStore = defineStore("layout", {
   },
   actions: {
     load() {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const key = namespacedStorageKey(STORAGE_KEY);
+      const raw = localStorage.getItem(key);
       if (raw) {
         try {
           const parsed = JSON.parse(raw) as { root: LayoutNode; activePaneId?: string };
@@ -180,14 +182,14 @@ export const useLayoutStore = defineStore("layout", {
           this.activePaneId = parsed.activePaneId || firstPaneId(this.root);
           return;
         } catch {
-          localStorage.removeItem(STORAGE_KEY);
+          localStorage.removeItem(key);
         }
       }
       this.activePaneId = firstPaneId(this.root);
       this.save();
     },
     save() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
+      localStorage.setItem(namespacedStorageKey(STORAGE_KEY), JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
     },
     snapshot() {
       return { root: cloneLayout(this.root), activePaneId: this.activePaneId || firstPaneId(this.root) };

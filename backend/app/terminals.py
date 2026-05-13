@@ -16,6 +16,7 @@ from loguru import logger
 from .config import settings
 from .files import resolve_served_directory
 from .storage import TERMINAL_LOG_DIR
+from .users import normalize_user_id
 from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
 MAX_OUTPUT_CHARS = 1_000_000
@@ -24,6 +25,7 @@ MAX_OUTPUT_CHARS = 1_000_000
 @dataclass
 class TerminalSession:
     id: str
+    user_id: str
     title: str
     shell: str
     cwd: str
@@ -46,6 +48,7 @@ class TerminalSession:
     def snapshot(self) -> dict:
         return {
             "id": self.id,
+            "user_id": self.user_id,
             "title": self.title,
             "shell": self.shell,
             "cwd": self.cwd,
@@ -62,6 +65,7 @@ class TerminalSession:
     def summary(self) -> dict:
         return {
             "id": self.id,
+            "user_id": self.user_id,
             "title": self.title,
             "shell": self.shell,
             "cwd": self.cwd,
@@ -79,8 +83,9 @@ class TerminalManager:
         self.sessions: dict[str, TerminalSession] = {}
         self._counter = 0
 
-    def list(self) -> list[dict]:
-        return sorted((session.summary() for session in self.sessions.values()), key=lambda item: item["created_at"])
+    def list(self, user_id: str | None = None) -> list[dict]:
+        normalized = normalize_user_id(user_id)
+        return sorted((session.summary() for session in self.sessions.values() if session.user_id == normalized), key=lambda item: item["created_at"])
 
     def get(self, terminal_id: str) -> TerminalSession:
         session = self.sessions.get(terminal_id)
@@ -88,18 +93,20 @@ class TerminalManager:
             raise HTTPException(status_code=404, detail="Terminal not found")
         return session
 
-    def _cwd_for(self, cwd: str | None) -> str:
-        return resolve_served_directory(cwd, "Terminal")
+    def _cwd_for(self, cwd: str | None, user_id: str | None) -> str:
+        return resolve_served_directory(cwd, "Terminal", user_id)
 
-    async def create(self, cwd: str | None = None) -> dict:
+    async def create(self, cwd: str | None = None, user_id: str | None = None) -> dict:
         self._counter += 1
         terminal_id = uuid.uuid4().hex
+        normalized_user_id = normalize_user_id(user_id)
         shell = settings.terminal_shell
         session = TerminalSession(
             id=terminal_id,
+            user_id=normalized_user_id,
             title=f"Terminal {self._counter}",
             shell=shell,
-            cwd=self._cwd_for(cwd),
+            cwd=self._cwd_for(cwd, normalized_user_id),
             created_at=time.time(),
             log_path=TERMINAL_LOG_DIR / f"{terminal_id}.log",
         )

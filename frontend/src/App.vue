@@ -11,11 +11,13 @@ import { useFilesStore } from "./stores/files";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
+import { useUsersStore } from "./stores/users";
 import { useWorkspacesStore } from "./stores/workspaces";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { AgentSessionInfo, AgentStatus } from "./types/agents";
 import type { LayoutNode, SplitDirection } from "./types/layout";
 import { agentRef, legacyAgentRefForPane, parseAgentRef } from "./utils/agents";
+import { namespacedStorageKey } from "./utils/userProfile";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
 const SIDEBAR_WIDTH_KEY = "viewer.sidebarWidth.v1";
@@ -29,7 +31,10 @@ const codex = useCodexStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
+const users = useUsersStore();
 const workspaces = useWorkspacesStore();
+const appReady = ref(false);
+const selectingUser = ref(false);
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
 const activePage = ref<"workspace" | "settings" | "loops">("workspace");
@@ -156,9 +161,20 @@ let workspaceSaveTimer: number | null = null;
 let workspaceAutosaveReady = false;
 
 onMounted(async () => {
-  sidebarPinned.value = localStorage.getItem(SIDEBAR_PIN_KEY) === "true";
-  sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || sidebarWidth.value);
+  await users.load();
+  if (users.needsSelection) {
+    selectingUser.value = true;
+    return;
+  }
+  await initializeApp();
+});
+
+async function initializeApp() {
+  appReady.value = false;
+  sidebarPinned.value = localStorage.getItem(namespacedStorageKey(SIDEBAR_PIN_KEY)) === "true";
+  sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(namespacedStorageKey(SIDEBAR_WIDTH_KEY))) || sidebarWidth.value);
   sidebarOpen.value = sidebarPinned.value;
+  files.currentPath = users.activeProfile?.home ?? "";
   layout.load();
   await Promise.all([files.loadConfig(), terminals.load(), codex.load(), agents.load(), workspaces.load()]);
   loadWorkspaceHeat();
@@ -181,7 +197,14 @@ onMounted(async () => {
   agentRefresh = window.setInterval(() => {
     void agents.load();
   }, 3000);
-});
+  appReady.value = true;
+}
+
+async function selectUserProfile(userId: string) {
+  users.select(userId);
+  selectingUser.value = false;
+  await initializeApp();
+}
 
 watch(
   [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => files.visitTimes],
@@ -209,7 +232,7 @@ watch(
 );
 
 watch(sidebarPinned, (pinned) => {
-  localStorage.setItem(SIDEBAR_PIN_KEY, String(pinned));
+  localStorage.setItem(namespacedStorageKey(SIDEBAR_PIN_KEY), String(pinned));
   if (pinned) sidebarOpen.value = true;
 });
 
@@ -303,7 +326,7 @@ function normalizeWorkspaceHeat() {
 
 function loadWorkspaceHeat() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(WORKSPACE_HEAT_KEY) || "{}");
+    const parsed = JSON.parse(localStorage.getItem(namespacedStorageKey(WORKSPACE_HEAT_KEY)) || "{}");
     const values = typeof parsed?.values === "object" && parsed.values ? parsed.values : parsed;
     const elapsedMs = Math.max(0, Date.now() - Number(parsed?.updated_at ?? Date.now()));
     const intervals = Math.floor(elapsedMs / heatIntervalMs());
@@ -322,7 +345,7 @@ function loadWorkspaceHeat() {
 }
 
 function saveWorkspaceHeat() {
-  localStorage.setItem(WORKSPACE_HEAT_KEY, JSON.stringify({ values: workspaceHeat.value, updated_at: Date.now() }));
+  localStorage.setItem(namespacedStorageKey(WORKSPACE_HEAT_KEY), JSON.stringify({ values: workspaceHeat.value, updated_at: Date.now() }));
 }
 
 function tickWorkspaceHeat() {
@@ -525,7 +548,7 @@ function startSidebarResize(event: PointerEvent) {
   const resize = (moveEvent: PointerEvent) => {
     const nextWidth = clampSidebarWidth(moveEvent.clientX);
     sidebarWidth.value = nextWidth;
-    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(nextWidth));
+    localStorage.setItem(namespacedStorageKey(SIDEBAR_WIDTH_KEY), String(nextWidth));
   };
 
   const stop = () => {
@@ -587,7 +610,22 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell" :style="appStyle">
+  <div v-if="selectingUser" class="user-select-page">
+    <section class="user-select-panel" aria-label="Select user profile">
+      <h1>Select Profile</h1>
+      <button
+        v-for="profile in users.profiles"
+        :key="profile.id"
+        class="user-profile-button"
+        type="button"
+        @click="selectUserProfile(profile.id)"
+      >
+        <span>{{ profile.name || profile.id }}</span>
+        <small>{{ profile.home || "/" }}</small>
+      </button>
+    </section>
+  </div>
+  <div v-else-if="appReady" class="app-shell" :style="appStyle">
     <header class="topbar">
       <button
         class="btn btn-outline-secondary icon-button"

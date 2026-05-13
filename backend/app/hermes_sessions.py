@@ -18,6 +18,7 @@ from .config import settings
 from .files import resolve_served_directory
 from .models import AgentEventType
 from .storage import HERMES_LOG_DIR
+from .users import default_user_id, normalize_user_id
 from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
 HERMES_BASE_URL = os.environ.get("VIEWER_HERMES_BASE_URL", "http://127.0.0.1:8642").rstrip("/")
@@ -45,6 +46,7 @@ def relative_cwd(cwd: str) -> str:
 @dataclass
 class HermesSession:
     id: str
+    user_id: str
     title: str
     cwd: str
     model: str | None
@@ -69,6 +71,7 @@ class HermesSession:
     def summary(self) -> dict:
         return {
             "id": self.id,
+            "user_id": self.user_id,
             "hermes_session_id": self.hermes_session_id,
             "hermes_run_id": self.hermes_run_id,
             "db_path": HERMES_STATE_DB.as_posix(),
@@ -96,8 +99,8 @@ class HermesSessionManager:
     def _paths(self, session_id: str) -> Path:
         return HERMES_LOG_DIR / f"{session_id}.json"
 
-    def _cwd_for(self, cwd: str | None) -> str:
-        return resolve_served_directory(cwd, "Hermes")
+    def _cwd_for(self, cwd: str | None, user_id: str | None) -> str:
+        return resolve_served_directory(cwd, "Hermes", user_id)
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -109,6 +112,7 @@ class HermesSessionManager:
                 session_id = str(meta["id"])
                 session = HermesSession(
                     id=session_id,
+                    user_id=meta.get("user_id") or default_user_id(),
                     hermes_session_id=meta.get("hermes_session_id"),
                     hermes_run_id=meta.get("hermes_run_id"),
                     title=meta.get("title") or "Hermes session",
@@ -186,6 +190,7 @@ class HermesSessionManager:
         payload = json.dumps(
             {
                 "id": session.id,
+                "user_id": session.user_id,
                 "hermes_session_id": session.hermes_session_id,
                 "hermes_run_id": session.hermes_run_id,
                 "title": session.title,
@@ -407,11 +412,16 @@ class HermesSessionManager:
     def snapshot(self, session_id: str) -> dict:
         return self._snapshot(self.get(session_id))
 
-    def list(self) -> list[dict]:
+    def list(self, user_id: str | None = None) -> list[dict]:
         self._ensure_loaded()
+        normalized_user_id = normalize_user_id(user_id)
         for session in self.sessions.values():
             self._sync_db_events(session)
-        return sorted((session.summary() for session in self.sessions.values()), key=lambda item: item["updated_at"], reverse=True)
+        return sorted(
+            (session.summary() for session in self.sessions.values() if session.user_id == normalized_user_id),
+            key=lambda item: item["updated_at"],
+            reverse=True,
+        )
 
     def get(self, session_id: str) -> HermesSession:
         self._ensure_loaded()
@@ -421,16 +431,18 @@ class HermesSessionManager:
         self._sync_db_events(session)
         return session
 
-    async def create(self, prompt: str, cwd: str | None = None, model: str | None = None) -> dict:
+    async def create(self, prompt: str, cwd: str | None = None, model: str | None = None, user_id: str | None = None) -> dict:
         self._ensure_loaded()
         session_id = uuid.uuid4().hex
+        normalized_user_id = normalize_user_id(user_id)
         now = time.time()
         cleaned_prompt = prompt.strip()
         session = HermesSession(
             id=session_id,
+            user_id=normalized_user_id,
             hermes_session_id=session_id,
             title=self._title_for(cleaned_prompt) if cleaned_prompt else "New Hermes session",
-            cwd=self._cwd_for(cwd),
+            cwd=self._cwd_for(cwd, normalized_user_id),
             model=model.strip() if isinstance(model, str) and model.strip() else None,
             created_at=now,
             updated_at=now,

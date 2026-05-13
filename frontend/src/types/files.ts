@@ -84,11 +84,19 @@ export interface WorkspaceConfig {
   heat_step_percent: number;
 }
 
+export interface UserProfile {
+  id: string;
+  name: string;
+  home: string;
+}
+
 export interface ViewerConfig {
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
   codex?: CodexConfig;
   workspace?: WorkspaceConfig;
+  users?: UserProfile[];
+  default_user?: string;
 }
 
 export interface WatchEvent {

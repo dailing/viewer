@@ -7,6 +7,7 @@ from loguru import logger
 from .config import settings
 
 VIEW_HOME = Path.home() / ".view"
+USERS_DIR = VIEW_HOME / "users"
 CONFIG_PATH = VIEW_HOME / "config.json"
 WORKSPACES_PATH = VIEW_HOME / "workspaces.json"
 LOOPS_DIR = VIEW_HOME / "loops"
@@ -23,7 +24,7 @@ LEGACY_CONFIG_PATH = settings.root_resolved / ".viewer.config.json"
 LEGACY_WORKSPACES_PATH = settings.root_resolved / ".viewer.workspaces.json"
 
 def ensure_view_home() -> None:
-    for path in (VIEW_HOME, LOOPS_DIR, LOG_DIR, CODEX_LOG_DIR, HERMES_LOG_DIR, TERMINAL_LOG_DIR, AGENT_LOOP_LOG_DIR, CODEX_RUN_DIR, HERMES_RUN_DIR):
+    for path in (VIEW_HOME, USERS_DIR, LOOPS_DIR, LOG_DIR, CODEX_LOG_DIR, HERMES_LOG_DIR, TERMINAL_LOG_DIR, AGENT_LOOP_LOG_DIR, CODEX_RUN_DIR, HERMES_RUN_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 

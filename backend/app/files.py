@@ -10,6 +10,7 @@ from loguru import logger
 from .config import settings
 from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, WorkspaceConfig, WorkspaceData, WorkspaceSnapshot
 from .storage import CONFIG_PATH, WORKSPACES_PATH, migrate_legacy_state
+from .users import default_user_id, list_user_profiles, user_home_relative, user_workspaces_path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
@@ -137,7 +138,7 @@ def resolve_directory_link(base_dir: str | None, target: str) -> str:
     return _normalize_link_parts([*base_parts, *target_path.split("/")])
 
 
-def resolve_served_directory(path: str | None, label: str) -> str:
+def resolve_served_directory(path: str | None, label: str, user_id: str | None = None) -> str:
     raw = (path or "").strip()
     requested = normalize_relative(raw)
     if raw:
@@ -151,6 +152,9 @@ def resolve_served_directory(path: str | None, label: str) -> str:
                 return settings.root_resolved.as_posix()
         else:
             target = resolve_path(requested)
+    elif user_id:
+        requested = user_home_relative(user_id)
+        target = resolve_path(requested)
     else:
         target = settings.root_resolved
     if not target.exists() or not target.is_dir():
@@ -282,14 +286,18 @@ def config_path() -> Path:
 def read_config() -> ConfigData:
     path = config_path()
     if not path.exists():
-        config = ConfigData(workspace=WorkspaceConfig(count=legacy_workspace_count() or stored_workspace_count() or 5))
+        config = ConfigData(
+            workspace=WorkspaceConfig(count=legacy_workspace_count() or stored_workspace_count() or 5),
+            users=list_user_profiles(),
+            default_user=default_user_id(),
+        )
         write_config(config)
         return config
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         config = ConfigData.model_validate(raw)
     except Exception:
-        return ConfigData()
+        return ConfigData(users=list_user_profiles(), default_user=default_user_id())
     if isinstance(raw, dict) and "workspace" not in raw:
         config.workspace.count = legacy_workspace_count() or stored_workspace_count() or config.workspace.count
     cleaned = ConfigData(
@@ -297,18 +305,21 @@ def read_config() -> ConfigData:
         markdown=config.markdown,
         codex=config.codex,
         workspace=config.workspace,
+        users=list_user_profiles(),
+        default_user=default_user_id(),
     )
     codex_raw = raw.get("codex") if isinstance(raw, dict) else None
     workspace_raw = raw.get("workspace") if isinstance(raw, dict) else None
     missing_codex_defaults = not isinstance(codex_raw, dict) or "auto_commit_prompt" not in codex_raw
     missing_workspace_defaults = not isinstance(workspace_raw, dict) or "heat_interval_seconds" not in workspace_raw or "heat_step_percent" not in workspace_raw
+    missing_user_defaults = "users" not in raw or "default_user" not in raw
     if isinstance(raw, dict) and (
         missing_codex_defaults
         or missing_workspace_defaults
+        or missing_user_defaults
         or "workspace" not in raw
         or any(key in raw for key in ("pinned", "current_path", "visit_times", "workspaces"))
     ):
-        read_workspaces()
         write_config(cleaned)
     return cleaned
 
@@ -320,24 +331,24 @@ def write_config(config: ConfigData) -> ConfigData:
     return config
 
 
-def write_workspace_config(config: WorkspaceConfig) -> WorkspaceData:
+def write_workspace_config(config: WorkspaceConfig, user_id: str | None = None) -> WorkspaceData:
     current = read_config()
     current.workspace = config
     write_config(current)
-    data = read_workspaces()
+    data = read_workspaces(user_id)
     data.count = config.count
     return data
 
 
-def workspaces_path() -> Path:
+def workspaces_path(user_id: str | None = None) -> Path:
     migrate_legacy_state()
-    return WORKSPACES_PATH
+    return user_workspaces_path(user_id)
 
 
-def read_workspaces() -> WorkspaceData:
-    path = workspaces_path()
+def read_workspaces(user_id: str | None = None) -> WorkspaceData:
+    path = workspaces_path(user_id)
     if not path.exists():
-        data = write_workspaces(legacy_workspace_data())
+        data = write_workspaces(legacy_workspace_data(), user_id)
         data.count = configured_workspace_count()
         return data
     try:
@@ -352,13 +363,13 @@ def read_workspaces() -> WorkspaceData:
     if isinstance(raw, dict) and "count" in raw:
         ensure_workspace_config_count(data.count)
     if migrated is not raw or (isinstance(raw, dict) and "count" in raw):
-        write_workspaces(data)
+        write_workspaces(data, user_id)
     data.count = configured_workspace_count()
     return data
 
 
-def write_workspaces(data: WorkspaceData) -> WorkspaceData:
-    path = workspaces_path()
+def write_workspaces(data: WorkspaceData, user_id: str | None = None) -> WorkspaceData:
+    path = workspaces_path(user_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(data.model_dump_json(indent=2, exclude={"count"}), encoding="utf-8")
     return data
@@ -393,7 +404,7 @@ def _layout_agent_refs(layout: object) -> list[str]:
     return _unique_nonempty_strings(refs)
 
 
-def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> WorkspaceData:
+def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot, user_id: str | None = None) -> WorkspaceData:
     cleaned_id = workspace_id.strip()
     if not cleaned_id:
         raise HTTPException(status_code=400, detail="Workspace id is required")
@@ -409,7 +420,7 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
     for path, visited_at in snapshot.visit_times.items():
         cleaned = normalize_relative(path)
         visit_times[cleaned] = visited_at
-    data = read_workspaces()
+    data = read_workspaces(user_id)
     previous = data.slots.get(cleaned_id)
     agent_refs = list(previous.agent_session_ids if previous else [])
     codex_ids = list(previous.codex_session_ids if previous else [])
@@ -431,10 +442,10 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
         visit_times=visit_times,
         updated_at=snapshot.updated_at,
     )
-    return write_workspaces(data)
+    return write_workspaces(data, user_id)
 
 
-def add_workspace_agent_session(workspace_id: str, ref: str) -> WorkspaceData:
+def add_workspace_agent_session(workspace_id: str, ref: str, user_id: str | None = None) -> WorkspaceData:
     cleaned_id = workspace_id.strip()
     cleaned_ref = ref.strip()
     if not cleaned_id:
@@ -444,7 +455,7 @@ def add_workspace_agent_session(workspace_id: str, ref: str) -> WorkspaceData:
     provider, session_id = cleaned_ref.split(":", 1)
     if not provider or not session_id:
         raise HTTPException(status_code=400, detail="Agent session ref is invalid")
-    data = read_workspaces()
+    data = read_workspaces(user_id)
     snapshot = data.slots.get(cleaned_id) or WorkspaceSnapshot(layout={"type": "pane", "id": f"pane-workspace-{cleaned_id}"})
     agent_refs = _unique_nonempty_strings([*snapshot.agent_session_ids, cleaned_ref])
     codex_ids = [*snapshot.codex_session_ids]
@@ -460,10 +471,10 @@ def add_workspace_agent_session(workspace_id: str, ref: str) -> WorkspaceData:
             "hermes_session_ids": _unique_nonempty_strings(hermes_ids),
         }
     )
-    return write_workspaces(data)
+    return write_workspaces(data, user_id)
 
 
-def remove_workspace_agent_session(workspace_id: str, ref: str) -> WorkspaceData:
+def remove_workspace_agent_session(workspace_id: str, ref: str, user_id: str | None = None) -> WorkspaceData:
     cleaned_id = workspace_id.strip()
     cleaned_ref = ref.strip()
     if not cleaned_id:
@@ -471,7 +482,7 @@ def remove_workspace_agent_session(workspace_id: str, ref: str) -> WorkspaceData
     if not cleaned_ref or ":" not in cleaned_ref:
         raise HTTPException(status_code=400, detail="Agent session ref is required")
     provider, session_id = cleaned_ref.split(":", 1)
-    data = read_workspaces()
+    data = read_workspaces(user_id)
     snapshot = data.slots.get(cleaned_id)
     if not snapshot:
         return data
@@ -482,16 +493,16 @@ def remove_workspace_agent_session(workspace_id: str, ref: str) -> WorkspaceData
             "hermes_session_ids": [item for item in snapshot.hermes_session_ids if provider != "hermes" or item != session_id],
         }
     )
-    return write_workspaces(data)
+    return write_workspaces(data, user_id)
 
 
-def set_active_workspace(workspace_id: str) -> WorkspaceData:
+def set_active_workspace(workspace_id: str, user_id: str | None = None) -> WorkspaceData:
     cleaned_id = workspace_id.strip()
     if not cleaned_id:
         raise HTTPException(status_code=400, detail="Workspace id is required")
-    data = read_workspaces()
+    data = read_workspaces(user_id)
     data.active_workspace_id = cleaned_id
-    return write_workspaces(data)
+    return write_workspaces(data, user_id)
 
 
 def legacy_workspace_count() -> int | None:

@@ -6,6 +6,7 @@ import AgentSessionsPanel from "./sidebar/AgentSessionsPanel.vue";
 import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
+import { namespacedStorageKey } from "../utils/userProfile";
 
 type SidebarTool = "files" | "git" | "terminals" | "agents";
 type WorkspaceNotice = "running" | "completed" | "failed";
@@ -45,7 +46,7 @@ const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
 const fileStore = useFilesStore();
 
 function storedTool(): SidebarTool {
-  const value = localStorage.getItem(ACTIVE_TOOL_KEY);
+  const value = localStorage.getItem(namespacedStorageKey(ACTIVE_TOOL_KEY));
   return tools.some((tool) => tool.id === value) ? (value as SidebarTool) : "files";
 }
 
@@ -57,7 +58,7 @@ let gitStatusTimer: number | null = null;
 let gitStatusRequestId = 0;
 
 watch(activeTool, (tool) => {
-  localStorage.setItem(ACTIVE_TOOL_KEY, tool);
+  localStorage.setItem(namespacedStorageKey(ACTIVE_TOOL_KEY), tool);
 });
 
 function selectTool(tool: SidebarTool) {

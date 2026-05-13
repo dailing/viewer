@@ -1,4 +1,4 @@
-import type { DirectoryListing, FileMeta, ViewerConfig, WorkspaceConfig } from "../types/files";
+import type { DirectoryListing, FileMeta, UserProfile, ViewerConfig, WorkspaceConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
@@ -6,9 +6,10 @@ import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
 import type { AgentProvider, AgentProviderInfo } from "../types/agents";
 import type { GitDiffText, GitStatus } from "../types/git";
+import { currentUserId } from "../utils/userProfile";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options);
+  const response = await fetch(withUser(url), options);
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || response.statusText);
@@ -18,13 +19,20 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
 function socketUrl(path: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}${path}`;
+  return `${protocol}//${window.location.host}${withUser(path)}`;
+}
+
+function withUser(url: string): string {
+  const user = currentUserId();
+  if (!user || !url.startsWith("/api/")) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}user=${encodeURIComponent(user)}`;
 }
 
 export function rawUrl(path: string, contentHash?: string, base?: string): string {
   const hashQuery = contentHash ? `&h=${encodeURIComponent(contentHash)}` : "";
   const baseQuery = base !== undefined ? `&base=${encodeURIComponent(base)}` : "";
-  return `/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}${baseQuery}`;
+  return withUser(`/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}${baseQuery}`);
 }
 
 function encodePathSegments(path: string): string {
@@ -37,7 +45,11 @@ function encodePathSegments(path: string): string {
 
 export function siteUrl(path: string, contentHash?: string): string {
   const hashQuery = contentHash ? `?h=${encodeURIComponent(contentHash)}` : "";
-  return `/api/file/site/${encodePathSegments(path)}${hashQuery}`;
+  return withUser(`/api/file/site/${encodePathSegments(path)}${hashQuery}`);
+}
+
+export async function listUsers(): Promise<UserProfile[]> {
+  return request<UserProfile[]>("/api/users");
 }
 
 export async function getTree(path = ""): Promise<DirectoryListing> {
@@ -49,7 +61,7 @@ export async function getMeta(path: string): Promise<FileMeta> {
 }
 
 export async function getText(path: string): Promise<string> {
-  const response = await fetch(`/api/file/content?path=${encodeURIComponent(path)}`);
+  const response = await fetch(withUser(`/api/file/content?path=${encodeURIComponent(path)}`));
   if (!response.ok) throw new Error(await response.text());
   return response.text();
 }

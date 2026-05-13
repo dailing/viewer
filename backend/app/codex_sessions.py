@@ -21,6 +21,7 @@ from .config import settings
 from .files import resolve_served_directory
 from .models import AgentEventType
 from .storage import CODEX_LOG_DIR, CODEX_RUN_DIR
+from .users import default_user_id, normalize_user_id
 from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
 
 CODEX_ROLLOUT_ROOT = Path.home() / ".codex" / "sessions"
@@ -69,6 +70,7 @@ def relative_cwd(cwd: str) -> str:
 @dataclass
 class CodexSession:
     id: str
+    user_id: str
     title: str
     cwd: str
     model: str | None
@@ -103,6 +105,7 @@ class CodexSession:
     def summary(self) -> dict:
         return {
             "id": self.id,
+            "user_id": self.user_id,
             "codex_session_id": self.codex_session_id,
             "rollout_path": self.rollout_path.as_posix() if self.rollout_path else None,
             "title": self.title,
@@ -143,8 +146,8 @@ class CodexSessionManager:
             CODEX_LOG_DIR / f"{session_id}.stderr.log",
         )
 
-    def _cwd_for(self, cwd: str | None) -> str:
-        return resolve_served_directory(cwd, "Codex")
+    def _cwd_for(self, cwd: str | None, user_id: str | None) -> str:
+        return resolve_served_directory(cwd, "Codex", user_id)
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -159,6 +162,7 @@ class CodexSessionManager:
                 status = meta.get("status", "exited")
                 session = CodexSession(
                     id=session_id,
+                    user_id=meta.get("user_id") or default_user_id(),
                     codex_session_id=meta.get("codex_session_id"),
                     title=meta.get("title") or "Codex session",
                     cwd=meta.get("cwd") or settings.root_resolved.as_posix(),
@@ -220,6 +224,7 @@ class CodexSessionManager:
         payload = json.dumps(
             {
                 "id": session.id,
+                "user_id": session.user_id,
                 "codex_session_id": session.codex_session_id,
                 "rollout_path": session.rollout_path.as_posix() if session.rollout_path else None,
                 "title": session.title,
@@ -796,14 +801,19 @@ class CodexSessionManager:
             return "Codex session"
         return first[:72]
 
-    def list(self) -> list[dict]:
+    def list(self, user_id: str | None = None) -> list[dict]:
         self._ensure_loaded()
+        normalized_user_id = normalize_user_id(user_id)
         for session in self.sessions.values():
             self._sync_background_run_state(session)
             if session.status == "running" and session.clients:
                 continue
             self._sync_rollout_events(session)
-        return sorted((session.summary() for session in self.sessions.values()), key=lambda item: item["updated_at"], reverse=True)
+        return sorted(
+            (session.summary() for session in self.sessions.values() if session.user_id == normalized_user_id),
+            key=lambda item: item["updated_at"],
+            reverse=True,
+        )
 
     def get(self, session_id: str) -> CodexSession:
         self._ensure_loaded()
@@ -814,16 +824,18 @@ class CodexSessionManager:
         self._sync_rollout_events(session)
         return session
 
-    async def create(self, prompt: str, cwd: str | None = None, model: str | None = None) -> dict:
+    async def create(self, prompt: str, cwd: str | None = None, model: str | None = None, user_id: str | None = None) -> dict:
         self._ensure_loaded()
         session_id = uuid.uuid4().hex
+        normalized_user_id = normalize_user_id(user_id)
         meta_path, log_path, stderr_path = self._paths(session_id)
         now = time.time()
         cleaned_prompt = prompt.strip()
         session = CodexSession(
             id=session_id,
+            user_id=normalized_user_id,
             title=self._title_for(cleaned_prompt) if cleaned_prompt else "New Codex session",
-            cwd=self._cwd_for(cwd),
+            cwd=self._cwd_for(cwd, normalized_user_id),
             model=model.strip() if isinstance(model, str) and model.strip() else None,
             created_at=now,
             updated_at=now,

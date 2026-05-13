@@ -2,18 +2,20 @@
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
 import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
+import { useUsersStore } from "../stores/users";
 import { useWorkspacesStore } from "../stores/workspaces";
 import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, WorkspaceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
+const users = useUsersStore();
 const workspaces = useWorkspacesStore();
 const saving = ref(false);
 const restarting = ref(false);
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
-const openSections = reactive({ server: true, appearance: true, workspace: true, codex: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, users: true, appearance: true, workspace: true, codex: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
@@ -94,6 +96,12 @@ function sectionToggle(section: keyof typeof openSections) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function switchUser(userId: string) {
+  if (!userId || userId === users.activeUserId) return;
+  users.select(userId);
+  window.location.reload();
 }
 
 async function waitForServer(previousPid: number) {
@@ -276,6 +284,23 @@ async function applyJson() {
               </button>
             </div>
             <div v-if="serverNotice" class="server-notice">{{ serverNotice }}</div>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('users')">
+            <i class="bi" :class="openSections.users ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>User Profile</span>
+          </button>
+          <div v-if="openSections.users" class="section-body">
+            <label class="compact-field">
+              <span>Active profile</span>
+              <select class="form-select form-select-sm" :value="users.activeUserId" @change="switchUser(($event.target as HTMLSelectElement).value)">
+                <option v-for="profile in users.profiles" :key="profile.id" :value="profile.id">
+                  {{ profile.name || profile.id }} - {{ profile.home || "/" }}
+                </option>
+              </select>
+            </label>
           </div>
         </section>
 

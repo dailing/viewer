@@ -318,7 +318,7 @@ async function createSessionHere() {
   error.value = "";
   try {
     const nextSession = await agents.create(provider.value, "", session.value.cwd, selectedModel.value);
-    workspaces.rememberActiveAgentSession(nextSession.ref);
+    await workspaces.rememberActiveAgentSession(nextSession.ref);
     layout.openAgentSession(nextSession.ref);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);

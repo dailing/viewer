@@ -140,6 +140,22 @@ export async function putWorkspace(id: string, snapshot: WorkspaceSnapshot): Pro
   });
 }
 
+export async function addWorkspaceAgentSession(id: string, ref: string): Promise<WorkspaceData> {
+  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/agent-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ref }),
+  });
+}
+
+export async function removeWorkspaceAgentSession(id: string, ref: string): Promise<WorkspaceData> {
+  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/agent-sessions`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ref }),
+  });
+}
+
 export async function activateWorkspace(id: string): Promise<WorkspaceData> {
   return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/activate`, { method: "POST" });
 }

@@ -89,15 +89,15 @@ async function newSession() {
   if (!provider) return;
   try {
     const session = await agents.create(provider, "", files.currentPath);
-    workspaces.rememberActiveAgentSession(session.ref);
+    await workspaces.rememberActiveAgentSession(session.ref);
     emit("open-agent-session", session.ref);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
 }
 
-function closeSession(ref: string) {
-  workspaces.forgetActiveAgentSession(ref);
+async function closeSession(ref: string) {
+  await workspaces.forgetActiveAgentSession(ref);
   layout.clearAgentSession(ref);
 }
 

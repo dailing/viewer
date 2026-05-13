@@ -14,6 +14,7 @@ from .config import settings
 from .codex_sessions import codex_session_manager
 from .events import hub
 from .files import (
+    add_workspace_agent_session,
     content_hash,
     get_meta,
     guess_mime,
@@ -24,6 +25,7 @@ from .files import (
     resolve_directory_link,
     resolve_markdown_link,
     resolve_path,
+    remove_workspace_agent_session,
     set_active_workspace,
     write_config,
     write_workspace_config,
@@ -32,7 +34,7 @@ from .files import (
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
 from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
-from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceConfig, WorkspaceSnapshot
+from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceAgentSessionRequest, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -402,6 +404,16 @@ async def put_workspace_config(config: WorkspaceConfig):
 @app.put("/api/workspaces/{workspace_id}")
 async def put_workspace(workspace_id: str, snapshot: WorkspaceSnapshot):
     return write_workspace(workspace_id, snapshot)
+
+
+@app.post("/api/workspaces/{workspace_id}/agent-sessions")
+async def add_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest):
+    return add_workspace_agent_session(workspace_id, request.ref)
+
+
+@app.delete("/api/workspaces/{workspace_id}/agent-sessions")
+async def remove_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest):
+    return remove_workspace_agent_session(workspace_id, request.ref)
 
 
 @app.post("/api/workspaces/{workspace_id}/activate")

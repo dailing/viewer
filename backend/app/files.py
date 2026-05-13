@@ -409,11 +409,16 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
     for path, visited_at in snapshot.visit_times.items():
         cleaned = normalize_relative(path)
         visit_times[cleaned] = visited_at
-    agent_refs = list(snapshot.agent_session_ids)
-    agent_refs.extend(f"codex:{item}" for item in snapshot.codex_session_ids)
-    agent_refs.extend(f"hermes:{item}" for item in snapshot.hermes_session_ids)
-    agent_refs.extend(_layout_agent_refs(snapshot.layout))
     data = read_workspaces()
+    previous = data.slots.get(cleaned_id)
+    agent_refs = list(previous.agent_session_ids if previous else [])
+    codex_ids = list(previous.codex_session_ids if previous else [])
+    hermes_ids = list(previous.hermes_session_ids if previous else [])
+    for ref in agent_refs:
+        if ref.startswith("codex:"):
+            codex_ids.append(ref.removeprefix("codex:"))
+        if ref.startswith("hermes:"):
+            hermes_ids.append(ref.removeprefix("hermes:"))
     data.active_workspace_id = cleaned_id
     data.slots[cleaned_id] = WorkspaceSnapshot(
         layout=snapshot.layout,
@@ -421,10 +426,61 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot) -> Workspace
         current_path=current_path,
         pinned=pinned,
         agent_session_ids=_unique_nonempty_strings(agent_refs),
-        codex_session_ids=_unique_nonempty_strings(snapshot.codex_session_ids),
-        hermes_session_ids=_unique_nonempty_strings(snapshot.hermes_session_ids),
+        codex_session_ids=_unique_nonempty_strings(codex_ids),
+        hermes_session_ids=_unique_nonempty_strings(hermes_ids),
         visit_times=visit_times,
         updated_at=snapshot.updated_at,
+    )
+    return write_workspaces(data)
+
+
+def add_workspace_agent_session(workspace_id: str, ref: str) -> WorkspaceData:
+    cleaned_id = workspace_id.strip()
+    cleaned_ref = ref.strip()
+    if not cleaned_id:
+        raise HTTPException(status_code=400, detail="Workspace id is required")
+    if not cleaned_ref or ":" not in cleaned_ref:
+        raise HTTPException(status_code=400, detail="Agent session ref is required")
+    provider, session_id = cleaned_ref.split(":", 1)
+    if not provider or not session_id:
+        raise HTTPException(status_code=400, detail="Agent session ref is invalid")
+    data = read_workspaces()
+    snapshot = data.slots.get(cleaned_id) or WorkspaceSnapshot(layout={"type": "pane", "id": f"pane-workspace-{cleaned_id}"})
+    agent_refs = _unique_nonempty_strings([*snapshot.agent_session_ids, cleaned_ref])
+    codex_ids = [*snapshot.codex_session_ids]
+    hermes_ids = [*snapshot.hermes_session_ids]
+    if provider == "codex":
+        codex_ids.append(session_id)
+    if provider == "hermes":
+        hermes_ids.append(session_id)
+    data.slots[cleaned_id] = snapshot.model_copy(
+        update={
+            "agent_session_ids": agent_refs,
+            "codex_session_ids": _unique_nonempty_strings(codex_ids),
+            "hermes_session_ids": _unique_nonempty_strings(hermes_ids),
+        }
+    )
+    return write_workspaces(data)
+
+
+def remove_workspace_agent_session(workspace_id: str, ref: str) -> WorkspaceData:
+    cleaned_id = workspace_id.strip()
+    cleaned_ref = ref.strip()
+    if not cleaned_id:
+        raise HTTPException(status_code=400, detail="Workspace id is required")
+    if not cleaned_ref or ":" not in cleaned_ref:
+        raise HTTPException(status_code=400, detail="Agent session ref is required")
+    provider, session_id = cleaned_ref.split(":", 1)
+    data = read_workspaces()
+    snapshot = data.slots.get(cleaned_id)
+    if not snapshot:
+        return data
+    data.slots[cleaned_id] = snapshot.model_copy(
+        update={
+            "agent_session_ids": [item for item in snapshot.agent_session_ids if item != cleaned_ref],
+            "codex_session_ids": [item for item in snapshot.codex_session_ids if provider != "codex" or item != session_id],
+            "hermes_session_ids": [item for item in snapshot.hermes_session_ids if provider != "hermes" or item != session_id],
+        }
     )
     return write_workspaces(data)
 

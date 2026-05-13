@@ -115,6 +115,10 @@ class WorkspaceSnapshot(BaseModel):
     updated_at: float | None = None
 
 
+class WorkspaceAgentSessionRequest(BaseModel):
+    ref: str
+
+
 class WorkspaceData(BaseModel):
     active_workspace_id: str = "1"
     count: int = Field(default=5, ge=1, le=20)

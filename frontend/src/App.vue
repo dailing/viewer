@@ -184,7 +184,7 @@ onMounted(async () => {
 });
 
 watch(
-  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => files.visitTimes, () => workspaces.activeAgentSessionRefs],
+  [() => layout.root, () => layout.activePaneId, () => files.currentPath, () => files.pinned, () => files.visitTimes],
   () => {
     scheduleWorkspaceSave();
   },
@@ -233,7 +233,7 @@ function openTerminal(id: string) {
 
 function openAgentSession(ref: string) {
   agents.markRead(ref);
-  workspaces.rememberActiveAgentSession(ref);
+  void workspaces.rememberActiveAgentSession(ref);
   layout.openAgentSession(ref);
   if (!sidebarPinned.value) sidebarOpen.value = false;
 }
@@ -245,15 +245,11 @@ function openDiff(path: string, cwd = "") {
 
 function currentWorkspaceSnapshot() {
   const snapshot = layout.snapshot();
-  const refs = [...workspaces.activeAgentSessionRefs];
   return {
     layout: snapshot.root,
     active_pane_id: snapshot.activePaneId,
     current_path: files.currentPath,
     pinned: [...files.pinned],
-    agent_session_ids: refs,
-    codex_session_ids: refs.flatMap((ref) => (ref.startsWith("codex:") ? [ref.slice("codex:".length)] : [])),
-    hermes_session_ids: refs.flatMap((ref) => (ref.startsWith("hermes:") ? [ref.slice("hermes:".length)] : [])),
     visit_times: { ...files.visitTimes },
   };
 }

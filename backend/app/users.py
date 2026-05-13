@@ -4,13 +4,14 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from .config import settings
 from .models import UserProfile
 from .storage import CONFIG_PATH, USERS_DIR, ensure_view_home, migrate_legacy_state
 
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 INITIAL_USER_PROFILES = [
-    UserProfile(id="dailing", name="d AI Ling g", home=""),
-    UserProfile(id="maomao", name="毛毛", home=""),
+    UserProfile(id="dailing", name="d AI Ling g", home="~/Sync"),
+    UserProfile(id="maomao", name="毛毛", home="~/maomao"),
 ]
 INITIAL_DEFAULT_USER = "dailing"
 
@@ -74,7 +75,22 @@ def get_user_profile(user_id: str | None) -> UserProfile:
 
 
 def user_home_relative(user_id: str | None) -> str:
-    return get_user_profile(user_id).home
+    try:
+        relative = user_home_path(user_id).relative_to(settings.root_resolved).as_posix()
+        return "" if relative == "." else relative
+    except ValueError:
+        return ""
+
+
+def user_home_path(user_id: str | None) -> Path:
+    profile = get_user_profile(user_id)
+    raw = profile.home.strip()
+    if not raw:
+        return settings.root_resolved
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return settings.root_resolved.joinpath(_normalize_relative_home(raw)).resolve()
 
 
 def user_state_dir(user_id: str | None) -> Path:
@@ -92,7 +108,16 @@ def user_workspaces_path(user_id: str | None) -> Path:
 
 
 def _normalize_home(value: str | None) -> str:
-    raw = (value or "").replace("\\", "/").strip("/")
+    raw = (value or "").replace("\\", "/").strip()
+    if not raw:
+        return ""
+    if raw.startswith("~") or Path(raw).expanduser().is_absolute():
+        return raw
+    return _normalize_relative_home(raw)
+
+
+def _normalize_relative_home(value: str) -> str:
+    raw = value.replace("\\", "/").strip("/")
     parts = [part for part in raw.split("/") if part and part != "."]
     if any(part == ".." for part in parts):
         return ""

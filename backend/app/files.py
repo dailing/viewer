@@ -10,7 +10,7 @@ from loguru import logger
 from .config import settings
 from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, WorkspaceConfig, WorkspaceData, WorkspaceSnapshot
 from .storage import CONFIG_PATH, WORKSPACES_PATH, migrate_legacy_state
-from .users import default_user_id, list_user_profiles, user_home_relative, user_workspaces_path
+from .users import default_user_id, list_user_profiles, user_home_path, user_workspaces_path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
@@ -146,15 +146,15 @@ def resolve_served_directory(path: str | None, label: str, user_id: str | None =
         if raw_path.is_absolute():
             try:
                 target = raw_path.resolve()
-                requested = target.relative_to(settings.root_resolved).as_posix()
-            except (OSError, ValueError):
-                logger.warning("{} cwd '{}' is outside served root; using root", label, raw)
+                requested = target.as_posix()
+            except OSError:
+                logger.warning("{} cwd '{}' is not available; using root", label, raw)
                 return settings.root_resolved.as_posix()
         else:
             target = resolve_path(requested)
     elif user_id:
-        requested = user_home_relative(user_id)
-        target = resolve_path(requested)
+        target = user_home_path(user_id)
+        requested = target.as_posix()
     else:
         target = settings.root_resolved
     if not target.exists() or not target.is_dir():

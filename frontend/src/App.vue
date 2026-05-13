@@ -174,7 +174,7 @@ async function initializeApp() {
   sidebarPinned.value = localStorage.getItem(namespacedStorageKey(SIDEBAR_PIN_KEY)) === "true";
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(namespacedStorageKey(SIDEBAR_WIDTH_KEY))) || sidebarWidth.value);
   sidebarOpen.value = sidebarPinned.value;
-  files.currentPath = users.activeProfile?.home ?? "";
+  files.currentPath = users.activeProfile?.home_path ?? "";
   layout.load();
   await Promise.all([files.loadConfig(), terminals.load(), codex.load(), agents.load(), workspaces.load()]);
   loadWorkspaceHeat();

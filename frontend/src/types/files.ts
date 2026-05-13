@@ -88,6 +88,7 @@ export interface UserProfile {
   id: string;
   name: string;
   home: string;
+  home_path?: string;
 }
 
 export interface ViewerConfig {

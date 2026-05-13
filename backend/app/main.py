@@ -37,7 +37,7 @@ from .logging import current_log_path, ensure_logging
 from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceAgentSessionRequest, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
 from .terminals import terminal_manager
-from .users import get_user_profile, list_user_profiles, user_home_relative
+from .users import get_user_profile, list_user_profiles, user_home_path, user_home_relative
 from .voice import connect_voice
 from .watcher import watch_root
 
@@ -129,13 +129,16 @@ async def debug_info() -> dict[str, str | bool | None]:
 
 @app.get("/api/users")
 async def users():
-    return list_user_profiles()
+    return [
+        {**profile.model_dump(), "home_path": user_home_relative(profile.id)}
+        for profile in list_user_profiles()
+    ]
 
 
 @app.get("/api/users/current")
 async def current_user(user: str | None = None):
     profile = get_user_profile(user)
-    return {**profile.model_dump(), "home": user_home_relative(profile.id)}
+    return {**profile.model_dump(), "home_path": user_home_relative(profile.id), "cwd": user_home_path(profile.id).as_posix()}
 
 
 @app.get("/api/debug/log")

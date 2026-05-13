@@ -40,7 +40,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
 - `/api/file/resolve-directory-link`: resolves a local link target against a served-root-relative directory, used by Codex session transcript links whose paths are relative to the session cwd.
 - `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at `settings.root_resolved`.
-- `/api/users`: returns configured soft user profiles from `~/.view/config.json`; the bootstrapped profiles are `dailing` and `maomao`. Profile `home` values are served-root-relative default working directories, not security boundaries.
+- `/api/users`: returns configured soft user profiles from `~/.view/config.json`; the bootstrapped profiles are `dailing` and `maomao`. Profile `home` values may be served-root-relative, absolute, or `~`-expanded default working directories, not security boundaries. The response also includes `home_path`, the served-root-relative path used by the file sidebar when the home is inside `VIEWER_ROOT`.
 - `/api/config` GET/PUT: reads and writes nav appearance, workspace count and workspace heat timing, Codex model options, Markdown theme config, user profiles, and default user in `~/.view/config.json`. Normal settings saves preserve existing user profiles unless the JSON payload explicitly changes them. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated agent refs live in per-user workspace files under `~/.view/users/{user}/workspaces.json`.
 - `/api/workspaces` GET, `/api/workspaces/config` GET/PUT, `/api/workspaces/{id}` PUT, `/api/workspaces/{id}/activate` POST, and `/api/workspaces/{id}/agent-sessions` POST/DELETE: read workspace state, read/update workspace count config, write workspace snapshots, activate workspaces, and add/remove workspace-associated agent sessions for the `user` query profile. Workspace count is stored globally in `~/.view/config.json`; per-workspace state is stored in `~/.view/users/{user}/workspaces.json`. Agent session association is maintained by the backend through the add/remove routes; workspace snapshot writes preserve the existing association set instead of accepting a full replacement from the browser.
 - `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
@@ -80,7 +80,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `backend/app/users.py`
 
-- Soft user profile helpers. Loads `users` and `default_user` from `~/.view/config.json`, validates user ids, normalizes served-root-relative profile homes, bootstraps `dailing` and `maomao` when no profiles are configured, and derives per-user workspace state paths.
+- Soft user profile helpers. Loads `users` and `default_user` from `~/.view/config.json`, validates user ids, normalizes profile homes, supports served-root-relative, absolute, and `~`-expanded homes, bootstraps `dailing` and `maomao` when no profiles are configured, and derives per-user workspace state paths.
 - `user_workspaces_path(user_id)`: returns `~/.view/users/{user}/workspaces.json`; legacy workspace files are not copied implicitly.
 
 `backend/app/files.py`
@@ -90,7 +90,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `resolve_path(path)`: joins normalized relative path to `settings.root_resolved`. Symlinks are allowed by current implementation.
 - `resolve_markdown_link(base_path, target)`: resolves local Markdown image/link targets relative to the Markdown file, including absolute filesystem paths under the served root, and rejects links outside the served root.
 - `resolve_directory_link(base_dir, target)`: resolves local file links relative to a served-root-relative directory, including absolute/file URLs under the served root, strips common editor `:line[:column]` suffixes, and rejects links outside the served root.
-- `resolve_served_directory(path, label)`: resolves a served-root-relative working directory for terminal/Codex launches, logging and falling back to root when unavailable.
+- `resolve_served_directory(path, label)`: resolves a working directory for terminal/Codex launches. Explicit absolute paths and profile homes may be outside `VIEWER_ROOT`; relative paths still resolve inside `VIEWER_ROOT`. Missing directories fall back to root.
 - `relative_for(path)`: returns path relative to root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
 - `preview_kind(path, mime, size)`: maps file extension/MIME to `image`, `markdown`, `html`, `pdf`, `text`, or `unsupported`.

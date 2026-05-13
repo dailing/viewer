@@ -188,7 +188,7 @@ async def file_raw(path: str, h: str | None = None, base: str | None = None):
 
     mime = guess_mime(target)
     etag = h or content_hash(target)
-    response = FileResponse(target, media_type=mime, filename=target.name)
+    response = FileResponse(target, media_type=mime, filename=target.name, content_disposition_type="inline")
     response.headers["ETag"] = f"\"{etag}\""
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
@@ -274,9 +274,26 @@ def inject_html_base(source: str, href: str) -> str:
     return f"{base}{source}"
 
 
+def resolve_site_path(path: str) -> Path:
+    target = resolve_path(path)
+    if target.exists():
+        return target
+
+    parts = [part for part in path.replace("\\", "/").strip("/").split("/") if part]
+    for index in range(len(parts) - 1):
+        if parts[index : index + 2] != ["generated", "assets"]:
+            continue
+        asset_tail = parts[index + 2 :]
+        for prefix_length in range(index - 1, -1, -1):
+            candidate = resolve_path("/".join([*parts[:prefix_length], "generated", "assets", *asset_tail]))
+            if candidate.exists():
+                return candidate
+    return target
+
+
 @app.get("/api/file/site/{path:path}")
 async def file_site(path: str, h: str | None = None):
-    target = resolve_path(path)
+    target = resolve_site_path(path)
     if target.exists() and target.is_dir():
         index = target / "index.html"
         if index.exists() and index.is_file():
@@ -303,7 +320,7 @@ async def file_site(path: str, h: str | None = None):
             source = target.read_text(encoding="utf-8", errors="replace")
         response = Response(rewrite_css_root_relative_urls(source), media_type="text/css")
     else:
-        response = FileResponse(target, media_type=mime, filename=target.name)
+        response = FileResponse(target, media_type=mime, filename=target.name, content_disposition_type="inline")
 
     response.headers["ETag"] = f"\"{h or content_hash(target)}\""
     response.headers["Cache-Control"] = "no-cache"

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import hljs from "highlight.js";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { commitGit, getGitDiff, pushGit, revertGitPath, stageGitPath } from "../../api/client";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
@@ -22,10 +21,6 @@ const message = ref("");
 const mode = ref<DiffMode>("normal");
 const container = ref<HTMLElement | null>(null);
 
-const highlightedHtml = computed(() => {
-  if (!diff.value) return "";
-  return hljs.highlight(diff.value, { language: "diff", ignoreIllegals: true }).value;
-});
 const wordDiffLines = computed(() => diffLines(diff.value));
 const splitRows = computed(() => toSplitRows(wordDiffLines.value));
 
@@ -258,12 +253,27 @@ function toSplitRows(lines: DiffLine[]): SplitRow[] {
   return rows;
 }
 
-function sideText(line: DiffLine | null): string {
-  if (!line) return " ";
-  if (line.kind === "add" || line.kind === "delete" || line.kind === "context") {
-    return line.text[0] === " " || line.text[0] === "+" || line.text[0] === "-" ? line.text.slice(1) || " " : line.text || " ";
+function sideSegments(line: DiffLine | null): DiffSegment[] {
+  if (!line) return [{ text: " ", changed: false }];
+  if (line.kind !== "add" && line.kind !== "delete" && line.kind !== "context") return line.segments;
+  const markerLength = line.text[0] === " " || line.text[0] === "+" || line.text[0] === "-" ? 1 : 0;
+  if (!markerLength) return line.segments;
+  return stripLeadingCharacters(line.segments, markerLength);
+}
+
+function stripLeadingCharacters(segments: DiffSegment[], count: number): DiffSegment[] {
+  const stripped: DiffSegment[] = [];
+  let remaining = count;
+  for (const segment of segments) {
+    if (remaining >= segment.text.length) {
+      remaining -= segment.text.length;
+      continue;
+    }
+    const text = remaining > 0 ? segment.text.slice(remaining) : segment.text;
+    remaining = 0;
+    if (text) stripped.push({ text, changed: segment.changed });
   }
-  return line.text || " ";
+  return stripped.length ? stripped : [{ text: " ", changed: false }];
 }
 
 function handleChange(event: Event) {
@@ -298,14 +308,14 @@ onUnmounted(() => {
       <i class="bi bi-file-earmark-binary"></i>
       <span>Binary file diff cannot be viewed.</span>
     </div>
-    <pre v-else-if="mode === 'normal'" ref="container" class="diff-content hljs markdown-syntax"><code v-html="highlightedHtml"></code></pre>
+    <pre v-else-if="mode === 'normal'" ref="container" class="diff-content diff-word-content markdown-syntax"><span v-for="(line, index) in wordDiffLines" :key="index" class="diff-line" :class="`diff-${line.kind}`"><span v-for="(segment, segmentIndex) in line.segments" :key="segmentIndex" :class="{ 'diff-word-change': segment.changed }">{{ segment.text }}</span></span></pre>
     <pre v-else-if="mode === 'word'" ref="container" class="diff-content diff-word-content markdown-syntax"><span v-for="(line, index) in wordDiffLines" :key="index" class="diff-line" :class="`diff-${line.kind}`"><span v-for="(segment, segmentIndex) in line.segments" :key="segmentIndex" :class="{ 'diff-word-change': segment.changed }">{{ segment.text }}</span></span></pre>
     <div v-else ref="container" class="diff-content diff-split-content markdown-syntax">
       <div v-for="(row, index) in splitRows" :key="index" class="split-row" :class="`split-${row.full?.kind ?? row.kind}`">
         <div v-if="row.full" class="split-full">{{ row.full.text || " " }}</div>
         <template v-else>
-          <pre class="split-cell split-left" :class="row.left ? `diff-${row.left.kind}` : 'split-empty'">{{ sideText(row.left) }}</pre>
-          <pre class="split-cell split-right" :class="row.right ? `diff-${row.right.kind}` : 'split-empty'">{{ sideText(row.right) }}</pre>
+          <pre class="split-cell split-left" :class="row.left ? `diff-${row.left.kind}` : 'split-empty'"><span v-for="(segment, segmentIndex) in sideSegments(row.left)" :key="segmentIndex" :class="{ 'diff-word-change': segment.changed }">{{ segment.text }}</span></pre>
+          <pre class="split-cell split-right" :class="row.right ? `diff-${row.right.kind}` : 'split-empty'"><span v-for="(segment, segmentIndex) in sideSegments(row.right)" :key="segmentIndex" :class="{ 'diff-word-change': segment.changed }">{{ segment.text }}</span></pre>
         </template>
       </div>
     </div>
@@ -330,7 +340,9 @@ onUnmounted(() => {
   overflow: auto;
   padding: 12px 14px;
   user-select: text;
-  white-space: pre;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .diff-line {
@@ -363,6 +375,14 @@ onUnmounted(() => {
   border-radius: 2px;
 }
 
+.diff-add .diff-word-change {
+  background: rgb(34 134 58 / 0.26);
+}
+
+.diff-delete .diff-word-change {
+  background: rgb(207 34 46 / 0.22);
+}
+
 .diff-split-content {
   display: grid;
   gap: 0;
@@ -373,7 +393,7 @@ onUnmounted(() => {
 .split-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  min-width: 760px;
+  min-width: 0;
 }
 
 .split-full {
@@ -385,7 +405,9 @@ onUnmounted(() => {
   line-height: 1.45;
   min-height: 1.45em;
   padding: 0 14px;
-  white-space: pre;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .split-file .split-full {

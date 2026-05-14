@@ -42,4 +42,3 @@ def copy_legacy_file(source: Path, target: Path) -> None:
 def migrate_legacy_state() -> None:
     ensure_view_home()
     copy_legacy_file(LEGACY_CONFIG_PATH, CONFIG_PATH)
-    copy_legacy_file(LEGACY_WORKSPACES_PATH, WORKSPACES_PATH)

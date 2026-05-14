@@ -66,6 +66,16 @@ export async function getText(path: string): Promise<string> {
   return response.text();
 }
 
+export async function putText(path: string, content: string): Promise<FileMeta> {
+  const response = await fetch(withUser(`/api/file/content?path=${encodeURIComponent(path)}`), {
+    method: "PUT",
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    body: content,
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<FileMeta>;
+}
+
 export async function uploadFile(directory: string, file: File): Promise<void> {
   const query = `directory=${encodeURIComponent(directory)}&filename=${encodeURIComponent(file.name)}`;
   const response = await fetch(withUser(`/api/file/upload?${query}`), {

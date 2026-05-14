@@ -6,8 +6,8 @@ from watchfiles import Change, awatch
 
 from .config import settings
 from .events import hub
-from .files import relative_for
 from .models import WatchEvent
+from .users import list_user_profiles, user_home_path
 
 
 def event_type(change: Change) -> str:
@@ -24,11 +24,29 @@ def is_ignored_path(path: Path) -> bool:
     return False
 
 
+def watch_roots() -> list[Path]:
+    roots = [settings.root_resolved]
+    for profile in list_user_profiles():
+        roots.append(user_home_path(profile.id))
+    unique = {root.resolve(): root.resolve() for root in roots}
+    return sorted(unique.values(), key=lambda item: len(item.parts), reverse=True)
+
+
+def relative_for_roots(path: Path, roots: list[Path]) -> str:
+    resolved = path.resolve(strict=False)
+    for root in roots:
+        try:
+            return resolved.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return resolved.as_posix()
+
+
 async def watch_root(stop_event: asyncio.Event) -> None:
-    root = settings.root_resolved
-    logger.info("Watching {}", root)
+    roots = watch_roots()
+    logger.info("Watching {}", ", ".join(root.as_posix() for root in roots))
     async for changes in awatch(
-        root,
+        *roots,
         watch_filter=lambda change, path: not is_ignored_path(Path(path)),
         stop_event=stop_event,
         debounce=settings.poll_delay_ms,
@@ -47,9 +65,9 @@ async def watch_root(stop_event: asyncio.Event) -> None:
             await hub.publish(
                 WatchEvent(
                     type=event_type(change),
-                    path=relative_for(path),
+                    path=relative_for_roots(path, roots),
                     is_dir=path.is_dir() if exists else False,
                     mtime=mtime,
                 )
             )
-            logger.debug("File change type={} path={}", event_type(change), relative_for(path))
+            logger.debug("File change type={} path={}", event_type(change), relative_for_roots(path, roots))

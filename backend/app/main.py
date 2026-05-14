@@ -31,6 +31,7 @@ from .files import (
     set_active_workspace,
     upload_target,
     write_config,
+    write_text,
     write_workspace_config,
     write_workspace,
 )
@@ -86,8 +87,7 @@ async def startup() -> None:
     global watch_stop_event, watch_task
     settings.root_resolved.mkdir(parents=True, exist_ok=True)
     for profile in list_user_profiles():
-        if profile.home:
-            (settings.root_resolved / profile.home).mkdir(parents=True, exist_ok=True)
+        user_home_path(profile.id).mkdir(parents=True, exist_ok=True)
     logger.info(
         "Starting viewer root={} frontend_dist={} debug={}",
         settings.root_resolved,
@@ -186,38 +186,44 @@ async def client_log(entry: ClientLog) -> dict[str, str]:
 
 
 @app.get("/api/tree")
-async def tree(path: str = Query(default="")):
-    return list_directory(path)
+async def tree(path: str = Query(default=""), user: str | None = None):
+    return list_directory(path, user)
 
 
 @app.get("/api/file/meta")
-async def file_meta(path: str):
-    return get_meta(path)
+async def file_meta(path: str, user: str | None = None):
+    return get_meta(path, user)
 
 
 @app.get("/api/file/content", response_class=PlainTextResponse)
-async def file_content(path: str):
-    return read_text(path)
+async def file_content(path: str, user: str | None = None):
+    return read_text(path, user)
+
+
+@app.put("/api/file/content")
+async def file_content_save(request: Request, path: str, user: str | None = None):
+    content = (await request.body()).decode("utf-8")
+    return write_text(path, content, user)
 
 
 @app.post("/api/file/upload")
-async def file_upload(request: Request, directory: str = Query(default=""), filename: str = Query(...)):
-    target = upload_target(directory, filename)
+async def file_upload(request: Request, directory: str = Query(default=""), filename: str = Query(...), user: str | None = None):
+    target = upload_target(directory, filename, user)
     with target.open("wb") as handle:
         async for chunk in request.stream():
             handle.write(chunk)
-    return {"status": "ok", "directory": directory, "entry": entry_for(target)}
+    return {"status": "ok", "directory": directory, "entry": entry_for(target, user)}
 
 
 @app.delete("/api/file")
-async def file_delete(path: str):
-    return delete_file(path)
+async def file_delete(path: str, user: str | None = None):
+    return delete_file(path, user)
 
 
 @app.get("/api/file/raw")
-async def file_raw(path: str, h: str | None = None, base: str | None = None):
-    target_path = resolve_markdown_link(base, path) if base is not None else path
-    target = resolve_path(target_path)
+async def file_raw(path: str, h: str | None = None, base: str | None = None, user: str | None = None):
+    target_path = resolve_markdown_link(base, path, user) if base is not None else path
+    target = resolve_path(target_path, user)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
     if not target.is_file():
@@ -311,8 +317,8 @@ def inject_html_base(source: str, href: str) -> str:
     return f"{base}{source}"
 
 
-def resolve_site_path(path: str) -> Path:
-    target = resolve_path(path)
+def resolve_site_path(path: str, user: str | None = None) -> Path:
+    target = resolve_path(path, user)
     if target.exists():
         return target
 
@@ -322,15 +328,15 @@ def resolve_site_path(path: str) -> Path:
             continue
         asset_tail = parts[index + 2 :]
         for prefix_length in range(index - 1, -1, -1):
-            candidate = resolve_path("/".join([*parts[:prefix_length], "generated", "assets", *asset_tail]))
+            candidate = resolve_path("/".join([*parts[:prefix_length], "generated", "assets", *asset_tail]), user)
             if candidate.exists():
                 return candidate
     return target
 
 
 @app.get("/api/file/site/{path:path}")
-async def file_site(path: str, h: str | None = None):
-    target = resolve_site_path(path)
+async def file_site(path: str, h: str | None = None, user: str | None = None):
+    target = resolve_site_path(path, user)
     if target.exists() and target.is_dir():
         index = target / "index.html"
         if index.exists() and index.is_file():
@@ -348,7 +354,7 @@ async def file_site(path: str, h: str | None = None):
             source = target.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             source = target.read_text(encoding="utf-8", errors="replace")
-        relative_path = target.relative_to(settings.root_resolved).as_posix()
+        relative_path = path
         response = HTMLResponse(inject_html_base(source, _html_base_href(relative_path)))
     elif mime == "text/css" or target.suffix.lower() == ".css":
         try:
@@ -365,43 +371,43 @@ async def file_site(path: str, h: str | None = None):
 
 
 @app.get("/api/file/resolve-link")
-async def file_resolve_link(base: str, target: str):
-    return {"path": resolve_markdown_link(base, target)}
+async def file_resolve_link(base: str, target: str, user: str | None = None):
+    return {"path": resolve_markdown_link(base, target, user)}
 
 
 @app.get("/api/file/resolve-directory-link")
-async def file_resolve_directory_link(base: str = "", target: str = ""):
-    return {"path": resolve_directory_link(base, target)}
+async def file_resolve_directory_link(base: str = "", target: str = "", user: str | None = None):
+    return {"path": resolve_directory_link(base, target, user)}
 
 
 @app.get("/api/git/status")
-async def git_status_route(scope: str | None = None):
-    return git_status(scope)
+async def git_status_route(scope: str | None = None, user: str | None = None):
+    return git_status(scope, user)
 
 
 @app.get("/api/git/diff")
-async def git_diff_route(path: str):
-    return git_diff(path)
+async def git_diff_route(path: str, user: str | None = None):
+    return git_diff(path, user)
 
 
 @app.post("/api/git/stage")
-async def git_stage_route(request: GitStageRequest | None = None):
-    return git_stage(request.path if request else None, request.scope if request else None)
+async def git_stage_route(request: GitStageRequest | None = None, user: str | None = None):
+    return git_stage(request.path if request else None, request.scope if request else None, user)
 
 
 @app.post("/api/git/revert")
-async def git_revert_route(request: GitRevertRequest):
-    return git_revert(request.path)
+async def git_revert_route(request: GitRevertRequest, user: str | None = None):
+    return git_revert(request.path, user)
 
 
 @app.post("/api/git/commit")
-async def git_commit_route(request: GitCommitRequest):
-    return git_commit(request)
+async def git_commit_route(request: GitCommitRequest, user: str | None = None):
+    return git_commit(request, user)
 
 
 @app.post("/api/git/push")
-async def git_push_route(scope: str | None = None):
-    return git_push(scope)
+async def git_push_route(scope: str | None = None, user: str | None = None):
+    return git_push(scope, user)
 
 
 @app.get("/api/config")

@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
+import { useUsersStore } from "../../stores/users";
 import type { FileEntry } from "../../types/files";
 import FileTree from "../FileTree.vue";
 
@@ -11,9 +12,10 @@ const emit = defineEmits<{
 
 const files = useFilesStore();
 const layout = useLayoutStore();
+const users = useUsersStore();
 
 const pinned = computed(() => files.pinned);
-const currentLabel = computed(() => files.currentPath || "/");
+const currentLabel = computed(() => files.currentPath || users.activeProfile?.home || "/");
 const fileInput = ref<HTMLInputElement | null>(null);
 const dragDepth = ref(0);
 const uploadError = ref("");
@@ -119,7 +121,7 @@ async function deleteEntry(entry: FileEntry) {
         </button>
         <input ref="fileInput" class="file-input" type="file" multiple @change="onFileInput" />
       </div>
-      <div class="current-path" :title="files.currentPath || '/'">
+      <div class="current-path" :title="currentLabel">
         <i class="bi bi-folder2-open"></i>
         <span>{{ currentLabel }}</span>
       </div>

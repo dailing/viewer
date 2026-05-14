@@ -9,7 +9,7 @@ from loguru import logger
 
 from .config import settings
 from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, WorkspaceConfig, WorkspaceData, WorkspaceSnapshot
-from .storage import CONFIG_PATH, WORKSPACES_PATH, migrate_legacy_state
+from .storage import CONFIG_PATH, migrate_legacy_state
 from .users import default_user_id, list_user_profiles, user_home_path, user_workspaces_path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
@@ -57,9 +57,13 @@ def normalize_relative(path: str | None) -> str:
     return "/".join(parts)
 
 
-def resolve_path(path: str | None) -> Path:
+def served_root(user_id: str | None = None) -> Path:
+    return user_home_path(user_id) if user_id else settings.root_resolved
+
+
+def resolve_path(path: str | None, user_id: str | None = None) -> Path:
     rel = normalize_relative(path)
-    return settings.root_resolved.joinpath(rel)
+    return served_root(user_id).joinpath(rel)
 
 
 def _normalize_link_parts(parts: list[str]) -> str:
@@ -86,7 +90,7 @@ def _strip_editor_line_suffix(target_path: str) -> str:
     return path
 
 
-def resolve_markdown_link(base_path: str, target: str) -> str:
+def resolve_markdown_link(base_path: str, target: str, user_id: str | None = None) -> str:
     parsed = urlsplit((target or "").strip())
     scheme = parsed.scheme.lower()
     if scheme and scheme != "file":
@@ -103,7 +107,7 @@ def resolve_markdown_link(base_path: str, target: str) -> str:
     if scheme == "file" or target_path.startswith("/"):
         absolute_target = Path(target_path).expanduser().resolve()
         try:
-            return absolute_target.relative_to(settings.root_resolved.resolve()).as_posix()
+            return absolute_target.relative_to(served_root(user_id).resolve()).as_posix()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Markdown link target is outside the served root") from exc
 
@@ -112,7 +116,7 @@ def resolve_markdown_link(base_path: str, target: str) -> str:
     return _normalize_link_parts([*base_parts, *target_path.split("/")])
 
 
-def resolve_directory_link(base_dir: str | None, target: str) -> str:
+def resolve_directory_link(base_dir: str | None, target: str, user_id: str | None = None) -> str:
     parsed = urlsplit((target or "").strip())
     scheme = parsed.scheme.lower()
     if scheme and scheme != "file":
@@ -129,7 +133,7 @@ def resolve_directory_link(base_dir: str | None, target: str) -> str:
     if scheme == "file" or target_path.startswith("/"):
         absolute_target = Path(target_path).expanduser().resolve()
         try:
-            return absolute_target.relative_to(settings.root_resolved.resolve()).as_posix()
+            return absolute_target.relative_to(served_root(user_id).resolve()).as_posix()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Link target is outside the served root") from exc
 
@@ -149,9 +153,9 @@ def resolve_served_directory(path: str | None, label: str, user_id: str | None =
                 requested = target.as_posix()
             except OSError:
                 logger.warning("{} cwd '{}' is not available; using root", label, raw)
-                return settings.root_resolved.as_posix()
+                return served_root(user_id).as_posix()
         else:
-            target = resolve_path(requested)
+            target = resolve_path(requested, user_id)
     elif user_id:
         target = user_home_path(user_id)
         requested = target.as_posix()
@@ -160,13 +164,13 @@ def resolve_served_directory(path: str | None, label: str, user_id: str | None =
     if not target.exists() or not target.is_dir():
         if requested:
             logger.warning("{} cwd '{}' is not available; using root", label, requested)
-        return settings.root_resolved.as_posix()
+        return served_root(user_id).as_posix()
     return target.as_posix()
 
 
-def relative_for(path: Path) -> str:
+def relative_for(path: Path, user_id: str | None = None) -> str:
     try:
-        return path.relative_to(settings.root_resolved).as_posix()
+        return path.relative_to(served_root(user_id)).as_posix()
     except ValueError:
         return path.as_posix()
 
@@ -201,7 +205,7 @@ def content_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def entry_for(path: Path) -> FileEntry:
+def entry_for(path: Path, user_id: str | None = None) -> FileEntry:
     try:
         stat = path.stat()
     except OSError:
@@ -218,7 +222,7 @@ def entry_for(path: Path) -> FileEntry:
 
     return FileEntry(
         name=path.name,
-        path=relative_for(path),
+        path=relative_for(path, user_id),
         type=entry_type,
         size=stat.st_size if stat and not is_dir else None,
         mtime=stat.st_mtime if stat else None,
@@ -228,8 +232,8 @@ def entry_for(path: Path) -> FileEntry:
     )
 
 
-def list_directory(path: str | None) -> DirectoryListing:
-    target = resolve_path(path)
+def list_directory(path: str | None, user_id: str | None = None) -> DirectoryListing:
+    target = resolve_path(path, user_id)
     if not target.exists():
         raise HTTPException(status_code=404, detail="Directory not found")
     if not target.is_dir():
@@ -239,16 +243,16 @@ def list_directory(path: str | None) -> DirectoryListing:
     for child in target.iterdir():
         if not settings.show_hidden and child.name.startswith("."):
             continue
-        entries.append(entry_for(child))
+        entries.append(entry_for(child, user_id))
 
     entries.sort(key=lambda item: (not item.is_dir, item.name.lower()))
     return DirectoryListing(path=normalize_relative(path), entries=entries)
 
 
-def upload_target(directory: str | None, filename: str) -> Path:
+def upload_target(directory: str | None, filename: str, user_id: str | None = None) -> Path:
     if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
         raise HTTPException(status_code=400, detail="Invalid file name")
-    target_dir = resolve_path(directory)
+    target_dir = resolve_path(directory, user_id)
     if not target_dir.exists():
         raise HTTPException(status_code=404, detail="Upload directory not found")
     if not target_dir.is_dir():
@@ -259,8 +263,8 @@ def upload_target(directory: str | None, filename: str) -> Path:
     return target
 
 
-def delete_file(path: str) -> dict[str, str]:
-    target = resolve_path(path)
+def delete_file(path: str, user_id: str | None = None) -> dict[str, str]:
+    target = resolve_path(path, user_id)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
     if target.is_dir():
@@ -269,8 +273,8 @@ def delete_file(path: str) -> dict[str, str]:
     return {"status": "deleted", "path": normalize_relative(path)}
 
 
-def get_meta(path: str) -> FileMeta:
-    target = resolve_path(path)
+def get_meta(path: str, user_id: str | None = None) -> FileMeta:
+    target = resolve_path(path, user_id)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
     if not target.is_file():
@@ -291,15 +295,25 @@ def get_meta(path: str) -> FileMeta:
     )
 
 
-def read_text(path: str) -> str:
-    meta = get_meta(path)
+def read_text(path: str, user_id: str | None = None) -> str:
+    meta = get_meta(path, user_id)
     if meta.text_too_large:
         raise HTTPException(status_code=413, detail="Text preview is too large")
-    target = resolve_path(path)
+    target = resolve_path(path, user_id)
     try:
         return target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return target.read_text(encoding="utf-8", errors="replace")
+
+
+def write_text(path: str, content: str, user_id: str | None = None) -> FileMeta:
+    target = resolve_path(path, user_id)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+    target.write_text(content, encoding="utf-8")
+    return get_meta(path, user_id)
 
 
 def config_path() -> Path:
@@ -311,7 +325,7 @@ def read_config() -> ConfigData:
     path = config_path()
     if not path.exists():
         config = ConfigData(
-            workspace=WorkspaceConfig(count=legacy_workspace_count() or stored_workspace_count() or 5),
+            workspace=WorkspaceConfig(count=legacy_workspace_count() or 5),
             users=list_user_profiles(),
             default_user=default_user_id(),
         )
@@ -323,7 +337,7 @@ def read_config() -> ConfigData:
     except Exception:
         return ConfigData(users=list_user_profiles(), default_user=default_user_id())
     if isinstance(raw, dict) and "workspace" not in raw:
-        config.workspace.count = legacy_workspace_count() or stored_workspace_count() or config.workspace.count
+        config.workspace.count = legacy_workspace_count() or config.workspace.count
     cleaned = ConfigData(
         appearance=config.appearance,
         markdown=config.markdown,
@@ -543,19 +557,6 @@ def legacy_workspace_count() -> int | None:
     return max(1, min(20, round(count)))
 
 
-def stored_workspace_count() -> int | None:
-    if not WORKSPACES_PATH.exists():
-        return None
-    try:
-        raw = json.loads(WORKSPACES_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    count = raw.get("count") if isinstance(raw, dict) else None
-    if not isinstance(count, (int, float)):
-        return None
-    return max(1, min(20, round(count)))
-
-
 def ensure_workspace_config_count(count: int) -> None:
     config_path()
     try:
@@ -583,7 +584,7 @@ def configured_workspace_count() -> int:
             count = workspace.get("count") if isinstance(workspace, dict) else None
             if isinstance(count, (int, float)):
                 return max(1, min(20, round(count)))
-    return legacy_workspace_count() or stored_workspace_count() or 5
+    return legacy_workspace_count() or 5
 
 
 def legacy_visit_times() -> dict[str, float]:

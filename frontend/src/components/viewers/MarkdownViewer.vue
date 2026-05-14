@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import hljs from "highlight.js";
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { getText, rawUrl, resolveMarkdownLink } from "../../api/client";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { getText, putText, rawUrl, resolveMarkdownLink } from "../../api/client";
 import { useReloadingScrollMemory } from "../../composables/useScrollMemory";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
@@ -19,11 +19,18 @@ const layout = useLayoutStore();
 const toolbar = usePaneToolbarStore();
 const mode = ref<MarkdownMode>("rendered");
 const text = ref("");
+const draft = ref("");
 const html = ref("");
 const error = ref("");
+const isEditing = ref(false);
+const saving = ref(false);
 const container = ref<HTMLElement | null>(null);
+const editPreview = ref<HTMLElement | null>(null);
+const syncingEditScroll = ref(false);
 const imageDependencies = ref<Set<string>>(new Set());
 const assetVersion = ref(0);
+
+const editPreviewHtml = computed(() => renderMarkdown(draft.value, { basePath: props.path, assetVersion: assetVersion.value }));
 
 const highlightedRaw = computed(() => {
   if (!text.value) return "";
@@ -44,10 +51,78 @@ function registerToolbar() {
     title: props.path,
     actions: [
       { id: "markdown-reload", title: "Reload Markdown", icon: "bi-arrow-clockwise", run: load },
+      { id: "markdown-edit", title: isEditing.value ? "Editing Markdown" : "Edit Markdown", icon: "bi-pencil-square", active: isEditing.value, run: toggleEdit },
       { id: "markdown-rendered", title: "Rendered Markdown", label: "Rendered", active: mode.value === "rendered", run: () => setMode("rendered") },
       { id: "markdown-raw", title: "Raw Markdown", label: "Raw", active: mode.value === "raw", run: () => setMode("raw") },
     ],
   });
+}
+
+function toggleEdit() {
+  if (isEditing.value) {
+    cancelEdit();
+    return;
+  }
+  draft.value = text.value;
+  isEditing.value = true;
+  registerToolbar();
+  void renderEditPreview();
+}
+
+function cancelEdit() {
+  draft.value = text.value;
+  isEditing.value = false;
+  error.value = "";
+  registerToolbar();
+}
+
+async function saveEdit() {
+  if (saving.value) return;
+  saving.value = true;
+  error.value = "";
+  try {
+    await putText(props.path, draft.value);
+    assetVersion.value += 1;
+    text.value = draft.value;
+    html.value = renderMarkdown(text.value, { basePath: props.path, assetVersion: assetVersion.value });
+    await updateImageDependencies(text.value);
+    isEditing.value = false;
+    registerToolbar();
+    await nextTick();
+    rewriteLocalHtmlImages();
+    if (mode.value === "rendered") await renderMermaidIn(container.value);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function renderEditPreview() {
+  await nextTick();
+  await renderMermaidIn(editPreview.value, "edit-mermaid");
+  syncScroll(container.value, editPreview.value);
+}
+
+function syncScroll(source: HTMLElement | null, target: HTMLElement | null) {
+  if (!source || !target || syncingEditScroll.value) return;
+  const sourceRange = source.scrollHeight - source.clientHeight;
+  const targetRange = target.scrollHeight - target.clientHeight;
+  if (sourceRange <= 0 || targetRange <= 0) return;
+  syncingEditScroll.value = true;
+  target.scrollTop = (source.scrollTop / sourceRange) * targetRange;
+  window.requestAnimationFrame(() => {
+    syncingEditScroll.value = false;
+  });
+}
+
+function onEditorScroll() {
+  saveCurrentScroll();
+  if (isEditing.value) syncScroll(container.value, editPreview.value);
+}
+
+function onEditPreviewScroll() {
+  syncScroll(editPreview.value, container.value);
 }
 
 async function updateImageDependencies(source: string) {
@@ -61,6 +136,7 @@ async function updateImageDependencies(source: string) {
 }
 
 async function load() {
+  if (isEditing.value) return;
   error.value = "";
   try {
     assetVersion.value += 1;
@@ -125,6 +201,10 @@ onMounted(() => {
   window.addEventListener("viewer:file-changed", handleFileChanged);
 });
 
+watch(draft, () => {
+  if (isEditing.value) void renderEditPreview();
+});
+
 onUnmounted(() => {
   window.removeEventListener("viewer:file-changed", handleFileChanged);
   toolbar.clearPaneToolbar(props.paneId);
@@ -132,8 +212,36 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <div v-if="isEditing" class="markdown-editor">
+    <div class="markdown-editor-workspace">
+      <textarea
+        ref="container"
+        v-model="draft"
+        class="markdown-editor-input"
+        spellcheck="false"
+        @scroll.passive="onEditorScroll"
+      ></textarea>
+      <article
+        ref="editPreview"
+        class="markdown-body markdown-content markdown-editor-preview scroll-area"
+        @scroll.passive="onEditPreviewScroll"
+        v-html="editPreviewHtml"
+      ></article>
+    </div>
+    <div class="markdown-editor-actions">
+      <button class="btn btn-sm btn-primary" type="button" :disabled="saving" @click="saveEdit">
+        <i class="bi" :class="saving ? 'bi-arrow-repeat' : 'bi-check2'"></i>
+        <span>{{ saving ? "Saving" : "Save" }}</span>
+      </button>
+      <button class="btn btn-sm btn-outline-secondary" type="button" :disabled="saving" @click="cancelEdit">
+        <i class="bi bi-x-lg"></i>
+        <span>Cancel</span>
+      </button>
+    </div>
+    <div v-if="error" class="markdown-error">{{ error }}</div>
+  </div>
   <article
-    v-if="!error && mode === 'rendered'"
+    v-else-if="!error && mode === 'rendered'"
     ref="container"
     class="markdown-body markdown-content scroll-area"
     @scroll.passive="saveCurrentScroll"
@@ -165,5 +273,69 @@ onUnmounted(() => {
 .markdown-error {
   color: #a33;
   padding: 14px;
+}
+
+.markdown-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.markdown-editor-workspace {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.markdown-editor-input {
+  background: var(--syntax-background);
+  border: 0;
+  color: var(--syntax-text);
+  flex: 1 1 auto;
+  font-family: var(--bs-font-monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 0;
+  outline: none;
+  padding: 14px;
+  resize: none;
+  width: 100%;
+}
+
+.markdown-editor-preview {
+  border-left: 1px solid var(--border);
+  min-width: 0;
+  overflow: auto;
+}
+
+.markdown-editor-actions {
+  align-items: center;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 8px 10px;
+}
+
+.markdown-editor-actions .btn {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+@media (max-width: 900px) {
+  .markdown-editor-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .markdown-editor-preview {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
 }
 </style>

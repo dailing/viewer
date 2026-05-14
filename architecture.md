@@ -4,7 +4,7 @@ This document is the working project map for future agents. Read it before chang
 
 ## Purpose
 
-Local Live File Viewer is a private-network file browser and preview app. A FastAPI backend serves files from `VIEWER_ROOT`, watches that directory, exposes file, Git, terminal, and Codex APIs, and serves the built Vue frontend. The app has soft user profiles: each browser chooses a profile, API calls carry `user`, and workspace/sidebar/session lists are scoped to that profile while all processes still run as the same trusted OS user with access to the served root. The Vue app provides a sidebar file browser, Git diff panel, recursive split panes, file viewers, live refresh on filesystem changes, and browser-local layout persistence.
+Local Live File Viewer is a private-network file browser and preview app. A FastAPI backend serves files from the active user's configured profile home, watches configured profile homes, exposes file, Git, terminal, and Codex APIs, and serves the built Vue frontend. The app has soft user profiles: each browser chooses a profile, API calls carry `user`, and workspace/sidebar/session lists are scoped to that profile while all processes still run as the same trusted OS user with access to the served root. The Vue app provides a sidebar file browser, Git diff panel, recursive split panes, file viewers, live refresh on filesystem changes, and browser-local layout persistence.
 
 ## Runtime Flow
 
@@ -12,7 +12,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()` and the agent-loop scheduler on startup, stops watcher, loops, terminals, and Codex sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
 4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading workspace state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/heat/draft keys are namespaced by user. The app then loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The top bar switches between the workspace, full-page settings, and full-page loop task editor.
-5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer. Viewers fetch raw/text content and reload when their `version` prop changes; Markdown panes track local image dependencies and reload/cache-bust embedded images when those image files change. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
+5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer. Viewers fetch raw/text content and reload when their `version` prop changes; Markdown panes track local image dependencies, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Raw rollout events stay server-side; REST/WebSocket snapshots send compact display events so hidden tool output is not transmitted to the browser.
 8. Hermes panes mirror the Codex pane lifecycle shape through REST and WebSocket `/api/hermes/sessions/{id}/ws`, but the provider backend talks to the local Hermes API server at `VIEWER_HERMES_BASE_URL` / `http://127.0.0.1:8642` and reads canonical session history directly from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`. Viewer-local Hermes metadata lives under `~/.view/logs/hermes-sessions/`; the SQLite `sessions` and `messages` rows are compacted into the same frontend event shape used by Codex panes.
@@ -24,7 +24,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - FastAPI application and route table.
 - `log_requests(request, call_next)`: logs failed HTTP requests and debug API requests.
-- `startup()`: ensures root exists, logs runtime config, starts filesystem watcher task.
+- `startup()`: ensures the global root and each configured profile home exist, logs runtime config, starts filesystem watcher task.
 - `shutdown()`: stops watcher task and terminates terminal sessions.
 - `/api/health`: returns health, active root, and current backend PID.
 - `/api/debug/info`: returns debug/root/frontend/log file details.
@@ -32,17 +32,18 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/admin/restart`: launches the detached process manager to stop the current PID and start a replacement server with the manager's default command.
 - `/api/admin/stop`: launches the detached process manager to stop the current backend PID.
 - `/api/debug/client-log`: receives frontend errors and writes them through Loguru.
-- `/api/tree`: calls `list_directory()`.
-- `/api/file/upload`: streams one request body into a file under the requested served-root-relative directory. The directory must exist, filenames cannot contain path separators, and existing files are overwritten while directories are protected.
-- `/api/file` DELETE: deletes a served-root-relative file only; directory deletion is intentionally rejected.
-- `/api/file/meta`: calls `get_meta()`.
-- `/api/file/content`: calls `read_text()`.
+- `/api/tree`: calls `list_directory()` under the active user's profile home.
+- `/api/file/upload`: streams one request body into a file under the requested active-user-root-relative directory. The directory must exist, filenames cannot contain path separators, and existing files are overwritten while directories are protected.
+- `/api/file` DELETE: deletes an active-user-root-relative file only; directory deletion is intentionally rejected.
+- `/api/file/meta`: calls `get_meta()` under the active user's profile home.
+- `/api/file/content`: calls `read_text()` under the active user's profile home.
+- `/api/file/content` PUT: saves UTF-8 text to an existing file under the active user's profile home and returns updated metadata.
 - `/api/file/raw`: streams a file via inline `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
-- `/api/file/site/{path:path}`: serves files under the viewer root as a static-site namespace for HTML preview iframes. HTML responses inject a `<base>` tag for relative assets and rewrite root-relative HTML/CSS asset URLs to the same `/api/file/site/` prefix; CSS responses rewrite root-relative `url(...)` and `@import` references; other files are returned through inline `FileResponse` so SVG/PDF/image assets render in-browser instead of downloading. Missing `generated/assets/...` requests fall back by searching upward for the nearest existing generated asset directory, which keeps static docs with page-relative generated-asset links working in the iframe preview. Cache headers are `no-cache` so local edits show after pane refreshes.
+- `/api/file/site/{path:path}`: serves files under the active user's profile home as a static-site namespace for HTML preview iframes. HTML responses inject a `<base>` tag for relative assets and rewrite root-relative HTML/CSS asset URLs to the same `/api/file/site/` prefix; CSS responses rewrite root-relative `url(...)` and `@import` references; other files are returned through inline `FileResponse` so SVG/PDF/image assets render in-browser instead of downloading. Missing `generated/assets/...` requests fall back by searching upward for the nearest existing generated asset directory, which keeps static docs with page-relative generated-asset links working in the iframe preview. Cache headers are `no-cache` so local edits show after pane refreshes.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation.
 - `/api/file/resolve-directory-link`: resolves a local link target against a served-root-relative directory, used by Codex session transcript links whose paths are relative to the session cwd.
-- `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at `settings.root_resolved`.
-- `/api/users`: returns configured soft user profiles from `~/.view/config.json`; the bootstrapped profiles are `dailing` and `maomao`. Profile `home` values may be served-root-relative, absolute, or `~`-expanded default working directories, not security boundaries. The response also includes `home_path`, the served-root-relative path used by the file sidebar when the home is inside `VIEWER_ROOT`.
+- `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at the active user's profile home.
+- `/api/users`: returns configured soft user profiles from `~/.view/config.json`; the bootstrapped profiles are `dailing` and `maomao`. Profile `home` values may be `~`-expanded, absolute, or relative to the OS home directory and define that user's file viewer root, not just a default directory.
 - `/api/config` GET/PUT: reads and writes nav appearance, workspace count and workspace heat timing, Codex model options, Markdown theme config, user profiles, and default user in `~/.view/config.json`. Normal settings saves preserve existing user profiles unless the JSON payload explicitly changes them. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated agent refs live in per-user workspace files under `~/.view/users/{user}/workspaces.json`.
 - `/api/workspaces` GET, `/api/workspaces/config` GET/PUT, `/api/workspaces/{id}` PUT, `/api/workspaces/{id}/activate` POST, and `/api/workspaces/{id}/agent-sessions` POST/DELETE: read workspace state, read/update workspace count config, write workspace snapshots, activate workspaces, and add/remove workspace-associated agent sessions for the `user` query profile. Workspace count is stored globally in `~/.view/config.json`; per-workspace state is stored in `~/.view/users/{user}/workspaces.json`. Agent session association is maintained by the backend through the add/remove routes; workspace snapshot writes preserve the existing association set instead of accepting a full replacement from the browser.
 - `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
@@ -75,32 +76,33 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Central viewer-local storage paths under `~/.view`.
 - Defines `USERS_DIR` for per-profile state under `~/.view/users/{user}/`.
-- Defines `CONFIG_PATH`, `WORKSPACES_PATH`, `LOOPS_DIR`, `LOOP_STATE_PATH`, `LOG_DIR`, `CODEX_LOG_DIR`, `HERMES_LOG_DIR`, `TERMINAL_LOG_DIR`, `AGENT_LOOP_LOG_DIR`, `CODEX_RUN_DIR`, and `HERMES_RUN_DIR`.
+- Defines `CONFIG_PATH`, legacy `WORKSPACES_PATH`, `LOOPS_DIR`, `LOOP_STATE_PATH`, `LOG_DIR`, `CODEX_LOG_DIR`, `HERMES_LOG_DIR`, `TERMINAL_LOG_DIR`, `AGENT_LOOP_LOG_DIR`, `CODEX_RUN_DIR`, and `HERMES_RUN_DIR`.
 - `CODEX_RUN_DIR` defaults to `/tmp/viewer_run/codex` and can be overridden with `VIEWER_CODEX_RUN_DIR`; it stores detached Codex runner state outside the viewer service process.
 - `HERMES_LOG_DIR` stores viewer-local Hermes metadata while canonical messages are read from `~/.hermes/state.db`; `HERMES_RUN_DIR` is reserved for Hermes detached-run state if the provider implementation later needs local runner files.
-- `migrate_legacy_state()`: copies served-root `.viewer.config.json` and `.viewer.workspaces.json` into `~/.view` on first use when the new files do not exist; it does not delete legacy files.
+- `migrate_legacy_state()`: copies served-root `.viewer.config.json` into `~/.view/config.json` on first use when the new config does not exist; it does not create or copy the legacy global `~/.view/workspaces.json`.
 
 `backend/app/users.py`
 
-- Soft user profile helpers. Loads `users` and `default_user` from `~/.view/config.json`, validates user ids, normalizes profile homes, supports served-root-relative, absolute, and `~`-expanded homes, bootstraps `dailing` and `maomao` when no profiles are configured, and derives per-user workspace state paths.
+- Soft user profile helpers. Loads `users` and `default_user` from `~/.view/config.json`, validates user ids, normalizes profile homes, supports absolute homes, `~`-expanded homes, and paths relative to the OS home directory, bootstraps `dailing` and `maomao` when no profiles are configured, and derives per-user workspace state paths. The profile home is the user's file viewer root.
 - `user_workspaces_path(user_id)`: returns `~/.view/users/{user}/workspaces.json`; legacy workspace files are not copied implicitly.
 
 `backend/app/files.py`
 
 - File tree, path normalization, metadata, upload/delete helpers, content reading, and `~/.view/config.json` persistence.
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
-- `resolve_path(path)`: joins normalized relative path to `settings.root_resolved`. Symlinks are allowed by current implementation.
-- `resolve_markdown_link(base_path, target)`: resolves local Markdown image/link targets relative to the Markdown file, including absolute filesystem paths under the served root, and rejects links outside the served root.
-- `resolve_directory_link(base_dir, target)`: resolves local file links relative to a served-root-relative directory, including absolute/file URLs under the served root, strips common editor `:line[:column]` suffixes, and rejects links outside the served root.
-- `resolve_served_directory(path, label)`: resolves a working directory for terminal/Codex launches. Explicit absolute paths and profile homes may be outside `VIEWER_ROOT`; relative paths still resolve inside `VIEWER_ROOT`. Missing directories fall back to root.
-- `relative_for(path)`: returns path relative to root when possible; symlink targets or external paths may become absolute if outside root.
+- `served_root(user_id)`: returns the active user's profile home when a `user` is supplied, otherwise the global `VIEWER_ROOT` fallback.
+- `resolve_path(path, user_id)`: joins normalized relative path to the active user's profile home. Symlinks are allowed by current implementation.
+- `resolve_markdown_link(base_path, target, user_id)`: resolves local Markdown image/link targets relative to the Markdown file, including absolute filesystem paths under the active user's root, and rejects links outside that root.
+- `resolve_directory_link(base_dir, target, user_id)`: resolves local file links relative to an active-user-root-relative directory, including absolute/file URLs under that root, strips common editor `:line[:column]` suffixes, and rejects links outside that root.
+- `resolve_served_directory(path, label, user_id)`: resolves a working directory for terminal/Codex launches. Explicit absolute paths are allowed; relative paths resolve inside the active user's profile home. Missing directories fall back to the active user's root.
+- `relative_for(path, user_id)`: returns path relative to the active user's root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
 - `preview_kind(path, mime, size)`: maps file extension/MIME to `image`, `markdown`, `html`, `pdf`, `text`, or `unsupported`.
 - `content_hash(path)`: computes SHA-256 for cache tagging.
 - `entry_for(path)`: builds `FileEntry` for a directory child.
 - `list_directory(path)`: validates directory, filters hidden files when configured, sorts directories first.
 - `upload_target(directory, filename)`: validates a target upload directory and basename-only filename, rejects directory overwrite, and returns the filesystem path that the route streams into.
-- `delete_file(path)`: deletes a single file under `VIEWER_ROOT`; directories are rejected to avoid recursive destructive actions from the sidebar.
+- `delete_file(path, user_id)`: deletes a single file under the active user's root; directories are rejected to avoid recursive destructive actions from the sidebar.
 - `get_meta(path)`: validates file and returns `FileMeta`, including preview type, text-size limit flag, and `content_hash`.
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `config_path()`: returns `~/.view/config.json` and triggers one-way legacy copy from root-local `.viewer.config.json` when needed.
@@ -140,10 +142,10 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `backend/app/watcher.py`
 
-- Watches `settings.root_resolved` with `watchfiles.awatch`.
+- Watches `settings.root_resolved` plus every configured profile home with `watchfiles.awatch`.
 - `event_type(change)`: converts `watchfiles.Change` enum to API strings.
 - `is_ignored_path(path)`: currently returns false because viewer logs now live outside the served root under `~/.view/logs`.
-- `watch_root(stop_event)`: debounced watch loop; publishes `WatchEvent` with type, relative path, directory flag, and mtime.
+- `watch_root(stop_event)`: debounced watch loop; publishes `WatchEvent` with type, best-match root-relative path, directory flag, and mtime.
 
 `backend/app/terminals.py`
 
@@ -327,6 +329,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/components/sidebar/FilesPanel.vue`
 
 - Files tool panel: pinned paths, current folder, parent button, upload button, drag-and-drop upload target, file delete confirmation/error display, and `FileTree`.
+- Shows the active profile `home` as the current path label when browsing the user's root (`path=""`).
 - `openPinned(path)`: tries to enter pinned path as directory, otherwise emits `open-file`.
 
 `frontend/src/components/sidebar/TerminalsPanel.vue`
@@ -407,7 +410,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Custom fence renderer turns ```mermaid fences into Mermaid blocks.
 - `renderMermaidIn()`: replaces Mermaid blocks with rendered SVG or marks errors.
 - `load()`: fetches Markdown text, renders HTML with the current Markdown path as link context, tracks local image dependencies, renders Mermaid, restores scroll.
-- Registers Markdown-specific top-bar actions for manual reload and rendered/raw view switching.
+- Registers Markdown-specific top-bar actions for manual reload, edit mode, and rendered/raw view switching.
+- Edit mode replaces preview/raw display with a split textarea and live Markdown preview plus bottom save/cancel controls. The editor and preview panes synchronize scroll position proportionally in both directions. Save writes through `/api/file/content` PUT, updates rendered HTML and image dependencies, and exits edit mode; cancel restores the last loaded text without writing.
 - Normal clicks on local Markdown links call `/api/file/resolve-link` and open the resolved file in the active viewer pane. Local images are rendered through `/api/file/raw` with the current Markdown path as `base` and a viewer version cache key.
 - `persistCurrentScroll()`: saves scroll position.
 - Uses Markdown and syntax CSS variables from the active theme for headings, paragraphs, links, code blocks, tables, and Highlight.js token colors.

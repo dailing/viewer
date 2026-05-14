@@ -5,8 +5,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from .config import settings
-from .files import normalize_relative, resolve_path
+from .files import normalize_relative, resolve_path, served_root
 from .models import GitCommitRequest, GitDiffFile, GitDiffText, GitStatus
 
 
@@ -16,10 +15,10 @@ class GitContext:
     scope_path: str
 
 
-def _run_git(args: list[str], *, check: bool = True, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run_git(args: list[str], *, check: bool = True, cwd: Path | None = None, user_id: str | None = None) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         ["git", *args],
-        cwd=cwd or settings.root_resolved,
+        cwd=cwd or served_root(user_id),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -30,33 +29,33 @@ def _run_git(args: list[str], *, check: bool = True, cwd: Path | None = None) ->
     return result
 
 
-def _scope_start(scope: str | None) -> Path:
+def _scope_start(scope: str | None, user_id: str | None = None) -> Path:
     if not scope:
-        return settings.root_resolved
-    target = resolve_path(scope)
+        return served_root(user_id)
+    target = resolve_path(scope, user_id)
     if target.exists():
         return target if target.is_dir() else target.parent
     start = target.parent
-    root = settings.root_resolved
+    root = served_root(user_id)
     while not start.exists() and start != root and start.is_relative_to(root):
         start = start.parent
     return start
 
 
-def _discover_single_child_repo() -> Path | None:
+def _discover_single_child_repo(user_id: str | None = None) -> Path | None:
     try:
-        children = list(settings.root_resolved.iterdir())
+        children = list(served_root(user_id).iterdir())
     except OSError:
         return None
     repos = [child for child in children if child.is_dir() and child.joinpath(".git").exists()]
     return repos[0] if len(repos) == 1 else None
 
 
-def _git_context(scope: str | None = None) -> GitContext:
-    start = _scope_start(scope)
+def _git_context(scope: str | None = None, user_id: str | None = None) -> GitContext:
+    start = _scope_start(scope, user_id)
     result = _run_git(["rev-parse", "--show-toplevel"], check=False, cwd=start)
     if result.returncode != 0 and not scope:
-        child_repo = _discover_single_child_repo()
+        child_repo = _discover_single_child_repo(user_id)
         if child_repo is not None:
             start = child_repo
             result = _run_git(["rev-parse", "--show-toplevel"], check=False, cwd=child_repo)
@@ -64,7 +63,7 @@ def _git_context(scope: str | None = None) -> GitContext:
         raise HTTPException(status_code=409, detail="Current folder is not inside a Git repository")
 
     repo_root = Path(result.stdout.strip()).resolve()
-    root = settings.root_resolved
+    root = served_root(user_id)
     if not (repo_root == root or repo_root.is_relative_to(root) or root.is_relative_to(repo_root)):
         raise HTTPException(status_code=409, detail="Current folder is not inside a Git repository")
     try:
@@ -74,18 +73,18 @@ def _git_context(scope: str | None = None) -> GitContext:
     return GitContext(cwd=repo_root, scope_path=scope_path or ".")
 
 
-def _git_path(ctx: GitContext, path: str) -> str:
-    target = resolve_path(path).resolve(strict=False)
+def _git_path(ctx: GitContext, path: str, user_id: str | None = None) -> str:
+    target = resolve_path(path, user_id).resolve(strict=False)
     try:
         return target.relative_to(ctx.cwd).as_posix()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Path is outside the active Git repository") from exc
 
 
-def _served_path(ctx: GitContext, git_path: str) -> str:
+def _served_path(ctx: GitContext, git_path: str, user_id: str | None = None) -> str:
     target = ctx.cwd.joinpath(git_path).resolve(strict=False)
     try:
-        return target.relative_to(settings.root_resolved).as_posix()
+        return target.relative_to(served_root(user_id)).as_posix()
     except ValueError:
         return git_path
 
@@ -128,8 +127,8 @@ def _exists_in_head(ctx: GitContext, path: str) -> bool:
     return result.returncode == 0
 
 
-def git_status(scope: str | None = None) -> GitStatus:
-    ctx = _git_context(scope)
+def git_status(scope: str | None = None, user_id: str | None = None) -> GitStatus:
+    ctx = _git_context(scope, user_id)
     result = _run_git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ctx.scope_path], cwd=ctx.cwd)
     raw_entries = [entry for entry in result.stdout.split("\0") if entry]
     files: list[GitDiffFile] = []
@@ -142,7 +141,7 @@ def git_status(scope: str | None = None) -> GitStatus:
             index += 1
         path = normalize_relative(path)
         added, deleted, is_binary = _numstat_for(ctx, path, status)
-        files.append(GitDiffFile(path=_served_path(ctx, path), status=status, added=added, deleted=deleted, is_binary=is_binary))
+        files.append(GitDiffFile(path=_served_path(ctx, path, user_id), status=status, added=added, deleted=deleted, is_binary=is_binary))
         index += 1
     files.sort(key=lambda item: item.path)
     return GitStatus(files=files)
@@ -165,11 +164,11 @@ def _untracked_diff(ctx: GitContext, path: str, served_path: str) -> str:
     ) + "\n"
 
 
-def git_diff(path: str) -> GitDiffText:
+def git_diff(path: str, user_id: str | None = None) -> GitDiffText:
     normalized = normalize_relative(path)
-    ctx = _git_context(normalized)
-    git_path = _git_path(ctx, normalized)
-    status = next((item.status for item in git_status(normalized).files if item.path == normalized), "")
+    ctx = _git_context(normalized, user_id)
+    git_path = _git_path(ctx, normalized, user_id)
+    status = next((item.status for item in git_status(normalized, user_id).files if item.path == normalized), "")
     if not status:
         raise HTTPException(status_code=404, detail="File has no Git changes")
     if _is_binary_path(ctx, git_path):
@@ -185,23 +184,23 @@ def git_diff(path: str) -> GitDiffText:
     return GitDiffText(path=normalized, diff=result.stdout, is_binary=False)
 
 
-def git_stage(path: str | None = None, scope: str | None = None) -> GitStatus:
-    ctx = _git_context(path or scope)
+def git_stage(path: str | None = None, scope: str | None = None, user_id: str | None = None) -> GitStatus:
+    ctx = _git_context(path or scope, user_id)
     args = ["add"]
-    args.extend(["--", _git_path(ctx, normalize_relative(path))] if path else ["--all", "--", ctx.scope_path])
+    args.extend(["--", _git_path(ctx, normalize_relative(path), user_id)] if path else ["--all", "--", ctx.scope_path])
     _run_git(args, cwd=ctx.cwd)
-    return git_status(path or scope)
+    return git_status(path or scope, user_id)
 
 
-def git_revert(path: str) -> GitStatus:
+def git_revert(path: str, user_id: str | None = None) -> GitStatus:
     normalized = normalize_relative(path)
-    ctx = _git_context(normalized)
-    git_path = _git_path(ctx, normalized)
-    status = next((item.status for item in git_status(normalized).files if item.path == normalized), "")
+    ctx = _git_context(normalized, user_id)
+    git_path = _git_path(ctx, normalized, user_id)
+    status = next((item.status for item in git_status(normalized, user_id).files if item.path == normalized), "")
     if not status:
         raise HTTPException(status_code=404, detail="File has no Git changes")
     if status == "??":
-        target = resolve_path(normalized)
+        target = resolve_path(normalized, user_id)
         if target.is_dir():
             raise HTTPException(status_code=400, detail="Refusing to remove untracked directory")
         target.unlink(missing_ok=True)
@@ -209,20 +208,20 @@ def git_revert(path: str) -> GitStatus:
         _run_git(["rm", "-f", "--", git_path], cwd=ctx.cwd)
     else:
         _run_git(["restore", "--source=HEAD", "--staged", "--worktree", "--", git_path], cwd=ctx.cwd)
-    return git_status(normalized)
+    return git_status(normalized, user_id)
 
 
-def git_commit(request: GitCommitRequest) -> GitStatus:
-    ctx = _git_context(request.scope)
+def git_commit(request: GitCommitRequest, user_id: str | None = None) -> GitStatus:
+    ctx = _git_context(request.scope, user_id)
     message = request.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Commit message is required")
     _run_git(["commit", "-m", message], cwd=ctx.cwd)
-    return git_status(request.scope)
+    return git_status(request.scope, user_id)
 
 
-def git_push(scope: str | None = None) -> dict[str, str]:
-    ctx = _git_context(scope)
+def git_push(scope: str | None = None, user_id: str | None = None) -> dict[str, str]:
+    ctx = _git_context(scope, user_id)
     result = _run_git(["push"], cwd=ctx.cwd)
     output = (result.stdout + result.stderr).strip()
     return {"status": "ok", "output": output}

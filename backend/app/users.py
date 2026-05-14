@@ -75,11 +75,8 @@ def get_user_profile(user_id: str | None) -> UserProfile:
 
 
 def user_home_relative(user_id: str | None) -> str:
-    try:
-        relative = user_home_path(user_id).relative_to(settings.root_resolved).as_posix()
-        return "" if relative == "." else relative
-    except ValueError:
-        return ""
+    get_user_profile(user_id)
+    return ""
 
 
 def user_home_path(user_id: str | None) -> Path:
@@ -90,7 +87,7 @@ def user_home_path(user_id: str | None) -> Path:
     path = Path(raw).expanduser()
     if path.is_absolute():
         return path.resolve()
-    return settings.root_resolved.joinpath(_normalize_relative_home(raw)).resolve()
+    return Path.home().joinpath(_normalize_relative_home(raw)).resolve()
 
 
 def user_state_dir(user_id: str | None) -> Path:

@@ -13,7 +13,7 @@ import type { WatchEvent } from "../../types/files";
 
 type MarkdownMode = "rendered" | "raw";
 
-const props = defineProps<{ path: string; version: number; paneId: string }>();
+const props = defineProps<{ path: string; version: number; paneId: string; workspaceId: string }>();
 const files = useFilesStore();
 const layout = useLayoutStore();
 const toolbar = usePaneToolbarStore();
@@ -42,7 +42,7 @@ function setMode(value: MarkdownMode) {
   registerToolbar();
   void nextTick(async () => {
     if (mode.value === "rendered") await renderMermaidIn(container.value);
-    await restoreScrollPosition(props.path, container.value);
+    await restoreScrollPosition(scrollTarget(), container.value);
   });
 }
 
@@ -147,7 +147,7 @@ async function load() {
     await nextTick();
     rewriteLocalHtmlImages();
     if (mode.value === "rendered") await renderMermaidIn(container.value);
-    await restoreScrollPosition(props.path, container.value);
+    await restoreScrollPosition(scrollTarget(), container.value);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -173,7 +173,12 @@ const { saveCurrentScroll } = useReloadingScrollMemory(
   () => props.version,
   container,
   load,
+  () => ({ paneId: props.paneId, workspaceId: props.workspaceId }),
 );
+
+function scrollTarget() {
+  return { path: props.path, paneId: props.paneId, workspaceId: props.workspaceId };
+}
 
 async function openMarkdownLink(event: MouseEvent) {
   if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {

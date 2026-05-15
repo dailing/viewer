@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import VuePdfEmbed from "vue-pdf-embed";
 import "vue-pdf-embed/dist/styles/annotationLayer.css";
 import "vue-pdf-embed/dist/styles/textLayer.css";
 import { rawUrl } from "../../api/client";
+import { restoreScrollPosition, saveScrollPosition } from "../../utils/scrollMemory";
 
-const props = defineProps<{ path: string; contentHash: string }>();
+const props = defineProps<{ path: string; contentHash: string; paneId: string; workspaceId: string }>();
 const src = computed(() => rawUrl(props.path, props.contentHash));
 const container = ref<HTMLElement | null>(null);
 const viewerWidth = ref(0);
@@ -16,6 +17,7 @@ const loading = ref(true);
 const error = ref("");
 
 let resizeObserver: ResizeObserver | null = null;
+let skipUnmountSave = false;
 
 const renderedWidth = computed(() => {
   if (!viewerWidth.value) return undefined;
@@ -43,6 +45,27 @@ function resetView(): void {
   rotation.value = 0;
 }
 
+function scrollTarget() {
+  return { path: props.path, paneId: props.paneId, workspaceId: props.workspaceId };
+}
+
+function saveCurrentScroll(): void {
+  saveScrollPosition(scrollTarget(), container.value);
+}
+
+function saveBeforePaneNavigate(event: Event): void {
+  const targetPaneId = (event as CustomEvent<{ paneId?: string }>).detail?.paneId;
+  if (targetPaneId === props.paneId) {
+    saveCurrentScroll();
+    skipUnmountSave = true;
+  }
+}
+
+function saveBeforeWorkspaceSwitch(): void {
+  saveCurrentScroll();
+  skipUnmountSave = true;
+}
+
 function rotateClockwise(): void {
   rotation.value = (rotation.value + 90) % 360;
 }
@@ -58,6 +81,7 @@ function handleProgress(): void {
 
 function handleRendered(): void {
   loading.value = false;
+  void restoreScrollPosition(scrollTarget(), container.value);
 }
 
 function handlePdfError(err: Error): void {
@@ -65,11 +89,14 @@ function handlePdfError(err: Error): void {
   error.value = err.message || "Unable to render PDF";
 }
 
-watch(src, () => {
+watch([src, () => props.workspaceId], () => {
+  saveCurrentScroll();
+  skipUnmountSave = false;
   loading.value = true;
   error.value = "";
   pageCount.value = 0;
   resetView();
+  void nextTick(() => restoreScrollPosition(scrollTarget(), container.value));
 });
 
 onMounted(() => {
@@ -78,9 +105,17 @@ onMounted(() => {
     resizeObserver = new ResizeObserver(updateWidth);
     resizeObserver.observe(container.value);
   }
+  window.addEventListener("beforeunload", saveCurrentScroll);
+  window.addEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
+  window.addEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
+  void restoreScrollPosition(scrollTarget(), container.value);
 });
 
 onUnmounted(() => {
+  if (!skipUnmountSave) saveCurrentScroll();
+  window.removeEventListener("beforeunload", saveCurrentScroll);
+  window.removeEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
+  window.removeEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
   resizeObserver?.disconnect();
 });
 </script>
@@ -108,7 +143,7 @@ onUnmounted(() => {
         </a>
       </div>
     </div>
-    <div ref="container" class="pdf-scroll scroll-area">
+    <div ref="container" class="pdf-scroll scroll-area" @scroll.passive="saveCurrentScroll">
       <div v-if="loading && !error" class="pdf-loading">
         <div class="spinner-border spinner-border-sm" role="status"></div>
       </div>

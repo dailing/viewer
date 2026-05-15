@@ -23,6 +23,7 @@ const meta = ref<FileMeta | null>(null);
 const error = ref("");
 const version = ref(0);
 const previewPaneId = `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const previewWorkspaceId = "preview";
 
 async function load(clearMeta: boolean) {
   error.value = "";
@@ -98,11 +99,11 @@ onUnmounted(() => {
           <span>{{ error }}</span>
         </div>
         <ImageViewer v-else-if="meta?.preview === 'image'" :path="path" :content-hash="meta.content_hash" />
-        <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="path" :version="version" :pane-id="previewPaneId" />
-        <HtmlViewer v-else-if="meta?.preview === 'html'" :path="path" :version="version" :pane-id="previewPaneId" :content-hash="meta.content_hash" />
-        <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="path" :content-hash="meta.content_hash" />
-        <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(path)" :path="path" :version="version" :pane-id="previewPaneId" />
-        <TextViewer v-else-if="meta?.preview === 'text'" :path="path" :version="version" />
+        <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
+        <HtmlViewer v-else-if="meta?.preview === 'html'" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" :content-hash="meta.content_hash" />
+        <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="path" :content-hash="meta.content_hash" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
+        <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(path)" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
+        <TextViewer v-else-if="meta?.preview === 'text'" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
         <UnsupportedViewer v-else-if="meta" :meta="meta" />
         <div v-else class="local-preview-state">
           <div class="spinner-border spinner-border-sm" role="status"></div>

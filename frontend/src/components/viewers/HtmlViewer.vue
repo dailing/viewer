@@ -11,7 +11,7 @@ import { restoreScrollPosition } from "../../utils/scrollMemory";
 
 type HtmlMode = "rendered" | "raw";
 
-const props = defineProps<{ path: string; version: number; paneId: string; contentHash?: string }>();
+const props = defineProps<{ path: string; version: number; paneId: string; workspaceId: string; contentHash?: string }>();
 const toolbar = usePaneToolbarStore();
 const mode = ref<HtmlMode>("rendered");
 const text = ref("");
@@ -29,7 +29,7 @@ const highlightedRaw = computed(() => {
 function setMode(value: HtmlMode) {
   mode.value = value;
   registerToolbar();
-  void nextTick(() => restoreScrollPosition(props.path, container.value));
+  void nextTick(() => restoreScrollPosition(scrollTarget(), container.value));
 }
 
 function reloadFrame() {
@@ -120,7 +120,7 @@ async function load() {
   }
   registerToolbar();
   await nextTick();
-  await restoreScrollPosition(props.path, container.value);
+  await restoreScrollPosition(scrollTarget(), container.value);
 }
 
 function isIndexHtmlPath(path: string): boolean {
@@ -150,7 +150,12 @@ const { saveCurrentScroll } = useReloadingScrollMemory(
   () => props.version,
   container,
   load,
+  () => ({ paneId: props.paneId, workspaceId: props.workspaceId }),
 );
+
+function scrollTarget() {
+  return { path: props.path, paneId: props.paneId, workspaceId: props.workspaceId };
+}
 
 watch(() => props.contentHash, load);
 onMounted(() => {

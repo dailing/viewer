@@ -2,13 +2,13 @@
 import SplitNode from "./SplitNode.vue";
 import { useLayoutStore } from "../stores/layout";
 
-defineProps<{ loading?: boolean }>();
+defineProps<{ loading?: boolean; workspaceId: string }>();
 const layout = useLayoutStore();
 </script>
 
 <template>
   <div class="workspace">
-    <SplitNode :node="layout.root" :loading="loading" />
+    <SplitNode :node="layout.root" :loading="loading" :workspace-id="workspaceId" />
   </div>
 </template>
 

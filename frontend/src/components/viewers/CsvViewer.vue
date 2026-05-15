@@ -7,7 +7,7 @@ import { restoreScrollPosition } from "../../utils/scrollMemory";
 
 type CsvMode = "table" | "raw";
 
-const props = defineProps<{ path: string; version: number; paneId: string }>();
+const props = defineProps<{ path: string; version: number; paneId: string; workspaceId: string }>();
 const toolbar = usePaneToolbarStore();
 const mode = ref<CsvMode>("table");
 const text = ref("");
@@ -23,7 +23,7 @@ function setMode(value: CsvMode) {
   mode.value = value;
   registerToolbar();
   void nextTick(async () => {
-    await restoreScrollPosition(props.path, container.value);
+    await restoreScrollPosition(scrollTarget(), container.value);
   });
 }
 
@@ -91,7 +91,7 @@ async function load() {
     rows.value = parseCsv(text.value);
     registerToolbar();
     await nextTick();
-    await restoreScrollPosition(props.path, container.value);
+    await restoreScrollPosition(scrollTarget(), container.value);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -102,7 +102,12 @@ const { saveCurrentScroll } = useReloadingScrollMemory(
   () => props.version,
   container,
   load,
+  () => ({ paneId: props.paneId, workspaceId: props.workspaceId }),
 );
+
+function scrollTarget() {
+  return { path: props.path, paneId: props.paneId, workspaceId: props.workspaceId };
+}
 
 onUnmounted(() => {
   toolbar.clearPaneToolbar(props.paneId);

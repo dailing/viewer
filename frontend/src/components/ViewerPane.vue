@@ -16,7 +16,7 @@ import TextViewer from "./viewers/TextViewer.vue";
 import TerminalViewer from "./viewers/TerminalViewer.vue";
 import UnsupportedViewer from "./viewers/UnsupportedViewer.vue";
 
-const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }>; workspaceLoading?: boolean }>();
+const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }>; workspaceId: string; workspaceLoading?: boolean }>();
 const PdfViewer = defineAsyncComponent(() => import("./viewers/PdfViewer.vue"));
 const layout = useLayoutStore();
 const meta = ref<FileMeta | null>(null);
@@ -72,11 +72,11 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
         <span>{{ error }}</span>
       </div>
       <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" />
-      <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" :pane-id="pane.id" />
-      <HtmlViewer v-else-if="meta?.preview === 'html'" :path="pane.filePath" :version="version" :pane-id="pane.id" :content-hash="meta.content_hash" />
-      <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" />
-      <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" />
-      <TextViewer v-else-if="meta?.preview === 'text'" :path="pane.filePath" :version="version" />
+      <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <HtmlViewer v-else-if="meta?.preview === 'html'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" :content-hash="meta.content_hash" />
+      <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <TextViewer v-else-if="meta?.preview === 'text'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
       <UnsupportedViewer v-else-if="meta" :meta="meta" />
       <div v-else class="empty-state">
         <div class="spinner-border spinner-border-sm" role="status"></div>

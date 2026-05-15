@@ -6,7 +6,7 @@ import { getText } from "../../api/client";
 import { useReloadingScrollMemory } from "../../composables/useScrollMemory";
 import { restoreScrollPosition } from "../../utils/scrollMemory";
 
-const props = defineProps<{ path: string; version: number }>();
+const props = defineProps<{ path: string; version: number; paneId: string; workspaceId: string }>();
 const text = ref("");
 const highlightedHtml = ref("");
 const error = ref("");
@@ -113,7 +113,7 @@ async function load() {
     text.value = await getText(props.path);
     highlightedHtml.value = highlightText(text.value);
     await nextTick();
-    await restoreScrollPosition(props.path, container.value);
+    await restoreScrollPosition(scrollTarget(), container.value);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -124,7 +124,12 @@ const { saveCurrentScroll } = useReloadingScrollMemory(
   () => props.version,
   container,
   load,
+  () => ({ paneId: props.paneId, workspaceId: props.workspaceId }),
 );
+
+function scrollTarget() {
+  return { path: props.path, paneId: props.paneId, workspaceId: props.workspaceId };
+}
 
 onUnmounted(() => {
   window.clearTimeout(copiedTimer);

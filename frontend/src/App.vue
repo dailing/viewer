@@ -113,6 +113,16 @@ const activePaneHasContent = computed(() => {
 const globalPaneActions = computed<PaneToolbarAction[]>(() => {
   if (!layout.activePaneId) return [];
   return [
+    ...(layout.activePaneCanGoBack
+      ? [
+          {
+            id: "go-back",
+            title: "Go back",
+            icon: "bi-arrow-left",
+            run: () => goBackActivePane(),
+          },
+        ]
+      : []),
     {
       id: "split-vertical",
       title: "Split pane right",
@@ -406,6 +416,7 @@ async function switchWorkspace(id: string) {
   if (workspaces.switching || targetId === displayedActiveWorkspaceId.value) return;
   const previousId = workspaces.activeWorkspaceId;
   const previousSnapshot = currentWorkspaceSnapshot();
+  window.dispatchEvent(new CustomEvent("viewer:workspace-before-switch", { detail: { workspaceId: previousId } }));
   workspaces.switching = true;
   switchingWorkspaceId.value = targetId;
   tickWorkspaceHeat();
@@ -587,6 +598,10 @@ function updateMobilePaneControl(control: PaneToolbarControl, event: Event) {
 function splitActivePane(direction: SplitDirection) {
   if (!layout.activePaneId) return;
   layout.splitPane(layout.activePaneId, direction);
+}
+
+function goBackActivePane() {
+  layout.goBack();
 }
 
 function closeActivePane() {
@@ -773,7 +788,7 @@ onUnmounted(() => {
         @pointerdown="startSidebarResize"
       ></div>
       <main class="workspace-wrap">
-        <Workspace :loading="workspaceContentLoading" />
+        <Workspace :loading="workspaceContentLoading" :workspace-id="displayedActiveWorkspaceId" />
       </main>
     </div>
     <main v-else-if="activePage === 'settings'" class="top-level-page">

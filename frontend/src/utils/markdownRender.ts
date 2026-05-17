@@ -151,6 +151,8 @@ md.renderer.rules.image = (tokens: any[], idx: number, options: any, env: Render
     const version = env.assetVersions?.[src] ?? env.assetVersion;
     token.attrSet("src", rawUrl(src, version === undefined ? undefined : String(version), env.basePath));
   }
+  token.attrSet("loading", "lazy");
+  token.attrSet("decoding", "async");
   return image ? image(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
 };
 

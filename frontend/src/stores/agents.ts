@@ -36,6 +36,7 @@ export function sortAgentSessions(sessions: AgentSessionInfo[]) {
 export const useAgentsStore = defineStore("agents", {
   state: () => ({
     providers: DEFAULT_PROVIDERS as AgentProviderInfo[],
+    providersLoaded: false,
     sessions: [] as AgentSessionInfo[],
     unreadSessionRefs: [] as string[],
     loading: false,
@@ -49,14 +50,17 @@ export const useAgentsStore = defineStore("agents", {
     async loadProviders() {
       try {
         this.providers = await listAgentProviders();
+        this.providersLoaded = true;
       } catch {
         this.providers = DEFAULT_PROVIDERS;
+        this.providersLoaded = true;
       }
     },
     async load() {
+      if (this.loading) return;
       this.loading = true;
       try {
-        await this.loadProviders();
+        if (!this.providersLoaded) await this.loadProviders();
         const groups = await Promise.all(
           this.providers.map(async (provider) => {
             const sessions = await listAgentSessions(provider.id);
@@ -68,10 +72,10 @@ export const useAgentsStore = defineStore("agents", {
         this.loading = false;
       }
     },
-    async snapshot(ref: string): Promise<AgentSessionSnapshot> {
+    async snapshot(ref: string, detail: "focus" | "full" = "focus"): Promise<AgentSessionSnapshot> {
       const parsed = parseAgentRef(ref);
       if (!parsed) throw new Error("Invalid agent session reference");
-      const session = await getAgentSession(parsed.provider, parsed.id);
+      const session = await getAgentSession(parsed.provider, parsed.id, detail);
       return toAgentSessionSnapshot(session as CodexSessionSnapshot | HermesSessionSnapshot, parsed.provider);
     },
     async create(provider: AgentProvider, prompt: string, cwd = "", model?: string) {

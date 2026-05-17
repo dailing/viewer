@@ -19,12 +19,15 @@ from .files import resolve_served_directory
 from .models import AgentEventType
 from .storage import HERMES_LOG_DIR
 from .users import default_user_id, normalize_user_id
-from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
+from .ws_clients import WebSocketClient, add_client, enqueue, remove_client
 
 HERMES_BASE_URL = os.environ.get("VIEWER_HERMES_BASE_URL", "http://127.0.0.1:8642").rstrip("/")
 HERMES_API_KEY = os.environ.get("VIEWER_HERMES_API_KEY", "").strip()
 HERMES_STATE_DB = Path(os.environ.get("VIEWER_HERMES_STATE_DB", "~/.hermes/state.db")).expanduser()
 RAW_PREVIEW_MAX_BYTES = 16 * 1024
+AGENT_DETAIL_FOCUS = "focus"
+AGENT_DETAIL_FULL = "full"
+AGENT_DETAILS = {AGENT_DETAIL_FOCUS, AGENT_DETAIL_FULL}
 HERMES_SOURCE_EVENT_MAP = {
     "role:assistant:content": AgentEventType.MESSAGE_ASSISTANT,
     "role:assistant:reasoning": AgentEventType.REASONING,
@@ -33,6 +36,10 @@ HERMES_SOURCE_EVENT_MAP = {
     "role:tool:content": AgentEventType.TOOL_RESULT,
 }
 HERMES_UNMAPPED_DB_FIELDS = ("reasoning_details", "codex_reasoning_items", "codex_message_items")
+
+
+def normalize_agent_detail(detail: str | None) -> str:
+    return detail if detail in AGENT_DETAILS else AGENT_DETAIL_FOCUS
 
 
 def relative_cwd(cwd: str) -> str:
@@ -405,18 +412,40 @@ class HermesSessionManager:
         if input_tokens or output_tokens:
             session.total_tokens = input_tokens + output_tokens
 
-    def _snapshot(self, session: HermesSession) -> dict:
-        self._sync_db_events(session)
-        return {**session.summary(), "prompts": session.prompts, "events": session.events}
+    def _event_for_detail(self, event: dict, detail: str) -> dict | None:
+        if detail == AGENT_DETAIL_FULL:
+            return event
+        if event.get("event_type") != AgentEventType.MESSAGE_ASSISTANT:
+            return None
+        return {
+            **event,
+            "file_changes": [],
+            "patch_text": None,
+            "raw_preview": None,
+        }
 
-    def snapshot(self, session_id: str) -> dict:
-        return self._snapshot(self.get(session_id))
+    def _events_for_detail(self, events: list[dict], detail: str) -> list[dict]:
+        normalized = normalize_agent_detail(detail)
+        rows: list[dict] = []
+        for event in events:
+            next_event = self._event_for_detail(event, normalized)
+            if next_event is not None:
+                rows.append(next_event)
+        return rows
+
+    def _snapshot(self, session: HermesSession, detail: str | None = None) -> dict:
+        self._sync_db_events(session)
+        return {**session.summary(), "prompts": session.prompts, "events": self._events_for_detail(session.events, normalize_agent_detail(detail))}
+
+    def snapshot(self, session_id: str, detail: str | None = None) -> dict:
+        return self._snapshot(self.get(session_id), detail)
 
     def list(self, user_id: str | None = None) -> list[dict]:
         self._ensure_loaded()
         normalized_user_id = normalize_user_id(user_id)
         for session in self.sessions.values():
-            self._sync_db_events(session)
+            if session.status == "running":
+                self._sync_db_events(session)
         return sorted(
             (session.summary() for session in self.sessions.values() if session.user_id == normalized_user_id),
             key=lambda item: item["updated_at"],
@@ -551,7 +580,7 @@ class HermesSessionManager:
         session.updated_at = now
         session.suppress_queue_drain = False
         self._write_meta(session)
-        await self._broadcast(session, {"type": "snapshot", "session": self._snapshot(session), "source": "hermes"})
+        await self._broadcast(session, {"type": "snapshot", "session": self._snapshot(session, AGENT_DETAIL_FULL), "source": "hermes"})
         session.run_task = asyncio.create_task(self._run(session, prompt))
         return True
 
@@ -799,11 +828,13 @@ class HermesSessionManager:
         await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
         return session.summary()
 
-    async def connect(self, session_id: str, websocket: WebSocket) -> None:
+    async def connect(self, session_id: str, websocket: WebSocket, detail: str | None = None) -> None:
         session = self.get(session_id)
+        normalized_detail = normalize_agent_detail(detail)
         await websocket.accept()
         client = add_client(session.clients, websocket)
-        enqueue(client, {"type": "snapshot", "session": self._snapshot(session), "source": "hermes"})
+        setattr(client, "agent_detail", normalized_detail)
+        enqueue(client, {"type": "snapshot", "session": self._snapshot(session, normalized_detail), "source": "hermes"})
         try:
             while True:
                 await websocket.receive_text()
@@ -816,7 +847,33 @@ class HermesSessionManager:
             await self._remove_client(session, client)
 
     async def _broadcast(self, session: HermesSession, message: dict) -> None:
-        await broadcast(session.clients, message)
+        stale: list[WebSocketClient] = []
+        for client in list(session.clients.values()):
+            if client.writer_task and client.writer_task.done():
+                stale.append(client)
+                continue
+            detail = normalize_agent_detail(getattr(client, "agent_detail", AGENT_DETAIL_FOCUS))
+            next_message = self._message_for_detail(session, message, detail)
+            if next_message is None:
+                continue
+            if not enqueue(client, next_message):
+                stale.append(client)
+        for client in stale:
+            await remove_client(session.clients, client)
+
+    def _message_for_detail(self, session: HermesSession, message: dict, detail: str) -> dict | None:
+        message_type = message.get("type")
+        if message_type == "snapshot":
+            return {**message, "session": self._snapshot(session, detail)}
+        if message_type == "event":
+            event = message.get("event")
+            if not isinstance(event, dict):
+                return message
+            next_event = self._event_for_detail(event, detail)
+            if next_event is None:
+                return None
+            return {**message, "event": next_event}
+        return message
 
     async def _remove_client(self, session: HermesSession, client: WebSocketClient) -> None:
         await remove_client(session.clients, client)

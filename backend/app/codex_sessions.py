@@ -22,11 +22,14 @@ from .files import resolve_served_directory
 from .models import AgentEventType
 from .storage import CODEX_LOG_DIR, CODEX_RUN_DIR
 from .users import default_user_id, normalize_user_id
-from .ws_clients import WebSocketClient, add_client, broadcast, enqueue, remove_client
+from .ws_clients import WebSocketClient, add_client, enqueue, remove_client
 
 CODEX_ROLLOUT_ROOT = Path.home() / ".codex" / "sessions"
 PROXY_ENV_KEYS = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY")
 RAW_PREVIEW_MAX_BYTES = 16 * 1024
+AGENT_DETAIL_FOCUS = "focus"
+AGENT_DETAIL_FULL = "full"
+AGENT_DETAILS = {AGENT_DETAIL_FOCUS, AGENT_DETAIL_FULL}
 HIDDEN_DISPLAY_EVENT_TYPES = {
     "session_meta",
     "turn_context",
@@ -57,6 +60,10 @@ CODEX_AGENT_EVENT_TYPE_MAP = {
     "patch_apply_end": AgentEventType.PATCH_APPLY_END,
     "view_image_tool_call": AgentEventType.VIEW_IMAGE_TOOL_CALL,
 }
+
+
+def normalize_agent_detail(detail: str | None) -> str:
+    return detail if detail in AGENT_DETAILS else AGENT_DETAIL_FOCUS
 
 
 def relative_cwd(cwd: str) -> str:
@@ -679,12 +686,34 @@ class CodexSessionManager:
                 compacted.append(compact)
         return compacted
 
-    def _snapshot(self, session: CodexSession) -> dict:
-        return {**session.summary(), "prompts": session.prompts, "events": self._compact_events(session.events)}
+    def _event_for_detail(self, event: dict, detail: str) -> dict | None:
+        if detail == AGENT_DETAIL_FULL:
+            return event
+        if event.get("event_type") != AgentEventType.MESSAGE_ASSISTANT:
+            return None
+        return {
+            **event,
+            "file_changes": [],
+            "patch_text": None,
+            "raw_preview": None,
+        }
 
-    def snapshot(self, session_id: str) -> dict:
+    def _events_for_detail(self, events: list[dict], detail: str) -> list[dict]:
+        normalized = normalize_agent_detail(detail)
+        rows: list[dict] = []
+        for event in events:
+            next_event = self._event_for_detail(event, normalized)
+            if next_event is not None:
+                rows.append(next_event)
+        return rows
+
+    def _snapshot(self, session: CodexSession, detail: str | None = None) -> dict:
+        compact_events = self._compact_events(session.events)
+        return {**session.summary(), "prompts": session.prompts, "events": self._events_for_detail(compact_events, normalize_agent_detail(detail))}
+
+    def snapshot(self, session_id: str, detail: str | None = None) -> dict:
         session = self.get(session_id)
-        return self._snapshot(session)
+        return self._snapshot(session, detail)
 
     def _turn_finished_status(self, events: list[dict]) -> str | None:
         status: str | None = None
@@ -806,9 +835,6 @@ class CodexSessionManager:
         normalized_user_id = normalize_user_id(user_id)
         for session in self.sessions.values():
             self._sync_background_run_state(session)
-            if session.status == "running" and session.clients:
-                continue
-            self._sync_rollout_events(session)
         return sorted(
             (session.summary() for session in self.sessions.values() if session.user_id == normalized_user_id),
             key=lambda item: item["updated_at"],
@@ -944,7 +970,7 @@ class CodexSessionManager:
         session.updated_at = now
         session.suppress_queue_drain = False
         self._write_meta(session)
-        await self._broadcast(session, {"type": "snapshot", "session": self._snapshot(session)})
+        await self._broadcast(session, {"type": "snapshot", "session": self._snapshot(session, AGENT_DETAIL_FULL)})
         session.run_task = asyncio.create_task(self._run(session, prompt, resume=bool(session.codex_session_id)))
         return True
 
@@ -980,11 +1006,13 @@ class CodexSessionManager:
         self.get(session_id)
         raise HTTPException(status_code=409, detail="Codex session has no pending approvals")
 
-    async def connect(self, session_id: str, websocket: WebSocket) -> None:
+    async def connect(self, session_id: str, websocket: WebSocket, detail: str | None = None) -> None:
         session = self.get(session_id)
+        normalized_detail = normalize_agent_detail(detail)
         await websocket.accept()
         client = add_client(session.clients, websocket)
-        enqueue(client, {"type": "snapshot", "session": self._snapshot(session), "source": "codex"})
+        setattr(client, "agent_detail", normalized_detail)
+        enqueue(client, {"type": "snapshot", "session": self._snapshot(session, normalized_detail), "source": "codex"})
         try:
             while True:
                 await websocket.receive_text()
@@ -1423,7 +1451,19 @@ class CodexSessionManager:
 
     async def _broadcast(self, session: CodexSession, message: dict) -> None:
         message.setdefault("source", "codex")
-        stale = await broadcast(session.clients, message)
+        stale: list[WebSocketClient] = []
+        for client in list(session.clients.values()):
+            if client.writer_task and client.writer_task.done():
+                stale.append(client)
+                continue
+            detail = normalize_agent_detail(getattr(client, "agent_detail", AGENT_DETAIL_FOCUS))
+            next_message = self._message_for_detail(session, message, detail)
+            if next_message is None:
+                continue
+            if not enqueue(client, next_message):
+                stale.append(client)
+        for client in stale:
+            await remove_client(session.clients, client)
         logger.debug(
             "Codex session {} websocket broadcast type={} clients={} stale_removed={}",
             session.id,
@@ -1431,6 +1471,20 @@ class CodexSessionManager:
             len(session.clients),
             len(stale),
         )
+
+    def _message_for_detail(self, session: CodexSession, message: dict, detail: str) -> dict | None:
+        message_type = message.get("type")
+        if message_type == "snapshot":
+            return {**message, "session": self._snapshot(session, detail)}
+        if message_type == "event":
+            event = message.get("event")
+            if not isinstance(event, dict):
+                return message
+            next_event = self._event_for_detail(event, detail)
+            if next_event is None:
+                return None
+            return {**message, "event": next_event}
+        return message
 
     async def _remove_client(self, session: CodexSession, client: WebSocketClient) -> None:
         await remove_client(session.clients, client)

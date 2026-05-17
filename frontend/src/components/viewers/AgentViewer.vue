@@ -67,6 +67,7 @@ const codexStatusItems = computed(() => {
   return items;
 });
 const selectedModel = computed(() => (isCodex.value ? codex.models.selected_model : undefined));
+const requestedDetail = computed<"focus" | "full">(() => (focusMode.value && !rawJson.value ? "focus" : "full"));
 
 function readPromptDrafts(): Record<string, string> {
   try {
@@ -184,7 +185,7 @@ function applyEvent(event: AgentEvent, info: AgentSessionInfo) {
   else agents.markUnread(props.agentRef);
 }
 
-async function loadSnapshot() {
+async function loadSnapshot(detail: "focus" | "full" = requestedDetail.value) {
   const parsed = parsedRef.value;
   if (!parsed) {
     error.value = "Invalid agent session reference.";
@@ -192,7 +193,7 @@ async function loadSnapshot() {
   }
   try {
     error.value = "";
-    applySnapshot(await agents.snapshot(props.agentRef));
+    applySnapshot(await agents.snapshot(props.agentRef, detail));
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -206,7 +207,7 @@ function connect() {
     reconnectTimer = null;
   }
   socket?.close();
-  const activeSocket = new WebSocket(agentSessionSocketUrl(parsed.provider, parsed.id));
+  const activeSocket = new WebSocket(agentSessionSocketUrl(parsed.provider, parsed.id, requestedDetail.value));
   socket = activeSocket;
   activeSocket.addEventListener("message", (event) => {
     if (socket !== activeSocket) return;
@@ -333,7 +334,7 @@ function updatePaneToolbar() {
   const status = session.value?.status ?? "connecting";
   const actions: PaneToolbarAction[] = [
     { id: "agent-new-session-here", title: `New ${providerInfo.value.name} session in this directory`, icon: "bi-plus-square", run: () => createSessionHere() },
-    { id: "agent-refresh", title: `Refresh ${providerInfo.value.name} session`, icon: "bi-arrow-clockwise", run: () => loadSnapshot() },
+    { id: "agent-refresh", title: `Refresh ${providerInfo.value.name} session`, icon: "bi-arrow-clockwise", run: () => loadSnapshot(requestedDetail.value) },
     {
       id: "agent-focus",
       title: focusMode.value ? "Show agent operation details" : "Focus mode: hide agent operation details",
@@ -375,7 +376,6 @@ watch(() => props.agentRef, (ref, previousRef) => {
   editingQueueItemId.value = null;
   promptText.value = loadPromptDraft(ref);
   session.value = null;
-  void loadSnapshot();
   connect();
 });
 watch(promptText, (text) => {
@@ -383,6 +383,11 @@ watch(promptText, (text) => {
 });
 watch(focusMode, updatePaneToolbar);
 watch(rawJson, updatePaneToolbar);
+watch(requestedDetail, () => {
+  if (!mounted) return;
+  session.value = null;
+  connect();
+});
 watch(() => [codex.models.selected_model, codex.models.available_models, codex.status], updatePaneToolbar, { deep: true });
 watch(isActivePane, (active) => {
   if (active) agents.markRead(props.agentRef);
@@ -391,8 +396,7 @@ watch(isActivePane, (active) => {
 onMounted(() => {
   mounted = true;
   if (isActivePane.value) agents.markRead(props.agentRef);
-  void agents.loadProviders();
-  void loadSnapshot();
+  if (!agents.providersLoaded) void agents.loadProviders();
   connect();
   updatePaneToolbar();
 });

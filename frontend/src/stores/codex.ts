@@ -23,24 +23,38 @@ export const useCodexStore = defineStore("codex", {
   }),
   actions: {
     async load() {
+      if (this.loading) return;
       this.loading = true;
       try {
         const [sessions, status, models] = await Promise.all([listCodexSessions(), getCodexStatus(), getCodexModels()]);
         this.sessions = sessions;
-        this.status = status;
-        if (!this.modelManuallySelected) {
-          this.models = models;
-        } else {
-          const selected = this.models.selected_model;
-          this.models = {
-            ...models,
-            selected_model: selected,
-            available_models: models.available_models.includes(selected) ? models.available_models : [selected, ...models.available_models],
-          };
-        }
+        this.applyOptions(status, models);
       } finally {
         this.loading = false;
       }
+    },
+    async loadOptions() {
+      if (this.loading) return;
+      this.loading = true;
+      try {
+        const [status, models] = await Promise.all([getCodexStatus(), getCodexModels()]);
+        this.applyOptions(status, models);
+      } finally {
+        this.loading = false;
+      }
+    },
+    applyOptions(status: CodexCliStatus, models: CodexModelOptions) {
+      this.status = status;
+      if (!this.modelManuallySelected) {
+        this.models = models;
+        return;
+      }
+      const selected = this.models.selected_model;
+      this.models = {
+        ...models,
+        selected_model: selected,
+        available_models: models.available_models.includes(selected) ? models.available_models : [selected, ...models.available_models],
+      };
     },
     setSelectedModel(model: string) {
       if (!model.trim()) return;

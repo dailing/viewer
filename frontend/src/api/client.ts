@@ -255,8 +255,10 @@ export async function createAgentSession(provider: AgentProvider, prompt: string
   });
 }
 
-export async function getAgentSession(provider: AgentProvider, id: string): Promise<unknown> {
-  return request<unknown>(`/api/agents/sessions/${encodeURIComponent(id)}?provider=${encodeURIComponent(provider)}`);
+export async function getAgentSession(provider: AgentProvider, id: string, detail: "focus" | "full" = "focus"): Promise<unknown> {
+  return request<unknown>(
+    `/api/agents/sessions/${encodeURIComponent(id)}?provider=${encodeURIComponent(provider)}&detail=${encodeURIComponent(detail)}`,
+  );
 }
 
 export async function sendAgentMessage(provider: AgentProvider, id: string, prompt: string, model?: string): Promise<unknown> {
@@ -303,8 +305,8 @@ export async function resolveAgentApproval(provider: AgentProvider, id: string, 
   });
 }
 
-export function agentSessionSocketUrl(provider: AgentProvider, id: string): string {
-  return socketUrl(`/api/agents/sessions/${encodeURIComponent(id)}/ws?provider=${encodeURIComponent(provider)}`);
+export function agentSessionSocketUrl(provider: AgentProvider, id: string, detail: "focus" | "full" = "focus"): string {
+  return socketUrl(`/api/agents/sessions/${encodeURIComponent(id)}/ws?provider=${encodeURIComponent(provider)}&detail=${encodeURIComponent(detail)}`);
 }
 
 export async function listCodexSessions(): Promise<CodexSessionInfo[]> {

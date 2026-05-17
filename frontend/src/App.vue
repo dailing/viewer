@@ -187,7 +187,7 @@ async function initializeApp() {
   sidebarOpen.value = sidebarPinned.value;
   files.currentPath = users.activeProfile?.home_path ?? "";
   layout.load();
-  await Promise.all([files.loadConfig(), terminals.load(), codex.load(), agents.load(), workspaces.load()]);
+  await Promise.all([files.loadConfig(), terminals.load(), codex.loadOptions(), agents.load(), workspaces.load()]);
   loadWorkspaceHeat();
   await restoreInitialWorkspace();
   updateWorkspaceAgentNotices();
@@ -203,11 +203,11 @@ async function initializeApp() {
     void terminals.load();
   }, 3000);
   codexRefresh = window.setInterval(() => {
-    void codex.load();
-  }, 3000);
+    void codex.loadOptions();
+  }, 10000);
   agentRefresh = window.setInterval(() => {
     void agents.load();
-  }, 3000);
+  }, 5000);
   appReady.value = true;
 }
 

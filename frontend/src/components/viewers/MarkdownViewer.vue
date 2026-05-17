@@ -87,7 +87,7 @@ async function saveEdit() {
     await putText(props.path, draft.value);
     assetVersion.value += 1;
     text.value = draft.value;
-    await updateImageDependencies(text.value);
+    updateImageDependencies(text.value);
     html.value = renderMarkdown(text.value, { basePath: props.path, assetVersion: assetVersion.value, assetVersions: imageAssetVersions.value });
     isEditing.value = false;
     registerToolbar();
@@ -128,18 +128,38 @@ function onEditPreviewScroll() {
   syncScroll(editPreview.value, container.value);
 }
 
-async function updateImageDependencies(source: string) {
+function localMarkdownDependency(target: string): string | null {
+  const trimmed = target.trim();
+  if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("/") || trimmed.startsWith("//")) return null;
+  const schemeMatch = trimmed.match(/^([A-Za-z][A-Za-z\d+.-]*):/);
+  if (schemeMatch) return null;
+  const pathPart = trimmed.split(/[?#]/, 1)[0]?.replace(/\\/g, "/") ?? "";
+  if (!pathPart) return null;
+  let decoded = pathPart;
+  try {
+    decoded = decodeURIComponent(pathPart);
+  } catch {
+    decoded = pathPart;
+  }
+  const parts = [...props.path.split("/").slice(0, -1), ...decoded.split("/")];
+  const normalized: string[] = [];
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") normalized.pop();
+    else normalized.push(part);
+  }
+  return normalized.join("/");
+}
+
+function updateImageDependencies(source: string) {
   const targets = extractMarkdownImageTargets(source);
-  const resolved = await Promise.allSettled(targets.map((target) => resolveMarkdownLink(props.path, target)));
-  const versions: Record<string, string> = {};
   const dependencies: string[] = [];
-  resolved.forEach((result, index) => {
-    if (result.status !== "fulfilled") return;
-    dependencies.push(result.value.path);
-    if (result.value.content_hash) versions[targets[index]] = result.value.content_hash;
-  });
+  for (const target of targets) {
+    const dependency = localMarkdownDependency(target);
+    if (dependency) dependencies.push(dependency);
+  }
   imageDependencies.value = new Set(dependencies);
-  imageAssetVersions.value = versions;
+  imageAssetVersions.value = {};
 }
 
 async function load() {
@@ -148,7 +168,7 @@ async function load() {
   try {
     assetVersion.value += 1;
     text.value = await getText(props.path);
-    await updateImageDependencies(text.value);
+    updateImageDependencies(text.value);
     html.value = renderMarkdown(text.value, { basePath: props.path, assetVersion: assetVersion.value, assetVersions: imageAssetVersions.value });
     registerToolbar();
     await nextTick();
@@ -162,6 +182,8 @@ async function load() {
 
 function rewriteLocalHtmlImages() {
   for (const image of Array.from(container.value?.querySelectorAll<HTMLImageElement>("img[src]") ?? [])) {
+    image.loading = "lazy";
+    image.decoding = "async";
     const src = image.getAttribute("src") ?? "";
     if (src.startsWith("/api/file/raw") || !isLocalLinkTarget(src)) continue;
     image.setAttribute("src", rawUrl(src, String(assetVersion.value), props.path));

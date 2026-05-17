@@ -21,6 +21,7 @@ from .files import (
     get_meta,
     guess_mime,
     list_directory,
+    metadata_version,
     read_config,
     read_text,
     read_text_lines,
@@ -382,7 +383,7 @@ async def file_resolve_link(base: str, target: str, user: str | None = None):
     resolved = resolve_path(path, user)
     payload = {"path": path}
     if resolved.exists() and resolved.is_file():
-        payload["content_hash"] = content_hash(resolved)
+        payload["content_hash"] = metadata_version(resolved, resolved.stat())
     return payload
 
 
@@ -603,8 +604,8 @@ async def create_agent_session(config: AgentSessionCreate, user: str | None = No
 
 
 @app.get("/api/agents/sessions/{session_id}")
-async def agent_session(session_id: str, provider: str):
-    return _agent_manager(provider).snapshot(session_id)
+async def agent_session(session_id: str, provider: str, detail: str | None = "focus"):
+    return _agent_manager(provider).snapshot(session_id, detail)
 
 
 @app.post("/api/agents/sessions/{session_id}/messages")
@@ -644,8 +645,8 @@ async def resolve_agent_approval(session_id: str, approval_id: str, message: Age
 
 
 @app.websocket("/api/agents/sessions/{session_id}/ws")
-async def agent_session_ws(websocket: WebSocket, session_id: str, provider: str):
-    await _agent_manager(provider).connect(session_id, websocket)
+async def agent_session_ws(websocket: WebSocket, session_id: str, provider: str, detail: str | None = "focus"):
+    await _agent_manager(provider).connect(session_id, websocket, detail)
 
 
 @app.get("/api/codex/sessions")
@@ -671,7 +672,7 @@ async def create_codex_session(config: CodexSessionCreate, user: str | None = No
 
 @app.get("/api/codex/sessions/{session_id}")
 async def codex_session(session_id: str):
-    return codex_session_manager.snapshot(session_id)
+    return codex_session_manager.snapshot(session_id, "full")
 
 
 @app.post("/api/codex/sessions/{session_id}/messages")
@@ -706,7 +707,7 @@ async def terminate_codex_session(session_id: str):
 
 @app.websocket("/api/codex/sessions/{session_id}/ws")
 async def codex_session_ws(websocket: WebSocket, session_id: str):
-    await codex_session_manager.connect(session_id, websocket)
+    await codex_session_manager.connect(session_id, websocket, "full")
 
 
 @app.get("/api/hermes/sessions")
@@ -722,7 +723,7 @@ async def create_hermes_session(config: HermesSessionCreate, user: str | None = 
 
 @app.get("/api/hermes/sessions/{session_id}")
 async def hermes_session(session_id: str):
-    return hermes_session_manager.snapshot(session_id)
+    return hermes_session_manager.snapshot(session_id, "full")
 
 
 @app.post("/api/hermes/sessions/{session_id}/messages")
@@ -757,7 +758,7 @@ async def terminate_hermes_session(session_id: str):
 
 @app.websocket("/api/hermes/sessions/{session_id}/ws")
 async def hermes_session_ws(websocket: WebSocket, session_id: str):
-    await hermes_session_manager.connect(session_id, websocket)
+    await hermes_session_manager.connect(session_id, websocket, "full")
 
 
 @app.websocket("/api/voice/ws")

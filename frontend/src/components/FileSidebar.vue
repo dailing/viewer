@@ -157,7 +157,6 @@ onUnmounted(() => {
           :title="workspaceTitle(id)"
           :aria-label="workspaceTitle(id)"
           :aria-pressed="props.activeWorkspaceId === id"
-          :disabled="props.switchingWorkspace"
           @click="selectWorkspace(id)"
         >
           <span>{{ id }}</span>

@@ -372,7 +372,12 @@ async def file_site(path: str, h: str | None = None, user: str | None = None):
 
 @app.get("/api/file/resolve-link")
 async def file_resolve_link(base: str, target: str, user: str | None = None):
-    return {"path": resolve_markdown_link(base, target, user)}
+    path = resolve_markdown_link(base, target, user)
+    resolved = resolve_path(path, user)
+    payload = {"path": path}
+    if resolved.exists() and resolved.is_file():
+        payload["content_hash"] = content_hash(resolved)
+    return payload
 
 
 @app.get("/api/file/resolve-directory-link")

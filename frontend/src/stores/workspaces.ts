@@ -76,14 +76,16 @@ export const useWorkspacesStore = defineStore("workspaces", {
     async forgetActiveHermesSession(id: string, workspaceId?: string) {
       await this.forgetActiveAgentSession(`hermes:${id}`, workspaceId);
     },
-    async saveSlot(id: string, snapshot: WorkspaceSnapshot, options?: { restoreActive?: boolean }) {
+    async saveSlot(id: string, snapshot: WorkspaceSnapshot, options?: { apply?: boolean; restoreActive?: boolean }) {
       const data = await putWorkspace(id, { ...snapshot, updated_at: Date.now() / 1000 });
-      this.applyData(data, id);
+      if (options?.apply !== false) this.applyData(data, id, true);
       if (options?.restoreActive !== false && this.activeWorkspaceId === id) this.restoreActiveAgentSessions(this.slots[id] ?? snapshot);
+      return data;
     },
-    async activate(id: string) {
+    async activate(id: string, options?: { apply?: boolean }) {
       const data = await activateWorkspace(id);
-      this.applyData(data, id);
+      if (options?.apply !== false) this.applyData(data, id);
+      return data;
     },
   },
 });

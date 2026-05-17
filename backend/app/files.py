@@ -15,6 +15,7 @@ from .users import default_user_id, list_user_profiles, user_home_path, user_wor
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 TEXT_EXTENSIONS = {
+    ".env",
     ".txt",
     ".py",
     ".js",
@@ -47,6 +48,7 @@ TEXT_EXTENSIONS = {
     ".csv",
 }
 HTML_EXTENSIONS = {".html", ".htm"}
+TEXT_FILENAMES = {".env"}
 
 
 def normalize_relative(path: str | None) -> str:
@@ -181,6 +183,7 @@ def guess_mime(path: Path) -> str:
 
 def preview_kind(path: Path, mime: str, size: int) -> str:
     suffix = path.suffix.lower()
+    filename = path.name.lower()
     if suffix in IMAGE_EXTENSIONS:
         return "image"
     if suffix in MARKDOWN_EXTENSIONS:
@@ -189,7 +192,7 @@ def preview_kind(path: Path, mime: str, size: int) -> str:
         return "html"
     if suffix == ".pdf" or mime == "application/pdf":
         return "pdf"
-    if suffix in TEXT_EXTENSIONS or mime.startswith("text/"):
+    if filename in TEXT_FILENAMES or filename.startswith(".env.") or suffix in TEXT_EXTENSIONS or mime.startswith("text/"):
         return "text"
     return "unsupported"
 

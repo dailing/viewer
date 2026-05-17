@@ -20,6 +20,7 @@ export interface RenderMarkdownOptions {
   basePath?: string;
   baseDirectory?: string;
   assetVersion?: string | number;
+  assetVersions?: Record<string, string | number | undefined>;
 }
 
 function escapeHtml(value: string): string {
@@ -147,7 +148,8 @@ md.renderer.rules.image = (tokens: any[], idx: number, options: any, env: Render
   const token = tokens[idx];
   const src = token.attrGet("src");
   if (env.basePath && src && isLocalLinkTarget(src)) {
-    token.attrSet("src", rawUrl(src, env.assetVersion === undefined ? undefined : String(env.assetVersion), env.basePath));
+    const version = env.assetVersions?.[src] ?? env.assetVersion;
+    token.attrSet("src", rawUrl(src, version === undefined ? undefined : String(version), env.basePath));
   }
   return image ? image(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
 };

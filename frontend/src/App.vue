@@ -169,6 +169,7 @@ let agentRefresh: number | null = null;
 let workspaceHeatTimer: number | null = null;
 let workspaceSaveTimer: number | null = null;
 let workspaceAutosaveReady = false;
+let workspaceSwitchToken = 0;
 
 onMounted(async () => {
   await users.load();
@@ -377,10 +378,15 @@ function startWorkspaceHeatTimer() {
 }
 
 async function loadWorkspaceDirectory(path: string) {
+  const targetPath = path || "";
+  files.currentPath = targetPath;
+  files.visitTimes = { ...files.visitTimes, [targetPath]: Date.now() / 1000 };
   try {
-    await files.enterDirectory(path);
+    await files.loadDirectory(targetPath);
   } catch {
-    await files.enterDirectory("");
+    files.currentPath = "";
+    files.visitTimes = { ...files.visitTimes, "": Date.now() / 1000 };
+    await files.loadDirectory("");
   }
 }
 
@@ -413,7 +419,8 @@ async function restoreInitialWorkspace() {
 
 async function switchWorkspace(id: string) {
   const targetId = normalizeWorkspaceId(id);
-  if (workspaces.switching || targetId === displayedActiveWorkspaceId.value) return;
+  if (targetId === displayedActiveWorkspaceId.value) return;
+  const token = ++workspaceSwitchToken;
   const previousId = workspaces.activeWorkspaceId;
   const previousSnapshot = currentWorkspaceSnapshot();
   window.dispatchEvent(new CustomEvent("viewer:workspace-before-switch", { detail: { workspaceId: previousId } }));
@@ -425,35 +432,59 @@ async function switchWorkspace(id: string) {
     window.clearTimeout(workspaceSaveTimer);
     workspaceSaveTimer = null;
   }
+  const target = workspaces.snapshotFor(targetId);
+  workspaces.activeWorkspaceId = targetId;
+  if (target) {
+    layout.restore(target.layout, target.active_pane_id);
+    workspaces.restoreActiveAgentSessions(target);
+    restoreWorkspacePins(target.pinned);
+    restoreWorkspaceVisitTimes(target.visit_times);
+    files.currentPath = target.current_path || "";
+  } else {
+    layout.reset();
+    workspaces.restoreActiveAgentSessions(null);
+    files.pinned = [];
+    files.visitTimes = {};
+    files.currentPath = "";
+    workspaces.slots[targetId] = currentWorkspaceSnapshot();
+  }
+  await showWorkspaceLoadingFrame();
+  if (token !== workspaceSwitchToken) return;
+  workspaceContentLoading.value = false;
+  workspaces.switching = false;
+  switchingWorkspaceId.value = null;
+  void persistWorkspaceSwitch(token, previousId, previousSnapshot, targetId, target);
+}
+
+async function persistWorkspaceSwitch(
+  token: number,
+  previousId: string,
+  previousSnapshot: ReturnType<typeof currentWorkspaceSnapshot>,
+  targetId: string,
+  target: ReturnType<typeof workspaces.snapshotFor>,
+) {
   try {
-    const target = workspaces.snapshotFor(targetId);
+    await workspaces.saveSlot(previousId, previousSnapshot, { apply: false, restoreActive: false });
+    if (token !== workspaceSwitchToken) return;
     if (target) {
-      layout.restore(target.layout, target.active_pane_id);
-      workspaces.restoreActiveAgentSessions(target);
-      restoreWorkspacePins(target.pinned);
-      restoreWorkspaceVisitTimes(target.visit_times);
-      await showWorkspaceLoadingFrame();
-      workspaceContentLoading.value = false;
-      const directoryLoad = loadWorkspaceDirectory(target.current_path);
-      await workspaces.saveSlot(previousId, previousSnapshot, { restoreActive: false });
-      workspaces.restoreActiveAgentSessions(target);
-      await Promise.all([directoryLoad, workspaces.activate(targetId)]);
+      await loadWorkspaceDirectory(target.current_path);
     } else {
-      layout.reset();
-      workspaces.restoreActiveAgentSessions(null);
-      files.pinned = [];
-      files.visitTimes = {};
-      await showWorkspaceLoadingFrame();
-      workspaceContentLoading.value = false;
       const targetSnapshot = currentWorkspaceSnapshot();
-      await workspaces.saveSlot(previousId, previousSnapshot, { restoreActive: false });
-      await workspaces.saveSlot(targetId, targetSnapshot, { restoreActive: false });
-      await workspaces.activate(targetId);
+      await workspaces.saveSlot(targetId, targetSnapshot, { apply: false, restoreActive: false });
+    }
+    if (token !== workspaceSwitchToken) return;
+    await workspaces.activate(targetId, { apply: false });
+    if (token !== workspaceSwitchToken) {
+      void workspaces.activate(workspaces.activeWorkspaceId, { apply: false });
+      return;
     }
   } finally {
-    workspaceContentLoading.value = false;
-    workspaces.switching = false;
-    switchingWorkspaceId.value = null;
+    if (token === workspaceSwitchToken) {
+      workspaces.activeWorkspaceId = targetId;
+      workspaces.switching = false;
+      switchingWorkspaceId.value = null;
+      workspaceContentLoading.value = false;
+    }
   }
 }
 

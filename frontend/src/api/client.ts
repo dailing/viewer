@@ -91,8 +91,8 @@ export async function deleteFile(path: string): Promise<void> {
   if (!response.ok) throw new Error(await response.text());
 }
 
-export async function resolveMarkdownLink(base: string, target: string): Promise<{ path: string }> {
-  return request<{ path: string }>(
+export async function resolveMarkdownLink(base: string, target: string): Promise<{ path: string; content_hash?: string }> {
+  return request<{ path: string; content_hash?: string }>(
     `/api/file/resolve-link?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`,
   );
 }

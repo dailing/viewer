@@ -29,8 +29,11 @@ const editPreview = ref<HTMLElement | null>(null);
 const syncingEditScroll = ref(false);
 const imageDependencies = ref<Set<string>>(new Set());
 const assetVersion = ref(0);
+const imageAssetVersions = ref<Record<string, string>>({});
 
-const editPreviewHtml = computed(() => renderMarkdown(draft.value, { basePath: props.path, assetVersion: assetVersion.value }));
+const editPreviewHtml = computed(() =>
+  renderMarkdown(draft.value, { basePath: props.path, assetVersion: assetVersion.value, assetVersions: imageAssetVersions.value }),
+);
 
 const highlightedRaw = computed(() => {
   if (!text.value) return "";
@@ -84,8 +87,8 @@ async function saveEdit() {
     await putText(props.path, draft.value);
     assetVersion.value += 1;
     text.value = draft.value;
-    html.value = renderMarkdown(text.value, { basePath: props.path, assetVersion: assetVersion.value });
     await updateImageDependencies(text.value);
+    html.value = renderMarkdown(text.value, { basePath: props.path, assetVersion: assetVersion.value, assetVersions: imageAssetVersions.value });
     isEditing.value = false;
     registerToolbar();
     await nextTick();
@@ -128,11 +131,15 @@ function onEditPreviewScroll() {
 async function updateImageDependencies(source: string) {
   const targets = extractMarkdownImageTargets(source);
   const resolved = await Promise.allSettled(targets.map((target) => resolveMarkdownLink(props.path, target)));
-  imageDependencies.value = new Set(
-    resolved
-      .filter((result): result is PromiseFulfilledResult<{ path: string }> => result.status === "fulfilled")
-      .map((result) => result.value.path),
-  );
+  const versions: Record<string, string> = {};
+  const dependencies: string[] = [];
+  resolved.forEach((result, index) => {
+    if (result.status !== "fulfilled") return;
+    dependencies.push(result.value.path);
+    if (result.value.content_hash) versions[targets[index]] = result.value.content_hash;
+  });
+  imageDependencies.value = new Set(dependencies);
+  imageAssetVersions.value = versions;
 }
 
 async function load() {
@@ -141,8 +148,8 @@ async function load() {
   try {
     assetVersion.value += 1;
     text.value = await getText(props.path);
-    html.value = renderMarkdown(text.value, { basePath: props.path, assetVersion: assetVersion.value });
     await updateImageDependencies(text.value);
+    html.value = renderMarkdown(text.value, { basePath: props.path, assetVersion: assetVersion.value, assetVersions: imageAssetVersions.value });
     registerToolbar();
     await nextTick();
     rewriteLocalHtmlImages();

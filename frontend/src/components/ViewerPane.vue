@@ -11,6 +11,7 @@ import CsvViewer from "./viewers/CsvViewer.vue";
 import DiffViewer from "./viewers/DiffViewer.vue";
 import HtmlViewer from "./viewers/HtmlViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
+import LargeTextViewer from "./viewers/LargeTextViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
 import TextViewer from "./viewers/TextViewer.vue";
 import TerminalViewer from "./viewers/TerminalViewer.vue";
@@ -72,10 +73,13 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
         <span>{{ error }}</span>
       </div>
       <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" />
+      <LargeTextViewer v-else-if="meta?.preview === 'markdown' && meta.text_too_large" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="markdown" :size="meta.size" />
       <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
       <HtmlViewer v-else-if="meta?.preview === 'html'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" :content-hash="meta.content_hash" />
       <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="csv" :size="meta.size" />
       <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="text" :size="meta.size" />
       <TextViewer v-else-if="meta?.preview === 'text'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
       <UnsupportedViewer v-else-if="meta" :meta="meta" />
       <div v-else class="empty-state">

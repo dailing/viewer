@@ -31,6 +31,17 @@ class FileMeta(BaseModel):
     text_too_large: bool = False
 
 
+class TextLineWindow(BaseModel):
+    path: str
+    size: int
+    mtime: float
+    total_lines: int
+    start_line: int
+    lines: list[str]
+    truncated_start: bool = False
+    truncated_end: bool = False
+
+
 class AppearanceConfig(BaseModel):
     navbar_size: int = 26
 

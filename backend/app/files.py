@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from .config import settings
-from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, WorkspaceConfig, WorkspaceData, WorkspaceSnapshot
+from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, TextLineWindow, WorkspaceConfig, WorkspaceData, WorkspaceSnapshot
 from .storage import CONFIG_PATH, migrate_legacy_state
 from .users import default_user_id, list_user_profiles, user_home_path, user_workspaces_path
 
@@ -48,6 +48,10 @@ TEXT_EXTENSIONS = {
     ".csv",
 }
 HTML_EXTENSIONS = {".html", ".htm"}
+LINE_INDEX_CHUNK_BYTES = 1024 * 1024
+MAX_TEXT_LINE_COUNT = 500
+MAX_LINE_INDEX_CACHE_ENTRIES = 8
+_line_index_cache: dict[tuple[str, int, int], list[int]] = {}
 TEXT_FILENAMES = {".env"}
 
 
@@ -208,6 +212,10 @@ def content_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def metadata_version(path: Path, stat) -> str:
+    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+
+
 def entry_for(path: Path, user_id: str | None = None) -> FileEntry:
     try:
         stat = path.stat()
@@ -286,15 +294,16 @@ def get_meta(path: str, user_id: str | None = None) -> FileMeta:
     stat = target.stat()
     mime = guess_mime(target)
     preview = preview_kind(target, mime, stat.st_size)
+    text_too_large = preview in {"text", "markdown", "html"} and stat.st_size > settings.max_text_preview_bytes
     return FileMeta(
         name=target.name,
         path=normalize_relative(path),
         size=stat.st_size,
         mtime=stat.st_mtime,
-        content_hash=content_hash(target),
+        content_hash=metadata_version(target, stat) if text_too_large else content_hash(target),
         mime=mime,
         preview=preview,
-        text_too_large=preview in {"text", "markdown", "html"} and stat.st_size > settings.max_text_preview_bytes,
+        text_too_large=text_too_large,
     )
 
 
@@ -307,6 +316,72 @@ def read_text(path: str, user_id: str | None = None) -> str:
         return target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return target.read_text(encoding="utf-8", errors="replace")
+
+
+def _line_offsets(path: Path, stat) -> list[int]:
+    cache_key = (path.as_posix(), stat.st_mtime_ns, stat.st_size)
+    cached = _line_index_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    offsets = [0]
+    position = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(LINE_INDEX_CHUNK_BYTES)
+            if not chunk:
+                break
+            start = 0
+            while True:
+                newline_at = chunk.find(b"\n", start)
+                if newline_at < 0:
+                    break
+                offsets.append(position + newline_at + 1)
+                start = newline_at + 1
+            position += len(chunk)
+
+    stale_keys = [key for key in _line_index_cache if key[0] == path.as_posix() and key != cache_key]
+    for key in stale_keys:
+        _line_index_cache.pop(key, None)
+    _line_index_cache[cache_key] = offsets
+    while len(_line_index_cache) > MAX_LINE_INDEX_CACHE_ENTRIES:
+        oldest_key = next(iter(_line_index_cache))
+        _line_index_cache.pop(oldest_key, None)
+    return offsets
+
+
+def read_text_lines(path: str, start_line: int = 0, count: int = 200, user_id: str | None = None) -> TextLineWindow:
+    meta = get_meta(path, user_id)
+    if meta.preview not in {"text", "markdown", "html"}:
+        raise HTTPException(status_code=400, detail="Path is not a text preview")
+    target = resolve_path(path, user_id)
+    stat = target.stat()
+    offsets = _line_offsets(target, stat)
+    total_lines = len(offsets)
+    safe_start = max(0, min(start_line, max(total_lines - 1, 0)))
+    safe_count = max(1, min(count, MAX_TEXT_LINE_COUNT))
+    end_line = min(safe_start + safe_count, total_lines)
+    start_offset = offsets[safe_start] if offsets else 0
+    end_offset = offsets[end_line] if end_line < total_lines else stat.st_size
+
+    with target.open("rb") as handle:
+        handle.seek(start_offset)
+        raw = handle.read(max(0, end_offset - start_offset))
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if text.endswith(("\n", "\r")) and len(lines) < end_line - safe_start:
+        lines.append("")
+
+    return TextLineWindow(
+        path=normalize_relative(path),
+        size=stat.st_size,
+        mtime=stat.st_mtime,
+        total_lines=total_lines,
+        start_line=safe_start,
+        lines=lines[: safe_count],
+        truncated_start=safe_start > 0,
+        truncated_end=end_line < total_lines,
+    )
 
 
 def write_text(path: str, content: str, user_id: str | None = None) -> FileMeta:

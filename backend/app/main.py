@@ -23,6 +23,7 @@ from .files import (
     list_directory,
     read_config,
     read_text,
+    read_text_lines,
     read_workspaces,
     resolve_directory_link,
     resolve_markdown_link,
@@ -198,6 +199,11 @@ async def file_meta(path: str, user: str | None = None):
 @app.get("/api/file/content", response_class=PlainTextResponse)
 async def file_content(path: str, user: str | None = None):
     return read_text(path, user)
+
+
+@app.get("/api/file/text-lines")
+async def file_text_lines(path: str, start: int = Query(default=0, ge=0), count: int = Query(default=200, ge=1, le=500), user: str | None = None):
+    return read_text_lines(path, start, count, user)
 
 
 @app.put("/api/file/content")

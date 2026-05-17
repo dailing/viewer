@@ -28,6 +28,17 @@ export interface FileMeta {
   text_too_large: boolean;
 }
 
+export interface TextLineWindow {
+  path: string;
+  size: number;
+  mtime: number;
+  total_lines: number;
+  start_line: number;
+  lines: string[];
+  truncated_start: boolean;
+  truncated_end: boolean;
+}
+
 export interface AppearanceConfig {
   navbar_size: number;
 }

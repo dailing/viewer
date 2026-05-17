@@ -1,4 +1,4 @@
-import type { DirectoryListing, FileMeta, UserProfile, ViewerConfig, WorkspaceConfig } from "../types/files";
+import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerConfig, WorkspaceConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
@@ -64,6 +64,12 @@ export async function getText(path: string): Promise<string> {
   const response = await fetch(withUser(`/api/file/content?path=${encodeURIComponent(path)}`));
   if (!response.ok) throw new Error(await response.text());
   return response.text();
+}
+
+export async function getTextLines(path: string, start: number, count: number): Promise<TextLineWindow> {
+  return request<TextLineWindow>(
+    `/api/file/text-lines?path=${encodeURIComponent(path)}&start=${encodeURIComponent(start)}&count=${encodeURIComponent(count)}`,
+  );
 }
 
 export async function putText(path: string, content: string): Promise<FileMeta> {

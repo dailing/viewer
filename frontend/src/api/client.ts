@@ -4,6 +4,7 @@ import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionS
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
+import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskListResponse, AgentTaskPatch, AgentTaskSettings } from "../types/agentTasks";
 import type { AgentProvider, AgentProviderInfo } from "../types/agents";
 import type { GitDiffText, GitStatus } from "../types/git";
 import { currentUserId } from "../utils/userProfile";
@@ -483,6 +484,74 @@ export async function listAgentLoopRuns(id: string): Promise<AgentLoopRunRecord[
 
 export async function getAgentLoopRun(id: string, runId: string): Promise<AgentLoopRunRecord> {
   return request<AgentLoopRunRecord>(`/api/agent-loops/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`);
+}
+
+export async function listAgentTasks(groupId?: string, status?: string): Promise<AgentTaskListResponse> {
+  const params = new URLSearchParams();
+  if (groupId) params.set("group_id", groupId);
+  if (status) params.set("status", status);
+  const query = params.toString();
+  return request<AgentTaskListResponse>(`/api/agent-tasks${query ? `?${query}` : ""}`);
+}
+
+export async function getAgentTask(id: string): Promise<AgentTask> {
+  return request<AgentTask>(`/api/agent-tasks/${encodeURIComponent(id)}`);
+}
+
+export async function getAgentTaskContext(id: string): Promise<AgentTaskContext> {
+  return request<AgentTaskContext>(`/api/agent-tasks/${encodeURIComponent(id)}/context`);
+}
+
+export async function createAgentTask(task: AgentTaskCreate): Promise<AgentTask> {
+  return request<AgentTask>("/api/agent-tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(task),
+  });
+}
+
+export async function patchAgentTask(id: string, patch: AgentTaskPatch): Promise<AgentTask> {
+  return request<AgentTask>(`/api/agent-tasks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function patchAgentTaskDependencies(id: string, patch: AgentTaskDependencyPatch): Promise<AgentTask> {
+  return request<AgentTask>(`/api/agent-tasks/${encodeURIComponent(id)}/dependencies`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function dispatchAgentTask(id: string, force = false): Promise<AgentTask> {
+  return request<AgentTask>(`/api/agent-tasks/${encodeURIComponent(id)}/dispatch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ force }),
+  });
+}
+
+export async function dispatchReadyAgentTasks(groupId?: string, force = false): Promise<{ dispatched: AgentTask[] }> {
+  const params = new URLSearchParams();
+  if (groupId) params.set("group_id", groupId);
+  if (force) params.set("force", "true");
+  const query = params.toString();
+  return request<{ dispatched: AgentTask[] }>(`/api/agent-tasks/dispatch-ready${query ? `?${query}` : ""}`, { method: "POST" });
+}
+
+export async function getAgentTaskSettings(groupId = "default"): Promise<AgentTaskSettings> {
+  return request<AgentTaskSettings>(`/api/agent-tasks/settings?group_id=${encodeURIComponent(groupId)}`);
+}
+
+export async function updateAgentTaskSettings(settings: Partial<AgentTaskSettings> & { default_group_id?: string }): Promise<AgentTaskSettings> {
+  return request<AgentTaskSettings>("/api/agent-tasks/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
 }
 
 export function voiceSocketUrl(): string {

@@ -10,6 +10,17 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from .agent_loops import agent_loop_manager
+from .agent_tasks import (
+    AgentTaskCompleteUpdate,
+    AgentTaskCreate,
+    AgentTaskDependencyPatch,
+    AgentTaskDispatchRequest,
+    AgentTaskPatch,
+    AgentTaskProcessUpdate,
+    AgentTaskSettingsUpdate,
+    AgentTaskStatusUpdate,
+    agent_task_manager,
+)
 from .config import settings
 from .codex_sessions import codex_session_manager
 from .events import hub
@@ -101,6 +112,7 @@ async def startup() -> None:
     await codex_session_manager.resume_pending_queues()
     await hermes_session_manager.resume_pending_queues()
     await agent_loop_manager.start()
+    await agent_task_manager.start()
 
 
 @app.on_event("shutdown")
@@ -110,6 +122,7 @@ async def shutdown() -> None:
         watch_stop_event.set()
     if watch_task:
         watch_task.cancel()
+    await agent_task_manager.shutdown()
     await agent_loop_manager.shutdown()
     await terminal_manager.shutdown()
     await codex_session_manager.shutdown()
@@ -535,6 +548,76 @@ async def agent_loop_runs(task_id: str):
 @app.get("/api/agent-loops/{task_id}/runs/{run_id}")
 async def agent_loop_run_detail(task_id: str, run_id: str):
     return agent_loop_manager.run_detail(task_id, run_id)
+
+
+@app.get("/api/agent-tasks")
+async def agent_tasks(group_id: str | None = None, status: str | None = None, user: str | None = None):
+    return agent_task_manager.list(user, group_id, status)
+
+
+@app.get("/api/agent-tasks/settings")
+async def agent_task_settings(group_id: str = "default", user: str | None = None):
+    return agent_task_manager.settings(user, group_id)
+
+
+@app.put("/api/agent-tasks/settings")
+async def update_agent_task_settings(update: AgentTaskSettingsUpdate, user: str | None = None):
+    return agent_task_manager.update_settings(update, user)
+
+
+@app.post("/api/agent-tasks/dispatch-ready")
+async def dispatch_ready_agent_tasks(group_id: str | None = None, limit: int = Query(default=1, ge=1, le=10), force: bool = False, user: str | None = None):
+    return await agent_task_manager.dispatch_ready(user, group_id, limit, force)
+
+
+@app.post("/api/agent-tasks")
+async def create_agent_task(task: AgentTaskCreate, user: str | None = None):
+    return agent_task_manager.create(task, user)
+
+
+@app.get("/api/agent-tasks/{task_id}")
+async def get_agent_task(task_id: str, user: str | None = None):
+    return agent_task_manager.get(task_id, user)
+
+
+@app.get("/api/agent-tasks/{task_id}/context")
+async def get_agent_task_context(task_id: str, user: str | None = None):
+    return agent_task_manager.context(task_id, user)
+
+
+@app.get("/api/agent-tasks/{task_id}/events")
+async def get_agent_task_events(task_id: str, limit: int = Query(default=100, ge=1, le=500), user: str | None = None):
+    return agent_task_manager.events(task_id, user, limit)
+
+
+@app.patch("/api/agent-tasks/{task_id}")
+async def patch_agent_task(task_id: str, patch: AgentTaskPatch, user: str | None = None):
+    return agent_task_manager.patch(task_id, patch, user)
+
+
+@app.post("/api/agent-tasks/{task_id}/dependencies")
+async def patch_agent_task_dependencies(task_id: str, patch: AgentTaskDependencyPatch, user: str | None = None):
+    return agent_task_manager.patch_dependencies(task_id, patch, user)
+
+
+@app.post("/api/agent-tasks/{task_id}/status")
+async def update_agent_task_status(task_id: str, update: AgentTaskStatusUpdate, user: str | None = None):
+    return agent_task_manager.update_status(task_id, update, user)
+
+
+@app.post("/api/agent-tasks/{task_id}/process")
+async def set_agent_task_process(task_id: str, update: AgentTaskProcessUpdate, user: str | None = None):
+    return agent_task_manager.set_process(task_id, update, user)
+
+
+@app.post("/api/agent-tasks/{task_id}/complete")
+async def complete_agent_task(task_id: str, update: AgentTaskCompleteUpdate, user: str | None = None):
+    return agent_task_manager.complete(task_id, update, user)
+
+
+@app.post("/api/agent-tasks/{task_id}/dispatch")
+async def dispatch_agent_task(task_id: str, request: AgentTaskDispatchRequest | None = None, user: str | None = None):
+    return await agent_task_manager.dispatch(task_id, request, user)
 
 
 @app.get("/api/events")

@@ -9,14 +9,15 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 ## Runtime Flow
 
 1. `run.py` parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
-2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()` and the agent-loop scheduler on startup, stops watcher, loops, terminals, and Codex sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
+2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()`, the agent-loop scheduler, and the Agent Task DAG monitor on startup, stops watcher, task monitor, loops, terminals, and agent sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
-4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading workspace state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/heat/draft keys are namespaced by user. The app then loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The top bar switches between the workspace, full-page settings, and full-page loop task editor.
+4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading workspace state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/heat/draft keys are namespaced by user. The app then loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The top bar switches between the workspace, full-page settings, full-page loop task editor, and full-page Agent Task DAG board.
 5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer and oversized Markdown/CSV/text files to the virtualized large text viewer. Viewers fetch raw/text content and reload when their `version` prop changes; Markdown panes render embedded images with browser lazy loading, track simple relative local image dependencies client-side, use a pane-level version cache key for raw-file URLs, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Raw rollout events stay server-side; REST/WebSocket snapshots send compact display events, and the shared agent API defaults to `detail=focus` so focus-mode panes receive assistant messages without tool output/file-change payloads until the frontend requests `detail=full`.
 8. Hermes panes mirror the Codex pane lifecycle shape through REST and WebSocket `/api/hermes/sessions/{id}/ws`, but the provider backend talks to the local Hermes API server at `VIEWER_HERMES_BASE_URL` / `http://127.0.0.1:8642` and reads canonical session history directly from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`. Viewer-local Hermes metadata lives under `~/.view/logs/hermes-sessions/`; the SQLite `sessions` and `messages` rows are compacted into the same frontend event shape used by Codex panes.
 9. Loop tasks are Markdown files in `~/.view/loops/*.md` with generated YAML frontmatter plus a prompt body. `backend/app/agent_loops.py` runs an asyncio scheduler that creates/resumes Codex sessions through `codex_session_manager`, writes state to `~/.view/agent-loops.json`, and writes run logs under `~/.view/logs/agent-loops/`.
+10. Agent Task DAG tasks live in `~/.view/agent-tasks.sqlite3` and are handled by `backend/app/agent_tasks.py`. The task monitor promotes dependency-satisfied tasks to `ready`, dispatches ready tasks when a group is in auto mode, tracks `waiting_process` task PIDs, and resumes the attached agent session when a recorded process exits. Logs and artifacts should be written under `~/.view/logs/agent-tasks/{task_id}/`.
 
 ## Backend Structure
 
@@ -48,6 +49,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/config` GET/PUT: reads and writes nav appearance, workspace count and workspace heat timing, Codex model options, Markdown theme config, user profiles, and default user in `~/.view/config.json`. Normal settings saves preserve existing user profiles unless the JSON payload explicitly changes them. Sidebar current directory, pinned paths, per-workspace open-order visit timestamps, and workspace-associated agent refs live in per-user workspace files under `~/.view/users/{user}/workspaces.json`.
 - `/api/workspaces` GET, `/api/workspaces/config` GET/PUT, `/api/workspaces/{id}` PUT, `/api/workspaces/{id}/activate` POST, and `/api/workspaces/{id}/agent-sessions` POST/DELETE: read workspace state, read/update workspace count config, write workspace snapshots, activate workspaces, and add/remove workspace-associated agent sessions for the `user` query profile. Workspace count is stored globally in `~/.view/config.json`; per-workspace state is stored in `~/.view/users/{user}/workspaces.json`. Agent session association is maintained by the backend through the add/remove routes; workspace snapshot writes preserve the existing association set instead of accepting a full replacement from the browser.
 - `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
+- `/api/agent-tasks` routes: persistent Agent Task DAG CRUD and scheduling APIs backed by `~/.view/agent-tasks.sqlite3`. Routes list tasks by `group_id`/status, create tasks, read task context, patch mutable not-yet-running tasks, patch dependencies with cycle checks, record long-running process PIDs, complete tasks with artifacts/results, manually dispatch a task to Codex/Hermes, dispatch ready tasks, and read/update per-group manual/auto scheduler settings.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
 - `/api/terminals`: lists or creates terminal sessions for the `user` query profile; POST accepts an optional relative `cwd`. When `cwd` is omitted, the terminal starts in the profile home directory.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
@@ -121,6 +123,28 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Persists runtime state in `~/.view/agent-loops.json`, including current session id, current run id, run counts, consecutive failures, next run time, stopped/paused state, and last error.
 - Writes per-task run history and detailed run snapshots under `~/.view/logs/agent-loops/{task_id}/`.
 - Reuses `codex_session_manager` for actual Codex creation/resume and uses compact Codex snapshots for log display.
+
+`backend/app/agent_tasks.py`
+
+- SQLite-backed Agent Task DAG runtime stored at `~/.view/agent-tasks.sqlite3`.
+- Defines task API models locally so the feature stays isolated from the legacy loop scheduler.
+- Supports statuses `draft`, `backlog`, `ready`, `claimed`, `running`, `waiting_process`, `review`, `done`, `failed`, `blocked`, and `cancelled`.
+- Keeps `parent_id`/`root_id` for task-tree display separate from `depends_on`, which is the scheduler DAG dependency list.
+- Allows plan patches only for `draft`, `backlog`, `ready`, and `blocked` tasks. Running/waiting/completed tasks are execution history and should be replaced or followed up instead of rewritten.
+- Validates dependency existence, group isolation, and cycles before writing dependency changes.
+- `recompute_ready()` promotes dependency-satisfied backlog/blocked tasks to `ready` and blocks tasks whose dependencies are unfinished or failed.
+- `dispatch()` creates a Codex/Hermes agent session with a task-specific prompt, records `agent_session_id`, and marks the task `running`.
+- `set_process()` records a long-running external PID and moves the task to `waiting_process`.
+- The monitor loop checks waiting-process PIDs, resumes the attached agent session when a process exits, and auto-dispatches one ready task per auto-mode group on each tick.
+- `events` table records task mutations with before/after JSON and reasons for auditability.
+
+`docs/agent_tasks.md`
+
+- User-facing design and API documentation for the Agent Task DAG system.
+
+`skills/agent-task-dag/SKILL.md`
+
+- Portable Codex-facing instructions for operating the Agent Task DAG HTTP API when this project is published or reused.
 
 `backend/app/events.py`
 
@@ -238,6 +262,19 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Agent schemas: shared `AgentPrompt`, compact `AgentEvent`, `AgentFileChange`, and `AgentQueueItem` describe the normalized intermediate representation used across providers. `AgentEvent.event_type` is typed by the backend `AgentEventType` enum and is a fixed backend IR, not a provider-native event name. Current fixed event types are `message:assistant`, `reasoning`, `tool_call`, `tool_result`, `custom_tool_call`, `exec_command_begin`, `exec_command_end`, `function_call`, `function_call_output`, `custom_tool_call_output`, `view_image_tool_call`, `patch_apply_end`, and fallback `operation` for logged-but-unclassified visible events. Agent drivers are responsible for converting provider-native logs into `AgentEventType` values before snapshots or WebSocket events reach the frontend. Frontend transcript code should only depend on this fixed IR; adding a new agent provider should require backend driver conversion work, not new frontend event-name handling, unless a genuinely new shared IR event type is introduced. Codex schemas add `CodexSessionInfo`, `CodexSessionSnapshot`, `CodexSessionCreate`, `CodexSessionMessage`, and `CodexQueueMessage`; `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible, and running sessions expose background `pid`, `codex_pid`, `run_id`, and `run_started_at` fields when available. Hermes schemas reuse the shared agent prompt/event/queue shape, with Hermes-specific ids and DB path in `HermesSessionInfo`.
 - `CodexConfig` stores Codex model options, muted operation-message alpha, the Diff viewer auto-commit prompt, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
+
+`frontend/src/components/AgentTasksPage.vue`
+
+- Full-page Agent Task DAG board opened from the top bar beside Loop Tasks.
+- Loads tasks by `group_id`, shows manual/auto scheduler mode, exposes "Run Ready" for approved one-at-a-time debugging, renders status columns plus a simple parent/child tree, and edits the selected task's title, workspace, description, instruction, dependencies, runtime, artifacts, and result summary.
+
+`frontend/src/stores/agentTasks.ts`
+
+- Pinia wrapper around the Agent Task DAG REST API. Tracks selected group/task, task list, selected task context, per-group settings, dispatch actions, and dependency patches.
+
+`frontend/src/types/agentTasks.ts`
+
+- TypeScript mirror of the Agent Task DAG transport shapes: task status, execution, runtime, artifacts, result, policy, settings, context, and mutation payloads.
 
 `backend/app/logging.py`
 

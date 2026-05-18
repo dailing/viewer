@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import AgentTasksPage from "./components/AgentTasksPage.vue";
 import ConfigPanel from "./components/ConfigPanel.vue";
 import FileSidebar from "./components/FileSidebar.vue";
 import LoopTasksPage from "./components/LoopTasksPage.vue";
@@ -37,7 +38,7 @@ const appReady = ref(false);
 const selectingUser = ref(false);
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
-const activePage = ref<"workspace" | "settings" | "loops">("workspace");
+const activePage = ref<"workspace" | "settings" | "loops" | "tasks">("workspace");
 const mobileToolbarOpen = ref(false);
 const agentStatusByRef = ref<Record<string, AgentStatus>>({});
 const workspaceHeat = ref<Record<string, number>>({});
@@ -691,8 +692,20 @@ onUnmounted(() => {
       >
         <i class="bi bi-clock-history"></i>
       </button>
-      <div class="active-pane-title" :title="activePage === 'workspace' ? activePaneTitle : activePage === 'settings' ? 'Settings' : 'Loop Tasks'">
-        {{ activePage === 'workspace' ? activePaneTitle : activePage === 'settings' ? 'Settings' : 'Loop Tasks' }}
+      <button
+        class="btn btn-outline-secondary icon-button"
+        :class="{ active: activePage === 'tasks' }"
+        type="button"
+        title="Task DAG"
+        @click="activePage = activePage === 'tasks' ? 'workspace' : 'tasks'"
+      >
+        <i class="bi bi-diagram-3"></i>
+      </button>
+      <div
+        class="active-pane-title"
+        :title="activePage === 'workspace' ? activePaneTitle : activePage === 'settings' ? 'Settings' : activePage === 'loops' ? 'Loop Tasks' : 'Task DAG'"
+      >
+        {{ activePage === 'workspace' ? activePaneTitle : activePage === 'settings' ? 'Settings' : activePage === 'loops' ? 'Loop Tasks' : 'Task DAG' }}
       </div>
       <span v-if="activePage === 'workspace' && activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
         {{ activePaneToolbar.status }}
@@ -825,8 +838,11 @@ onUnmounted(() => {
     <main v-else-if="activePage === 'settings'" class="top-level-page">
       <ConfigPanel @close="activePage = 'workspace'" />
     </main>
-    <main v-else class="top-level-page">
+    <main v-else-if="activePage === 'loops'" class="top-level-page">
       <LoopTasksPage />
+    </main>
+    <main v-else class="top-level-page">
+      <AgentTasksPage />
     </main>
   </div>
 </template>

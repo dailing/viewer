@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
-import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, WorkspaceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DagConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, WorkspaceConfig } from "../types/files";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   name: "Default",
@@ -47,6 +47,10 @@ Summarize the changes briefly, stage the relevant files in this directory, creat
 If a remote/tracking branch is configured, push the commit after it succeeds.
 
 Do not amend, rebase, reset, or rewrite history. If there are no changes, unrelated changes outside this directory, or anything unsafe or unclear, stop and explain instead of committing.`,
+};
+
+export const DEFAULT_DAG_CONFIG: DagConfig = {
+  base_url: "",
 };
 
 export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfig = {
@@ -116,6 +120,12 @@ function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
   };
 }
 
+function normalizeDagConfig(config?: Partial<DagConfig>): DagConfig {
+  return {
+    base_url: config?.base_url?.trim() ?? DEFAULT_DAG_CONFIG.base_url,
+  };
+}
+
 function normalizeAlpha(value: unknown, fallback: number): number {
   const alpha = Number(value ?? fallback);
   if (!Number.isFinite(alpha)) return fallback;
@@ -143,6 +153,7 @@ export const useFilesStore = defineStore("files", {
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
     codexConfig: normalizeCodexConfig(),
+    dagConfig: normalizeDagConfig(),
     workspaceConfig: normalizeWorkspaceConfig(),
     loading: false,
   }),
@@ -174,6 +185,7 @@ export const useFilesStore = defineStore("files", {
       this.appearance = normalizeAppearance(config.appearance);
       this.markdown = normalizeMarkdown(config.markdown);
       this.codexConfig = normalizeCodexConfig(config.codex);
+      this.dagConfig = normalizeDagConfig(config.dag);
       this.workspaceConfig = normalizeWorkspaceConfig(config.workspace);
     },
     async saveConfig() {
@@ -181,12 +193,14 @@ export const useFilesStore = defineStore("files", {
         appearance: normalizeAppearance(this.appearance),
         markdown: normalizeMarkdown(this.markdown),
         codex: normalizeCodexConfig(this.codexConfig),
+        dag: normalizeDagConfig(this.dagConfig),
         workspace: normalizeWorkspaceConfig(this.workspaceConfig),
       };
       const saved = await putConfig(config);
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
       this.codexConfig = normalizeCodexConfig(saved.codex);
+      this.dagConfig = normalizeDagConfig(saved.dag);
       this.workspaceConfig = normalizeWorkspaceConfig(saved.workspace);
     },
     async saveAppearance(appearance: AppearanceConfig) {
@@ -202,11 +216,12 @@ export const useFilesStore = defineStore("files", {
       this.markdown = normalizeMarkdown(markdown);
       await this.saveConfig();
     },
-    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, workspace: WorkspaceConfig) {
+    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, workspace: WorkspaceConfig, dag: DagConfig) {
       this.appearance = normalizeAppearance(appearance);
       this.markdown = normalizeMarkdown(markdown);
       this.codexConfig = normalizeCodexConfig(codex);
       this.workspaceConfig = normalizeWorkspaceConfig(workspace);
+      this.dagConfig = normalizeDagConfig(dag);
       await this.saveConfig();
     },
     async loadDirectory(path = "") {

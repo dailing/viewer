@@ -89,6 +89,10 @@ export interface CodexConfig {
   auto_commit_prompt: string;
 }
 
+export interface DagConfig {
+  base_url: string;
+}
+
 export interface WorkspaceConfig {
   count: number;
   heat_interval_seconds: number;
@@ -106,6 +110,7 @@ export interface ViewerConfig {
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
   codex?: CodexConfig;
+  dag?: DagConfig;
   workspace?: WorkspaceConfig;
   users?: UserProfile[];
   default_user?: string;

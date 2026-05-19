@@ -4,7 +4,7 @@ import { restartServer, stopServer } from "../api/client";
 import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
 import { useUsersStore } from "../stores/users";
 import { useWorkspacesStore } from "../stores/workspaces";
-import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, WorkspaceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DagConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, WorkspaceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
@@ -15,12 +15,13 @@ const restarting = ref(false);
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
-const openSections = reactive({ server: true, users: true, appearance: true, workspace: true, codex: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, users: true, appearance: true, workspace: true, codex: true, dag: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
   workspace: clone(files.workspaceConfig) as WorkspaceConfig,
   codex: clone(files.codexConfig) as CodexConfig,
+  dag: clone(files.dagConfig) as DagConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
 });
 
@@ -39,6 +40,7 @@ const fullConfigJson = computed(() =>
       appearance: draft.appearance,
       workspace: draft.workspace,
       codex: draft.codex,
+      dag: draft.dag,
       markdown: draft.markdown,
     },
     null,
@@ -56,6 +58,15 @@ watch(
   () => files.codexConfig,
   (codex) => {
     Object.assign(draft.codex, clone(codex));
+    jsonDraft.value = fullConfigJson.value;
+  },
+  { deep: true },
+);
+
+watch(
+  () => files.dagConfig,
+  (dag) => {
+    Object.assign(draft.dag, clone(dag));
     jsonDraft.value = fullConfigJson.value;
   },
   { deep: true },
@@ -227,7 +238,7 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.workspace);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.workspace, draft.dag);
     await workspaces.load();
     emit("close");
   } catch (err) {
@@ -243,6 +254,7 @@ async function applyJson() {
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
     if (parsed.workspace) Object.assign(draft.workspace, parsed.workspace);
     if (parsed.codex) Object.assign(draft.codex, parsed.codex);
+    if (parsed.dag) Object.assign(draft.dag, parsed.dag);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
     await save();
   } catch (err) {
@@ -389,6 +401,23 @@ async function applyJson() {
                 class="form-control form-control-sm model-list"
                 spellcheck="false"
               ></textarea>
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('dag')">
+            <i class="bi" :class="openSections.dag ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Task DAG</span>
+          </button>
+          <div v-if="openSections.dag" class="section-body">
+            <label class="compact-field">
+              <span>API base URL</span>
+              <input
+                v-model.trim="draft.dag.base_url"
+                class="form-control form-control-sm"
+                placeholder="http://127.0.0.1:8000"
+              />
             </label>
           </div>
         </section>

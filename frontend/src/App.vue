@@ -841,7 +841,7 @@ onUnmounted(() => {
     <main v-else-if="activePage === 'loops'" class="top-level-page">
       <LoopTasksPage />
     </main>
-    <main v-else class="top-level-page">
+    <main v-else class="top-level-page task-dag-top-page">
       <AgentTasksPage />
     </main>
   </div>

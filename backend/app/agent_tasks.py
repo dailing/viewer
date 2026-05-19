@@ -2,6 +2,7 @@ import asyncio
 from contextlib import contextmanager
 import json
 import os
+import shutil
 import sqlite3
 import time
 import uuid
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from .config import settings
 from .codex_sessions import codex_session_manager
 from .hermes_sessions import hermes_session_manager
 from .storage import AGENT_TASK_LOG_DIR, AGENT_TASKS_DB_PATH, ensure_view_home
@@ -155,6 +157,13 @@ class AgentTaskCompleteUpdate(BaseModel):
     status: Literal["done", "failed", "review", "blocked"] = "done"
     result: AgentTaskResult = Field(default_factory=AgentTaskResult)
     artifacts: list[AgentTaskArtifact] | None = None
+    agent_session_id: str | None = None
+    summary: str | None = None
+    decision: str | None = None
+    metrics: dict[str, Any] | None = None
+    failure_reason: str | None = None
+    next_suggestions: list[str] | None = None
+    user_decision_needed: str | None = None
     reason: str = ""
 
 
@@ -166,10 +175,40 @@ class AgentTaskSettingsUpdate(BaseModel):
     auto_tick_seconds: int | None = None
 
 
+class AgentTaskPlanUpdate(BaseModel):
+    group_id: str = "default"
+    goal: str = ""
+    plan: str = ""
+    context: str = ""
+    constraints: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 class AgentTaskDispatchRequest(BaseModel):
     force: bool = False
     agent: str | None = None
     model: str | None = None
+
+
+class AgentTaskManagerRequest(BaseModel):
+    group_id: str = "default"
+    task_id: str | None = None
+    prompt: str = ""
+    reason: str = ""
+    trigger: str = "user"
+    model: str | None = None
+
+
+class AgentTaskScopedManagerRequest(BaseModel):
+    prompt: str = ""
+    reason: str = ""
+    trigger: str = "executor_request"
+    model: str | None = None
+
+
+class AgentTaskResetRequest(BaseModel):
+    action: Literal["clear", "retry"] = "clear"
+    reason: str = ""
 
 
 def _json(value: Any) -> str:
@@ -271,11 +310,26 @@ class AgentTaskManager:
                     default_agent TEXT NOT NULL,
                     default_model TEXT,
                     auto_tick_seconds INTEGER NOT NULL,
+                    goal TEXT NOT NULL DEFAULT '',
+                    plan TEXT NOT NULL DEFAULT '',
+                    context TEXT NOT NULL DEFAULT '',
+                    constraints_json TEXT NOT NULL DEFAULT '[]',
+                    manager_session_id TEXT,
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (user_id, group_id)
                 )
                 """
             )
+            for column, ddl in (
+                ("goal", "ALTER TABLE settings ADD COLUMN goal TEXT NOT NULL DEFAULT ''"),
+                ("plan", "ALTER TABLE settings ADD COLUMN plan TEXT NOT NULL DEFAULT ''"),
+                ("context", "ALTER TABLE settings ADD COLUMN context TEXT NOT NULL DEFAULT ''"),
+                ("constraints_json", "ALTER TABLE settings ADD COLUMN constraints_json TEXT NOT NULL DEFAULT '[]'"),
+                ("manager_session_id", "ALTER TABLE settings ADD COLUMN manager_session_id TEXT"),
+            ):
+                existing = [row["name"] for row in conn.execute("PRAGMA table_info(settings)").fetchall()]
+                if column not in existing:
+                    conn.execute(ddl)
             conn.commit()
 
     async def start(self) -> None:
@@ -311,6 +365,11 @@ class AgentTaskManager:
             "default_agent": "codex",
             "default_model": None,
             "auto_tick_seconds": 10,
+            "goal": "",
+            "plan": "",
+            "context": "",
+            "constraints_json": "[]",
+            "manager_session_id": None,
             "updated_at": _now(),
         }
 
@@ -333,18 +392,34 @@ class AgentTaskManager:
             "default_agent": default_agent,
             "default_model": update.default_model if update.default_model is not None else current["default_model"],
             "auto_tick_seconds": auto_tick_seconds,
+            "goal": current.get("goal", ""),
+            "plan": current.get("plan", ""),
+            "context": current.get("context", ""),
+            "constraints_json": current.get("constraints_json", "[]"),
+            "manager_session_id": current.get("manager_session_id"),
             "updated_at": _now(),
         }
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO settings (user_id, group_id, mode, default_agent, default_model, auto_tick_seconds, updated_at)
-                VALUES (:user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds, :updated_at)
+                INSERT INTO settings (
+                    user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
+                    goal, plan, context, constraints_json, manager_session_id, updated_at
+                )
+                VALUES (
+                    :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
+                    :goal, :plan, :context, :constraints_json, :manager_session_id, :updated_at
+                )
                 ON CONFLICT(user_id, group_id) DO UPDATE SET
                     mode=excluded.mode,
                     default_agent=excluded.default_agent,
                     default_model=excluded.default_model,
                     auto_tick_seconds=excluded.auto_tick_seconds,
+                    goal=excluded.goal,
+                    plan=excluded.plan,
+                    context=excluded.context,
+                    constraints_json=excluded.constraints_json,
+                    manager_session_id=excluded.manager_session_id,
                     updated_at=excluded.updated_at
                 """,
                 payload,
@@ -352,6 +427,57 @@ class AgentTaskManager:
             conn.commit()
         self._record_event(None, user, group_id, "user", None, "settings_updated", current, payload, "Updated task scheduler settings")
         return payload
+
+    def plan(self, user_id: str | None, group_id: str = "default") -> dict:
+        settings = self.settings(user_id, group_id)
+        return {
+            "user_id": settings["user_id"],
+            "group_id": settings["group_id"],
+            "goal": settings.get("goal", ""),
+            "plan": settings.get("plan", ""),
+            "context": settings.get("context", ""),
+            "constraints": _loads(settings.get("constraints_json"), []),
+            "manager_session_id": settings.get("manager_session_id"),
+            "updated_at": settings["updated_at"],
+        }
+
+    def update_plan(self, update: AgentTaskPlanUpdate, user_id: str | None, actor: str = "user") -> dict:
+        user = normalize_user_id(user_id)
+        group_id = update.group_id.strip() or "default"
+        current = self.settings(user, group_id)
+        before = self.plan(user, group_id)
+        next_settings = {
+            **current,
+            "goal": update.goal,
+            "plan": update.plan,
+            "context": update.context,
+            "constraints_json": _json(update.constraints),
+            "updated_at": _now(),
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO settings (
+                    user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
+                    goal, plan, context, constraints_json, manager_session_id, updated_at
+                )
+                VALUES (
+                    :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
+                    :goal, :plan, :context, :constraints_json, :manager_session_id, :updated_at
+                )
+                ON CONFLICT(user_id, group_id) DO UPDATE SET
+                    goal=excluded.goal,
+                    plan=excluded.plan,
+                    context=excluded.context,
+                    constraints_json=excluded.constraints_json,
+                    updated_at=excluded.updated_at
+                """,
+                next_settings,
+            )
+            conn.commit()
+        after = self.plan(user, group_id)
+        self._record_event(None, user, group_id, actor, current.get("manager_session_id"), "plan_updated", before, after, update.reason)
+        return after
 
     def list(self, user_id: str | None, group_id: str | None = None, status: str | None = None) -> dict:
         self._init_db()
@@ -378,9 +504,151 @@ class AgentTaskManager:
             "settings": self.settings(user, group_id or (groups[0] if len(groups) == 1 else "default")),
         }
 
+    def groups(self, user_id: str | None = None) -> list[dict]:
+        self._init_db()
+        user = normalize_user_id(user_id)
+        with self._connect() as conn:
+            task_rows = conn.execute(
+                """
+                SELECT group_id, COUNT(*) AS task_count, MAX(updated_at) AS updated_at
+                FROM tasks WHERE user_id=? GROUP BY group_id
+                """,
+                (user,),
+            ).fetchall()
+            setting_rows = conn.execute("SELECT * FROM settings WHERE user_id=?", (user,)).fetchall()
+        by_group: dict[str, dict] = {}
+        for row in task_rows:
+            by_group[row["group_id"]] = {
+                "user_id": user,
+                "group_id": row["group_id"],
+                "task_count": row["task_count"],
+                "updated_at": row["updated_at"] or 0,
+                "goal": "",
+                "manager_session_id": None,
+                "mode": "manual",
+            }
+        for row in setting_rows:
+            item = by_group.setdefault(
+                row["group_id"],
+                {
+                    "user_id": user,
+                    "group_id": row["group_id"],
+                    "task_count": 0,
+                    "updated_at": row["updated_at"],
+                },
+            )
+            item.update(
+                {
+                    "goal": row["goal"],
+                    "manager_session_id": row["manager_session_id"],
+                    "mode": row["mode"],
+                    "updated_at": max(float(item.get("updated_at") or 0), float(row["updated_at"] or 0)),
+                }
+            )
+        if not by_group:
+            by_group["default"] = {
+                "user_id": user,
+                "group_id": "default",
+                "task_count": 0,
+                "updated_at": _now(),
+                "goal": "",
+                "manager_session_id": None,
+                "mode": "manual",
+            }
+        return sorted(by_group.values(), key=lambda item: (item["updated_at"], item["group_id"]), reverse=True)
+
     def get(self, task_id: str, user_id: str | None = None) -> dict:
         task = self._get_task(task_id, user_id)
         return task
+
+    def delete(self, task_id: str, user_id: str | None = None) -> dict:
+        task = self._get_task(task_id, user_id)
+        if task["status"] in {"running", "waiting_process"}:
+            raise HTTPException(status_code=409, detail="Cannot delete running or waiting-process tasks")
+        with self._connect() as conn:
+            dependents = conn.execute(
+                "SELECT id, depends_on FROM tasks WHERE user_id=? AND group_id=?",
+                (task["user_id"], task["group_id"]),
+            ).fetchall()
+            blocking = [row["id"] for row in dependents if task_id in _loads(row["depends_on"], [])]
+            if blocking:
+                raise HTTPException(status_code=409, detail=f"Task is still a dependency of: {', '.join(blocking[:5])}")
+            conn.execute("DELETE FROM tasks WHERE id=? AND user_id=?", (task_id, task["user_id"]))
+            conn.commit()
+        self._record_event(task_id, task["user_id"], task["group_id"], "user", task.get("agent_session_id"), "deleted", task, None, "Deleted task")
+        return {"status": "deleted", "task_id": task_id}
+
+    def _downstream_task_ids(self, task: dict) -> list[str]:
+        tasks = self.list(task["user_id"], task["group_id"])["tasks"]
+        by_id = {item["id"]: item for item in tasks}
+        dependents: dict[str, list[str]] = {item["id"]: [] for item in tasks}
+        for item in tasks:
+            for dep_id in item.get("depends_on", []):
+                dependents.setdefault(dep_id, []).append(item["id"])
+        affected: list[str] = []
+        seen: set[str] = set()
+        queue = [task["id"]]
+        while queue:
+            current = queue.pop(0)
+            if current in seen or current not in by_id:
+                continue
+            seen.add(current)
+            affected.append(current)
+            queue.extend(dependents.get(current, []))
+        return affected
+
+    def _clear_task_storage(self, task_id: str) -> None:
+        shutil.rmtree(AGENT_TASK_LOG_DIR / task_id, ignore_errors=True)
+
+    async def reset(self, task_id: str, request: AgentTaskResetRequest, user_id: str | None = None, actor: str = "user") -> dict:
+        task = self._get_task(task_id, user_id)
+        affected_ids = self._downstream_task_ids(task)
+        affected = [self._get_task(item_id, task["user_id"]) for item_id in affected_ids]
+        active = [item["id"] for item in affected if item["status"] in {"claimed", "running", "waiting_process"}]
+        if active:
+            raise HTTPException(status_code=409, detail=f"Cannot reset active tasks: {', '.join(active[:5])}")
+
+        reset_tasks: list[dict] = []
+        for item in affected:
+            before = dict(item)
+            next_task = dict(item)
+            next_task["status"] = "backlog"
+            next_task["blocked_reason"] = None
+            next_task["agent_session_id"] = None
+            next_task["runtime"] = AgentTaskRuntime().model_dump()
+            next_task["artifacts"] = []
+            next_task["result"] = AgentTaskResult().model_dump()
+            self._clear_task_storage(item["id"])
+            self._write_task(next_task, bump=True)
+            after = self._get_task(item["id"], item["user_id"])
+            self._record_event(
+                item["id"],
+                item["user_id"],
+                item["group_id"],
+                actor,
+                before.get("agent_session_id"),
+                f"{request.action}_reset",
+                before,
+                after,
+                request.reason or f"{request.action} requested from task DAG page",
+            )
+            reset_tasks.append(after)
+
+        self.recompute_ready(task["user_id"], task["group_id"])
+        reset_tasks = [self._get_task(item_id, task["user_id"]) for item_id in affected_ids]
+        dispatched = None
+        if request.action == "retry":
+            target = self._get_task(task_id, task["user_id"])
+            if target["status"] == "ready":
+                dispatched = await self.dispatch(task_id, AgentTaskDispatchRequest(force=True), task["user_id"], actor)
+            else:
+                dispatched = target
+        return {
+            "action": request.action,
+            "affected_task_ids": affected_ids,
+            "tasks": reset_tasks,
+            "dispatched": dispatched,
+        }
 
     def context(self, task_id: str, user_id: str | None = None) -> dict:
         task = self._get_task(task_id, user_id)
@@ -393,7 +661,7 @@ class AgentTaskManager:
             cursor = tasks[cursor["parent_id"]]
             ancestors.append(cursor)
         events = self.events(task_id, task["user_id"])
-        return {"task": task, "dependencies": dependencies, "children": children, "ancestors": ancestors, "events": events}
+        return {"task": task, "plan": self.plan(task["user_id"], task["group_id"]), "dependencies": dependencies, "children": children, "ancestors": ancestors, "events": events}
 
     def create(self, payload: AgentTaskCreate, user_id: str | None = None, actor: str = "user") -> dict:
         self._init_db()
@@ -544,10 +812,25 @@ class AgentTaskManager:
 
     def complete(self, task_id: str, update: AgentTaskCompleteUpdate, user_id: str | None = None, actor: str = "agent") -> dict:
         task = self._get_task(task_id, user_id)
+        if update.agent_session_id and task.get("agent_session_id") and update.agent_session_id != task.get("agent_session_id"):
+            raise HTTPException(status_code=409, detail="Completion does not match the task's active agent session")
         before = dict(task)
         task["status"] = update.status
         task["blocked_reason"] = None
-        task["result"] = update.result.model_dump()
+        result = update.result.model_dump()
+        if update.summary is not None:
+            result["summary"] = update.summary
+        if update.decision is not None:
+            result["decision"] = update.decision
+        if update.metrics is not None:
+            result["metrics"] = update.metrics
+        if update.failure_reason is not None:
+            result["failure_reason"] = update.failure_reason
+        if update.next_suggestions is not None:
+            result["next_suggestions"] = update.next_suggestions
+        if update.user_decision_needed is not None:
+            result["user_decision_needed"] = update.user_decision_needed
+        task["result"] = result
         if update.artifacts is not None:
             task["artifacts"] = [item.model_dump() for item in update.artifacts]
         runtime = dict(task["runtime"])
@@ -562,6 +845,8 @@ class AgentTaskManager:
 
     async def dispatch(self, task_id: str, request: AgentTaskDispatchRequest | None = None, user_id: str | None = None, actor: str = "user") -> dict:
         task = self._get_task(task_id, user_id)
+        if task["status"] in {"claimed", "running", "waiting_process", "done", "failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail=f"Task is {task['status']} and cannot be dispatched")
         if task["status"] != "ready" and not (request and request.force):
             raise HTTPException(status_code=409, detail=f"Task is {task['status']}, not ready")
         if self._has_unfinished_dependency(task["depends_on"], task["user_id"]):
@@ -575,14 +860,23 @@ class AgentTaskManager:
         runtime["started_at"] = _now()
         runtime["attempt"] = int(runtime.get("attempt") or 0) + 1
         runtime["heartbeat_at"] = _now()
+        runtime["task_workspace"] = self._task_workspace(task["id"]).as_posix()
         task["status"] = "running"
         task["assigned_agent"] = agent
         task["runtime"] = runtime
+        artifacts = list(task["artifacts"])
+        workspace_artifact = {"type": "task_workspace", "path": runtime["task_workspace"], "label": "task-local workspace"}
+        if not any(item.get("type") == "task_workspace" for item in artifacts):
+            artifacts.append(workspace_artifact)
+        task["artifacts"] = artifacts
         self._write_task(task, bump=True)
-        prompt = self._dispatch_prompt(task)
-        summary = await AGENT_MANAGERS[agent].create(prompt, task["workspace"], model, task["user_id"])
+        summary = await AGENT_MANAGERS[agent].create("", task["workspace"], model, task["user_id"])
         task = self._get_task(task_id, task["user_id"])
         task["agent_session_id"] = summary["id"]
+        self._write_task(task, bump=True)
+        prompt = self._dispatch_prompt(task)
+        summary = await AGENT_MANAGERS[agent].send(summary["id"], prompt, model)
+        task = self._get_task(task_id, task["user_id"])
         runtime = dict(task["runtime"])
         runtime["pid"] = summary.get("pid")
         task["runtime"] = runtime
@@ -618,6 +912,58 @@ class AgentTaskManager:
                 logger.exception("Failed to dispatch task {}", task["id"])
                 self.update_status(task["id"], AgentTaskStatusUpdate(status="failed", reason=str(exc)), user, "scheduler")
         return {"dispatched": dispatched}
+
+    async def request_manager(self, request: AgentTaskManagerRequest, user_id: str | None = None, actor: str = "user") -> dict:
+        user = normalize_user_id(user_id)
+        group_id = request.group_id.strip() or "default"
+        settings = self.settings(user, group_id)
+        plan = self.plan(user, group_id)
+        task = self._get_task(request.task_id, user) if request.task_id else None
+        tasks = self.list(user, group_id)["tasks"]
+        session_id = settings.get("manager_session_id")
+        model = request.model or settings.get("default_model")
+        if session_id:
+            prompt = request.prompt.strip() or "(no prompt)"
+            try:
+                summary = await codex_session_manager.send(session_id, prompt, model)
+            except Exception:
+                logger.exception("Failed to resume manager session {}; creating a replacement", session_id)
+                prompt = self._manager_prompt(plan, tasks, task, request)
+                summary = await codex_session_manager.create(prompt, task.get("workspace") if task else "", model, user)
+                session_id = summary["id"]
+                self._set_manager_session(user, group_id, session_id)
+        else:
+            prompt = self._manager_prompt(plan, tasks, task, request)
+            summary = await codex_session_manager.create(prompt, task.get("workspace") if task else "", model, user)
+            session_id = summary["id"]
+            self._set_manager_session(user, group_id, session_id)
+        self._record_event(
+            task["id"] if task else None,
+            user,
+            group_id,
+            actor,
+            session_id,
+            "manager_requested",
+            None,
+            {"prompt": request.prompt, "reason": request.reason, "trigger": request.trigger, "session_id": session_id},
+            request.reason or request.prompt,
+        )
+        return {"manager_session_id": session_id, "session": summary}
+
+    async def request_manager_for_task(self, task_id: str, request: AgentTaskScopedManagerRequest, user_id: str | None = None, actor: str = "executor") -> dict:
+        task = self._get_task(task_id, user_id)
+        return await self.request_manager(
+            AgentTaskManagerRequest(
+                group_id=task["group_id"],
+                task_id=task["id"],
+                prompt=request.prompt,
+                reason=request.reason,
+                trigger=request.trigger,
+                model=request.model or task.get("model"),
+            ),
+            task["user_id"],
+            actor,
+        )
 
     def recompute_ready(self, user_id: str | None = None, group_id: str | None = None) -> None:
         self._init_db()
@@ -683,9 +1029,9 @@ class AgentTaskManager:
             runtime["ended_at"] = _now()
             runtime["heartbeat_at"] = _now()
             task["runtime"] = runtime
-            task["status"] = "running"
+            task["status"] = "review"
             self._write_task(task, bump=True)
-            await self._resume_after_process(task)
+            await self._request_manager_after_process(task)
 
     async def _auto_dispatch_once(self) -> None:
         with self._connect() as conn:
@@ -693,40 +1039,168 @@ class AgentTaskManager:
         for row in groups:
             await self.dispatch_ready(row["user_id"], row["group_id"], limit=1)
 
-    async def _resume_after_process(self, task: dict) -> None:
-        session_id = task.get("agent_session_id")
-        agent = task.get("assigned_agent") or "codex"
-        if not session_id or agent not in AGENT_MANAGERS:
-            self.update_status(
-                task["id"],
-                AgentTaskStatusUpdate(status="review", reason="Process ended; no resumable agent session was attached."),
+    async def _request_manager_after_process(self, task: dict) -> None:
+        prompt = self._process_finished_prompt(task)
+        try:
+            await self.request_manager(
+                AgentTaskManagerRequest(
+                    group_id=task["group_id"],
+                    task_id=task["id"],
+                    prompt=prompt,
+                    reason="A task process exited and needs manager review/rescheduling.",
+                    trigger="process_exit",
+                    model=task.get("model"),
+                ),
                 task["user_id"],
                 "scheduler",
             )
-            return
-        prompt = self._process_finished_prompt(task)
-        try:
-            await AGENT_MANAGERS[agent].send(session_id, prompt, task.get("model"))
-            self._record_event(task["id"], task["user_id"], task["group_id"], "scheduler", session_id, "process_resume_sent", None, task, "Process ended; resumed agent session")
         except Exception as exc:
-            logger.exception("Failed to resume agent session {} for task {}", session_id, task["id"])
+            logger.exception("Failed to request manager for task {}", task["id"])
             self.update_status(
                 task["id"],
-                AgentTaskStatusUpdate(status="review", reason=f"Process ended but resume failed: {exc}"),
+                AgentTaskStatusUpdate(status="review", reason=f"Process ended but manager request failed: {exc}"),
                 task["user_id"],
                 "scheduler",
             )
 
+    def _task_api_base_url(self) -> str:
+        try:
+            from .files import read_config
+
+            configured = read_config().dag.base_url.strip().rstrip("/")
+        except Exception:
+            configured = ""
+        return configured or f"http://127.0.0.1:{settings.port}"
+
+    def _api_url(self, path: str) -> str:
+        return f"{self._task_api_base_url()}{path}"
+
+    def _worker_api_contract(self, task: dict, user_query: str) -> str:
+        task_id = task["id"]
+        current_session_id = task.get("agent_session_id") or "<current viewer session id>"
+        return f"""Worker Task API contract. Use exactly the configured base URL below; do not infer a host or port from memory.
+Base URL: {self._task_api_base_url()}
+
+Read context before work:
+GET {self._api_url(f"/api/agent-tasks/{task_id}/context{user_query}")}
+Response includes task, plan, dependencies, children, ancestors, and recent events.
+
+Ask manager when the graph/plan/shared code needs changes:
+POST {self._api_url(f"/api/agent-tasks/{task_id}/manager-request{user_query}")}
+JSON body:
+{{"prompt":"specific manager request","reason":"why executor cannot safely finish locally","trigger":"executor_request"}}
+
+Register long-running process, then stop this turn:
+POST {self._api_url(f"/api/agent-tasks/{task_id}/process{user_query}")}
+JSON body:
+{{"pid":1234,"process_group_id":1234,"log_path":"/absolute/log/path","expected_outputs":["/absolute/output/path"],"reason":"what is running"}}
+
+Complete this task only after outputs are checked:
+POST {self._api_url(f"/api/agent-tasks/{task_id}/complete{user_query}")}
+JSON body:
+{{"status":"done","agent_session_id":"{current_session_id}","artifacts":[{{"type":"markdown","path":"/absolute/output.md","label":"short label"}}],"result":{{"summary":"concise result","metrics":{{"checked_outputs":1}},"failure_reason":null,"next_suggestions":[],"user_decision_needed":null}},"reason":"finished and verified"}}
+Allowed status values: done, failed, review, blocked."""
+
+    def _manager_api_contract(self, plan: dict, user_query: str) -> str:
+        group_query = f"group_id={plan['group_id']}{user_query.replace('?', '&')}"
+        return f"""Manager Task API contract. Use exactly the configured base URL below; do not infer a host or port from memory.
+Base URL: {self._task_api_base_url()}
+
+List DAG:
+GET {self._api_url(f"/api/agent-tasks?{group_query}")}
+
+Read task context:
+GET {self._api_url(f"/api/agent-tasks/<task_id>/context{user_query}")}
+
+Create task:
+POST {self._api_url(f"/api/agent-tasks{user_query}")}
+JSON body:
+{{"group_id":"{plan['group_id']}","parent_id":null,"title":"clear task title","description":"task contract and expected output","status":"backlog","priority":50,"kind":"research","workspace":"","assigned_agent":"codex","model":null,"depends_on":[],"execution":{{"mode":"agent","instruction":"specific worker instructions","command":null,"cwd":"","env":{{}},"timeout_sec":null}},"artifacts":[],"metadata":{{"reason":"why this task exists"}},"policy":{{"requires_approval":false}}}}
+
+Patch mutable task fields before it runs:
+PATCH {self._api_url(f"/api/agent-tasks/<task_id>{user_query}")}
+JSON body:
+{{"expected_version":1,"title":"updated title","description":"updated contract","status":"backlog","priority":60,"execution":{{"mode":"agent","instruction":"updated instructions","command":null,"cwd":"","env":{{}},"timeout_sec":null}},"metadata":{{"reason":"why changed"}},"reason":"short audit reason"}}
+
+Patch dependencies:
+POST {self._api_url(f"/api/agent-tasks/<task_id>/dependencies{user_query}")}
+JSON body:
+{{"replace":["dependency_task_id"],"reason":"why these dependencies are correct"}}
+
+Update global plan/context:
+PUT {self._api_url(f"/api/agent-tasks/plan{user_query}")}
+JSON body:
+{{"group_id":"{plan['group_id']}","goal":"goal","plan":"numbered plan","context":"stable facts for workers","constraints":["constraint"],"reason":"why updated"}}
+
+Complete or block a task when acting on process review:
+POST {self._api_url(f"/api/agent-tasks/<task_id>/complete{user_query}")}
+JSON body:
+{{"status":"done","result":{{"summary":"what happened","metrics":{{}},"failure_reason":null,"next_suggestions":[],"user_decision_needed":null}},"artifacts":[],"reason":"manager decision"}}
+
+Clear or retry a task and every downstream task that depends on it:
+POST {self._api_url(f"/api/agent-tasks/<task_id>/reset{user_query}")}
+JSON body:
+{{"action":"clear","reason":"why previous outputs should be cleared"}}
+Use action="retry" to clear the same downstream set and immediately dispatch the selected task if its dependencies are satisfied."""
+
+    def _dependency_artifacts_block(self, task: dict) -> str:
+        lines: list[str] = []
+        for dep_id in task.get("depends_on") or []:
+            try:
+                dep = self._get_task(dep_id, task["user_id"])
+            except HTTPException:
+                lines.append(f"- {dep_id}: missing dependency record")
+                continue
+            artifact_parts = [
+                f"{item.get('type', 'artifact')} {item.get('path')}"
+                for item in dep.get("artifacts", [])
+                if item.get("path") and item.get("type") != "task_workspace"
+            ]
+            suffix = "; ".join(artifact_parts) if artifact_parts else "no output artifacts recorded"
+            lines.append(f"- {dep['id']} [{dep['status']}] {dep['title']}: {suffix}")
+        return "\n".join(lines) or "- none"
+
     def _dispatch_prompt(self, task: dict) -> str:
         user_query = f"?user={task['user_id']}"
-        context_url = f"/api/agent-tasks/{task['id']}/context{user_query}"
-        complete_url = f"/api/agent-tasks/{task['id']}/complete{user_query}"
-        process_url = f"/api/agent-tasks/{task['id']}/process{user_query}"
-        return f"""You are executing Viewer Agent Task {task['id']}.
+        plan = self.plan(task["user_id"], task["group_id"])
+        task_workspace = task["runtime"].get("task_workspace") or self._task_workspace(task["id"]).as_posix()
+        output_artifacts = [item for item in task.get("artifacts", []) if item.get("type") != "task_workspace"]
+        output_block = "\n".join(f"- {item.get('type', 'artifact')}: {item.get('path')} ({item.get('label') or 'no label'})" for item in output_artifacts) or "- No predeclared output artifact. Create a clear artifact under the task-local workspace and register it on completion."
+        return f"""You are an EXECUTOR agent for Viewer Agent Task {task['id']}.
+
+Role boundary:
+- You execute exactly this task.
+- You may run commands, start long-running processes, inspect logs, write scripts, create files, modify files, and generate outputs inside this task-local workspace:
+  {task_workspace}
+- You may read the project/common workspace and call its scripts.
+- Do not modify shared project/common source code outside the task-local workspace unless this task explicitly grants that permission.
+- Do not create tasks, patch dependencies, rewrite the DAG, or change the global plan.
+- If the plan is wrong, dependencies are missing, code must change, or rescheduling is needed, call the manager endpoint instead of changing the graph yourself.
 
 Task title: {task['title']}
 Group: {task['group_id']}
 Workspace: {task['workspace'] or '(default profile home)'}
+Task-local workspace: {task_workspace}
+
+Task Contract:
+- Inputs/dependencies:
+{self._dependency_artifacts_block(task)}
+- Expected outputs:
+{output_block}
+- Done criteria:
+  - Read the task context API before doing work.
+  - Produce outputs only inside the task-local workspace unless the task explicitly says otherwise.
+  - Check that every registered artifact exists and matches the requested format.
+  - Complete with a nested result.summary and result.metrics object so the DAG board can show the outcome.
+
+Global goal:
+{plan.get('goal') or '(none set)'}
+
+Global plan:
+{plan.get('plan') or '(none set)'}
+
+Global constraints:
+{chr(10).join(f'- {item}' for item in plan.get('constraints', [])) or '- none set'}
 
 Description:
 {task['description']}
@@ -734,32 +1208,68 @@ Description:
 Instruction:
 {task['execution'].get('instruction') or task['description'] or task['title']}
 
-Before doing work, read task context with:
-  GET {context_url}
-
-You may create follow-up tasks, patch not-yet-running tasks, and update dependencies through /api/agent-tasks.
-If you start a long-running process, write logs under ~/.view/logs/agent-tasks/{task['id']}/ and call:
-  POST {process_url}
-with pid, process_group_id, log_path, and expected_outputs, then stop your turn.
-
-When finished, call:
-  POST {complete_url}
-with status done, failed, review, or blocked, artifacts, metrics, and a concise summary.
-Do not mark the task done until outputs have been checked.
+{self._worker_api_contract(task, user_query)}
 """
 
     def _process_finished_prompt(self, task: dict) -> str:
         user_query = f"?user={task['user_id']}"
-        return f"""The long-running process recorded for Viewer Agent Task {task['id']} has exited.
+        return f"""A long-running process recorded for Viewer Agent Task {task['id']} has exited.
 
-Inspect the task artifacts, logs, and expected outputs. Then call /api/agent-tasks/{task['id']}/complete with:
-- status=done if outputs are valid
-- status=failed if the run failed
-- status=review if a user decision is needed
-- status=blocked if more input is required
+You are the MANAGER/PLANNER. Inspect the task artifacts, logs, expected outputs, dependency context, and current DAG. Decide whether to:
+- mark the task done/failed/review/blocked
+- create retry or follow-up tasks
+- patch dependencies of not-yet-running tasks
+- update the global plan/context
+- edit code only if that is necessary and safer than asking an executor to do it
 
-You may create or patch dependent tasks if the result changes the plan.
 Use the Viewer task API with {user_query} so updates are applied to the correct user profile.
+Configured API base URL: {self._task_api_base_url()}
+"""
+
+    def _manager_prompt(self, plan: dict, tasks: list[dict], task: dict | None, request: AgentTaskManagerRequest) -> str:
+        user_query = f"?user={plan['user_id']}"
+        task_lines = []
+        for item in tasks[:80]:
+            deps = ",".join(item.get("depends_on") or [])
+            task_lines.append(f"- {item['id']} [{item['status']}] p{item['priority']} {item['title']} deps=[{deps}]")
+        task_block = "\n".join(task_lines) or "(no tasks yet)"
+        focus = f"{task['id']} [{task['status']}] {task['title']}" if task else "(none)"
+        return f"""You are the MANAGER/PLANNER for Viewer Agent Task DAG group {plan['group_id']}.
+
+Your role:
+- Own the global plan and DAG structure.
+- Create, split, cancel, retry, and reschedule tasks.
+- Patch dependencies only for not-yet-running tasks.
+- Edit source code only when the plan requires code changes; executors should normally not edit files.
+- Keep executor tasks narrow: each executor should run or inspect one concrete unit and record PID/results.
+- Prefer putting new expensive tasks in backlog/review unless auto execution is explicitly desired.
+
+Current goal:
+{plan.get('goal') or '(none set)'}
+
+Current plan:
+{plan.get('plan') or '(none set)'}
+
+Project context:
+{plan.get('context') or '(none set)'}
+
+Constraints:
+{chr(10).join(f'- {item}' for item in plan.get('constraints', [])) or '- none set'}
+
+Current DAG:
+{task_block}
+
+Focus task:
+{focus}
+
+Request trigger: {request.trigger}
+Request reason: {request.reason or '(none)'}
+User/request prompt:
+{request.prompt or '(none)'}
+
+{self._manager_api_contract(plan, user_query)}
+
+When you make a graph or plan change, include a concise reason. If user approval is needed, set the affected task to review or create a review task.
 """
 
     def _get_task(self, task_id: str | None, user_id: str | None = None) -> dict:
@@ -783,6 +1293,33 @@ Use the Viewer task API with {user_query} so updates are applied to the correct 
         task["metadata"] = _loads(task["metadata"], {})
         task["policy"] = _loads(task["policy"], {})
         return task
+
+    def _task_workspace(self, task_id: str) -> Path:
+        path = AGENT_TASK_LOG_DIR / task_id / "workspace"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _set_manager_session(self, user_id: str, group_id: str, session_id: str) -> None:
+        settings = self.settings(user_id, group_id)
+        payload = {**settings, "manager_session_id": session_id, "updated_at": _now()}
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO settings (
+                    user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
+                    goal, plan, context, constraints_json, manager_session_id, updated_at
+                )
+                VALUES (
+                    :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
+                    :goal, :plan, :context, :constraints_json, :manager_session_id, :updated_at
+                )
+                ON CONFLICT(user_id, group_id) DO UPDATE SET
+                    manager_session_id=excluded.manager_session_id,
+                    updated_at=excluded.updated_at
+                """,
+                payload,
+            )
+            conn.commit()
 
     def _write_task(self, task: dict, bump: bool) -> None:
         task = dict(task)

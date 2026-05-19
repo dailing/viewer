@@ -353,6 +353,11 @@ body {
   overflow: hidden;
 }
 
+.task-dag-top-page {
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .icon-button {
   align-items: center;
   display: inline-flex;

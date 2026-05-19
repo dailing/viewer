@@ -15,9 +15,13 @@ from .agent_tasks import (
     AgentTaskCreate,
     AgentTaskDependencyPatch,
     AgentTaskDispatchRequest,
+    AgentTaskManagerRequest,
     AgentTaskPatch,
+    AgentTaskPlanUpdate,
     AgentTaskProcessUpdate,
+    AgentTaskResetRequest,
     AgentTaskSettingsUpdate,
+    AgentTaskScopedManagerRequest,
     AgentTaskStatusUpdate,
     agent_task_manager,
 )
@@ -448,6 +452,7 @@ async def put_config(config: ConfigData):
             appearance=config.appearance,
             markdown=config.markdown,
             codex=config.codex,
+            dag=config.dag,
             workspace=config.workspace,
             users=config.users or current.users,
             default_user=config.default_user or current.default_user,
@@ -555,6 +560,11 @@ async def agent_tasks(group_id: str | None = None, status: str | None = None, us
     return agent_task_manager.list(user, group_id, status)
 
 
+@app.get("/api/agent-tasks/groups")
+async def agent_task_groups(user: str | None = None):
+    return agent_task_manager.groups(user)
+
+
 @app.get("/api/agent-tasks/settings")
 async def agent_task_settings(group_id: str = "default", user: str | None = None):
     return agent_task_manager.settings(user, group_id)
@@ -563,6 +573,21 @@ async def agent_task_settings(group_id: str = "default", user: str | None = None
 @app.put("/api/agent-tasks/settings")
 async def update_agent_task_settings(update: AgentTaskSettingsUpdate, user: str | None = None):
     return agent_task_manager.update_settings(update, user)
+
+
+@app.get("/api/agent-tasks/plan")
+async def agent_task_plan(group_id: str = "default", user: str | None = None):
+    return agent_task_manager.plan(user, group_id)
+
+
+@app.put("/api/agent-tasks/plan")
+async def update_agent_task_plan(update: AgentTaskPlanUpdate, user: str | None = None):
+    return agent_task_manager.update_plan(update, user)
+
+
+@app.post("/api/agent-tasks/manager")
+async def request_agent_task_manager(request: AgentTaskManagerRequest, user: str | None = None):
+    return await agent_task_manager.request_manager(request, user)
 
 
 @app.post("/api/agent-tasks/dispatch-ready")
@@ -578,6 +603,16 @@ async def create_agent_task(task: AgentTaskCreate, user: str | None = None):
 @app.get("/api/agent-tasks/{task_id}")
 async def get_agent_task(task_id: str, user: str | None = None):
     return agent_task_manager.get(task_id, user)
+
+
+@app.delete("/api/agent-tasks/{task_id}")
+async def delete_agent_task(task_id: str, user: str | None = None):
+    return agent_task_manager.delete(task_id, user)
+
+
+@app.post("/api/agent-tasks/{task_id}/reset")
+async def reset_agent_task(task_id: str, request: AgentTaskResetRequest, user: str | None = None):
+    return await agent_task_manager.reset(task_id, request, user)
 
 
 @app.get("/api/agent-tasks/{task_id}/context")
@@ -608,6 +643,11 @@ async def update_agent_task_status(task_id: str, update: AgentTaskStatusUpdate, 
 @app.post("/api/agent-tasks/{task_id}/process")
 async def set_agent_task_process(task_id: str, update: AgentTaskProcessUpdate, user: str | None = None):
     return agent_task_manager.set_process(task_id, update, user)
+
+
+@app.post("/api/agent-tasks/{task_id}/manager-request")
+async def request_agent_task_manager_for_task(task_id: str, request: AgentTaskScopedManagerRequest, user: str | None = None):
+    return await agent_task_manager.request_manager_for_task(task_id, request, user)
 
 
 @app.post("/api/agent-tasks/{task_id}/complete")

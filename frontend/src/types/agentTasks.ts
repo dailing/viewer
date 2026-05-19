@@ -32,6 +32,7 @@ export type AgentTaskRuntime = {
   attempt: number;
   lease_owner?: string | null;
   lease_expires_at?: number | null;
+  task_workspace?: string | null;
 };
 
 export type AgentTaskArtifact = {
@@ -92,7 +93,33 @@ export type AgentTaskSettings = {
   default_agent: string;
   default_model?: string | null;
   auto_tick_seconds: number;
+  goal?: string;
+  plan?: string;
+  context?: string;
+  constraints_json?: string;
+  manager_session_id?: string | null;
   updated_at: number;
+};
+
+export type AgentTaskPlan = {
+  user_id: string;
+  group_id: string;
+  goal: string;
+  plan: string;
+  context: string;
+  constraints: string[];
+  manager_session_id?: string | null;
+  updated_at: number;
+};
+
+export type AgentTaskGroup = {
+  user_id: string;
+  group_id: string;
+  task_count: number;
+  updated_at: number;
+  goal: string;
+  manager_session_id?: string | null;
+  mode: AgentTaskMode;
 };
 
 export type AgentTaskListResponse = {
@@ -103,6 +130,7 @@ export type AgentTaskListResponse = {
 
 export type AgentTaskContext = {
   task: AgentTask;
+  plan: AgentTaskPlan;
   dependencies: AgentTask[];
   children: AgentTask[];
   ancestors: AgentTask[];
@@ -139,4 +167,22 @@ export type AgentTaskDependencyPatch = {
   replace?: string[] | null;
   expected_version?: number | null;
   reason?: string;
+};
+
+export type AgentTaskManagerRequest = {
+  group_id: string;
+  task_id?: string | null;
+  prompt: string;
+  reason?: string;
+  trigger?: string;
+  model?: string | null;
+};
+
+export type AgentTaskResetAction = "clear" | "retry";
+
+export type AgentTaskResetResponse = {
+  action: AgentTaskResetAction;
+  affected_task_ids: string[];
+  tasks: AgentTask[];
+  dispatched?: AgentTask | null;
 };

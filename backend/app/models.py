@@ -101,6 +101,10 @@ class CodexConfig(BaseModel):
     auto_commit_prompt: str = DEFAULT_AUTO_COMMIT_PROMPT
 
 
+class DagConfig(BaseModel):
+    base_url: str = ""
+
+
 class WorkspaceConfig(BaseModel):
     count: int = Field(default=5, ge=1, le=20)
     heat_interval_seconds: float = Field(default=10.0, ge=1.0, le=300.0)
@@ -117,6 +121,7 @@ class ConfigData(BaseModel):
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
+    dag: DagConfig = Field(default_factory=DagConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     users: list[UserProfile] = Field(default_factory=list)
     default_user: str = ""

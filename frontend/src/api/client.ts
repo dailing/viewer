@@ -4,7 +4,7 @@ import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionS
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
-import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskListResponse, AgentTaskPatch, AgentTaskSettings } from "../types/agentTasks";
+import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskGroup, AgentTaskListResponse, AgentTaskManagerRequest, AgentTaskPatch, AgentTaskPlan, AgentTaskResetAction, AgentTaskResetResponse, AgentTaskSettings } from "../types/agentTasks";
 import type { AgentProvider, AgentProviderInfo } from "../types/agents";
 import type { GitDiffText, GitStatus } from "../types/git";
 import { currentUserId } from "../utils/userProfile";
@@ -494,6 +494,10 @@ export async function listAgentTasks(groupId?: string, status?: string): Promise
   return request<AgentTaskListResponse>(`/api/agent-tasks${query ? `?${query}` : ""}`);
 }
 
+export async function listAgentTaskGroups(): Promise<AgentTaskGroup[]> {
+  return request<AgentTaskGroup[]>("/api/agent-tasks/groups");
+}
+
 export async function getAgentTask(id: string): Promise<AgentTask> {
   return request<AgentTask>(`/api/agent-tasks/${encodeURIComponent(id)}`);
 }
@@ -515,6 +519,18 @@ export async function patchAgentTask(id: string, patch: AgentTaskPatch): Promise
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteAgentTask(id: string): Promise<void> {
+  await request<{ status: string; task_id: string }>(`/api/agent-tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function resetAgentTask(id: string, action: AgentTaskResetAction, reason: string): Promise<AgentTaskResetResponse> {
+  return request<AgentTaskResetResponse>(`/api/agent-tasks/${encodeURIComponent(id)}/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, reason }),
   });
 }
 
@@ -551,6 +567,26 @@ export async function updateAgentTaskSettings(settings: Partial<AgentTaskSetting
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(settings),
+  });
+}
+
+export async function getAgentTaskPlan(groupId = "default"): Promise<AgentTaskPlan> {
+  return request<AgentTaskPlan>(`/api/agent-tasks/plan?group_id=${encodeURIComponent(groupId)}`);
+}
+
+export async function updateAgentTaskPlan(plan: Pick<AgentTaskPlan, "group_id" | "goal" | "plan" | "context" | "constraints"> & { reason?: string }): Promise<AgentTaskPlan> {
+  return request<AgentTaskPlan>("/api/agent-tasks/plan", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(plan),
+  });
+}
+
+export async function requestAgentTaskManager(requestBody: AgentTaskManagerRequest): Promise<{ manager_session_id: string; session: unknown }> {
+  return request<{ manager_session_id: string; session: unknown }>("/api/agent-tasks/manager", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
   });
 }
 

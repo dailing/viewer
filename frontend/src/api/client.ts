@@ -4,7 +4,7 @@ import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionS
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
-import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskGroup, AgentTaskListResponse, AgentTaskManagerRequest, AgentTaskPatch, AgentTaskPlan, AgentTaskResetAction, AgentTaskResetResponse, AgentTaskSettings } from "../types/agentTasks";
+import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskFile, AgentTaskGroup, AgentTaskListResponse, AgentTaskManagerRequest, AgentTaskPatch, AgentTaskPlan, AgentTaskResetAction, AgentTaskResetResponse, AgentTaskSettings } from "../types/agentTasks";
 import type { AgentProvider, AgentProviderInfo } from "../types/agents";
 import type { GitDiffText, GitStatus } from "../types/git";
 import { currentUserId } from "../utils/userProfile";
@@ -506,6 +506,10 @@ export async function getAgentTaskContext(id: string): Promise<AgentTaskContext>
   return request<AgentTaskContext>(`/api/agent-tasks/${encodeURIComponent(id)}/context`);
 }
 
+export async function listAgentTaskFiles(id: string): Promise<AgentTaskFile[]> {
+  return request<AgentTaskFile[]>(`/api/agent-tasks/${encodeURIComponent(id)}/files`);
+}
+
 export async function createAgentTask(task: AgentTaskCreate): Promise<AgentTask> {
   return request<AgentTask>("/api/agent-tasks", {
     method: "POST",
@@ -562,7 +566,7 @@ export async function getAgentTaskSettings(groupId = "default"): Promise<AgentTa
   return request<AgentTaskSettings>(`/api/agent-tasks/settings?group_id=${encodeURIComponent(groupId)}`);
 }
 
-export async function updateAgentTaskSettings(settings: Partial<AgentTaskSettings> & { default_group_id?: string }): Promise<AgentTaskSettings> {
+export async function updateAgentTaskSettings(settings: Partial<AgentTaskSettings> & { default_group_id?: string; project_root?: string }): Promise<AgentTaskSettings> {
   return request<AgentTaskSettings>("/api/agent-tasks/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

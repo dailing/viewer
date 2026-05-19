@@ -9,7 +9,7 @@ from loguru import logger
 
 from .config import settings
 from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, TextLineWindow, WorkspaceConfig, WorkspaceData, WorkspaceSnapshot
-from .storage import CONFIG_PATH, migrate_legacy_state
+from .storage import AGENT_TASK_LOG_DIR, CONFIG_PATH, migrate_legacy_state
 from .users import default_user_id, list_user_profiles, user_home_path, user_workspaces_path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
@@ -53,6 +53,7 @@ MAX_TEXT_LINE_COUNT = 500
 MAX_LINE_INDEX_CACHE_ENTRIES = 8
 _line_index_cache: dict[tuple[str, int, int], list[int]] = {}
 TEXT_FILENAMES = {".env"}
+AGENT_TASK_FILE_PREFIX = "__agent_task_files__"
 
 
 def normalize_relative(path: str | None) -> str:
@@ -67,8 +68,21 @@ def served_root(user_id: str | None = None) -> Path:
     return user_home_path(user_id) if user_id else settings.root_resolved
 
 
+def _resolve_agent_task_file_path(rel: str) -> Path | None:
+    parts = rel.split("/")
+    if len(parts) < 3 or parts[0] != AGENT_TASK_FILE_PREFIX or parts[2] != "workspace":
+        return None
+    task_id = parts[1]
+    if not task_id.startswith("task_"):
+        raise HTTPException(status_code=400, detail="Invalid task file path")
+    return AGENT_TASK_LOG_DIR / task_id / "workspace" / "/".join(parts[3:])
+
+
 def resolve_path(path: str | None, user_id: str | None = None) -> Path:
     rel = normalize_relative(path)
+    task_file = _resolve_agent_task_file_path(rel)
+    if task_file is not None:
+        return task_file
     return served_root(user_id).joinpath(rel)
 
 

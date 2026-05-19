@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from .config import settings
 from .codex_sessions import codex_session_manager
+from .files import AGENT_TASK_FILE_PREFIX, served_root
 from .hermes_sessions import hermes_session_manager
 from .storage import AGENT_TASK_LOG_DIR, AGENT_TASKS_DB_PATH, ensure_view_home
 from .users import normalize_user_id
@@ -76,6 +77,20 @@ class AgentTaskArtifact(BaseModel):
     type: str
     path: str
     label: str | None = None
+
+
+class AgentTaskFile(BaseModel):
+    source: Literal["artifact", "workspace"]
+    type: str
+    name: str
+    path: str
+    view_path: str | None = None
+    label: str | None = None
+    size: int | None = None
+    mtime: float | None = None
+    is_dir: bool = False
+    viewable: bool = False
+    unavailable_reason: str | None = None
 
 
 class AgentTaskResult(BaseModel):
@@ -173,6 +188,7 @@ class AgentTaskSettingsUpdate(BaseModel):
     default_agent: str | None = None
     default_model: str | None = None
     auto_tick_seconds: int | None = None
+    project_root: str | None = None
 
 
 class AgentTaskPlanUpdate(BaseModel):
@@ -314,6 +330,7 @@ class AgentTaskManager:
                     plan TEXT NOT NULL DEFAULT '',
                     context TEXT NOT NULL DEFAULT '',
                     constraints_json TEXT NOT NULL DEFAULT '[]',
+                    project_root TEXT NOT NULL DEFAULT '',
                     manager_session_id TEXT,
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (user_id, group_id)
@@ -325,6 +342,7 @@ class AgentTaskManager:
                 ("plan", "ALTER TABLE settings ADD COLUMN plan TEXT NOT NULL DEFAULT ''"),
                 ("context", "ALTER TABLE settings ADD COLUMN context TEXT NOT NULL DEFAULT ''"),
                 ("constraints_json", "ALTER TABLE settings ADD COLUMN constraints_json TEXT NOT NULL DEFAULT '[]'"),
+                ("project_root", "ALTER TABLE settings ADD COLUMN project_root TEXT NOT NULL DEFAULT ''"),
                 ("manager_session_id", "ALTER TABLE settings ADD COLUMN manager_session_id TEXT"),
             ):
                 existing = [row["name"] for row in conn.execute("PRAGMA table_info(settings)").fetchall()]
@@ -369,6 +387,7 @@ class AgentTaskManager:
             "plan": "",
             "context": "",
             "constraints_json": "[]",
+            "project_root": "",
             "manager_session_id": None,
             "updated_at": _now(),
         }
@@ -396,6 +415,7 @@ class AgentTaskManager:
             "plan": current.get("plan", ""),
             "context": current.get("context", ""),
             "constraints_json": current.get("constraints_json", "[]"),
+            "project_root": update.project_root.strip() if update.project_root is not None else current.get("project_root", ""),
             "manager_session_id": current.get("manager_session_id"),
             "updated_at": _now(),
         }
@@ -404,11 +424,11 @@ class AgentTaskManager:
                 """
                 INSERT INTO settings (
                     user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
-                    goal, plan, context, constraints_json, manager_session_id, updated_at
+                    goal, plan, context, constraints_json, project_root, manager_session_id, updated_at
                 )
                 VALUES (
                     :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
-                    :goal, :plan, :context, :constraints_json, :manager_session_id, :updated_at
+                    :goal, :plan, :context, :constraints_json, :project_root, :manager_session_id, :updated_at
                 )
                 ON CONFLICT(user_id, group_id) DO UPDATE SET
                     mode=excluded.mode,
@@ -419,6 +439,7 @@ class AgentTaskManager:
                     plan=excluded.plan,
                     context=excluded.context,
                     constraints_json=excluded.constraints_json,
+                    project_root=excluded.project_root,
                     manager_session_id=excluded.manager_session_id,
                     updated_at=excluded.updated_at
                 """,
@@ -437,6 +458,7 @@ class AgentTaskManager:
             "plan": settings.get("plan", ""),
             "context": settings.get("context", ""),
             "constraints": _loads(settings.get("constraints_json"), []),
+            "project_root": settings.get("project_root", ""),
             "manager_session_id": settings.get("manager_session_id"),
             "updated_at": settings["updated_at"],
         }
@@ -459,11 +481,11 @@ class AgentTaskManager:
                 """
                 INSERT INTO settings (
                     user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
-                    goal, plan, context, constraints_json, manager_session_id, updated_at
+                    goal, plan, context, constraints_json, project_root, manager_session_id, updated_at
                 )
                 VALUES (
                     :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
-                    :goal, :plan, :context, :constraints_json, :manager_session_id, :updated_at
+                    :goal, :plan, :context, :constraints_json, :project_root, :manager_session_id, :updated_at
                 )
                 ON CONFLICT(user_id, group_id) DO UPDATE SET
                     goal=excluded.goal,
@@ -526,6 +548,7 @@ class AgentTaskManager:
                 "goal": "",
                 "manager_session_id": None,
                 "mode": "manual",
+                "project_root": "",
             }
         for row in setting_rows:
             item = by_group.setdefault(
@@ -542,6 +565,7 @@ class AgentTaskManager:
                     "goal": row["goal"],
                     "manager_session_id": row["manager_session_id"],
                     "mode": row["mode"],
+                    "project_root": row["project_root"],
                     "updated_at": max(float(item.get("updated_at") or 0), float(row["updated_at"] or 0)),
                 }
             )
@@ -554,6 +578,7 @@ class AgentTaskManager:
                 "goal": "",
                 "manager_session_id": None,
                 "mode": "manual",
+                "project_root": "",
             }
         return sorted(by_group.values(), key=lambda item: (item["updated_at"], item["group_id"]), reverse=True)
 
@@ -662,6 +687,74 @@ class AgentTaskManager:
             ancestors.append(cursor)
         events = self.events(task_id, task["user_id"])
         return {"task": task, "plan": self.plan(task["user_id"], task["group_id"]), "dependencies": dependencies, "children": children, "ancestors": ancestors, "events": events}
+
+    def files(self, task_id: str, user_id: str | None = None, limit: int = 200) -> list[dict]:
+        task = self._get_task(task_id, user_id)
+        workspace = AGENT_TASK_LOG_DIR / task_id / "workspace"
+        entries: list[AgentTaskFile] = []
+        seen: set[str] = set()
+
+        def add_path(source: Literal["artifact", "workspace"], artifact_type: str, raw_path: str, label: str | None = None) -> None:
+            if len(entries) >= limit:
+                return
+            target = self._resolve_task_file_path(raw_path, workspace, task["user_id"])
+            if not target.exists():
+                entries.append(
+                    AgentTaskFile(
+                        source=source,
+                        type=artifact_type,
+                        name=Path(raw_path).name or raw_path,
+                        path=raw_path,
+                        label=label,
+                        unavailable_reason="missing",
+                    )
+                )
+                return
+            try:
+                resolved = target.resolve()
+            except OSError:
+                return
+            key = resolved.as_posix()
+            if key in seen:
+                return
+            if resolved.is_dir():
+                for child in sorted((item for item in resolved.rglob("*") if item.is_file()), key=lambda item: item.relative_to(resolved).as_posix().lower()):
+                    add_path(source, artifact_type, child.as_posix(), label or child.relative_to(resolved).as_posix())
+                    if len(entries) >= limit:
+                        break
+                return
+            seen.add(key)
+            stat = resolved.stat()
+            view_path = self._task_file_view_path(resolved, task["user_id"], task_id)
+            entries.append(
+                AgentTaskFile(
+                    source=source,
+                    type=artifact_type,
+                    name=resolved.name,
+                    path=resolved.as_posix(),
+                    view_path=view_path,
+                    label=label,
+                    size=stat.st_size if resolved.is_file() else None,
+                    mtime=stat.st_mtime,
+                    is_dir=False,
+                    viewable=bool(view_path),
+                    unavailable_reason=None if view_path else "outside_served_root",
+                )
+            )
+
+        for artifact in task.get("artifacts", []):
+            raw_path = str(artifact.get("path") or "").strip()
+            if not raw_path:
+                continue
+            add_path("artifact", artifact.get("type") or "artifact", raw_path, artifact.get("label"))
+
+        if workspace.exists():
+            for child in sorted((item for item in workspace.rglob("*") if item.is_file()), key=lambda item: item.relative_to(workspace).as_posix().lower()):
+                add_path("workspace", "workspace_file", child.as_posix(), child.relative_to(workspace).as_posix())
+                if len(entries) >= limit:
+                    break
+
+        return [entry.model_dump() for entry in entries]
 
     def create(self, payload: AgentTaskCreate, user_id: str | None = None, actor: str = "user") -> dict:
         self._init_db()
@@ -870,7 +963,7 @@ class AgentTaskManager:
             artifacts.append(workspace_artifact)
         task["artifacts"] = artifacts
         self._write_task(task, bump=True)
-        summary = await AGENT_MANAGERS[agent].create("", task["workspace"], model, task["user_id"])
+        summary = await AGENT_MANAGERS[agent].create("", self._agent_cwd(task), model, task["user_id"])
         task = self._get_task(task_id, task["user_id"])
         task["agent_session_id"] = summary["id"]
         self._write_task(task, bump=True)
@@ -929,12 +1022,12 @@ class AgentTaskManager:
             except Exception:
                 logger.exception("Failed to resume manager session {}; creating a replacement", session_id)
                 prompt = self._manager_prompt(plan, tasks, task, request)
-                summary = await codex_session_manager.create(prompt, task.get("workspace") if task else "", model, user)
+                summary = await codex_session_manager.create(prompt, self._agent_cwd(task, settings), model, user)
                 session_id = summary["id"]
                 self._set_manager_session(user, group_id, session_id)
         else:
             prompt = self._manager_prompt(plan, tasks, task, request)
-            summary = await codex_session_manager.create(prompt, task.get("workspace") if task else "", model, user)
+            summary = await codex_session_manager.create(prompt, self._agent_cwd(task, settings), model, user)
             session_id = summary["id"]
             self._set_manager_session(user, group_id, session_id)
         self._record_event(
@@ -1163,6 +1256,7 @@ Use action="retry" to clear the same downstream set and immediately dispatch the
     def _dispatch_prompt(self, task: dict) -> str:
         user_query = f"?user={task['user_id']}"
         plan = self.plan(task["user_id"], task["group_id"])
+        project_root = plan.get("project_root") or "(default profile home)"
         task_workspace = task["runtime"].get("task_workspace") or self._task_workspace(task["id"]).as_posix()
         output_artifacts = [item for item in task.get("artifacts", []) if item.get("type") != "task_workspace"]
         output_block = "\n".join(f"- {item.get('type', 'artifact')}: {item.get('path')} ({item.get('label') or 'no label'})" for item in output_artifacts) or "- No predeclared output artifact. Create a clear artifact under the task-local workspace and register it on completion."
@@ -1179,7 +1273,8 @@ Role boundary:
 
 Task title: {task['title']}
 Group: {task['group_id']}
-Workspace: {task['workspace'] or '(default profile home)'}
+Project root: {project_root}
+Agent cwd: {self._agent_cwd(task)}
 Task-local workspace: {task_workspace}
 
 Task Contract:
@@ -1247,6 +1342,9 @@ Your role:
 Current goal:
 {plan.get('goal') or '(none set)'}
 
+Project root:
+{plan.get('project_root') or '(default profile home)'}
+
 Current plan:
 {plan.get('plan') or '(none set)'}
 
@@ -1299,6 +1397,34 @@ When you make a graph or plan change, include a concise reason. If user approval
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _agent_cwd(self, task: dict | None, settings: dict | None = None) -> str:
+        if task and task.get("workspace"):
+            return str(task["workspace"])
+        if settings is None and task:
+            settings = self.settings(task["user_id"], task["group_id"])
+        return str((settings or {}).get("project_root") or "")
+
+    def _resolve_task_file_path(self, raw_path: str, workspace: Path, user_id: str) -> Path:
+        candidate = Path(raw_path).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        workspace_candidate = workspace / raw_path
+        if workspace_candidate.exists():
+            return workspace_candidate
+        return served_root(user_id) / raw_path
+
+    def _task_file_view_path(self, path: Path, user_id: str, task_id: str) -> str | None:
+        try:
+            return path.resolve().relative_to(served_root(user_id).resolve()).as_posix()
+        except ValueError:
+            pass
+        workspace = (AGENT_TASK_LOG_DIR / task_id / "workspace").resolve()
+        try:
+            rel = path.resolve().relative_to(workspace).as_posix()
+        except ValueError:
+            return None
+        return "/".join(part for part in [AGENT_TASK_FILE_PREFIX, task_id, "workspace", rel] if part)
+
     def _set_manager_session(self, user_id: str, group_id: str, session_id: str) -> None:
         settings = self.settings(user_id, group_id)
         payload = {**settings, "manager_session_id": session_id, "updated_at": _now()}
@@ -1307,11 +1433,11 @@ When you make a graph or plan change, include a concise reason. If user approval
                 """
                 INSERT INTO settings (
                     user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
-                    goal, plan, context, constraints_json, manager_session_id, updated_at
+                    goal, plan, context, constraints_json, project_root, manager_session_id, updated_at
                 )
                 VALUES (
                     :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
-                    :goal, :plan, :context, :constraints_json, :manager_session_id, :updated_at
+                    :goal, :plan, :context, :constraints_json, :project_root, :manager_session_id, :updated_at
                 )
                 ON CONFLICT(user_id, group_id) DO UPDATE SET
                     manager_session_id=excluded.manager_session_id,

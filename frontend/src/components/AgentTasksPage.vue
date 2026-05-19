@@ -1,16 +1,25 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { listAgentTaskFiles } from "../api/client";
 import { useAgentTasksStore } from "../stores/agentTasks";
+import { useLayoutStore } from "../stores/layout";
 import { renderMarkdown, renderMermaidIn } from "../utils/markdownRender";
+import { namespacedStorageKey } from "../utils/userProfile";
 import AgentViewer from "./viewers/AgentViewer.vue";
-import type { AgentTask, AgentTaskStatus } from "../types/agentTasks";
+import LocalFilePreview from "./LocalFilePreview.vue";
+import type { AgentTask, AgentTaskFile, AgentTaskStatus } from "../types/agentTasks";
+import type { SplitDirection } from "../types/layout";
 
 const taskStore = useAgentTasksStore();
+const layout = useLayoutStore();
 const busy = ref(false);
 const error = ref("");
 const notice = ref("");
 const activePanel = ref<"groups" | "plan" | "tasks">("tasks");
-const groupDraft = ref("default");
+const LAST_GROUP_KEY = "viewer.agentTasks.lastGroup.v1";
+const readLastGroupId = () => localStorage.getItem(namespacedStorageKey(LAST_GROUP_KEY))?.trim() || "default";
+const rememberGroupId = (groupId: string) => localStorage.setItem(namespacedStorageKey(LAST_GROUP_KEY), groupId || "default");
+const groupDraft = ref(readLastGroupId());
 const editTitle = ref("");
 const editDescription = ref("");
 const editInstruction = ref("");
@@ -25,6 +34,15 @@ const planGoal = ref("");
 const planText = ref("");
 const planContext = ref("");
 const planConstraints = ref("");
+const taskFiles = ref<AgentTaskFile[]>([]);
+const taskFilesLoading = ref(false);
+const taskFilesError = ref("");
+const previewPath = ref("");
+const newGroupDialogOpen = ref(false);
+const newGroupId = ref("");
+const newGroupGoal = ref("");
+const newGroupProjectRoot = ref("");
+const newGroupContext = ref("");
 
 const statuses: AgentTaskStatus[] = ["backlog", "ready", "running", "waiting_process", "review", "blocked", "done", "failed"];
 const dagNodeWidth = 230;
@@ -194,6 +212,13 @@ onMounted(async () => {
 });
 
 watch(selectedTask, (task) => syncEdit(task), { immediate: true });
+watch(
+  () => taskStore.selectedId,
+  (id) => {
+    if (id) void loadTaskFiles(id);
+    else taskFiles.value = [];
+  },
+);
 watch(planPreviewMarkdown, () => {
   if (!planEditing.value) void renderPlanPreview();
 });
@@ -205,29 +230,48 @@ async function load() {
   await withBusy(async () => {
     await taskStore.load(groupDraft.value || "default");
     groupDraft.value = taskStore.selectedGroupId;
+    rememberGroupId(taskStore.selectedGroupId);
     syncPlan();
-    if (taskStore.selectedId) await taskStore.loadContext(taskStore.selectedId);
+    if (taskStore.selectedId) {
+      await taskStore.loadContext(taskStore.selectedId);
+      await loadTaskFiles(taskStore.selectedId);
+    }
   });
 }
 
 async function selectGroup(groupId: string) {
   groupDraft.value = groupId;
+  rememberGroupId(groupId || "default");
   await load();
 }
 
-async function newGroup() {
-  const groupId = window.prompt("New group id", "new_project");
-  if (!groupId) return;
-  const normalized = groupId.trim();
+function openNewGroupDialog() {
+  newGroupId.value = "";
+  newGroupGoal.value = "";
+  newGroupProjectRoot.value = taskStore.settings?.project_root || "";
+  newGroupContext.value = "";
+  newGroupDialogOpen.value = true;
+  void nextTick(() => document.getElementById("new-group-id")?.focus());
+}
+
+function closeNewGroupDialog() {
+  newGroupDialogOpen.value = false;
+}
+
+async function createGroupFromDialog() {
+  const normalized = newGroupId.value.trim();
   if (!normalized) return;
-  const goal = window.prompt("Group goal", "Describe the goal for this DAG") ?? "";
   groupDraft.value = normalized;
   await withBusy(async () => {
+    await taskStore.saveSettings({
+      default_group_id: normalized,
+      project_root: newGroupProjectRoot.value.trim(),
+    });
     await taskStore.savePlan({
       group_id: normalized,
-      goal,
+      goal: newGroupGoal.value.trim(),
       plan: "",
-      context: "",
+      context: newGroupContext.value.trim(),
       constraints: [
         "Executors may write inside their task-local workspace.",
         "Executors should not edit shared/common source code unless explicitly instructed.",
@@ -236,7 +280,9 @@ async function newGroup() {
       reason: "Created group from Task DAG page",
     });
     await taskStore.load(normalized);
+    rememberGroupId(normalized);
     syncPlan();
+    newGroupDialogOpen.value = false;
     notice.value = `Created group ${normalized}`;
   });
 }
@@ -274,7 +320,58 @@ async function selectTask(id: string) {
   taskStore.selectedId = id;
   await withBusy(async () => {
     await taskStore.loadContext(id);
+    await loadTaskFiles(id);
   });
+}
+
+async function loadTaskFiles(id = taskStore.selectedId) {
+  if (!id) {
+    taskFiles.value = [];
+    return;
+  }
+  taskFilesLoading.value = true;
+  taskFilesError.value = "";
+  try {
+    taskFiles.value = await listAgentTaskFiles(id);
+  } catch (err) {
+    taskFilesError.value = err instanceof Error ? err.message : String(err);
+    taskFiles.value = [];
+  } finally {
+    taskFilesLoading.value = false;
+  }
+}
+
+function formatBytes(value?: number | null) {
+  if (value === null || value === undefined) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function taskFileAvailability(file: AgentTaskFile) {
+  if (file.viewable) return "open preview";
+  if (file.unavailable_reason === "missing") return "missing or cleared";
+  if (file.unavailable_reason === "outside_served_root") return "outside served root";
+  return file.unavailable_reason || "not previewable";
+}
+
+function openTaskFile(file: AgentTaskFile) {
+  if (!file.view_path) return;
+  previewPath.value = file.view_path;
+}
+
+function closeFilePreview() {
+  previewPath.value = "";
+}
+
+function openPreviewPathInPane(path: string) {
+  layout.openFile(path);
+  notice.value = `Opened ${path} in the active workspace pane`;
+}
+
+function openPreviewPathInSplit(path: string, direction: SplitDirection) {
+  layout.openFileInSplit(path, direction);
+  notice.value = `Opened ${path} in a workspace split`;
 }
 
 async function createTask() {
@@ -374,6 +471,7 @@ async function saveSelected() {
       },
       reason: "Updated from task DAG page",
     });
+    await loadTaskFiles(task.id);
   });
 }
 
@@ -408,6 +506,7 @@ async function dispatchSelected(force = false) {
   if (!task) return;
   await withBusy(async () => {
     await taskStore.dispatch(task.id, force);
+    await loadTaskFiles(task.id);
   });
 }
 
@@ -424,6 +523,7 @@ async function resetSelected(action: "clear" | "retry") {
   await withBusy(async () => {
     const result = await taskStore.reset(task.id, action, `${verb} from task DAG page`);
     notice.value = `${verb} affected ${result.affected_task_ids.length} task(s)`;
+    await loadTaskFiles(task.id);
   });
 }
 
@@ -484,7 +584,7 @@ async function withBusy(action: () => Promise<void>) {
             <h2>Groups</h2>
             <span>{{ taskStore.groupItems.length }} groups · {{ taskStore.tasks.length }} tasks loaded</span>
           </div>
-          <button class="btn btn-primary icon-button" type="button" title="New group" @click="newGroup">
+          <button class="btn btn-primary icon-button" type="button" title="New group" @click="openNewGroupDialog">
             <i class="bi bi-folder-plus"></i>
           </button>
         </header>
@@ -512,6 +612,7 @@ async function withBusy(action: () => Promise<void>) {
           >
             <span class="group-title">{{ group.group_id }}</span>
             <span class="group-meta">{{ group.task_count }} tasks · {{ group.mode }}</span>
+            <span class="group-root">{{ group.project_root || "Default profile home" }}</span>
             <span class="group-goal">{{ group.goal || "No goal set" }}</span>
           </button>
         </section>
@@ -728,8 +829,39 @@ async function withBusy(action: () => Promise<void>) {
         <section class="task-result">
           <h3>Result</h3>
           <p>{{ selectedTask.result.summary || "No summary yet." }}</p>
-          <div class="task-artifacts">
-            <span v-for="artifact in selectedTask.artifacts" :key="`${artifact.type}:${artifact.path}`">{{ artifact.type }}: {{ artifact.path }}</span>
+        </section>
+
+        <section class="task-files">
+          <header class="task-section-header">
+            <div>
+              <h3>Generated Files</h3>
+              <span>{{ taskFiles.length }} files and artifacts</span>
+            </div>
+            <button class="btn btn-outline-secondary icon-button" type="button" title="Refresh files" :disabled="taskFilesLoading" @click="loadTaskFiles()">
+              <i class="bi bi-arrow-clockwise"></i>
+            </button>
+          </header>
+          <div v-if="taskFilesError" class="task-empty small">{{ taskFilesError }}</div>
+          <div v-else-if="taskFilesLoading" class="task-empty small">Loading files...</div>
+          <div v-else-if="!taskFiles.length" class="task-empty small">No generated files found yet.</div>
+          <div v-else class="task-file-list">
+            <button
+              v-for="file in taskFiles"
+              :key="`${file.source}:${file.path}`"
+              class="task-file-item"
+              :class="{ disabled: !file.viewable }"
+              type="button"
+              :disabled="!file.viewable"
+              :title="`${file.path} · ${taskFileAvailability(file)}`"
+              @click="openTaskFile(file)"
+            >
+              <i class="bi" :class="file.viewable ? 'bi-file-earmark-text' : file.unavailable_reason === 'missing' ? 'bi-file-earmark-x' : 'bi-slash-circle'"></i>
+              <span class="task-file-main">
+                <span class="task-file-name">{{ file.label || file.name }}</span>
+                <span class="task-file-path">{{ file.path }}</span>
+              </span>
+              <span class="task-file-meta">{{ file.source }} · {{ file.type }} · {{ taskFileAvailability(file) }} {{ formatBytes(file.size) }}</span>
+            </button>
           </div>
         </section>
       </section>
@@ -749,6 +881,53 @@ async function withBusy(action: () => Promise<void>) {
         <AgentViewer v-if="sessionDialogRef" :agent-ref="sessionDialogRef" pane-id="agent-task-session-dialog" />
       </section>
     </div>
+
+    <div v-if="newGroupDialogOpen" class="modal-backdrop-custom" @click.self="closeNewGroupDialog">
+      <form class="new-group-dialog" role="dialog" aria-modal="true" aria-labelledby="new-group-title" @submit.prevent="createGroupFromDialog">
+        <header class="dialog-header">
+          <div>
+            <h2 id="new-group-title">New Group</h2>
+            <span>Configure the DAG and Codex starting directory.</span>
+          </div>
+          <button class="btn btn-outline-secondary icon-button" type="button" title="Close" @click="closeNewGroupDialog">
+            <i class="bi bi-x-lg"></i>
+          </button>
+        </header>
+
+        <label>
+          <span>Group ID</span>
+          <input id="new-group-id" v-model="newGroupId" class="form-control" type="text" placeholder="project_alpha" required />
+        </label>
+
+        <label>
+          <span>Project Root</span>
+          <input v-model="newGroupProjectRoot" class="form-control" type="text" placeholder="/absolute/path/or/profile-relative/path" />
+        </label>
+
+        <label>
+          <span>Goal</span>
+          <input v-model="newGroupGoal" class="form-control" type="text" placeholder="What should this task DAG accomplish?" />
+        </label>
+
+        <label>
+          <span>Context</span>
+          <textarea v-model="newGroupContext" class="form-control" rows="4" placeholder="Stable context for manager and executor agents"></textarea>
+        </label>
+
+        <footer class="dialog-actions">
+          <button class="btn btn-outline-secondary" type="button" :disabled="busy" @click="closeNewGroupDialog">Cancel</button>
+          <button class="btn btn-primary" type="submit" :disabled="busy || !newGroupId.trim()">Create Group</button>
+        </footer>
+      </form>
+    </div>
+
+    <LocalFilePreview
+      v-if="previewPath"
+      :path="previewPath"
+      @close="closeFilePreview"
+      @open-pane="openPreviewPathInPane"
+      @open-split="openPreviewPathInSplit"
+    />
   </section>
 </template>
 
@@ -885,12 +1064,14 @@ h3 {
 }
 
 .group-meta,
+.group-root,
 .group-goal {
   color: #667085;
   font-size: 11px;
   line-height: 1.25;
 }
 
+.group-root,
 .group-goal {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1271,17 +1452,66 @@ label span {
   margin-top: 12px;
 }
 
-.task-artifacts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.task-files {
+  margin-top: 12px;
+  border-top: 1px solid #edf0f5;
+  padding-top: 12px;
 }
 
-.task-artifacts span {
-  background: #eef2f7;
+.task-file-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.task-file-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid #d8dee8;
   border-radius: 6px;
-  padding: 4px 6px;
+  background: #ffffff;
+  color: #172033;
+  padding: 8px;
+  text-align: left;
+}
+
+.task-file-item:hover:not(:disabled) {
+  border-color: #2563eb;
+  background: #f8fbff;
+}
+
+.task-file-item.disabled {
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+.task-file-main {
+  display: grid;
+  min-width: 0;
+}
+
+.task-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.task-file-path,
+.task-file-meta {
+  overflow: hidden;
+  color: #667085;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
+}
+
+.task-file-meta {
+  max-width: 220px;
 }
 
 .session-dialog-backdrop {
@@ -1330,6 +1560,55 @@ label span {
 .session-dialog :deep(.agent-viewer) {
   flex: 1;
   min-height: 0;
+}
+
+.modal-backdrop-custom {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgb(15 23 42 / 0.36);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.new-group-dialog {
+  width: min(560px, 94vw);
+  background: #ffffff;
+  border: 1px solid #cfd8e6;
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgb(15 23 42 / 0.24);
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.dialog-header,
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dialog-header span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.new-group-dialog label {
+  display: grid;
+  gap: 5px;
+}
+
+.new-group-dialog label > span {
+  color: #344054;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
 }
 
 @media (max-width: 900px) {
@@ -1402,6 +1681,15 @@ label span {
 
   .task-detail-actions .btn {
     width: 100%;
+  }
+
+  .task-file-item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .task-file-meta {
+    grid-column: 2;
+    max-width: none;
   }
 
   .task-form-grid,

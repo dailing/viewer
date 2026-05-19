@@ -620,6 +620,11 @@ async def get_agent_task_context(task_id: str, user: str | None = None):
     return agent_task_manager.context(task_id, user)
 
 
+@app.get("/api/agent-tasks/{task_id}/files")
+async def get_agent_task_files(task_id: str, limit: int = Query(default=200, ge=1, le=1000), user: str | None = None):
+    return agent_task_manager.files(task_id, user, limit)
+
+
 @app.get("/api/agent-tasks/{task_id}/events")
 async def get_agent_task_events(task_id: str, limit: int = Query(default=100, ge=1, le=500), user: str | None = None):
     return agent_task_manager.events(task_id, user, limit)

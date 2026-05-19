@@ -122,7 +122,7 @@ export const useAgentTasksStore = defineStore("agentTasks", {
       for (const task of result.dispatched) this.upsert(task);
       return result;
     },
-    async saveSettings(settings: Partial<AgentTaskSettings> & { default_group_id?: string }) {
+    async saveSettings(settings: Partial<AgentTaskSettings> & { default_group_id?: string; project_root?: string }) {
       this.settings = await updateAgentTaskSettings(settings);
       return this.settings;
     },

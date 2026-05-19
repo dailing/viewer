@@ -41,6 +41,20 @@ export type AgentTaskArtifact = {
   label?: string | null;
 };
 
+export type AgentTaskFile = {
+  source: "artifact" | "workspace";
+  type: string;
+  name: string;
+  path: string;
+  view_path?: string | null;
+  label?: string | null;
+  size?: number | null;
+  mtime?: number | null;
+  is_dir: boolean;
+  viewable: boolean;
+  unavailable_reason?: "missing" | "outside_served_root" | string | null;
+};
+
 export type AgentTaskResult = {
   summary?: string | null;
   decision?: string | null;
@@ -97,6 +111,7 @@ export type AgentTaskSettings = {
   plan?: string;
   context?: string;
   constraints_json?: string;
+  project_root?: string;
   manager_session_id?: string | null;
   updated_at: number;
 };
@@ -108,6 +123,7 @@ export type AgentTaskPlan = {
   plan: string;
   context: string;
   constraints: string[];
+  project_root?: string;
   manager_session_id?: string | null;
   updated_at: number;
 };
@@ -118,6 +134,7 @@ export type AgentTaskGroup = {
   task_count: number;
   updated_at: number;
   goal: string;
+  project_root?: string;
   manager_session_id?: string | null;
   mode: AgentTaskMode;
 };

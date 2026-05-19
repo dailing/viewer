@@ -5,6 +5,7 @@ import { fileChangeAffectsPath } from "../utils/paths";
 import CsvViewer from "./viewers/CsvViewer.vue";
 import HtmlViewer from "./viewers/HtmlViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
+import LargeTextViewer from "./viewers/LargeTextViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
 import TextViewer from "./viewers/TextViewer.vue";
 import UnsupportedViewer from "./viewers/UnsupportedViewer.vue";
@@ -99,10 +100,13 @@ onUnmounted(() => {
           <span>{{ error }}</span>
         </div>
         <ImageViewer v-else-if="meta?.preview === 'image'" :path="path" :content-hash="meta.content_hash" />
+        <LargeTextViewer v-else-if="meta?.preview === 'markdown' && meta.text_too_large" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" kind="markdown" :size="meta.size" />
         <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
         <HtmlViewer v-else-if="meta?.preview === 'html'" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" :content-hash="meta.content_hash" />
         <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="path" :content-hash="meta.content_hash" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
+        <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large && isCsvPath(path)" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" kind="csv" :size="meta.size" />
         <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(path)" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
+        <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" kind="text" :size="meta.size" />
         <TextViewer v-else-if="meta?.preview === 'text'" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
         <UnsupportedViewer v-else-if="meta" :meta="meta" />
         <div v-else class="local-preview-state">

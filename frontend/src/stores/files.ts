@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
 import type { AppearanceConfig, CodexConfig, DagConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, WorkspaceConfig } from "../types/files";
+import { parentPath as resolveParentPath } from "../utils/paths";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   name: "Default",
@@ -172,8 +173,7 @@ export const useFilesStore = defineStore("files", {
       });
     },
     parentPath(state): string {
-      if (!state.currentPath) return "";
-      return state.currentPath.includes("/") ? state.currentPath.split("/").slice(0, -1).join("/") : "";
+      return resolveParentPath(state.currentPath);
     },
     activeMarkdownTheme(state): MarkdownTheme {
       return state.markdown.themes.find((theme) => theme.name === state.markdown.active_theme) ?? state.markdown.themes[0] ?? DEFAULT_MARKDOWN_THEME;
@@ -253,7 +253,7 @@ export const useFilesStore = defineStore("files", {
     },
     async refreshAffected(path: string, isDir: boolean) {
       if (isDir && this.expanded.has(path)) await this.loadDirectory(path);
-      const parent = path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
+      const parent = resolveParentPath(path);
       if (this.listings[parent]) await this.loadDirectory(parent);
     },
     async uploadToCurrent(files: File[]) {
@@ -265,7 +265,7 @@ export const useFilesStore = defineStore("files", {
     async deletePath(path: string) {
       await deleteFile(path);
       this.pinned = this.pinned.filter((item) => item !== path);
-      const parent = path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
+      const parent = resolveParentPath(path);
       await this.loadDirectory(parent);
       if (this.currentPath !== parent && this.listings[this.currentPath]) await this.loadDirectory(this.currentPath);
     },

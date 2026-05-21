@@ -358,8 +358,7 @@ def resolve_site_path(path: str, user: str | None = None) -> Path:
     return target
 
 
-@app.get("/api/file/site/{path:path}")
-async def file_site(path: str, h: str | None = None, user: str | None = None):
+def file_site_response(path: str, h: str | None = None, user: str | None = None):
     target = resolve_site_path(path, user)
     if target.exists() and target.is_dir():
         index = target / "index.html"
@@ -392,6 +391,16 @@ async def file_site(path: str, h: str | None = None, user: str | None = None):
     response.headers["ETag"] = f"\"{h or content_hash(target)}\""
     response.headers["Cache-Control"] = "no-cache"
     return response
+
+
+@app.get("/api/file/site")
+async def file_site_query(path: str, h: str | None = None, user: str | None = None):
+    return file_site_response(path, h, user)
+
+
+@app.get("/api/file/site/{path:path}")
+async def file_site(path: str, h: str | None = None, user: str | None = None):
+    return file_site_response(path, h, user)
 
 
 @app.get("/api/file/resolve-link")

@@ -45,6 +45,11 @@ function encodePathSegments(path: string): string {
 }
 
 export function siteUrl(path: string, contentHash?: string): string {
+  if (path.startsWith("/")) {
+    const params = new URLSearchParams({ path });
+    if (contentHash) params.set("h", contentHash);
+    return withUser(`/api/file/site?${params.toString()}`);
+  }
   const hashQuery = contentHash ? `?h=${encodeURIComponent(contentHash)}` : "";
   return withUser(`/api/file/site/${encodePathSegments(path)}${hashQuery}`);
 }

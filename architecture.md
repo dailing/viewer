@@ -41,7 +41,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/file/text-lines`: calls `read_text_lines()` under the active user's profile home for virtualized large text previews.
 - `/api/file/content` PUT: saves UTF-8 text to an existing file under the active user's profile home and returns updated metadata.
 - `/api/file/raw`: streams a file via inline `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving. The file APIs also accept the internal `__agent_task_files__/{task_id}/workspace/...` virtual path prefix so Task DAG workspace outputs remain previewable even when `~/.view/logs/agent-tasks/...` is outside the active user's served root.
-- `/api/file/site/{path:path}`: serves files under the active user's profile home as a static-site namespace for HTML preview iframes. HTML responses inject a `<base>` tag for relative assets and rewrite root-relative HTML/CSS asset URLs to the same `/api/file/site/` prefix; CSS responses rewrite root-relative `url(...)` and `@import` references; other files are returned through inline `FileResponse` so SVG/PDF/image assets render in-browser instead of downloading. Missing `generated/assets/...` requests fall back by searching upward for the nearest existing generated asset directory, which keeps static docs with page-relative generated-asset links working in the iframe preview. Cache headers are `no-cache` so local edits show after pane refreshes.
+- `/api/file/site/{path:path}` and `/api/file/site?path=...`: serve files as a static-site namespace for HTML preview iframes. The query form preserves absolute filesystem paths for outside-root files and symlink targets. HTML responses inject a `<base>` tag for relative assets and rewrite root-relative HTML/CSS asset URLs to the same `/api/file/site/` prefix; CSS responses rewrite root-relative `url(...)` and `@import` references; other files are returned through inline `FileResponse` so SVG/PDF/image assets render in-browser instead of downloading. Missing `generated/assets/...` requests fall back by searching upward for the nearest existing generated asset directory, which keeps static docs with page-relative generated-asset links working in the iframe preview. Cache headers are `no-cache` so local edits show after pane refreshes.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation, plus a stat-based `content_hash`/version when the target exists as a file. Markdown image rendering no longer calls this for every image during initial render; the frontend resolves simple relative image dependencies locally and lets `/api/file/raw?base=...` resolve actual image requests lazily.
 - `/api/file/resolve-directory-link`: resolves a local link target against a served-root-relative directory, used by Codex session transcript links whose paths are relative to the session cwd.
 - `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at the active user's profile home.
@@ -94,9 +94,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - File tree, path normalization, metadata, upload/delete helpers, content reading, and `~/.view/config.json` persistence.
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
 - `served_root(user_id)`: returns the active user's profile home when a `user` is supplied, otherwise the global `VIEWER_ROOT` fallback.
-- `resolve_path(path, user_id)`: joins normalized relative path to the active user's profile home. Symlinks are allowed by current implementation.
-- `resolve_markdown_link(base_path, target, user_id)`: resolves local Markdown image/link targets relative to the Markdown file, including absolute filesystem paths under the active user's root, and rejects links outside that root.
-- `resolve_directory_link(base_dir, target, user_id)`: resolves local file links relative to an active-user-root-relative directory, including absolute/file URLs under that root, strips common editor `:line[:column]` suffixes, and rejects links outside that root.
+- `resolve_path(path, user_id)`: joins normalized relative paths to the active user's profile home and preserves explicit absolute filesystem paths. Symlinks are allowed by current implementation, including symlinks whose targets live outside the profile home.
+- `resolve_markdown_link(base_path, target, user_id)`: resolves local Markdown image/link targets relative to the Markdown file, supports absolute/file URLs, strips common editor `:line[:column]` suffixes, and returns absolute paths when targets live outside the active user's root.
+- `resolve_directory_link(base_dir, target, user_id)`: resolves local file links relative to a directory, supports absolute/file URLs, strips common editor `:line[:column]` suffixes, and returns absolute paths when targets live outside the active user's root.
 - `resolve_served_directory(path, label, user_id)`: resolves a working directory for terminal/Codex launches. Explicit absolute paths are allowed; relative paths resolve inside the active user's profile home. Missing directories fall back to the active user's root.
 - `relative_for(path, user_id)`: returns path relative to the active user's root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
@@ -178,9 +178,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `backend/app/watcher.py`
 
-- Watches `settings.root_resolved` plus every configured profile home with `watchfiles.awatch`.
+- Watches `settings.root_resolved` plus every configured profile home with non-recursive `watchfiles.watch` in a worker thread so scan/setup does not follow large symlinked trees and block FastAPI startup.
 - `event_type(change)`: converts `watchfiles.Change` enum to API strings.
-- `is_ignored_path(path)`: currently returns false because viewer logs now live outside the served root under `~/.view/logs`.
+- `is_ignored_path(path)`: ignores high-churn `__outputs` directories while the `watchfiles` default filter ignores common development directories such as `.git`, `.venv`, and `node_modules`.
 - `watch_root(stop_event)`: debounced watch loop; publishes `WatchEvent` with type, best-match root-relative path, directory flag, and mtime.
 
 `backend/app/terminals.py`

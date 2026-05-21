@@ -158,6 +158,13 @@ def stop(explicit_pid: int | None = None) -> dict[str, Any]:
 
 def restart(extra: list[str], explicit_pid: int | None = None) -> dict[str, Any]:
     stopped = stop(explicit_pid)
+    recorded_pid = read_pid()
+    if explicit_pid is not None and recorded_pid and recorded_pid != explicit_pid:
+        if pid_exists(recorded_pid):
+            log(f"Waiting for recorded viewer pid={recorded_pid} after stopping pid={explicit_pid}")
+            if not wait_for_exit(recorded_pid, FORCED_TIMEOUT_SECONDS):
+                log(f"Recorded viewer pid={recorded_pid} still running; clearing stale state before restart")
+        clear_state(recorded_pid)
     started = start(extra)
     return {"status": "restarted", "stopped": stopped, "started": started}
 

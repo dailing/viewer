@@ -79,6 +79,11 @@ def _resolve_agent_task_file_path(rel: str) -> Path | None:
 
 
 def resolve_path(path: str | None, user_id: str | None = None) -> Path:
+    raw = (path or "").strip()
+    if raw:
+        raw_path = Path(raw).expanduser()
+        if raw_path.is_absolute():
+            return raw_path
     rel = normalize_relative(path)
     task_file = _resolve_agent_task_file_path(rel)
     if task_file is not None:
@@ -126,10 +131,11 @@ def resolve_markdown_link(base_path: str, target: str, user_id: str | None = Non
 
     if scheme == "file" or target_path.startswith("/"):
         absolute_target = Path(target_path).expanduser().resolve()
-        try:
-            return absolute_target.relative_to(served_root(user_id).resolve()).as_posix()
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Markdown link target is outside the served root") from exc
+        return relative_for(absolute_target, user_id)
+
+    base_raw = Path((base_path or "").strip()).expanduser()
+    if base_raw.is_absolute():
+        return relative_for(base_raw.parent.joinpath(target_path).resolve(strict=False), user_id)
 
     base_rel = normalize_relative(base_path)
     base_parts = base_rel.split("/")[:-1] if base_rel else []
@@ -152,10 +158,11 @@ def resolve_directory_link(base_dir: str | None, target: str, user_id: str | Non
 
     if scheme == "file" or target_path.startswith("/"):
         absolute_target = Path(target_path).expanduser().resolve()
-        try:
-            return absolute_target.relative_to(served_root(user_id).resolve()).as_posix()
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Link target is outside the served root") from exc
+        return relative_for(absolute_target, user_id)
+
+    base_raw = Path((base_dir or "").strip()).expanduser()
+    if base_raw.is_absolute():
+        return relative_for(base_raw.joinpath(target_path).resolve(strict=False), user_id)
 
     base_rel = normalize_relative(base_dir or "")
     base_parts = base_rel.split("/") if base_rel else []
@@ -190,7 +197,8 @@ def resolve_served_directory(path: str | None, label: str, user_id: str | None =
 
 def relative_for(path: Path, user_id: str | None = None) -> str:
     try:
-        return path.relative_to(served_root(user_id)).as_posix()
+        rel = path.relative_to(served_root(user_id)).as_posix()
+        return "" if rel == "." else rel
     except ValueError:
         return path.as_posix()
 
@@ -271,7 +279,7 @@ def list_directory(path: str | None, user_id: str | None = None) -> DirectoryLis
         entries.append(entry_for(child, user_id))
 
     entries.sort(key=lambda item: (not item.is_dir, item.name.lower()))
-    return DirectoryListing(path=normalize_relative(path), entries=entries)
+    return DirectoryListing(path=relative_for(target, user_id), entries=entries)
 
 
 def upload_target(directory: str | None, filename: str, user_id: str | None = None) -> Path:
@@ -295,7 +303,7 @@ def delete_file(path: str, user_id: str | None = None) -> dict[str, str]:
     if target.is_dir():
         raise HTTPException(status_code=400, detail="Directory deletion is not supported")
     target.unlink()
-    return {"status": "deleted", "path": normalize_relative(path)}
+    return {"status": "deleted", "path": relative_for(target, user_id)}
 
 
 def get_meta(path: str, user_id: str | None = None) -> FileMeta:
@@ -311,7 +319,7 @@ def get_meta(path: str, user_id: str | None = None) -> FileMeta:
     text_too_large = preview in {"text", "markdown", "html"} and stat.st_size > settings.max_text_preview_bytes
     return FileMeta(
         name=target.name,
-        path=normalize_relative(path),
+        path=relative_for(target, user_id),
         size=stat.st_size,
         mtime=stat.st_mtime,
         content_hash=metadata_version(target, stat) if text_too_large else content_hash(target),
@@ -387,7 +395,7 @@ def read_text_lines(path: str, start_line: int = 0, count: int = 200, user_id: s
         lines.append("")
 
     return TextLineWindow(
-        path=normalize_relative(path),
+        path=relative_for(target, user_id),
         size=stat.st_size,
         mtime=stat.st_mtime,
         total_lines=total_lines,

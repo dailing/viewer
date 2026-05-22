@@ -30,6 +30,7 @@ from .codex_sessions import codex_session_manager
 from .events import hub
 from .files import (
     add_workspace_agent_session,
+    add_workspace_pinned_agent_session,
     content_hash,
     delete_file,
     entry_for,
@@ -45,6 +46,7 @@ from .files import (
     resolve_markdown_link,
     resolve_path,
     remove_workspace_agent_session,
+    remove_workspace_pinned_agent_session,
     set_active_workspace,
     upload_target,
     write_config,
@@ -497,6 +499,16 @@ async def add_workspace_agent_session_route(workspace_id: str, request: Workspac
 @app.delete("/api/workspaces/{workspace_id}/agent-sessions")
 async def remove_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
     return remove_workspace_agent_session(workspace_id, request.ref, user)
+
+
+@app.post("/api/workspaces/{workspace_id}/pinned-agent-sessions")
+async def add_workspace_pinned_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
+    return add_workspace_pinned_agent_session(workspace_id, request.ref, user)
+
+
+@app.delete("/api/workspaces/{workspace_id}/pinned-agent-sessions")
+async def remove_workspace_pinned_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
+    return remove_workspace_pinned_agent_session(workspace_id, request.ref, user)
 
 
 @app.post("/api/workspaces/{workspace_id}/activate")

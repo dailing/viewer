@@ -6,8 +6,7 @@ export interface WorkspaceSnapshot {
   current_path: string;
   pinned?: string[] | null;
   agent_session_ids?: string[];
-  codex_session_ids?: string[];
-  hermes_session_ids?: string[];
+  pinned_agent_session_ids?: string[];
   visit_times?: Record<string, number>;
   updated_at?: number | null;
 }

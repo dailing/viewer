@@ -133,8 +133,7 @@ class WorkspaceSnapshot(BaseModel):
     current_path: str = ""
     pinned: list[str] | None = None
     agent_session_ids: list[str] = Field(default_factory=list)
-    codex_session_ids: list[str] = Field(default_factory=list)
-    hermes_session_ids: list[str] = Field(default_factory=list)
+    pinned_agent_session_ids: list[str] = Field(default_factory=list)
     visit_times: dict[str, float] = Field(default_factory=dict)
     updated_at: float | None = None
 

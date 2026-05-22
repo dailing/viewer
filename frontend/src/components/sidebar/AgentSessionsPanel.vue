@@ -13,9 +13,7 @@ const emit = defineEmits<{
   "open-agent-session": [ref: string];
 }>();
 
-const props = defineProps<{
-  sessionRefs: string[];
-}>();
+const props = defineProps<{ sessionRefs: string[] }>();
 
 const agents = useAgentsStore();
 const files = useFilesStore();
@@ -24,9 +22,14 @@ const voice = useVoiceStore();
 const workspaces = useWorkspacesStore();
 const error = ref("");
 const selectedProvider = ref<AgentProvider>("");
+const pinnedAgentRefs = computed(() => new Set(workspaces.activePinnedAgentSessionRefs));
 const visibleSessions = computed(() => {
-  const refs = new Set(props.sessionRefs);
-  return sortAgentSessions(agents.sessions.filter((session) => refs.has(session.ref)));
+  const workspaceRefs = new Set(props.sessionRefs);
+  return sortAgentSessions(agents.sessions.filter((session) => workspaceRefs.has(session.ref))).sort((left, right) => {
+    const leftPinned = pinnedAgentRefs.value.has(left.ref) ? 1 : 0;
+    const rightPinned = pinnedAgentRefs.value.has(right.ref) ? 1 : 0;
+    return rightPinned - leftPinned;
+  });
 });
 
 const selectedProviderInfo = computed(() => {
@@ -96,6 +99,14 @@ async function newSession() {
   }
 }
 
+async function toggleStarSession(ref: string) {
+  if (pinnedAgentRefs.value.has(ref)) {
+    await workspaces.unpinActiveAgentSession(ref);
+    return;
+  }
+  await workspaces.pinActiveAgentSession(ref);
+}
+
 async function closeSession(ref: string) {
   await workspaces.forgetActiveAgentSession(ref);
   layout.clearAgentSession(ref);
@@ -111,6 +122,10 @@ function sessionProviderName(session: AgentSessionInfo) {
 
 function isOpen(ref: string) {
   return layout.openAgentSessionRefs.includes(ref);
+}
+
+function isStarred(ref: string) {
+  return pinnedAgentRefs.value.has(ref);
 }
 
 function ensureValidRef(ref: string) {
@@ -143,6 +158,7 @@ function ensureValidRef(ref: string) {
         :class="[
           {
             active: isOpen(session.ref),
+            starred: isStarred(session.ref),
             'voice-pending': hasVoicePending(session),
             'voice-ready': hasVoiceReady(session),
           },
@@ -158,7 +174,22 @@ function ensureValidRef(ref: string) {
         <button class="sidebar-row-main" type="button" :disabled="!ensureValidRef(session.ref)" @click="emit('open-agent-session', session.ref)">
           <span class="sidebar-row-name">{{ session.title }}</span>
         </button>
-        <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Remove from workspace" @click="closeSession(session.ref)">
+        <button
+          class="btn btn-sm icon-button sidebar-row-action star-button"
+          type="button"
+          :title="isStarred(session.ref) ? 'Unstar session' : 'Star session'"
+          :aria-label="isStarred(session.ref) ? 'Unstar session' : 'Star session'"
+          @click="toggleStarSession(session.ref)"
+        >
+          <i class="bi" :class="isStarred(session.ref) ? 'bi-star-fill' : 'bi-star'"></i>
+        </button>
+        <button
+          class="btn btn-sm icon-button sidebar-row-action"
+          type="button"
+          title="Remove from workspace"
+          aria-label="Remove from workspace"
+          @click="closeSession(session.ref)"
+        >
           <i class="bi bi-x"></i>
         </button>
       </div>
@@ -245,6 +276,10 @@ function ensureValidRef(ref: string) {
   box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
 }
 
+.sidebar-row.starred .sidebar-row-name {
+  font-weight: 600;
+}
+
 .sidebar-row.voice-pending {
   background: #fff6d7;
 }
@@ -317,5 +352,9 @@ function ensureValidRef(ref: string) {
   height: 24px;
   opacity: 0.75;
   width: 24px;
+}
+
+.star-button .bi-star-fill {
+  color: #d89b00;
 }
 </style>

@@ -565,13 +565,7 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot, user_id: str
     data = read_workspaces(user_id)
     previous = data.slots.get(cleaned_id)
     agent_refs = list(previous.agent_session_ids if previous else [])
-    codex_ids = list(previous.codex_session_ids if previous else [])
-    hermes_ids = list(previous.hermes_session_ids if previous else [])
-    for ref in agent_refs:
-        if ref.startswith("codex:"):
-            codex_ids.append(ref.removeprefix("codex:"))
-        if ref.startswith("hermes:"):
-            hermes_ids.append(ref.removeprefix("hermes:"))
+    pinned_agent_refs = list(previous.pinned_agent_session_ids if previous else snapshot.pinned_agent_session_ids)
     data.active_workspace_id = cleaned_id
     data.slots[cleaned_id] = WorkspaceSnapshot(
         layout=snapshot.layout,
@@ -579,8 +573,7 @@ def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot, user_id: str
         current_path=current_path,
         pinned=pinned,
         agent_session_ids=_unique_nonempty_strings(agent_refs),
-        codex_session_ids=_unique_nonempty_strings(codex_ids),
-        hermes_session_ids=_unique_nonempty_strings(hermes_ids),
+        pinned_agent_session_ids=_unique_nonempty_strings(pinned_agent_refs),
         visit_times=visit_times,
         updated_at=snapshot.updated_at,
     )
@@ -600,17 +593,9 @@ def add_workspace_agent_session(workspace_id: str, ref: str, user_id: str | None
     data = read_workspaces(user_id)
     snapshot = data.slots.get(cleaned_id) or WorkspaceSnapshot(layout={"type": "pane", "id": f"pane-workspace-{cleaned_id}"})
     agent_refs = _unique_nonempty_strings([*snapshot.agent_session_ids, cleaned_ref])
-    codex_ids = [*snapshot.codex_session_ids]
-    hermes_ids = [*snapshot.hermes_session_ids]
-    if provider == "codex":
-        codex_ids.append(session_id)
-    if provider == "hermes":
-        hermes_ids.append(session_id)
     data.slots[cleaned_id] = snapshot.model_copy(
         update={
             "agent_session_ids": agent_refs,
-            "codex_session_ids": _unique_nonempty_strings(codex_ids),
-            "hermes_session_ids": _unique_nonempty_strings(hermes_ids),
         }
     )
     return write_workspaces(data, user_id)
@@ -623,7 +608,6 @@ def remove_workspace_agent_session(workspace_id: str, ref: str, user_id: str | N
         raise HTTPException(status_code=400, detail="Workspace id is required")
     if not cleaned_ref or ":" not in cleaned_ref:
         raise HTTPException(status_code=400, detail="Agent session ref is required")
-    provider, session_id = cleaned_ref.split(":", 1)
     data = read_workspaces(user_id)
     snapshot = data.slots.get(cleaned_id)
     if not snapshot:
@@ -631,9 +615,46 @@ def remove_workspace_agent_session(workspace_id: str, ref: str, user_id: str | N
     data.slots[cleaned_id] = snapshot.model_copy(
         update={
             "agent_session_ids": [item for item in snapshot.agent_session_ids if item != cleaned_ref],
-            "codex_session_ids": [item for item in snapshot.codex_session_ids if provider != "codex" or item != session_id],
-            "hermes_session_ids": [item for item in snapshot.hermes_session_ids if provider != "hermes" or item != session_id],
+            "pinned_agent_session_ids": [item for item in snapshot.pinned_agent_session_ids if item != cleaned_ref],
         }
+    )
+    return write_workspaces(data, user_id)
+
+
+def add_workspace_pinned_agent_session(workspace_id: str, ref: str, user_id: str | None = None) -> WorkspaceData:
+    cleaned_id = workspace_id.strip()
+    cleaned_ref = ref.strip()
+    if not cleaned_id:
+        raise HTTPException(status_code=400, detail="Workspace id is required")
+    if not cleaned_ref or ":" not in cleaned_ref:
+        raise HTTPException(status_code=400, detail="Agent session ref is required")
+    provider, session_id = cleaned_ref.split(":", 1)
+    if not provider or not session_id:
+        raise HTTPException(status_code=400, detail="Agent session ref is invalid")
+    data = read_workspaces(user_id)
+    snapshot = data.slots.get(cleaned_id) or WorkspaceSnapshot(layout={"type": "pane", "id": f"pane-workspace-{cleaned_id}"})
+    data.slots[cleaned_id] = snapshot.model_copy(
+        update={
+            "agent_session_ids": _unique_nonempty_strings([*snapshot.agent_session_ids, cleaned_ref]),
+            "pinned_agent_session_ids": _unique_nonempty_strings([*snapshot.pinned_agent_session_ids, cleaned_ref]),
+        }
+    )
+    return write_workspaces(data, user_id)
+
+
+def remove_workspace_pinned_agent_session(workspace_id: str, ref: str, user_id: str | None = None) -> WorkspaceData:
+    cleaned_id = workspace_id.strip()
+    cleaned_ref = ref.strip()
+    if not cleaned_id:
+        raise HTTPException(status_code=400, detail="Workspace id is required")
+    if not cleaned_ref or ":" not in cleaned_ref:
+        raise HTTPException(status_code=400, detail="Agent session ref is required")
+    data = read_workspaces(user_id)
+    snapshot = data.slots.get(cleaned_id)
+    if not snapshot:
+        return data
+    data.slots[cleaned_id] = snapshot.model_copy(
+        update={"pinned_agent_session_ids": [item for item in snapshot.pinned_agent_session_ids if item != cleaned_ref]}
     )
     return write_workspaces(data, user_id)
 
@@ -763,33 +784,18 @@ def migrate_workspace_state(raw: object) -> object:
         if not isinstance(snapshot, dict):
             continue
         next_snapshot = dict(snapshot)
-        if "agent_session_ids" not in next_snapshot:
-            refs = _layout_agent_refs(next_snapshot.get("layout"))
-            refs.extend(f"codex:{item}" for item in next_snapshot.get("codex_session_ids", []) if isinstance(item, str))
-            refs.extend(f"hermes:{item}" for item in next_snapshot.get("hermes_session_ids", []) if isinstance(item, str))
-            next_snapshot["agent_session_ids"] = _unique_nonempty_strings(refs)
+        refs = [item for item in next_snapshot.get("agent_session_ids", []) if isinstance(item, str)]
+        refs.extend(f"codex:{item}" for item in next_snapshot.get("codex_session_ids", []) if isinstance(item, str))
+        refs.extend(f"hermes:{item}" for item in next_snapshot.get("hermes_session_ids", []) if isinstance(item, str))
+        refs.extend(_layout_agent_refs(next_snapshot.get("layout")))
+        agent_refs = _unique_nonempty_strings(refs)
+        if next_snapshot.get("agent_session_ids") != agent_refs:
+            next_snapshot["agent_session_ids"] = agent_refs
             changed = True
-        elif not next_snapshot.get("agent_session_ids"):
-            layout_agent_refs = _layout_agent_refs(next_snapshot.get("layout"))
-            if layout_agent_refs:
-                next_snapshot["agent_session_ids"] = layout_agent_refs
-                changed = True
-        if "codex_session_ids" not in next_snapshot:
-            next_snapshot["codex_session_ids"] = _layout_session_ids(next_snapshot.get("layout"), "codexSessionId")
+        pinned_agent_refs = _unique_nonempty_strings([item for item in next_snapshot.get("pinned_agent_session_ids", []) if isinstance(item, str)])
+        if next_snapshot.get("pinned_agent_session_ids") != pinned_agent_refs:
+            next_snapshot["pinned_agent_session_ids"] = pinned_agent_refs
             changed = True
-        elif not next_snapshot.get("codex_session_ids"):
-            layout_codex_ids = _layout_session_ids(next_snapshot.get("layout"), "codexSessionId")
-            if layout_codex_ids:
-                next_snapshot["codex_session_ids"] = layout_codex_ids
-                changed = True
-        if "hermes_session_ids" not in next_snapshot:
-            next_snapshot["hermes_session_ids"] = _layout_session_ids(next_snapshot.get("layout"), "hermesSessionId")
-            changed = True
-        elif not next_snapshot.get("hermes_session_ids"):
-            layout_hermes_ids = _layout_session_ids(next_snapshot.get("layout"), "hermesSessionId")
-            if layout_hermes_ids:
-                next_snapshot["hermes_session_ids"] = layout_hermes_ids
-                changed = True
         if "visit_times" not in next_snapshot:
             next_snapshot["visit_times"] = active_visit_times if str(workspace_id) == active_workspace_id else {}
             changed = True

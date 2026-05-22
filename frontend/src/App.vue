@@ -17,7 +17,7 @@ import { useWorkspacesStore } from "./stores/workspaces";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { AgentSessionInfo, AgentStatus } from "./types/agents";
 import type { LayoutNode, SplitDirection } from "./types/layout";
-import { agentRef, legacyAgentRefForPane, parseAgentRef } from "./utils/agents";
+import { legacyAgentRefForPane, parseAgentRef } from "./utils/agents";
 import { namespacedStorageKey } from "./utils/userProfile";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
@@ -285,6 +285,7 @@ function currentWorkspaceSnapshot() {
     active_pane_id: snapshot.activePaneId,
     current_path: files.currentPath,
     pinned: [...files.pinned],
+    pinned_agent_session_ids: [...workspaces.activePinnedAgentSessionRefs],
     visit_times: { ...files.visitTimes },
   };
 }
@@ -537,8 +538,6 @@ function workspaceAgentSessionRefs(workspaceId: string) {
   const snapshot = workspaceId === displayedActiveWorkspaceId.value ? null : workspaces.snapshotFor(workspaceId);
   const snapshotRefs = workspaceId === displayedActiveWorkspaceId.value ? workspaces.activeAgentSessionRefs : snapshot?.agent_session_ids ?? [];
   for (const ref of snapshotRefs) refs.add(ref);
-  for (const id of snapshot?.codex_session_ids ?? []) refs.add(agentRef("codex", id));
-  for (const id of snapshot?.hermes_session_ids ?? []) refs.add(agentRef("hermes", id));
   const root = workspaceId === displayedActiveWorkspaceId.value ? layout.root : snapshot?.layout;
   if (root) collectLayoutAgentSessionRefs(root, refs);
   return [...refs];

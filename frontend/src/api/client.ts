@@ -205,6 +205,22 @@ export async function removeWorkspaceAgentSession(id: string, ref: string): Prom
   });
 }
 
+export async function addWorkspacePinnedAgentSession(id: string, ref: string): Promise<WorkspaceData> {
+  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/pinned-agent-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ref }),
+  });
+}
+
+export async function removeWorkspacePinnedAgentSession(id: string, ref: string): Promise<WorkspaceData> {
+  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/pinned-agent-sessions`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ref }),
+  });
+}
+
 export async function activateWorkspace(id: string): Promise<WorkspaceData> {
   return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/activate`, { method: "POST" });
 }

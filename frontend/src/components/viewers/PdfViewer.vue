@@ -1,27 +1,55 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import VuePdfEmbed from "vue-pdf-embed";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
+import VuePdfEmbed, { GlobalWorkerOptions, useVuePdfEmbed } from "vue-pdf-embed/dist/index.essential.mjs";
 import "vue-pdf-embed/dist/styles/annotationLayer.css";
 import "vue-pdf-embed/dist/styles/textLayer.css";
+import PdfWorker from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { rawUrl } from "../../api/client";
 import { restoreScrollPosition, saveScrollPosition } from "../../utils/scrollMemory";
 
+GlobalWorkerOptions.workerSrc = PdfWorker;
+
 const props = defineProps<{ path: string; contentHash: string; paneId: string; workspaceId: string }>();
 const src = computed(() => rawUrl(props.path, props.contentHash));
+const pdfSource = computed(() => ({
+  disableAutoFetch: true,
+  disableStream: true,
+  rangeChunkSize: 256 * 1024,
+  url: src.value,
+}));
 const container = ref<HTMLElement | null>(null);
 const viewerWidth = ref(0);
 const zoom = ref(1);
 const rotation = ref(0);
 const pageCount = ref(0);
-const loading = ref(true);
+const loadingDocument = ref(true);
 const error = ref("");
+const visiblePages = shallowRef(new Set<number>([1]));
+const renderedPages = shallowRef(new Set<number>());
+const pageElements = new Map<number, Element>();
 
 let resizeObserver: ResizeObserver | null = null;
+let pageObserver: IntersectionObserver | null = null;
 let skipUnmountSave = false;
 
 const renderedWidth = computed(() => {
   if (!viewerWidth.value) return undefined;
   return Math.max(240, Math.floor((viewerWidth.value - 32) * zoom.value));
+});
+
+const estimatedPageHeight = computed(() => {
+  if (!renderedWidth.value) return 720;
+  return Math.floor(renderedWidth.value * 1.294);
+});
+
+const pages = computed(() => Array.from({ length: pageCount.value }, (_, index) => index + 1));
+
+const loading = computed(() => loadingDocument.value && !error.value);
+
+const { doc } = useVuePdfEmbed({
+  onError: handlePdfError,
+  onProgress: handleLoadProgress,
+  source: pdfSource,
 });
 
 function updateWidth(): void {
@@ -70,34 +98,129 @@ function rotateClockwise(): void {
   rotation.value = (rotation.value + 90) % 360;
 }
 
-function handleLoaded(document: { numPages?: number }): void {
-  pageCount.value = document.numPages ?? 0;
-}
-
-function handleProgress(): void {
-  loading.value = true;
+function handleLoadProgress(): void {
+  loadingDocument.value = true;
   error.value = "";
 }
 
-function handleRendered(): void {
-  loading.value = false;
-  void restoreScrollPosition(scrollTarget(), container.value);
+function handlePageRendered(page: number): void {
+  const next = new Set(renderedPages.value);
+  next.add(page);
+  renderedPages.value = next;
+  loadingDocument.value = false;
+  if (page === firstVisiblePage.value) {
+    void restoreScrollPosition(scrollTarget(), container.value);
+  }
 }
 
 function handlePdfError(err: Error): void {
-  loading.value = false;
+  loadingDocument.value = false;
   error.value = err.message || "Unable to render PDF";
 }
+
+function resetRenderedPages(): void {
+  renderedPages.value = new Set();
+}
+
+function addVisiblePage(page: number): void {
+  if (visiblePages.value.has(page)) return;
+  const next = new Set(visiblePages.value);
+  next.add(page);
+  visiblePages.value = next;
+}
+
+function removeVisiblePage(page: number): void {
+  if (page === 1 || !visiblePages.value.has(page)) return;
+  const next = new Set(visiblePages.value);
+  next.delete(page);
+  visiblePages.value = next;
+}
+
+function shouldRenderPage(page: number): boolean {
+  if (visiblePages.value.has(page)) return true;
+  return visiblePages.value.has(page - 1) || visiblePages.value.has(page + 1);
+}
+
+const firstVisiblePage = computed(() => {
+  const values = [...visiblePages.value].sort((left, right) => left - right);
+  return values[0] ?? 1;
+});
+
+function setupPageObserver(): void {
+  pageObserver?.disconnect();
+  pageObserver = null;
+  if (!container.value) return;
+  pageObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const page = Number((entry.target as HTMLElement).dataset.page);
+        if (!Number.isFinite(page)) continue;
+        if (entry.isIntersecting) addVisiblePage(page);
+        else removeVisiblePage(page);
+      }
+    },
+    { root: container.value, rootMargin: "900px 0px" },
+  );
+  void nextTick(() => {
+    for (const element of pageElements.values()) {
+      pageObserver?.observe(element);
+    }
+  });
+}
+
+function setPageElement(page: number, element: Element | null): void {
+  const previous = pageElements.get(page);
+  if (previous) pageObserver?.unobserve(previous);
+  if (!element) {
+    pageElements.delete(page);
+    return;
+  }
+  pageElements.set(page, element);
+  pageObserver?.observe(element);
+}
+
+watch(doc, (document) => {
+  pageCount.value = document?.numPages ?? 0;
+  loadingDocument.value = !document;
+  error.value = "";
+  visiblePages.value = new Set([1]);
+  resetRenderedPages();
+  void nextTick(setupPageObserver);
+});
+
+watch([renderedWidth, rotation], () => {
+  resetRenderedPages();
+});
 
 watch([src, () => props.workspaceId], () => {
   saveCurrentScroll();
   skipUnmountSave = false;
-  loading.value = true;
+  loadingDocument.value = true;
   error.value = "";
   pageCount.value = 0;
+  visiblePages.value = new Set([1]);
+  resetRenderedPages();
   resetView();
-  void nextTick(() => restoreScrollPosition(scrollTarget(), container.value));
+  void nextTick(() => {
+    setupPageObserver();
+    restoreScrollPosition(scrollTarget(), container.value);
+  });
 });
+
+watch(pageCount, () => {
+  void nextTick(setupPageObserver);
+});
+
+function pageFrameStyle(page: number) {
+  return {
+    minHeight: pageIsRendered(page) ? undefined : `${estimatedPageHeight.value}px`,
+    width: renderedWidth.value ? `${renderedWidth.value}px` : "100%",
+  };
+}
+
+function pageIsRendered(page: number): boolean {
+  return renderedPages.value.has(page);
+}
 
 onMounted(() => {
   updateWidth();
@@ -109,6 +232,7 @@ onMounted(() => {
   window.addEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
   window.addEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
   void restoreScrollPosition(scrollTarget(), container.value);
+  setupPageObserver();
 });
 
 onUnmounted(() => {
@@ -117,6 +241,7 @@ onUnmounted(() => {
   window.removeEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
   window.removeEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
   resizeObserver?.disconnect();
+  pageObserver?.disconnect();
 });
 </script>
 
@@ -151,20 +276,33 @@ onUnmounted(() => {
         <span>{{ error }}</span>
         <a :href="src" target="_blank" rel="noreferrer">Open PDF</a>
       </div>
-      <VuePdfEmbed
-        v-else-if="renderedWidth"
-        annotation-layer
-        text-layer
-        class="pdf-document"
-        :source="src"
-        :width="renderedWidth"
-        :rotation="rotation"
-        @loaded="handleLoaded"
-        @progress="handleProgress"
-        @rendered="handleRendered"
-        @loading-failed="handlePdfError"
-        @rendering-failed="handlePdfError"
-      />
+      <div v-else-if="renderedWidth && doc" class="pdf-document">
+        <div
+          v-for="page in pages"
+          :key="page"
+          :ref="(element) => setPageElement(page, element as Element | null)"
+          class="pdf-page-frame"
+          :data-page="page"
+          :style="pageFrameStyle(page)"
+        >
+          <div v-if="!pageIsRendered(page)" class="pdf-page-placeholder">
+            <span>Page {{ page }}</span>
+          </div>
+          <VuePdfEmbed
+            v-if="shouldRenderPage(page)"
+            annotation-layer
+            text-layer
+            class="pdf-page"
+            :source="doc"
+            :page="page"
+            :width="renderedWidth"
+            :rotation="rotation"
+            @rendered="handlePageRendered(page)"
+            @loading-failed="handlePdfError"
+            @rendering-failed="handlePdfError"
+          />
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -271,13 +409,36 @@ onUnmounted(() => {
   padding: 16px;
 }
 
-.pdf-document :deep(.vue-pdf-embed__page) {
+.pdf-page-frame {
+  align-items: center;
   background: #ffffff;
   box-shadow: 0 2px 12px rgb(15 23 42 / 0.18);
+  display: flex;
+  justify-content: center;
   margin: 0 auto;
+  position: relative;
 }
 
-.pdf-document :deep(canvas) {
+.pdf-page-placeholder {
+  align-items: center;
+  color: #8a96a8;
+  display: flex;
+  font-size: 12px;
+  inset: 0;
+  justify-content: center;
+  position: absolute;
+}
+
+.pdf-page {
+  position: relative;
+  z-index: 1;
+}
+
+.pdf-page :deep(.vue-pdf-embed__page) {
+  background: #ffffff;
+}
+
+.pdf-page :deep(canvas) {
   display: block;
   height: auto;
   max-width: none;

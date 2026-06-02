@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import type { AgentQueueItem } from "../types/agents";
-import VoiceInputButton from "./VoiceInputButton.vue";
+import VoiceTextarea from "./VoiceTextarea.vue";
 
 const props = defineProps<{
   modelValue: string;
@@ -25,7 +25,7 @@ const emit = defineEmits<{
   "stop-run": [];
 }>();
 
-const textarea = ref<HTMLTextAreaElement | null>(null);
+const textarea = ref<InstanceType<typeof VoiceTextarea> | null>(null);
 
 const promptText = computed({
   get: () => props.modelValue,
@@ -34,7 +34,6 @@ const promptText = computed({
 const editingQueueItem = computed(() => props.queue.find((item) => item.id === props.editingQueueItemId) ?? null);
 const isEditingQueue = computed(() => Boolean(editingQueueItem.value));
 const canQueue = computed(() => Boolean(props.modelValue.trim()) && !isEditingQueue.value);
-const canClearPrompt = computed(() => Boolean(props.modelValue));
 const isRunning = computed(() => props.status === "running");
 
 function focusTextarea() {
@@ -81,11 +80,16 @@ function handleKeydown(event: KeyboardEvent) {
 
     <div v-if="editingQueueItem" class="agent-composer-editing-row">Editing queued message</div>
 
-    <div class="agent-composer-input-box">
-      <textarea ref="textarea" v-model="promptText" rows="3" :placeholder="placeholder" @keydown="handleKeydown"></textarea>
-    </div>
-
-    <div class="agent-composer-actions">
+    <VoiceTextarea
+      ref="textarea"
+      v-model="promptText"
+      :context-id="voiceContextId"
+      :placeholder="placeholder"
+      :clearable="!isEditingQueue"
+      @keydown="handleKeydown"
+      @clear="emit('clear-prompt')"
+    >
+      <template #actions>
       <template v-if="isEditingQueue">
         <button class="btn btn-primary" type="submit" :disabled="!modelValue.trim()">
           <i class="bi bi-check2"></i>
@@ -101,21 +105,17 @@ function handleKeydown(event: KeyboardEvent) {
         </button>
       </template>
       <template v-else>
-        <VoiceInputButton v-model="promptText" :context-id="voiceContextId" />
         <button class="btn btn-outline-primary" type="button" :disabled="!canQueue" title="Queue message (Cmd/Ctrl+Enter)" @click="emit('queue-prompt')">
           <i class="bi bi-list-ol"></i>
           <span>Queue</span>
-        </button>
-        <button class="btn btn-outline-secondary" type="button" :disabled="!canClearPrompt" @click="emit('clear-prompt')">
-          <i class="bi bi-eraser"></i>
-          <span>Clear</span>
         </button>
         <button class="btn btn-outline-danger" type="button" :disabled="!isRunning || stopping" @click="emit('stop-run')">
           <i class="bi bi-stop-fill"></i>
           <span>{{ stopping ? "Stopping" : "Stop" }}</span>
         </button>
       </template>
-    </div>
+      </template>
+    </VoiceTextarea>
   </form>
 </template>
 
@@ -201,39 +201,4 @@ function handleKeydown(event: KeyboardEvent) {
   font-size: 12px;
 }
 
-.agent-composer-input-box {
-  min-width: 0;
-  position: relative;
-}
-
-.agent-composer textarea {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 14px;
-  line-height: 1.35;
-  min-height: 92px;
-  outline: none;
-  padding: 8px;
-  resize: vertical;
-  width: 100%;
-}
-
-.agent-composer textarea:focus {
-  border-color: #1f6feb;
-  box-shadow: 0 0 0 2px rgb(31 111 235 / 0.16);
-}
-
-.agent-composer-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.agent-composer-actions .btn {
-  align-items: center;
-  display: inline-flex;
-  gap: 6px;
-  justify-content: center;
-  white-space: nowrap;
-}
 </style>

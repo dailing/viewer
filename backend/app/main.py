@@ -59,6 +59,7 @@ from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
 from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceAgentSessionRequest, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
+from .super_workspace import SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, super_workspace_manager
 from .terminals import terminal_manager
 from .users import get_user_profile, list_user_profiles, user_home_path, user_home_relative
 from .voice import connect_voice
@@ -736,6 +737,31 @@ def _agent_manager(provider: str):
 @app.get("/api/agents/providers")
 async def agent_providers():
     return list(AGENT_PROVIDERS.values())
+
+
+@app.get("/api/super-workspace")
+async def super_workspace(user: str | None = None):
+    return super_workspace_manager.read(user)
+
+
+@app.post("/api/super-workspace/roles")
+async def create_super_role(request: SuperRoleCreate, user: str | None = None):
+    return super_workspace_manager.create_role(request, user)
+
+
+@app.put("/api/super-workspace/roles/{role_id}")
+async def update_super_role(role_id: str, request: SuperRolePatch, user: str | None = None):
+    return super_workspace_manager.update_role(role_id, request, user)
+
+
+@app.delete("/api/super-workspace/roles/{role_id}")
+async def delete_super_role(role_id: str, user: str | None = None):
+    return super_workspace_manager.delete_role(role_id, user)
+
+
+@app.post("/api/super-workspace/dispatch")
+async def dispatch_super_workspace(request: SuperDispatchRequest, user: str | None = None):
+    return await super_workspace_manager.dispatch(request, user)
 
 
 @app.get("/api/agents/sessions")

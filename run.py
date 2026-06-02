@@ -17,6 +17,7 @@ DEFAULT_ROOT = Path("~/Sync").expanduser()
 DEFAULT_PORT = 18989
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_LOG_DIR = Path("~/.view/logs").expanduser()
+PROJECT_ENV_PATH = PROJECT_ROOT / ".viewer.env"
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,6 +112,25 @@ def resolve_project_path(path: Path) -> Path:
     return (PROJECT_ROOT / path).resolve()
 
 
+def load_project_env(path: Path = PROJECT_ENV_PATH) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if not name or name in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[name] = value
+
+
 def build_frontend(debug: bool) -> None:
     package_json = FRONTEND_DIR / "package.json"
     if not package_json.exists():
@@ -139,6 +159,7 @@ def default_log_file(log_dir: Path) -> Path:
 
 
 def main() -> None:
+    load_project_env()
     args = parse_args()
     root_arg = args.serve_dir if args.serve_dir is not None else args.root
     root = root_arg.expanduser().resolve()

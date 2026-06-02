@@ -4,6 +4,7 @@ import AgentTasksPage from "./components/AgentTasksPage.vue";
 import ConfigPanel from "./components/ConfigPanel.vue";
 import FileSidebar from "./components/FileSidebar.vue";
 import LoopTasksPage from "./components/LoopTasksPage.vue";
+import SuperWorkspacePage from "./components/SuperWorkspacePage.vue";
 import Workspace from "./components/Workspace.vue";
 import { connectEvents } from "./api/events";
 import { useAgentsStore } from "./stores/agents";
@@ -38,7 +39,7 @@ const appReady = ref(false);
 const selectingUser = ref(false);
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
-const activePage = ref<"workspace" | "settings" | "loops" | "tasks">("workspace");
+const activePage = ref<"workspace" | "settings" | "loops" | "tasks" | "super">("workspace");
 const mobileToolbarOpen = ref(false);
 const agentStatusByRef = ref<Record<string, AgentStatus>>({});
 const workspaceHeat = ref<Record<string, number>>({});
@@ -110,6 +111,13 @@ const activePaneTitle = computed(() => {
 const activePaneHasContent = computed(() => {
   const pane = layout.activePane;
   return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || legacyAgentRefForPane(pane) || pane.diffPath));
+});
+const activePageTitle = computed(() => {
+  if (activePage.value === "workspace") return activePaneTitle.value;
+  if (activePage.value === "settings") return "Settings";
+  if (activePage.value === "loops") return "Loop Tasks";
+  if (activePage.value === "tasks") return "Task DAG";
+  return "Super Workspace";
 });
 const globalPaneActions = computed<PaneToolbarAction[]>(() => {
   if (!layout.activePaneId) return [];
@@ -712,11 +720,17 @@ onUnmounted(() => {
       >
         <i class="bi bi-diagram-3"></i>
       </button>
-      <div
-        class="active-pane-title"
-        :title="activePage === 'workspace' ? activePaneTitle : activePage === 'settings' ? 'Settings' : activePage === 'loops' ? 'Loop Tasks' : 'Task DAG'"
+      <button
+        class="btn btn-outline-secondary icon-button"
+        :class="{ active: activePage === 'super' }"
+        type="button"
+        title="Super Workspace"
+        @click="activePage = activePage === 'super' ? 'workspace' : 'super'"
       >
-        {{ activePage === 'workspace' ? activePaneTitle : activePage === 'settings' ? 'Settings' : activePage === 'loops' ? 'Loop Tasks' : 'Task DAG' }}
+        <i class="bi bi-people"></i>
+      </button>
+      <div class="active-pane-title" :title="activePageTitle">
+        {{ activePageTitle }}
       </div>
       <span v-if="activePage === 'workspace' && activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
         {{ activePaneToolbar.status }}
@@ -852,8 +866,11 @@ onUnmounted(() => {
     <main v-else-if="activePage === 'loops'" class="top-level-page">
       <LoopTasksPage />
     </main>
-    <main v-else class="top-level-page task-dag-top-page">
+    <main v-else-if="activePage === 'tasks'" class="top-level-page task-dag-top-page">
       <AgentTasksPage />
+    </main>
+    <main v-else class="top-level-page">
+      <SuperWorkspacePage />
     </main>
   </div>
 </template>

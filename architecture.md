@@ -8,10 +8,10 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 ## Runtime Flow
 
-1. `run.py` parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
+1. `run.py` loads project-local `.viewer.env` without overriding existing process variables, parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
 2. `backend/app/main.py` creates the FastAPI app, installs CORS and request logging middleware, starts `watch_root()`, the agent-loop scheduler, and the Agent Task DAG monitor on startup, stops watcher, task monitor, loops, terminals, and agent sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
-4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading workspace state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/heat/draft keys are namespaced by user. The app then loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The top bar switches between the workspace, full-page settings, full-page loop task editor, and full-page Agent Task DAG board.
+4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading workspace state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/heat/draft keys are namespaced by user. The app then loads file tree/config/terminal/workspace state, restores the active workspace layout and sidebar directory, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The top bar switches between the workspace, full-page settings, full-page loop task editor, full-page Agent Task DAG board, and the Super Workspace role-chat page.
 5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer and oversized Markdown/CSV/text files to the virtualized large text viewer. The app top bar exposes a global active-pane refresh action that dispatches `viewer:pane-refresh`; file panes clear visible content before refetching metadata and incrementing their pane `version`, diff panes clear and reload their Git diff directly, and terminal/agent panes clear stale content before reconnecting to fetch a fresh snapshot. Viewers fetch raw/text content and reload when their `version` prop changes; image and PDF panes include the pane version in raw-file URLs so manual refreshes can bypass browser cache even when the content hash is unchanged. Markdown panes render embedded images with browser lazy loading, track simple relative local image dependencies client-side, use a pane-level version cache key for raw-file URLs, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. PDF panes configure the PDF.js worker explicitly, load the document once from `/api/file/raw`, and render individual pages lazily as page placeholders approach the scroll viewport. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 7. Codex panes use REST for lifecycle/message operations and WebSocket `/api/codex/sessions/{id}/ws` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message starts the actual Codex CLI run. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Raw rollout events stay server-side; REST/WebSocket snapshots send compact display events, and the shared agent API defaults to `detail=focus` so focus-mode panes receive assistant messages without tool output/file-change payloads until the frontend requests `detail=full`.
@@ -54,6 +54,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/terminals`: lists or creates terminal sessions for the `user` query profile; POST accepts an optional relative `cwd`. When `cwd` is omitted, the terminal starts in the profile home directory.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
 - `/api/agents/providers`: returns registered agent providers with frontend display metadata such as name and Bootstrap icon.
+- `/api/super-workspace` routes: per-user Super Workspace role storage and LLM dispatch. Role definitions live in `~/.view/users/{user}/super-workspace.json` and contain role name, fixed rules/description, provider, cwd, model, and the current backing agent session ref. `/api/super-workspace/dispatch` sends the user message plus candidate role descriptions to an OpenAI-compatible chat-completions endpoint and expects JSON role ids. Dispatch defaults to DeepSeek direct API model `deepseek-v4-flash`, reads `VIEWER_SUPER_DISPATCH_API_KEY` / `DEEPSEEK_API_KEY` from the process environment or the project-local ignored `.viewer.env`, and can be overridden with `VIEWER_SUPER_DISPATCH_MODEL` or `VIEWER_SUPER_DISPATCH_URL`.
 - `/api/agents/sessions`: shared agent session API. GET accepts optional `provider` plus `user` and returns only that profile's sessions; POST accepts a JSON `provider` plus prompt/cwd/model and creates a session owned by the `user` query profile. When `cwd` is omitted, Codex/Hermes start in the profile home directory.
 - `/api/agents/sessions/{session_id}` routes: shared snapshot, send, queue append/update/delete, terminate, and WebSocket connect. Non-WebSocket mutating requests carry `provider` in the JSON body; GET/DELETE/WebSocket use a `provider` query parameter because they have no request JSON body. Snapshot and WebSocket routes accept `detail=focus|full`; focus is the default and filters event payloads down to assistant messages, while full includes tool calls/results, file changes, patch text, and raw previews.
 - `/api/agents/sessions/{session_id}/approvals/{approval_id}` resolves a provider-normalized pending approval with choices such as `once`, `session`, `always`, or `deny`. Agent snapshots expose `pending_approvals` so the shared frontend transcript can render approve/deny controls without provider-specific UI.
@@ -273,6 +274,13 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `DagConfig.base_url` stores the Viewer API origin injected into Agent Task manager/executor prompts; when empty, the backend falls back to `http://127.0.0.1:{VIEWER_PORT}` during prompt generation.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
+`backend/app/super_workspace.py`
+
+- Per-user Super Workspace role manager backed by `~/.view/users/{user}/super-workspace.json`.
+- Defines local API models for `SuperRole`, role create/update payloads, and dispatch responses so the feature stays isolated from workspace slots and the Agent Task DAG.
+- `SuperWorkspaceManager.read()` / `write()` / create/update/delete role methods persist fixed role rules plus the current backing `provider:session_id` ref.
+- `dispatch()` reads role descriptions, calls an OpenAI-compatible chat-completions endpoint with JSON response format, validates returned role ids against the candidate roles, and returns the selected ids/rationale. It intentionally only routes messages; the frontend owns creating/renewing the actual agent session and sending or queueing the routed prompt through the shared agent session API.
+
 `frontend/src/components/AgentTasksPage.vue`
 
 - Full-page Agent Task DAG board opened from the top bar beside Loop Tasks.
@@ -322,8 +330,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/App.vue`
 
-- Root shell: top bar, sidebar drawer/pinned layout, workspace, full-page settings, and full-page loop tasks.
-- Loads config/terminal lists, restores the saved sidebar directory, loads that directory, restores layout, and exposes top-bar buttons for Settings and Loop Tasks.
+- Root shell: top bar, sidebar drawer/pinned layout, workspace, full-page settings, full-page loop tasks, full-page Agent Task DAG, and full-page Super Workspace.
+- Loads config/terminal lists, restores the saved sidebar directory, loads that directory, restores layout, and exposes top-bar buttons for Settings, Loop Tasks, Task DAG, and Super Workspace.
 - Applies appearance and active Markdown theme settings from `stores/files.ts` as CSS variables on the app shell, including nav height/icon size and Markdown/syntax colors.
 - Connects SSE with `connectEvents()`.
 - Refreshes affected file listings on change events.
@@ -340,6 +348,22 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - File viewer scroll memory lives in `utils/scrollMemory.ts` and `composables/useScrollMemory.ts`. Scroll positions are browser-local, user-namespaced, and keyed by workspace id, pane id, and file path so two panes can keep different positions for the same file; layout navigation emits `viewer:pane-before-navigate` before replacing pane content and workspace switching emits `viewer:workspace-before-switch` before the displayed workspace id changes so the current viewer can save its last scroll position under the correct key.
 - Agent provider/session list is loaded on startup and polled every 3 seconds like terminals through `stores/agents.ts`. Workspaces keep one `agent_session_ids` list using `provider:session_id` refs; new or opened sessions are remembered in the active workspace so the Agents sidebar is workspace-scoped rather than directory-scoped. Pinned agent sessions are stored per workspace in `pinned_agent_session_ids` and sorted above unpinned sessions in the Agents sidebar. Removing a row from the sidebar only removes that workspace entry and matching panes; it does not delete viewer session metadata or canonical provider history.
 - `LocalFilePreview.vue` is a floating file preview dialog used for transient local-file inspection from Codex transcript links. It resolves to normal viewer components and offers only three navigation actions: open in the active pane, open in a vertical split, or open in a horizontal split.
+
+`frontend/src/components/SuperWorkspacePage.vue`
+
+- Full-page role-chat UI opened from the top bar beside Task DAG.
+- Loads per-user role definitions through `/api/super-workspace`, edits name/provider/cwd/model/fixed rules, and stores the current backing agent session ref on each role.
+- The role list starts with no config panel open; clicking a role row toggles that role's config, while the row-level `Renew` action creates a fresh backing session without opening the config panel.
+- Role CWD uses `DirectoryPicker.vue` so users can walk profile-root subdirectories one level at a time before choosing the working directory.
+- `Renew` creates a fresh provider session using the same fixed role rules, then patches the role's `session_ref` so future dispatches resume the new context.
+- The composer sends the user message to `/api/super-workspace/dispatch`; after the backend returns selected role ids, the page creates a role session when missing or sends/queues the routed prompt through `stores/agents.ts` depending on whether that session is running.
+- Uses `VoiceTextarea.vue` for both the global dispatch composer and role rules editor, with custom action buttons injected into the component action bar.
+- Uses focus snapshots from the shared agent API, refreshed by lightweight polling, and renders each dispatched message as a chat-like block with selected role chips, model rationale, role status, and post-dispatch assistant messages rendered through the shared Markdown renderer. Recent dispatch blocks are browser-local and user-namespaced under `viewer.superWorkspace.runs.v1`.
+
+`frontend/src/components/DirectoryPicker.vue`
+
+- Reusable stepped directory selector backed by `/api/tree`.
+- Displays one select per path level starting at the active profile root, loads child directories for each selected parent, and emits the selected served-root-relative directory string for cwd-style fields.
 
 `frontend/src/components/viewers/CsvViewer.vue`
 
@@ -503,7 +527,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - xterm.js terminal pane connected to backend WebSocket.
 - Registers terminal shell/status, quick-key controls, and terminate action with `stores/paneToolbar.ts` for top-bar rendering while the pane is active.
-- The terminal text input pad uses `VoiceInputButton.vue` for microphone transcription into the pad and leaves command sending under explicit user control.
+- The terminal text input pad uses `VoiceTextarea.vue` for microphone transcription and clear behavior, with terminal-specific Send, Send+Enter, Bracketed, and Slow paste actions injected through the reusable component action slot. Command sending stays under explicit user control.
 - Maintains socket, xterm instance, fit addon, resize observer, parser disposables, output-version ordering, reconnect timer, and reset state.
 - `firstParam()`: helper for xterm parser mode query parameters.
 - `registerModeQueryHandlers(term)`, `modeQueryReply(sequence)`, `filterModeQueries(data, respond)`: handle terminal mode status queries.
@@ -534,7 +558,12 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/components/AgentPromptComposer.vue`
 
-- Shared Codex/Hermes prompt composer with the Codex input styling and behavior: server-backed queue list, queued-message edit/save/cancel/delete controls, microphone transcription through `VoiceInputButton.vue`, queue, clear, and stop actions. Parent viewers own persistence and API calls through emitted events.
+- Shared Codex/Hermes prompt composer with the Codex input styling and behavior: server-backed queue list, queued-message edit/save/cancel/delete controls, microphone transcription through `VoiceTextarea.vue`, queue, clear, and stop actions. Parent viewers own persistence and API calls through emitted events.
+
+`frontend/src/components/VoiceTextarea.vue`
+
+- Reusable textarea plus voice-input action bar. It owns only textarea binding, `VoiceInputButton.vue`, optional Clear, keyboard event forwarding, and an `actions` slot for caller-specific buttons such as Queue/Stop, Save/Delete, or Dispatch.
+- The voice state still lives in `stores/voice.ts`; callers must provide a stable `contextId` so recording/transcription state stays scoped to the right prompt or role editor.
 
 `frontend/src/components/AgentSessionTranscript.vue`
 
@@ -563,6 +592,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Admin APIs: `restartServer()` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
 - Codex APIs: `listCodexSessions()`, `createCodexSession(prompt, cwd)`, `getCodexSession()`, `sendCodexMessage()`, `queueCodexMessage()`, `updateCodexQueuedMessage()`, `deleteCodexQueuedMessage()`, `codexSessionSocketUrl()`.
+- Super Workspace APIs: `getSuperWorkspace()`, `createSuperRole()`, `updateSuperRole()`, `deleteSuperRole()`, and `dispatchSuperWorkspace()` wrap role storage and LLM routing endpoints while actual role messages still use the shared agent session helpers.
 - `frontend/src/api/client.ts` appends the active user id from `viewer.activeUser.v1` to REST and WebSocket API URLs; `frontend/src/api/events.ts` does the same for the SSE stream.
 - Codex and Hermes session helpers call the shared `/api/agents/sessions` endpoints and pass `provider` in the request body or query string; old provider-specific backend routes remain for compatibility.
 - Hermes APIs: `listHermesSessions()`, `createHermesSession(prompt, cwd)`, `getHermesSession()`, `sendHermesMessage()`, `queueHermesMessage()`, `updateHermesQueuedMessage()`, `deleteHermesQueuedMessage()`, `terminateHermesSession()`, and `hermesSessionSocketUrl()`.
@@ -648,6 +678,10 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/types/hermes.ts`
 
 - TypeScript mirror of Hermes schemas: `HermesStatus`, `HermesSessionInfo`, and `HermesSessionSnapshot`; it reuses the shared agent prompt/event/queue item shapes for normalized transcript display.
+
+`frontend/src/types/superWorkspace.ts`
+
+- TypeScript mirror of Super Workspace role storage and dispatch response shapes: `SuperRole`, create/patch payloads, persisted role list, and selected route ids/rationale.
 
 `frontend/src/types/agentLoops.ts`
 
@@ -809,6 +843,7 @@ If a backend field changes, update the matching frontend type and all consumers.
 
 - `~/.view/config.json`: appearance, workspace count, Codex model options, voice model/language/translation options, Markdown themes, user profiles, and default user, managed by `/api/config`, `/api/users`, and `/api/workspaces/config`. On first use, missing config is copied from served-root `.viewer.config.json` if present; legacy workspace keys (`pinned`, `current_path`, `visit_times`, and `workspaces`) are removed on subsequent reads/writes after `workspaces.count` is migrated to `workspace.count`.
 - `~/.view/users/{user}/workspaces.json`: active workspace id plus per-slot split tree, active pane, open file paths, open terminal IDs, sidebar directory, pinned files/folders, workspace-associated agent refs, legacy Codex/Hermes session id compatibility lists, per-workspace visit timestamps/open ordering, and update timestamp, managed by `/api/workspaces?user=...`. Legacy `count` is migrated into `~/.view/config.json` and pruned from the workspace state file on write.
+- `~/.view/users/{user}/super-workspace.json`: Super Workspace role definitions, including fixed role rules, provider/cwd/model, and current backing agent session refs. The page's recent routed message blocks are intentionally browser-local, not stored here.
 - `~/.view/loops/*.md`: Markdown loop task definitions with generated YAML frontmatter and prompt body.
 - `~/.view/agent-loops.json`: scheduler runtime state for loop tasks.
 - `localStorage viewer.activeUser.v1`: selected soft user profile id.
@@ -818,6 +853,7 @@ If a backend field changes, update the matching frontend type and all consumers.
 - `localStorage viewer.sidebarActiveTool.v1.{user}` and `viewer.workspaceHeat.v1.{user}`: sidebar tab and workspace heat state.
 - `localStorage viewer.scrollPositions.v1.{user}`: per-path scroll positions.
 - `localStorage viewer.agentDrafts.v1.{user}`: unsent agent prompt drafts.
+- `localStorage viewer.superWorkspace.runs.v1.{user}`: recent Super Workspace dispatch blocks with message text, selected role ids, start event cursors, and router rationale.
 - `~/.view/logs/viewer-*.log`: timestamped runtime logs from `run.py`.
 - `~/.view/logs/codex-sessions/*.jsonl`: obsolete viewer-local Codex stdout caches from older versions; rendering now reads canonical rollout JSONL files under `~/.codex/sessions/`.
 - `~/.view/logs/codex-sessions/*.stderr.log`: stderr from Codex subprocesses.

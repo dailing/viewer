@@ -2,6 +2,7 @@ import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerCon
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
+import type { SuperDispatchResponse, SuperRoleCreate, SuperRolePatch, SuperWorkspaceData } from "../types/superWorkspace";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
 import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskFile, AgentTaskGroup, AgentTaskListResponse, AgentTaskManagerRequest, AgentTaskPatch, AgentTaskPlan, AgentTaskResetAction, AgentTaskResetResponse, AgentTaskSettings } from "../types/agentTasks";
@@ -263,6 +264,38 @@ export function terminalSocketUrl(id: string): string {
 
 export async function listAgentProviders(): Promise<AgentProviderInfo[]> {
   return request<AgentProviderInfo[]>("/api/agents/providers");
+}
+
+export async function getSuperWorkspace(): Promise<SuperWorkspaceData> {
+  return request<SuperWorkspaceData>("/api/super-workspace");
+}
+
+export async function createSuperRole(role: SuperRoleCreate): Promise<SuperWorkspaceData> {
+  return request<SuperWorkspaceData>("/api/super-workspace/roles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(role),
+  });
+}
+
+export async function updateSuperRole(id: string, patch: SuperRolePatch): Promise<SuperWorkspaceData> {
+  return request<SuperWorkspaceData>(`/api/super-workspace/roles/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteSuperRole(id: string): Promise<SuperWorkspaceData> {
+  return request<SuperWorkspaceData>(`/api/super-workspace/roles/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function dispatchSuperWorkspace(message: string, roleIds?: string[]): Promise<SuperDispatchResponse> {
+  return request<SuperDispatchResponse>("/api/super-workspace/dispatch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, role_ids: roleIds }),
+  });
 }
 
 export async function listAgentSessions(provider: AgentProvider): Promise<unknown[]> {

@@ -463,6 +463,7 @@ async def put_config(config: ConfigData):
             appearance=config.appearance,
             markdown=config.markdown,
             codex=config.codex,
+            voice=config.voice,
             dag=config.dag,
             workspace=config.workspace,
             users=config.users or current.users,

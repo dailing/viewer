@@ -232,6 +232,14 @@ function connect() {
   });
 }
 
+function handleRefresh(event: Event) {
+  const paneId = (event as CustomEvent<{ paneId?: string }>).detail?.paneId;
+  if (paneId !== props.paneId) return;
+  session.value = null;
+  error.value = "";
+  connect();
+}
+
 async function queuePrompt() {
   const prompt = promptText.value.trim();
   if (!prompt || !session.value || isEditingQueue.value) return;
@@ -334,7 +342,6 @@ function updatePaneToolbar() {
   const status = session.value?.status ?? "connecting";
   const actions: PaneToolbarAction[] = [
     { id: "agent-new-session-here", title: `New ${providerInfo.value.name} session in this directory`, icon: "bi-plus-square", run: () => createSessionHere() },
-    { id: "agent-refresh", title: `Refresh ${providerInfo.value.name} session`, icon: "bi-arrow-clockwise", run: () => loadSnapshot(requestedDetail.value) },
     {
       id: "agent-focus",
       title: focusMode.value ? "Show agent operation details" : "Focus mode: hide agent operation details",
@@ -398,12 +405,14 @@ onMounted(() => {
   if (isActivePane.value) agents.markRead(props.agentRef);
   if (!agents.providersLoaded) void agents.loadProviders();
   connect();
+  window.addEventListener("viewer:pane-refresh", handleRefresh);
   updatePaneToolbar();
 });
 
 onUnmounted(() => {
   mounted = false;
   if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+  window.removeEventListener("viewer:pane-refresh", handleRefresh);
   socket?.close();
   paneToolbar.clearPaneToolbar(props.paneId);
 });

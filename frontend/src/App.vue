@@ -114,6 +114,12 @@ const activePaneHasContent = computed(() => {
 const globalPaneActions = computed<PaneToolbarAction[]>(() => {
   if (!layout.activePaneId) return [];
   return [
+    {
+      id: "refresh-pane",
+      title: "Refresh pane",
+      icon: "bi-arrow-clockwise",
+      run: () => refreshActivePane(),
+    },
     ...(layout.activePaneCanGoBack
       ? [
           {
@@ -643,6 +649,12 @@ function closeActivePane() {
     return;
   }
   layout.closePane(paneId);
+}
+
+function refreshActivePane() {
+  const paneId = layout.activePaneId;
+  if (!paneId) return;
+  window.dispatchEvent(new CustomEvent("viewer:pane-refresh", { detail: { paneId } }));
 }
 
 onUnmounted(() => {

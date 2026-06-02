@@ -16,12 +16,81 @@ from .config import settings
 from .logging import DEFAULT_LOG_DIR, current_log_path
 
 _whisper_engine: Any | None = None
+_whisper_engine_key: tuple[Any, ...] | None = None
 _whisper_engine_lock = asyncio.Lock()
 _offline_model: Any | None = None
+_offline_model_name: str | None = None
 _offline_model_lock = asyncio.Lock()
 _offline_transcribe_lock = asyncio.Lock()
 _offline_model_unload_task: asyncio.Task | None = None
 _offline_model_last_used = 0.0
+
+
+@dataclass(frozen=True)
+class VoiceRuntimeConfig:
+    enabled: bool
+    model: str
+    language: str
+    translation_enabled: bool
+    target_language: str
+    backend: str
+    backend_policy: str
+    direct_english_translation: bool
+    min_chunk_size: float
+    stop_timeout_seconds: float
+    model_idle_timeout_seconds: float
+    offline_beam_size: int
+    offline_vad_filter: bool
+    vac: bool
+    vad: bool
+    upstream_ws: str
+
+
+LANGUAGE_ALIASES = {
+    "cn": "zh",
+    "zh-cn": "zh",
+    "zh_cn": "zh",
+    "chinese": "zh",
+    "eng": "en",
+    "english": "en",
+}
+
+
+def _normalize_language(value: str, fallback: str, *, allow_auto: bool) -> str:
+    cleaned = (value or "").strip().lower()
+    if not cleaned:
+        return fallback
+    normalized = LANGUAGE_ALIASES.get(cleaned, cleaned)
+    if normalized == "auto" and not allow_auto:
+        return fallback
+    return normalized
+
+
+def _voice_config() -> VoiceRuntimeConfig:
+    from .files import read_config
+
+    config = read_config().voice
+    language = _normalize_language(config.language, "auto", allow_auto=True)
+    target_language = _normalize_language(config.target_language, "en", allow_auto=False)
+    translation_enabled = bool(config.translation_enabled and target_language)
+    return VoiceRuntimeConfig(
+        enabled=settings.voice_enabled and config.enabled,
+        model=(config.model or settings.voice_model).strip() or "large-v3-turbo",
+        language=language,
+        translation_enabled=translation_enabled,
+        target_language=target_language if translation_enabled else "",
+        backend=settings.voice_backend,
+        backend_policy=settings.voice_backend_policy,
+        direct_english_translation=settings.voice_direct_english_translation,
+        min_chunk_size=settings.voice_min_chunk_size,
+        stop_timeout_seconds=settings.voice_stop_timeout_seconds,
+        model_idle_timeout_seconds=settings.voice_model_idle_timeout_seconds,
+        offline_beam_size=settings.voice_offline_beam_size,
+        offline_vad_filter=settings.voice_offline_vad_filter,
+        vac=settings.voice_vac,
+        vad=settings.voice_vad,
+        upstream_ws=settings.voice_upstream_ws,
+    )
 
 
 def _utc_stamp() -> str:
@@ -100,25 +169,25 @@ async def _send_error(websocket: WebSocket, message: str) -> None:
     await websocket.send_json({"type": "error", "message": message})
 
 
-def _line_text(line: dict[str, Any]) -> str:
+def _line_text(line: dict[str, Any], cfg: VoiceRuntimeConfig) -> str:
     if line.get("speaker") == -2:
         return ""
-    if settings.voice_target_language and line.get("translation"):
+    if cfg.translation_enabled and line.get("translation"):
         return str(line.get("translation") or "").strip()
     return str(line.get("text") or "").strip()
 
 
-def _state_text(payload: dict[str, Any]) -> str:
+def _state_text(payload: dict[str, Any], cfg: VoiceRuntimeConfig) -> str:
     lines = payload.get("lines")
     committed = ""
     if isinstance(lines, list):
-        committed = " ".join(_line_text(line) for line in lines if isinstance(line, dict)).strip()
-    buffer_key = "buffer_translation" if settings.voice_target_language else "buffer_transcription"
+        committed = " ".join(_line_text(line, cfg) for line in lines if isinstance(line, dict)).strip()
+    buffer_key = "buffer_translation" if cfg.translation_enabled else "buffer_transcription"
     buffer_text = str(payload.get(buffer_key) or "").strip()
     return " ".join(part for part in [committed, buffer_text] if part)
 
 
-def _normalize_payload(payload: dict[str, Any]) -> dict[str, str] | None:
+def _normalize_payload(payload: dict[str, Any], cfg: VoiceRuntimeConfig) -> dict[str, str] | None:
     if payload.get("type") in {"config", "ready_to_stop"}:
         return None
     if payload.get("error"):
@@ -130,14 +199,14 @@ def _normalize_payload(payload: dict[str, Any]) -> dict[str, str] | None:
     if not text and isinstance(payload.get("segments"), list):
         text = "".join(str(segment.get("text", "")) for segment in payload["segments"] if isinstance(segment, dict))
     if isinstance(payload.get("lines"), list):
-        text = _state_text(payload)
+        text = _state_text(payload, cfg)
         is_final = False
     if not text:
         return None
     return {"type": "final" if is_final else "partial", "text": str(text)}
 
 
-def _normalize_upstream_message(message: str | bytes) -> dict[str, str] | None:
+def _normalize_upstream_message(message: str | bytes, cfg: VoiceRuntimeConfig) -> dict[str, str] | None:
     if isinstance(message, bytes):
         with suppress(UnicodeDecodeError):
             message = message.decode("utf-8")
@@ -149,43 +218,46 @@ def _normalize_upstream_message(message: str | bytes) -> dict[str, str] | None:
         text = message.strip()
         return {"type": "partial", "text": text} if text else None
 
-    return _normalize_payload(payload)
+    return _normalize_payload(payload, cfg)
 
 
-def _whisper_kwargs() -> dict[str, Any]:
-    target_language = settings.voice_target_language
-    if target_language and settings.voice_language == "auto" and settings.voice_backend_policy != "simulstreaming":
+def _whisper_kwargs(cfg: VoiceRuntimeConfig) -> dict[str, Any]:
+    target_language = cfg.target_language
+    if target_language and cfg.language == "auto" and cfg.backend_policy != "simulstreaming":
         logger.warning(
-            "Ignoring VIEWER_VOICE_TARGET_LANGUAGE={} because WhisperLiveKit translation with "
-            "VIEWER_VOICE_LANGUAGE=auto requires backend_policy=simulstreaming; using transcription-only mode.",
+            "Ignoring voice target_language={} because WhisperLiveKit translation with "
+            "language=auto requires backend_policy=simulstreaming; using transcription-only mode.",
             target_language,
         )
         target_language = ""
 
     return {
-        "model_size": settings.voice_model,
-        "lan": settings.voice_language,
+        "model_size": cfg.model,
+        "lan": cfg.language,
         "target_language": target_language,
-        "backend": settings.voice_backend,
-        "backend_policy": settings.voice_backend_policy,
-        "direct_english_translation": settings.voice_direct_english_translation,
-        "min_chunk_size": settings.voice_min_chunk_size,
-        "vac": settings.voice_vac,
-        "vad": settings.voice_vad,
+        "backend": cfg.backend,
+        "backend_policy": cfg.backend_policy,
+        "direct_english_translation": cfg.direct_english_translation,
+        "min_chunk_size": cfg.min_chunk_size,
+        "vac": cfg.vac,
+        "vad": cfg.vad,
         "pcm_input": False,
     }
 
 
-async def _get_whisper_engine() -> Any:
-    global _whisper_engine
+async def _get_whisper_engine(cfg: VoiceRuntimeConfig) -> Any:
+    global _whisper_engine, _whisper_engine_key
     async with _whisper_engine_lock:
-        if _whisper_engine is None:
+        kwargs = _whisper_kwargs(cfg)
+        key = tuple(sorted(kwargs.items()))
+        if _whisper_engine is None or _whisper_engine_key != key:
             try:
                 from whisperlivekit import TranscriptionEngine
             except ImportError as exc:
                 raise RuntimeError("WhisperLiveKit is not installed. Run `uv sync`.") from exc
-            logger.info("Loading WhisperLiveKit voice engine with {}", _whisper_kwargs())
-            _whisper_engine = await asyncio.to_thread(TranscriptionEngine, **_whisper_kwargs())
+            logger.info("Loading WhisperLiveKit voice engine with {}", kwargs)
+            _whisper_engine = await asyncio.to_thread(TranscriptionEngine, **kwargs)
+            _whisper_engine_key = key
         return _whisper_engine
 
 
@@ -221,17 +293,22 @@ def _schedule_offline_model_unload() -> None:
     _offline_model_unload_task = asyncio.create_task(_unload_offline_model_after_idle())
 
 
-async def _get_offline_model() -> Any:
-    global _offline_model, _offline_model_last_used
+async def _get_offline_model(cfg: VoiceRuntimeConfig) -> Any:
+    global _offline_model, _offline_model_last_used, _offline_model_name
     async with _offline_model_lock:
         _offline_model_last_used = asyncio.get_running_loop().time()
-        if _offline_model is None:
+        if _offline_model is None or _offline_model_name != cfg.model:
             try:
                 from faster_whisper import WhisperModel
             except ImportError as exc:
                 raise RuntimeError("faster-whisper is not installed. Run `uv sync`.") from exc
-            logger.info("Loading offline voice model {}", settings.voice_model)
-            _offline_model = await asyncio.to_thread(WhisperModel, settings.voice_model, device="auto", compute_type="default")
+            if _offline_model is not None:
+                logger.info("Switching offline voice model from {} to {}", _offline_model_name, cfg.model)
+                _offline_model = None
+                await asyncio.to_thread(_release_gpu_memory)
+            logger.info("Loading offline voice model {}", cfg.model)
+            _offline_model = await asyncio.to_thread(WhisperModel, cfg.model, device="auto", compute_type="default")
+            _offline_model_name = cfg.model
         _schedule_offline_model_unload()
         return _offline_model
 
@@ -240,29 +317,33 @@ def _join_segments(segments: Any) -> str:
     return " ".join(str(segment.text).strip() for segment in segments if str(segment.text).strip()).strip()
 
 
-def _transcribe_with_model(model: Any, audio_path: Path) -> str:
+def _transcribe_with_model(model: Any, audio_path: Path, cfg: VoiceRuntimeConfig) -> str:
+    task = "translate" if cfg.translation_enabled and cfg.target_language == "en" else "transcribe"
+    if cfg.translation_enabled and cfg.target_language != "en":
+        logger.warning("Offline faster-whisper translation only supports English output; transcribing without translation.")
     segments, _info = model.transcribe(
         audio_path.as_posix(),
-        language=settings.voice_language if settings.voice_language != "auto" else None,
-        beam_size=settings.voice_offline_beam_size,
-        vad_filter=settings.voice_offline_vad_filter,
+        language=cfg.language if cfg.language != "auto" else None,
+        task=task,
+        beam_size=cfg.offline_beam_size,
+        vad_filter=cfg.offline_vad_filter,
         condition_on_previous_text=True,
     )
     return _join_segments(segments)
 
 
-async def _transcribe_offline(audio_path: Path) -> str:
+async def _transcribe_offline(audio_path: Path, cfg: VoiceRuntimeConfig) -> str:
     global _offline_model_last_used
-    model = await _get_offline_model()
+    model = await _get_offline_model(cfg)
     async with _offline_transcribe_lock:
-        text = await asyncio.to_thread(_transcribe_with_model, model, audio_path)
+        text = await asyncio.to_thread(_transcribe_with_model, model, audio_path, cfg)
         _offline_model_last_used = asyncio.get_running_loop().time()
         _schedule_offline_model_unload()
         return " ".join(text.split())
 
 
-async def _connect_offline_voice(websocket: WebSocket) -> None:
-    capture = VoiceCapture(_utc_stamp(), f"offline-{settings.voice_backend}", settings.voice_backend_policy)
+async def _connect_offline_voice(websocket: WebSocket, cfg: VoiceRuntimeConfig) -> None:
+    capture = VoiceCapture(_utc_stamp(), f"offline-{cfg.backend}", cfg.backend_policy)
     await websocket.send_json({"type": "ready"})
     try:
         while True:
@@ -284,7 +365,7 @@ async def _connect_offline_voice(websocket: WebSocket) -> None:
                     await _send_error(websocket, "No voice audio was received.")
                     return
                 await websocket.send_json({"type": "processing"})
-                text = await _transcribe_offline(audio_path)
+                text = await _transcribe_offline(audio_path, cfg)
                 await websocket.send_json({"type": "final", "text": text})
                 return
     finally:
@@ -292,23 +373,23 @@ async def _connect_offline_voice(websocket: WebSocket) -> None:
             capture.finish()
 
 
-async def _connect_whisperlivekit(websocket: WebSocket) -> None:
+async def _connect_whisperlivekit(websocket: WebSocket, cfg: VoiceRuntimeConfig) -> None:
     from whisperlivekit import AudioProcessor
 
-    engine = await _get_whisper_engine()
-    audio_processor = AudioProcessor(transcription_engine=engine, language=settings.voice_language)
+    engine = await _get_whisper_engine(cfg)
+    audio_processor = AudioProcessor(transcription_engine=engine, language=cfg.language)
     results_generator = await audio_processor.create_tasks()
-    capture = VoiceCapture(_utc_stamp(), settings.voice_backend, settings.voice_backend_policy)
+    capture = VoiceCapture(_utc_stamp(), cfg.backend, cfg.backend_policy)
     await websocket.send_json({"type": "ready"})
 
     async def results_to_client() -> None:
         async for response in results_generator:
             payload = response.to_dict() if hasattr(response, "to_dict") else response
             if isinstance(payload, dict):
-                normalized = _normalize_payload(payload)
+                normalized = _normalize_payload(payload, cfg)
                 if normalized:
                     await websocket.send_json(normalized)
-        final_text = _state_text(audio_processor.last_response_content.to_dict())
+        final_text = _state_text(audio_processor.last_response_content.to_dict(), cfg)
         if final_text:
             await websocket.send_json({"type": "final", "text": final_text})
 
@@ -337,11 +418,11 @@ async def _connect_whisperlivekit(websocket: WebSocket) -> None:
         if client_task in done:
             client_task.result()
             try:
-                await asyncio.wait_for(results_task, timeout=settings.voice_stop_timeout_seconds)
+                await asyncio.wait_for(results_task, timeout=cfg.stop_timeout_seconds)
             except TimeoutError:
                 logger.warning(
                     "Timed out waiting {}s for final WhisperLiveKit voice results",
-                    settings.voice_stop_timeout_seconds,
+                    cfg.stop_timeout_seconds,
                 )
         else:
             results_task.result()
@@ -358,20 +439,21 @@ async def _connect_whisperlivekit(websocket: WebSocket) -> None:
 
 async def connect_voice(websocket: WebSocket) -> None:
     await websocket.accept()
-    if not settings.voice_enabled:
+    cfg = _voice_config()
+    if not cfg.enabled:
         await _send_error(
             websocket,
-            "Voice input is disabled. Set VIEWER_VOICE_ENABLED=true to enable WhisperLiveKit voice input.",
+            "Voice input is disabled. Enable it in ~/.view/config.json or set VIEWER_VOICE_ENABLED=true.",
         )
         await websocket.close(code=1013)
         return
 
     try:
-        if not settings.voice_upstream_ws:
-            await _connect_offline_voice(websocket)
+        if not cfg.upstream_ws:
+            await _connect_offline_voice(websocket, cfg)
             return
 
-        async with websockets.connect(settings.voice_upstream_ws, max_size=None) as upstream:
+        async with websockets.connect(cfg.upstream_ws, max_size=None) as upstream:
             capture = VoiceCapture(_utc_stamp(), "upstream", "")
             await websocket.send_json({"type": "ready"})
 
@@ -395,7 +477,7 @@ async def connect_voice(websocket: WebSocket) -> None:
 
             async def upstream_to_client() -> None:
                 async for message in upstream:
-                    normalized = _normalize_upstream_message(message)
+                    normalized = _normalize_upstream_message(message, cfg)
                     if normalized:
                         await websocket.send_json(normalized)
 
@@ -406,7 +488,7 @@ async def connect_voice(websocket: WebSocket) -> None:
                 if client_task in done:
                     client_task.result()
                     with suppress(TimeoutError):
-                        await asyncio.wait_for(upstream_task, timeout=settings.voice_stop_timeout_seconds)
+                        await asyncio.wait_for(upstream_task, timeout=cfg.stop_timeout_seconds)
                 else:
                     upstream_task.result()
                     client_task.cancel()

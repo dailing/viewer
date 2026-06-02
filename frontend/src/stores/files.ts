@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
-import type { AppearanceConfig, CodexConfig, DagConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, WorkspaceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DagConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, VoiceConfig, WorkspaceConfig } from "../types/files";
 import { parentPath as resolveParentPath } from "../utils/paths";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
@@ -48,6 +48,17 @@ Summarize the changes briefly, stage the relevant files in this directory, creat
 If a remote/tracking branch is configured, push the commit after it succeeds.
 
 Do not amend, rebase, reset, or rewrite history. If there are no changes, unrelated changes outside this directory, or anything unsafe or unclear, stop and explain instead of committing.`,
+};
+
+export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
+  enabled: true,
+  available_models: ["large-v3-turbo", "small", "medium", "base", "tiny"],
+  model: "large-v3-turbo",
+  available_languages: ["auto", "en", "zh", "ja", "ko", "fr", "de", "es"],
+  language: "auto",
+  translation_enabled: false,
+  available_target_languages: ["en", "zh", "ja", "ko", "fr", "de", "es"],
+  target_language: "en",
 };
 
 export const DEFAULT_DAG_CONFIG: DagConfig = {
@@ -121,6 +132,40 @@ function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
   };
 }
 
+function uniqueCleanList(items: string[] | undefined, fallback: string[], options?: { lowercase?: boolean; aliases?: boolean }) {
+  const seen = new Set<string>();
+  const source = items?.length ? items : fallback;
+  return source
+    .map((item) => (options?.lowercase ? item.trim().toLowerCase() : item.trim()))
+    .map((item) => (options?.aliases && item === "cn" ? "zh" : item))
+    .filter((item) => {
+      if (!item || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    });
+}
+
+function normalizeVoiceConfig(config?: Partial<VoiceConfig>): VoiceConfig {
+  const models = uniqueCleanList(config?.available_models, DEFAULT_VOICE_CONFIG.available_models);
+  const languages = uniqueCleanList(config?.available_languages, DEFAULT_VOICE_CONFIG.available_languages, { lowercase: true, aliases: true });
+  const targetLanguages = uniqueCleanList(config?.available_target_languages, DEFAULT_VOICE_CONFIG.available_target_languages, { lowercase: true, aliases: true }).filter(
+    (item) => item !== "auto",
+  );
+  const model = (config?.model?.trim() || models[0] || DEFAULT_VOICE_CONFIG.model);
+  const language = (config?.language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.language).replace(/^cn$/, "zh");
+  const targetLanguage = (config?.target_language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.target_language).replace(/^cn$/, "zh");
+  return {
+    enabled: config?.enabled ?? DEFAULT_VOICE_CONFIG.enabled,
+    available_models: models.includes(model) ? models : [model, ...models],
+    model,
+    available_languages: languages.includes(language) ? languages : [language, ...languages],
+    language,
+    translation_enabled: config?.translation_enabled ?? DEFAULT_VOICE_CONFIG.translation_enabled,
+    available_target_languages: targetLanguages.includes(targetLanguage) ? targetLanguages : [targetLanguage, ...targetLanguages],
+    target_language: targetLanguage,
+  };
+}
+
 function normalizeDagConfig(config?: Partial<DagConfig>): DagConfig {
   return {
     base_url: config?.base_url?.trim() ?? DEFAULT_DAG_CONFIG.base_url,
@@ -154,6 +199,7 @@ export const useFilesStore = defineStore("files", {
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
     codexConfig: normalizeCodexConfig(),
+    voiceConfig: normalizeVoiceConfig(),
     dagConfig: normalizeDagConfig(),
     workspaceConfig: normalizeWorkspaceConfig(),
     loading: false,
@@ -185,6 +231,7 @@ export const useFilesStore = defineStore("files", {
       this.appearance = normalizeAppearance(config.appearance);
       this.markdown = normalizeMarkdown(config.markdown);
       this.codexConfig = normalizeCodexConfig(config.codex);
+      this.voiceConfig = normalizeVoiceConfig(config.voice);
       this.dagConfig = normalizeDagConfig(config.dag);
       this.workspaceConfig = normalizeWorkspaceConfig(config.workspace);
     },
@@ -193,6 +240,7 @@ export const useFilesStore = defineStore("files", {
         appearance: normalizeAppearance(this.appearance),
         markdown: normalizeMarkdown(this.markdown),
         codex: normalizeCodexConfig(this.codexConfig),
+        voice: normalizeVoiceConfig(this.voiceConfig),
         dag: normalizeDagConfig(this.dagConfig),
         workspace: normalizeWorkspaceConfig(this.workspaceConfig),
       };
@@ -200,6 +248,7 @@ export const useFilesStore = defineStore("files", {
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
       this.codexConfig = normalizeCodexConfig(saved.codex);
+      this.voiceConfig = normalizeVoiceConfig(saved.voice);
       this.dagConfig = normalizeDagConfig(saved.dag);
       this.workspaceConfig = normalizeWorkspaceConfig(saved.workspace);
     },
@@ -216,10 +265,11 @@ export const useFilesStore = defineStore("files", {
       this.markdown = normalizeMarkdown(markdown);
       await this.saveConfig();
     },
-    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, workspace: WorkspaceConfig, dag: DagConfig) {
+    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, voice: VoiceConfig, workspace: WorkspaceConfig, dag: DagConfig) {
       this.appearance = normalizeAppearance(appearance);
       this.markdown = normalizeMarkdown(markdown);
       this.codexConfig = normalizeCodexConfig(codex);
+      this.voiceConfig = normalizeVoiceConfig(voice);
       this.workspaceConfig = normalizeWorkspaceConfig(workspace);
       this.dagConfig = normalizeDagConfig(dag);
       await this.saveConfig();

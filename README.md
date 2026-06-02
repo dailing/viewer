@@ -242,7 +242,21 @@ uv run python run.py --no-voice
 Choose a model or source language:
 
 ```bash
-uv run python run.py --voice-model small --voice-language en
+uv run python run.py --voice-model small --voice-language auto
+```
+
+The persisted voice defaults live in `~/.view/config.json` under `voice` and can also be edited from Settings:
+
+```json
+{
+  "voice": {
+    "enabled": true,
+    "model": "large-v3-turbo",
+    "language": "auto",
+    "translation_enabled": false,
+    "target_language": "en"
+  }
+}
 ```
 
 Useful voice environment variables:

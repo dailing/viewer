@@ -73,7 +73,6 @@ function registerToolbar() {
     title: props.path,
     status: `Large ${props.kind} · ${fileSizeLabel.value} · ${totalLines.value.toLocaleString()} lines`,
     actions: [
-      { id: "large-text-reload", title: "Reload Window", icon: "bi-arrow-clockwise", run: () => loadAround(lineForScroll(), true) },
       { id: "large-text-top", title: "Go to top", icon: "bi-arrow-up", run: goTop },
       { id: "large-text-end", title: "Go to end", icon: "bi-arrow-down", run: goEnd },
       { id: "large-text-copy-window", title: "Copy visible window", icon: "bi-clipboard", run: copyWindow },

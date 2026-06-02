@@ -93,8 +93,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--voice-language",
-        default="en",
-        help="Source language code for voice input, or auto. Defaults to en.",
+        default="auto",
+        help="Source language code for voice input, or auto. Defaults to auto.",
     )
     parser.add_argument(
         "--voice-target-language",

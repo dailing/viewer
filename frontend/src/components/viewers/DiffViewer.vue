@@ -34,6 +34,8 @@ function setMessage(value: string) {
 async function load() {
   loading.value = true;
   error.value = "";
+  diff.value = "";
+  isBinary.value = false;
   try {
     const result = await getGitDiff(props.path);
     diff.value = result.diff;
@@ -97,7 +99,6 @@ function registerToolbar() {
       { id: "mode-normal", title: "Normal diff", label: "Diff", active: mode.value === "normal", run: () => setMode("normal") },
       { id: "mode-word", title: "Word diff", label: "Word", active: mode.value === "word", run: () => setMode("word") },
       { id: "mode-split", title: "Side-by-side diff", label: "Split", active: mode.value === "split", run: () => setMode("split") },
-      { id: "refresh-diff", title: "Refresh diff", icon: "bi-arrow-clockwise", run: load },
       { id: "stage-file", title: "Stage file", icon: "bi-plus-square", run: stageFile },
       { id: "stage-all", title: "Stage all changes", label: "All", run: stageAll },
       { id: "revert-file", title: "Revert file", icon: "bi-arrow-counterclockwise", variant: "danger", run: revertFile },
@@ -281,6 +282,11 @@ function handleChange(event: Event) {
   if (fileChangeAffectsPath(detail.path, props.path)) void load();
 }
 
+function handleRefresh(event: Event) {
+  const paneId = (event as CustomEvent<{ paneId?: string }>).detail?.paneId;
+  if (paneId === props.paneId) void load();
+}
+
 watch(() => props.path, () => void load(), { immediate: true });
 watch(message, registerToolbar);
 watch(mode, registerToolbar);
@@ -288,9 +294,11 @@ watch(mode, registerToolbar);
 onMounted(() => {
   registerToolbar();
   window.addEventListener("viewer:file-changed", handleChange);
+  window.addEventListener("viewer:pane-refresh", handleRefresh);
 });
 onUnmounted(() => {
   window.removeEventListener("viewer:file-changed", handleChange);
+  window.removeEventListener("viewer:pane-refresh", handleRefresh);
   toolbar.clearPaneToolbar(props.paneId);
 });
 </script>

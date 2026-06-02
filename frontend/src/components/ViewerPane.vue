@@ -46,13 +46,24 @@ function handleChange(event: Event) {
   if (props.pane.filePath && fileChangeAffectsPath(detail.path, props.pane.filePath)) void load(false);
 }
 
+function handleRefresh(event: Event) {
+  const paneId = (event as CustomEvent<{ paneId?: string }>).detail?.paneId;
+  if (paneId === props.pane.id) void load(true);
+}
+
 function isCsvPath(path: string): boolean {
   return path.toLowerCase().endsWith(".csv");
 }
 
 watch(() => [props.pane.filePath, props.pane.terminalId, paneAgentRef(), props.workspaceLoading], () => load(true), { immediate: true });
-onMounted(() => window.addEventListener("viewer:file-changed", handleChange));
-onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange));
+onMounted(() => {
+  window.addEventListener("viewer:file-changed", handleChange);
+  window.addEventListener("viewer:pane-refresh", handleRefresh);
+});
+onUnmounted(() => {
+  window.removeEventListener("viewer:file-changed", handleChange);
+  window.removeEventListener("viewer:pane-refresh", handleRefresh);
+});
 </script>
 
 <template>
@@ -72,11 +83,11 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
         <i class="bi bi-exclamation-triangle"></i>
         <span>{{ error }}</span>
       </div>
-      <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" />
+      <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" :version="version" />
       <LargeTextViewer v-else-if="meta?.preview === 'markdown' && meta.text_too_large" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="markdown" :size="meta.size" />
       <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
       <HtmlViewer v-else-if="meta?.preview === 'html'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" :content-hash="meta.content_hash" />
-      <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
       <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="csv" :size="meta.size" />
       <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
       <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="text" :size="meta.size" />

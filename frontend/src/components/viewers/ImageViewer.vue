@@ -2,8 +2,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { rawUrl } from "../../api/client";
 
-const props = defineProps<{ path: string; contentHash: string }>();
-const src = computed(() => rawUrl(props.path, props.contentHash));
+const props = defineProps<{ path: string; contentHash: string; version: number }>();
+const src = computed(() => rawUrl(props.path, `${props.contentHash}-${props.version}`));
 const container = ref<HTMLElement | null>(null);
 const naturalWidth = ref(0);
 const naturalHeight = ref(0);
@@ -110,7 +110,7 @@ function handleImageLoad(event: Event): void {
   naturalHeight.value = image.naturalHeight;
 }
 
-watch(() => [props.path, props.contentHash] as const, async ([newPath], [oldPath, oldHash]) => {
+watch(() => [props.path, props.contentHash, props.version] as const, async ([newPath], [oldPath, oldHash]) => {
   if (!oldPath || newPath !== oldPath || oldHash !== undefined) {
     scale.value = 1;
     offsetX.value = 0;

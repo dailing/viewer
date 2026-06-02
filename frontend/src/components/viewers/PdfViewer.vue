@@ -9,8 +9,8 @@ import { restoreScrollPosition, saveScrollPosition } from "../../utils/scrollMem
 
 GlobalWorkerOptions.workerSrc = PdfWorker;
 
-const props = defineProps<{ path: string; contentHash: string; paneId: string; workspaceId: string }>();
-const src = computed(() => rawUrl(props.path, props.contentHash));
+const props = defineProps<{ path: string; contentHash: string; version: number; paneId: string; workspaceId: string }>();
+const src = computed(() => rawUrl(props.path, `${props.contentHash}-${props.version}`));
 const pdfSource = computed(() => ({
   disableAutoFetch: true,
   disableStream: true,

@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     voice_enabled: bool = False
     voice_upstream_ws: str = ""
     voice_model: str = "base"
-    voice_language: str = "en"
+    voice_language: str = "auto"
     voice_target_language: str = ""
     voice_backend: str = "faster-whisper"
     voice_backend_policy: str = "localagreement"

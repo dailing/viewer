@@ -442,20 +442,29 @@ def read_config() -> ConfigData:
         appearance=config.appearance,
         markdown=config.markdown,
         codex=config.codex,
+        voice=config.voice,
         dag=config.dag,
         workspace=config.workspace,
         users=list_user_profiles(),
         default_user=default_user_id(),
     )
     codex_raw = raw.get("codex") if isinstance(raw, dict) else None
+    voice_raw = raw.get("voice") if isinstance(raw, dict) else None
     dag_raw = raw.get("dag") if isinstance(raw, dict) else None
     workspace_raw = raw.get("workspace") if isinstance(raw, dict) else None
     missing_codex_defaults = not isinstance(codex_raw, dict) or "auto_commit_prompt" not in codex_raw
+    missing_voice_defaults = (
+        not isinstance(voice_raw, dict)
+        or "available_models" not in voice_raw
+        or "available_languages" not in voice_raw
+        or "translation_enabled" not in voice_raw
+    )
     missing_dag_defaults = not isinstance(dag_raw, dict) or "base_url" not in dag_raw
     missing_workspace_defaults = not isinstance(workspace_raw, dict) or "heat_interval_seconds" not in workspace_raw or "heat_step_percent" not in workspace_raw
     missing_user_defaults = "users" not in raw or "default_user" not in raw
     if isinstance(raw, dict) and (
         missing_codex_defaults
+        or missing_voice_defaults
         or missing_dag_defaults
         or missing_workspace_defaults
         or missing_user_defaults

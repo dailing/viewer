@@ -101,6 +101,17 @@ class CodexConfig(BaseModel):
     auto_commit_prompt: str = DEFAULT_AUTO_COMMIT_PROMPT
 
 
+class VoiceConfig(BaseModel):
+    enabled: bool = True
+    available_models: list[str] = Field(default_factory=lambda: ["large-v3-turbo", "small", "medium", "base", "tiny"])
+    model: str = "large-v3-turbo"
+    available_languages: list[str] = Field(default_factory=lambda: ["auto", "en", "zh", "ja", "ko", "fr", "de", "es"])
+    language: str = "auto"
+    translation_enabled: bool = False
+    available_target_languages: list[str] = Field(default_factory=lambda: ["en", "zh", "ja", "ko", "fr", "de", "es"])
+    target_language: str = "en"
+
+
 class DagConfig(BaseModel):
     base_url: str = ""
 
@@ -121,6 +132,7 @@ class ConfigData(BaseModel):
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
     dag: DagConfig = Field(default_factory=DagConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     users: list[UserProfile] = Field(default_factory=list)

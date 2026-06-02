@@ -544,6 +544,18 @@ async function load() {
   }
 }
 
+function handleRefresh(event: Event) {
+  const paneId = (event as CustomEvent<{ paneId?: string }>).detail?.paneId;
+  if (paneId !== props.paneId) return;
+  terminal.value = null;
+  hasSnapshot = false;
+  appliedOutputVersion = 0;
+  pendingOutput = [];
+  deferredOutput = [];
+  resetOutput("");
+  void load();
+}
+
 async function endTerminal() {
   await terminals.terminate(props.id);
 }
@@ -571,6 +583,7 @@ onMounted(() => {
   mounted = true;
   window.addEventListener("focus", resize);
   window.addEventListener("resize", resize);
+  window.addEventListener("viewer:pane-refresh", handleRefresh);
   void nextTick(() => {
     ensureTerminal();
     scheduleResize();
@@ -583,6 +596,7 @@ onUnmounted(() => {
   if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
   window.removeEventListener("focus", resize);
   window.removeEventListener("resize", resize);
+  window.removeEventListener("viewer:pane-refresh", handleRefresh);
   socket?.close();
   paneToolbar.clearPaneToolbar(props.paneId);
   disposeTerminal();

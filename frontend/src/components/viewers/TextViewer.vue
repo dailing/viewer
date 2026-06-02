@@ -100,7 +100,6 @@ function registerToolbar() {
   toolbar.setPaneToolbar(props.paneId, {
     title: props.path,
     actions: [
-      { id: "text-reload", title: "Reload Text", icon: "bi-arrow-clockwise", run: load },
       { id: "text-edit", title: isEditing.value ? "Editing Text" : "Edit Text", icon: "bi-pencil-square", active: isEditing.value, run: toggleEdit },
       { id: "text-copy", title: copied.value ? "Copied" : "Copy all text", icon: copied.value ? "bi-check2" : "bi-clipboard", run: copyAll },
     ],

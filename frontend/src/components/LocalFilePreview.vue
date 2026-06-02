@@ -99,11 +99,11 @@ onUnmounted(() => {
           <i class="bi bi-exclamation-triangle"></i>
           <span>{{ error }}</span>
         </div>
-        <ImageViewer v-else-if="meta?.preview === 'image'" :path="path" :content-hash="meta.content_hash" />
+        <ImageViewer v-else-if="meta?.preview === 'image'" :path="path" :content-hash="meta.content_hash" :version="version" />
         <LargeTextViewer v-else-if="meta?.preview === 'markdown' && meta.text_too_large" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" kind="markdown" :size="meta.size" />
         <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
         <HtmlViewer v-else-if="meta?.preview === 'html'" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" :content-hash="meta.content_hash" />
-        <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="path" :content-hash="meta.content_hash" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
+        <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="path" :content-hash="meta.content_hash" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
         <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large && isCsvPath(path)" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" kind="csv" :size="meta.size" />
         <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(path)" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" />
         <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large" :path="path" :version="version" :pane-id="previewPaneId" :workspace-id="previewWorkspaceId" kind="text" :size="meta.size" />

@@ -53,7 +53,6 @@ function registerToolbar() {
   toolbar.setPaneToolbar(props.paneId, {
     title: props.path,
     actions: [
-      { id: "markdown-reload", title: "Reload Markdown", icon: "bi-arrow-clockwise", run: load },
       { id: "markdown-edit", title: isEditing.value ? "Editing Markdown" : "Edit Markdown", icon: "bi-pencil-square", active: isEditing.value, run: toggleEdit },
       { id: "markdown-rendered", title: "Rendered Markdown", label: "Rendered", active: mode.value === "rendered", run: () => setMode("rendered") },
       { id: "markdown-raw", title: "Raw Markdown", label: "Raw", active: mode.value === "raw", run: () => setMode("raw") },

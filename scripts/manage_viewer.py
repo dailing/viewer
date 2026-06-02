@@ -20,7 +20,7 @@ STATE_DIR = Path(tempfile.gettempdir()) / "viewer-process-manager" / PROJECT_KEY
 PID_FILE = STATE_DIR / "viewer.pid"
 STATE_FILE = STATE_DIR / "viewer.json"
 LOG_FILE = STATE_DIR / "viewer.log"
-DEFAULT_COMMAND = ["uv", "run", RUN_SCRIPT.name, "--build-frontend", "--debug", "-p", "18888"]
+DEFAULT_COMMAND = ["uv", "run", RUN_SCRIPT.name, "--build-frontend", "--debug", "-p", "18989"]
 GRACEFUL_TIMEOUT_SECONDS = 30.0
 FORCED_TIMEOUT_SECONDS = 5.0
 
@@ -73,6 +73,29 @@ def wait_for_exit(pid: int, timeout: float) -> bool:
             return True
         time.sleep(0.2)
     return not pid_exists(pid)
+
+
+def process_group_id(pid: int) -> int | None:
+    try:
+        return os.getpgid(pid)
+    except ProcessLookupError:
+        return None
+
+
+def process_session_id(pid: int) -> int | None:
+    try:
+        return os.getsid(pid)
+    except ProcessLookupError:
+        return None
+
+
+def signal_process(pid: int, sig: signal.Signals) -> None:
+    pgid = process_group_id(pid)
+    session_id = process_session_id(pid)
+    if pgid is not None and session_id is not None and session_id != os.getsid(0):
+        os.killpg(pgid, sig)
+    else:
+        os.kill(pid, sig)
 
 
 def write_state(pid: int, command: list[str]) -> None:
@@ -132,6 +155,7 @@ def start(extra: list[str]) -> dict[str, Any]:
 
 
 def stop(explicit_pid: int | None = None) -> dict[str, Any]:
+    recorded_pid = read_pid()
     pid = active_pid(explicit_pid)
     if not pid:
         clear_state(explicit_pid)
@@ -139,7 +163,7 @@ def stop(explicit_pid: int | None = None) -> dict[str, Any]:
 
     log(f"Stopping viewer pid={pid}")
     try:
-        os.kill(pid, signal.SIGTERM)
+        signal_process(pid, signal.SIGTERM)
     except ProcessLookupError:
         clear_state(pid)
         return {"status": "stopped", "pid": pid, "pid_file": PID_FILE.as_posix()}
@@ -147,12 +171,22 @@ def stop(explicit_pid: int | None = None) -> dict[str, Any]:
     if not wait_for_exit(pid, GRACEFUL_TIMEOUT_SECONDS):
         log(f"pid={pid} did not exit after {GRACEFUL_TIMEOUT_SECONDS:.0f}s; sending SIGKILL")
         try:
-            os.kill(pid, signal.SIGKILL)
+            signal_process(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         wait_for_exit(pid, FORCED_TIMEOUT_SECONDS)
 
-    clear_state(pid)
+    if explicit_pid is not None and recorded_pid and recorded_pid != pid and pid_exists(recorded_pid):
+        log(f"Waiting for recorded viewer pid={recorded_pid} after stopping pid={pid}")
+        if not wait_for_exit(recorded_pid, FORCED_TIMEOUT_SECONDS):
+            log(f"Recorded viewer pid={recorded_pid} still running; sending SIGKILL")
+            try:
+                signal_process(recorded_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            wait_for_exit(recorded_pid, FORCED_TIMEOUT_SECONDS)
+
+    clear_state(recorded_pid if recorded_pid else pid)
     return {"status": "stopped", "pid": pid, "pid_file": PID_FILE.as_posix()}
 
 

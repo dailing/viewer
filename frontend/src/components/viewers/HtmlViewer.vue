@@ -40,7 +40,6 @@ function registerToolbar() {
   toolbar.setPaneToolbar(props.paneId, {
     title: props.path,
     actions: [
-      { id: "html-reload", title: "Reload HTML", icon: "bi-arrow-clockwise", run: load },
       { id: "html-rendered", title: "Rendered HTML", label: "Rendered", active: mode.value === "rendered", run: () => setMode("rendered") },
       { id: "html-raw", title: "Raw HTML", label: "Raw", active: mode.value === "raw", run: () => setMode("raw") },
       {

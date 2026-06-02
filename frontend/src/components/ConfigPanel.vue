@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
-import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
+import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
 import { useUsersStore } from "../stores/users";
 import { useWorkspacesStore } from "../stores/workspaces";
-import type { AppearanceConfig, CodexConfig, DagConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, WorkspaceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DagConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, VoiceConfig, WorkspaceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
@@ -15,12 +15,13 @@ const restarting = ref(false);
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
-const openSections = reactive({ server: true, users: true, appearance: true, workspace: true, codex: true, dag: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, users: true, appearance: true, workspace: true, codex: true, voice: true, dag: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
   workspace: clone(files.workspaceConfig) as WorkspaceConfig,
   codex: clone(files.codexConfig) as CodexConfig,
+  voice: clone(files.voiceConfig) as VoiceConfig,
   dag: clone(files.dagConfig) as DagConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
 });
@@ -40,6 +41,7 @@ const fullConfigJson = computed(() =>
       appearance: draft.appearance,
       workspace: draft.workspace,
       codex: draft.codex,
+      voice: draft.voice,
       dag: draft.dag,
       markdown: draft.markdown,
     },
@@ -58,6 +60,15 @@ watch(
   () => files.codexConfig,
   (codex) => {
     Object.assign(draft.codex, clone(codex));
+    jsonDraft.value = fullConfigJson.value;
+  },
+  { deep: true },
+);
+
+watch(
+  () => files.voiceConfig,
+  (voice) => {
+    Object.assign(draft.voice, clone(voice));
     jsonDraft.value = fullConfigJson.value;
   },
   { deep: true },
@@ -190,6 +201,51 @@ function setDefaultModel(value: string) {
   }
 }
 
+function normalizeVoiceModelList(value: string) {
+  const seen = new Set<string>();
+  const available = value
+    .split(/\r?\n|,/)
+    .map((model) => model.trim())
+    .filter((model) => {
+      if (!model || seen.has(model)) return false;
+      seen.add(model);
+      return true;
+    });
+  draft.voice.available_models = available.length ? available : [...DEFAULT_VOICE_CONFIG.available_models];
+  if (!draft.voice.model || !draft.voice.available_models.includes(draft.voice.model)) {
+    draft.voice.model = draft.voice.available_models[0] ?? DEFAULT_VOICE_CONFIG.model;
+  }
+}
+
+function setVoiceModel(value: string) {
+  const model = value.trim();
+  draft.voice.model = model;
+  if (model && !draft.voice.available_models.includes(model)) {
+    draft.voice.available_models = [model, ...draft.voice.available_models];
+  }
+}
+
+function normalizeLanguage(value: string) {
+  const cleaned = value.trim().toLowerCase();
+  return cleaned === "cn" ? "zh" : cleaned;
+}
+
+function setVoiceLanguage(value: string) {
+  const language = normalizeLanguage(value);
+  draft.voice.language = language || DEFAULT_VOICE_CONFIG.language;
+  if (!draft.voice.available_languages.includes(draft.voice.language)) {
+    draft.voice.available_languages = [draft.voice.language, ...draft.voice.available_languages];
+  }
+}
+
+function setVoiceTargetLanguage(value: string) {
+  const language = normalizeLanguage(value);
+  draft.voice.target_language = language === "auto" || !language ? DEFAULT_VOICE_CONFIG.target_language : language;
+  if (!draft.voice.available_target_languages.includes(draft.voice.target_language)) {
+    draft.voice.available_target_languages = [draft.voice.target_language, ...draft.voice.available_target_languages];
+  }
+}
+
 function numberValue(value: number | null, fallback: number) {
   return value ?? fallback;
 }
@@ -238,7 +294,7 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.workspace, draft.dag);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.voice, draft.workspace, draft.dag);
     await workspaces.load();
     emit("close");
   } catch (err) {
@@ -254,6 +310,7 @@ async function applyJson() {
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
     if (parsed.workspace) Object.assign(draft.workspace, parsed.workspace);
     if (parsed.codex) Object.assign(draft.codex, parsed.codex);
+    if (parsed.voice) Object.assign(draft.voice, parsed.voice);
     if (parsed.dag) Object.assign(draft.dag, parsed.dag);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
     await save();
@@ -402,6 +459,70 @@ async function applyJson() {
                 spellcheck="false"
               ></textarea>
             </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('voice')">
+            <i class="bi" :class="openSections.voice ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Voice</span>
+          </button>
+          <div v-if="openSections.voice" class="section-body">
+            <label class="compact-field checkbox-field">
+              <span>Enabled</span>
+              <input v-model="draft.voice.enabled" class="form-check-input" type="checkbox" />
+            </label>
+            <label class="compact-field">
+              <span>Whisper model</span>
+              <input
+                class="form-control form-control-sm"
+                list="voice-model-options"
+                :value="draft.voice.model"
+                @input="setVoiceModel(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <datalist id="voice-model-options">
+              <option v-for="model in draft.voice.available_models" :key="model" :value="model"></option>
+            </datalist>
+            <label class="compact-field model-list-field">
+              <span>Model options</span>
+              <textarea
+                class="form-control form-control-sm model-list"
+                :value="draft.voice.available_models.join('\n')"
+                spellcheck="false"
+                @change="normalizeVoiceModelList(($event.target as HTMLTextAreaElement).value)"
+              ></textarea>
+            </label>
+            <label class="compact-field">
+              <span>Language</span>
+              <input
+                class="form-control form-control-sm"
+                list="voice-language-options"
+                :value="draft.voice.language"
+                placeholder="auto"
+                @input="setVoiceLanguage(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <datalist id="voice-language-options">
+              <option v-for="language in draft.voice.available_languages" :key="language" :value="language"></option>
+            </datalist>
+            <label class="compact-field checkbox-field">
+              <span>Translate</span>
+              <input v-model="draft.voice.translation_enabled" class="form-check-input" type="checkbox" />
+            </label>
+            <label class="compact-field">
+              <span>Target language</span>
+              <input
+                class="form-control form-control-sm"
+                list="voice-target-language-options"
+                :disabled="!draft.voice.translation_enabled"
+                :value="draft.voice.target_language"
+                @input="setVoiceTargetLanguage(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <datalist id="voice-target-language-options">
+              <option v-for="language in draft.voice.available_target_languages" :key="language" :value="language"></option>
+            </datalist>
           </div>
         </section>
 
@@ -643,6 +764,14 @@ async function applyJson() {
 .compact-field {
   grid-template-columns: 120px 1fr;
   margin-top: 10px;
+}
+
+.checkbox-field {
+  justify-content: start;
+}
+
+.checkbox-field .form-check-input {
+  margin: 0;
 }
 
 .number-input {

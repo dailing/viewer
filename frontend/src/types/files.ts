@@ -89,6 +89,17 @@ export interface CodexConfig {
   auto_commit_prompt: string;
 }
 
+export interface VoiceConfig {
+  enabled: boolean;
+  available_models: string[];
+  model: string;
+  available_languages: string[];
+  language: string;
+  translation_enabled: boolean;
+  available_target_languages: string[];
+  target_language: string;
+}
+
 export interface DagConfig {
   base_url: string;
 }
@@ -110,6 +121,7 @@ export interface ViewerConfig {
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
   codex?: CodexConfig;
+  voice?: VoiceConfig;
   dag?: DagConfig;
   workspace?: WorkspaceConfig;
   users?: UserProfile[];

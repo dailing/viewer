@@ -1,3 +1,4 @@
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -26,8 +27,19 @@ class FileMeta(BaseModel):
     mtime: float
     content_hash: str
     mime: str
-    preview: Literal["image", "markdown", "pdf", "text", "unsupported"]
+    preview: Literal["image", "markdown", "html", "pdf", "text", "unsupported"]
     text_too_large: bool = False
+
+
+class TextLineWindow(BaseModel):
+    path: str
+    size: int
+    mtime: float
+    total_lines: int
+    start_line: int
+    lines: list[str]
+    truncated_start: bool = False
+    truncated_end: bool = False
 
 
 class AppearanceConfig(BaseModel):
@@ -72,17 +84,80 @@ class MarkdownConfig(BaseModel):
     themes: list[MarkdownTheme] = Field(default_factory=lambda: [MarkdownTheme()])
 
 
+DEFAULT_AUTO_COMMIT_PROMPT = """Review the Git changes in the current directory only.
+
+Summarize the changes briefly, stage the relevant files in this directory, create a concise commit message, and commit them.
+
+If a remote/tracking branch is configured, push the commit after it succeeds.
+
+Do not amend, rebase, reset, or rewrite history. If there are no changes, unrelated changes outside this directory, or anything unsafe or unclear, stop and explain instead of committing."""
+
+
 class CodexConfig(BaseModel):
     available_models: list[str] = Field(default_factory=lambda: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"])
     default_model: str = "gpt-5.5"
+    proxy: str = ""
+    muted_message_alpha: float = Field(default=0.56, ge=0.15, le=1.0)
+    auto_commit_prompt: str = DEFAULT_AUTO_COMMIT_PROMPT
+
+
+class VoiceConfig(BaseModel):
+    enabled: bool = True
+    available_models: list[str] = Field(default_factory=lambda: ["large-v3-turbo", "small", "medium", "base", "tiny"])
+    model: str = "large-v3-turbo"
+    available_languages: list[str] = Field(default_factory=lambda: ["auto", "en", "zh", "ja", "ko", "fr", "de", "es"])
+    language: str = "auto"
+    translation_enabled: bool = False
+    available_target_languages: list[str] = Field(default_factory=lambda: ["en", "zh", "ja", "ko", "fr", "de", "es"])
+    target_language: str = "en"
+
+
+class DagConfig(BaseModel):
+    base_url: str = ""
+
+
+class WorkspaceConfig(BaseModel):
+    count: int = Field(default=5, ge=1, le=20)
+    heat_interval_seconds: float = Field(default=10.0, ge=1.0, le=300.0)
+    heat_step_percent: float = Field(default=5.0, ge=0.1, le=100.0)
+
+
+class UserProfile(BaseModel):
+    id: str
+    name: str = ""
+    home: str = ""
 
 
 class ConfigData(BaseModel):
-    pinned: list[str] = Field(default_factory=list)
-    current_path: str = ""
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    dag: DagConfig = Field(default_factory=DagConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    users: list[UserProfile] = Field(default_factory=list)
+    default_user: str = ""
+
+
+class WorkspaceSnapshot(BaseModel):
+    layout: dict
+    active_pane_id: str | None = None
+    current_path: str = ""
+    pinned: list[str] | None = None
+    agent_session_ids: list[str] = Field(default_factory=list)
+    pinned_agent_session_ids: list[str] = Field(default_factory=list)
+    visit_times: dict[str, float] = Field(default_factory=dict)
+    updated_at: float | None = None
+
+
+class WorkspaceAgentSessionRequest(BaseModel):
+    ref: str
+
+
+class WorkspaceData(BaseModel):
+    active_workspace_id: str = "1"
+    count: int = Field(default=5, ge=1, le=20)
+    slots: dict[str, WorkspaceSnapshot] = Field(default_factory=dict)
 
 
 class WatchEvent(BaseModel):
@@ -90,6 +165,38 @@ class WatchEvent(BaseModel):
     path: str
     is_dir: bool
     mtime: float | None = None
+
+
+class GitDiffFile(BaseModel):
+    path: str
+    status: str
+    added: int | None = None
+    deleted: int | None = None
+    is_binary: bool = False
+
+
+class GitStatus(BaseModel):
+    files: list[GitDiffFile] = Field(default_factory=list)
+
+
+class GitDiffText(BaseModel):
+    path: str
+    diff: str
+    is_binary: bool = False
+
+
+class GitStageRequest(BaseModel):
+    path: str | None = None
+    scope: str | None = None
+
+
+class GitRevertRequest(BaseModel):
+    path: str
+
+
+class GitCommitRequest(BaseModel):
+    message: str
+    scope: str | None = None
 
 
 class TerminalInfo(BaseModel):
@@ -120,28 +227,85 @@ class CodexSessionInfo(BaseModel):
     rollout_path: str | None = None
     title: str
     cwd: str
+    cwd_relative: str | None = None
     model: str | None = None
     created_at: float
     updated_at: float
     status: Literal["idle", "running", "exited", "failed"]
     exit_code: int | None = None
+    pid: int | None = None
+    codex_pid: int | None = None
+    run_id: str | None = None
+    run_started_at: float | None = None
     event_count: int = 0
+    model_context_window: int | None = None
+    context_used_percent: float | None = None
+    total_tokens: int | None = None
+    queue: list["AgentQueueItem"] = Field(default_factory=list)
+    pending_approvals: list["AgentApproval"] = Field(default_factory=list)
 
 
-class CodexPrompt(BaseModel):
+class AgentPrompt(BaseModel):
     text: str
     created_at: float
 
 
-class CodexEvent(BaseModel):
+class AgentFileChange(BaseModel):
+    path: str
+    change_type: str
+    diff: str | None = None
+
+
+class AgentEventType(StrEnum):
+    MESSAGE_ASSISTANT = "message:assistant"
+    REASONING = "reasoning"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    CUSTOM_TOOL_CALL = "custom_tool_call"
+    EXEC_COMMAND_BEGIN = "exec_command_begin"
+    EXEC_COMMAND_END = "exec_command_end"
+    FUNCTION_CALL = "function_call"
+    FUNCTION_CALL_OUTPUT = "function_call_output"
+    CUSTOM_TOOL_CALL_OUTPUT = "custom_tool_call_output"
+    VIEW_IMAGE_TOOL_CALL = "view_image_tool_call"
+    PATCH_APPLY_END = "patch_apply_end"
+    OPERATION = "operation"
+
+
+class AgentEvent(BaseModel):
     index: int
     received_at: float
-    raw: dict
+    event_type: AgentEventType
+    text: str = ""
+    file_changes: list[AgentFileChange] = Field(default_factory=list)
+    patch_text: str | None = None
+    raw_preview: dict | None = None
+
+
+class AgentQueueItem(BaseModel):
+    id: str
+    prompt: str
+    created_at: float
+    updated_at: float
+    model: str | None = None
+
+
+class AgentApproval(BaseModel):
+    id: str
+    provider: str
+    session_id: str
+    run_id: str | None = None
+    title: str = "Approval required"
+    description: str = ""
+    command: str | None = None
+    choices: list[str] = Field(default_factory=lambda: ["once", "session", "always", "deny"])
+    created_at: float
+    raw: dict | None = None
 
 
 class CodexSessionSnapshot(CodexSessionInfo):
-    prompts: list[CodexPrompt] = Field(default_factory=list)
-    events: list[CodexEvent] = Field(default_factory=list)
+    prompts: list[AgentPrompt] = Field(default_factory=list)
+    events: list[AgentEvent] = Field(default_factory=list)
 
 
 class CodexSessionCreate(BaseModel):
@@ -153,6 +317,80 @@ class CodexSessionCreate(BaseModel):
 class CodexSessionMessage(BaseModel):
     prompt: str
     model: str | None = None
+
+
+class CodexQueueMessage(BaseModel):
+    prompt: str
+    model: str | None = None
+
+
+class HermesSessionInfo(BaseModel):
+    id: str
+    hermes_session_id: str | None = None
+    hermes_run_id: str | None = None
+    db_path: str | None = None
+    title: str
+    cwd: str
+    cwd_relative: str | None = None
+    model: str | None = None
+    created_at: float
+    updated_at: float
+    status: Literal["idle", "running", "exited", "failed"]
+    exit_code: int | None = None
+    event_count: int = 0
+    total_tokens: int | None = None
+    queue: list[AgentQueueItem] = Field(default_factory=list)
+    pending_approvals: list[AgentApproval] = Field(default_factory=list)
+
+
+class HermesSessionSnapshot(HermesSessionInfo):
+    prompts: list[AgentPrompt] = Field(default_factory=list)
+    events: list[AgentEvent] = Field(default_factory=list)
+
+
+class HermesSessionCreate(BaseModel):
+    prompt: str = ""
+    cwd: str | None = None
+    model: str | None = None
+
+
+class HermesSessionMessage(BaseModel):
+    prompt: str
+    model: str | None = None
+
+
+class HermesQueueMessage(BaseModel):
+    prompt: str
+    model: str | None = None
+
+
+class AgentSessionCreate(BaseModel):
+    provider: str
+    prompt: str = ""
+    cwd: str | None = None
+    model: str | None = None
+
+
+class AgentSessionMessage(BaseModel):
+    provider: str
+    prompt: str
+    model: str | None = None
+
+
+class AgentQueueMessage(BaseModel):
+    provider: str
+    prompt: str
+    model: str | None = None
+
+
+class AgentProviderRequest(BaseModel):
+    provider: str
+
+
+class AgentApprovalDecision(BaseModel):
+    provider: str
+    choice: Literal["once", "session", "always", "deny", "approve", "allow"]
+    all: bool = False
 
 
 class CodexCliStatus(BaseModel):
@@ -167,8 +405,10 @@ class CodexCliStatus(BaseModel):
     total_tokens: int | None = None
     plan_type: str | None = None
     primary_used_percent: float | None = None
+    primary_remaining_percent: float | None = None
     primary_window_minutes: int | None = None
     secondary_used_percent: float | None = None
+    secondary_remaining_percent: float | None = None
     secondary_window_minutes: int | None = None
 
 
@@ -176,6 +416,95 @@ class CodexModelOptions(BaseModel):
     selected_model: str
     available_models: list[str] = Field(default_factory=list)
     source: str = "config"
+
+
+class AgentLoopSchedule(BaseModel):
+    type: Literal["manual", "once", "interval", "daily", "multi_daily"] = "manual"
+    at_local: str | None = None
+    start_at_local: str | None = None
+    every_minutes: int = Field(default=30, ge=1)
+    time_local: str = "09:00"
+    times_local: list[str] = Field(default_factory=list)
+
+
+class AgentLoopRunConfig(BaseModel):
+    max_runs: int | None = Field(default=None, ge=1)
+    max_consecutive_failures: int | None = Field(default=3, ge=1)
+    skip_if_previous_running: bool = True
+
+
+class AgentLoopSessionConfig(BaseModel):
+    policy: Literal["new_each_run", "reuse", "reuse_until_context", "reuse_with_limits"] = "reuse_until_context"
+    max_context_percent: float = Field(default=70, ge=1, le=100)
+    reset_after_runs: int | None = Field(default=None, ge=1)
+    reset_on_failure: bool = False
+
+
+class AgentLoopStopConfig(BaseModel):
+    final_message_regex: str | None = None
+
+
+class AgentLoopDefinition(BaseModel):
+    id: str
+    name: str
+    enabled: bool = True
+    agent: Literal["codex"] = "codex"
+    model: str | None = None
+    cwd: str = ""
+    timezone: str = "Asia/Shanghai"
+    schedule: AgentLoopSchedule = Field(default_factory=AgentLoopSchedule)
+    run: AgentLoopRunConfig = Field(default_factory=AgentLoopRunConfig)
+    session: AgentLoopSessionConfig = Field(default_factory=AgentLoopSessionConfig)
+    stop: AgentLoopStopConfig = Field(default_factory=AgentLoopStopConfig)
+    prompt: str = ""
+
+
+class AgentLoopRuntime(BaseModel):
+    paused: bool = False
+    stopped: bool = False
+    stop_reason: str | None = None
+    current_session_id: str | None = None
+    current_run_id: str | None = None
+    current_trigger: str | None = None
+    run_count: int = 0
+    session_run_count: int = 0
+    consecutive_failures: int = 0
+    last_run_at: float | None = None
+    next_run_at: float | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+
+
+class AgentLoopInfo(BaseModel):
+    definition: AgentLoopDefinition
+    runtime: AgentLoopRuntime = Field(default_factory=AgentLoopRuntime)
+    path: str
+    parse_error: str | None = None
+
+
+class AgentLoopRunRecord(BaseModel):
+    run_id: str
+    task_id: str
+    task_name: str
+    codex_session_id: str | None = None
+    trigger: str = "schedule"
+    model: str | None = None
+    cwd: str = ""
+    started_at: float
+    finished_at: float | None = None
+    status: str = "running"
+    exit_code: int | None = None
+    error: str | None = None
+    prompt: str = ""
+    session_snapshot: CodexSessionSnapshot | None = None
+
+
+class AgentLoopCreate(BaseModel):
+    name: str = "New Loop Task"
+
+
+class AgentLoopRunRequest(BaseModel):
+    trigger: str = "manual"
 
 
 class ClientLog(BaseModel):

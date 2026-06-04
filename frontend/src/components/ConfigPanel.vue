@@ -1,16 +1,28 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { DEFAULT_MARKDOWN_THEME, useFilesStore } from "../stores/files";
-import type { AppearanceConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme } from "../types/files";
+import { restartServer, stopServer } from "../api/client";
+import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
+import { useUsersStore } from "../stores/users";
+import { useWorkspacesStore } from "../stores/workspaces";
+import type { AppearanceConfig, CodexConfig, DagConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, VoiceConfig, WorkspaceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
+const users = useUsersStore();
+const workspaces = useWorkspacesStore();
 const saving = ref(false);
+const restarting = ref(false);
+const stopping = ref(false);
 const error = ref("");
-const openSections = reactive({ appearance: true, markdown: true, syntax: false, json: false });
+const serverNotice = ref("");
+const openSections = reactive({ server: true, users: true, appearance: true, workspace: true, codex: true, voice: true, dag: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
+  workspace: clone(files.workspaceConfig) as WorkspaceConfig,
+  codex: clone(files.codexConfig) as CodexConfig,
+  voice: clone(files.voiceConfig) as VoiceConfig,
+  dag: clone(files.dagConfig) as DagConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
 });
 
@@ -26,9 +38,11 @@ const activeTheme = computed(() => {
 const fullConfigJson = computed(() =>
   JSON.stringify(
     {
-      pinned: files.pinned,
-      current_path: files.currentPath,
       appearance: draft.appearance,
+      workspace: draft.workspace,
+      codex: draft.codex,
+      voice: draft.voice,
+      dag: draft.dag,
       markdown: draft.markdown,
     },
     null,
@@ -39,6 +53,42 @@ const fullConfigJson = computed(() =>
 watch(
   () => files.appearance,
   (appearance) => Object.assign(draft.appearance, clone(appearance)),
+  { deep: true },
+);
+
+watch(
+  () => files.codexConfig,
+  (codex) => {
+    Object.assign(draft.codex, clone(codex));
+    jsonDraft.value = fullConfigJson.value;
+  },
+  { deep: true },
+);
+
+watch(
+  () => files.voiceConfig,
+  (voice) => {
+    Object.assign(draft.voice, clone(voice));
+    jsonDraft.value = fullConfigJson.value;
+  },
+  { deep: true },
+);
+
+watch(
+  () => files.dagConfig,
+  (dag) => {
+    Object.assign(draft.dag, clone(dag));
+    jsonDraft.value = fullConfigJson.value;
+  },
+  { deep: true },
+);
+
+watch(
+  () => files.workspaceConfig,
+  (workspace) => {
+    Object.assign(draft.workspace, clone(workspace));
+    jsonDraft.value = fullConfigJson.value;
+  },
   { deep: true },
 );
 
@@ -64,6 +114,136 @@ function clone<T>(value: T): T {
 function sectionToggle(section: keyof typeof openSections) {
   openSections[section] = !openSections[section];
   if (section === "json" && openSections.json) jsonDraft.value = fullConfigJson.value;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function switchUser(userId: string) {
+  if (!userId || userId === users.activeUserId) return;
+  users.select(userId);
+  window.location.reload();
+}
+
+async function waitForServer(previousPid: number) {
+  await sleep(1000);
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const response = await fetch(`/api/health?t=${Date.now()}`, { cache: "no-store" });
+      if (response.ok) {
+        const health = (await response.json()) as { pid?: number };
+        if (health.pid && health.pid !== previousPid) {
+          window.location.reload();
+          return;
+        }
+      }
+    } catch {
+      // The server is expected to be unavailable while the helper restarts it.
+    }
+    await sleep(1000);
+  }
+  error.value = "Restart was requested, but the server did not come back within 60 seconds.";
+  restarting.value = false;
+}
+
+async function restart() {
+  if (restarting.value) return;
+  if (!window.confirm("Restart the viewer server now?")) return;
+  restarting.value = true;
+  error.value = "";
+  serverNotice.value = "";
+  try {
+    const response = await restartServer();
+    await waitForServer(response.pid);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+    restarting.value = false;
+  }
+}
+
+async function stop() {
+  if (stopping.value) return;
+  if (!window.confirm("Stop the viewer server now? Use scripts/manage_viewer.py start to bring it back.")) return;
+  stopping.value = true;
+  error.value = "";
+  serverNotice.value = "";
+  try {
+    await stopServer();
+    serverNotice.value = "Stop requested. Restart from the command line with scripts/manage_viewer.py start.";
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+    stopping.value = false;
+  }
+}
+
+function normalizeModelList(value: string) {
+  const seen = new Set<string>();
+  const available = value
+    .split(/\r?\n|,/)
+    .map((model) => model.trim())
+    .filter((model) => {
+      if (!model || seen.has(model)) return false;
+      seen.add(model);
+      return true;
+    });
+  draft.codex.available_models = available.length ? available : [...DEFAULT_CODEX_CONFIG.available_models];
+  if (!draft.codex.default_model || !draft.codex.available_models.includes(draft.codex.default_model)) {
+    draft.codex.default_model = draft.codex.available_models[0] ?? DEFAULT_CODEX_CONFIG.default_model;
+  }
+}
+
+function setDefaultModel(value: string) {
+  const model = value.trim();
+  draft.codex.default_model = model;
+  if (model && !draft.codex.available_models.includes(model)) {
+    draft.codex.available_models = [model, ...draft.codex.available_models];
+  }
+}
+
+function normalizeVoiceModelList(value: string) {
+  const seen = new Set<string>();
+  const available = value
+    .split(/\r?\n|,/)
+    .map((model) => model.trim())
+    .filter((model) => {
+      if (!model || seen.has(model)) return false;
+      seen.add(model);
+      return true;
+    });
+  draft.voice.available_models = available.length ? available : [...DEFAULT_VOICE_CONFIG.available_models];
+  if (!draft.voice.model || !draft.voice.available_models.includes(draft.voice.model)) {
+    draft.voice.model = draft.voice.available_models[0] ?? DEFAULT_VOICE_CONFIG.model;
+  }
+}
+
+function setVoiceModel(value: string) {
+  const model = value.trim();
+  draft.voice.model = model;
+  if (model && !draft.voice.available_models.includes(model)) {
+    draft.voice.available_models = [model, ...draft.voice.available_models];
+  }
+}
+
+function normalizeLanguage(value: string) {
+  const cleaned = value.trim().toLowerCase();
+  return cleaned === "cn" ? "zh" : cleaned;
+}
+
+function setVoiceLanguage(value: string) {
+  const language = normalizeLanguage(value);
+  draft.voice.language = language || DEFAULT_VOICE_CONFIG.language;
+  if (!draft.voice.available_languages.includes(draft.voice.language)) {
+    draft.voice.available_languages = [draft.voice.language, ...draft.voice.available_languages];
+  }
+}
+
+function setVoiceTargetLanguage(value: string) {
+  const language = normalizeLanguage(value);
+  draft.voice.target_language = language === "auto" || !language ? DEFAULT_VOICE_CONFIG.target_language : language;
+  if (!draft.voice.available_target_languages.includes(draft.voice.target_language)) {
+    draft.voice.available_target_languages = [draft.voice.target_language, ...draft.voice.available_target_languages];
+  }
 }
 
 function numberValue(value: number | null, fallback: number) {
@@ -114,7 +294,8 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    await files.saveViewerConfig(draft.appearance, draft.markdown);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.voice, draft.workspace, draft.dag);
+    await workspaces.load();
     emit("close");
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -127,6 +308,10 @@ async function applyJson() {
   try {
     const parsed = JSON.parse(jsonDraft.value);
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
+    if (parsed.workspace) Object.assign(draft.workspace, parsed.workspace);
+    if (parsed.codex) Object.assign(draft.codex, parsed.codex);
+    if (parsed.voice) Object.assign(draft.voice, parsed.voice);
+    if (parsed.dag) Object.assign(draft.dag, parsed.dag);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
     await save();
   } catch (err) {
@@ -136,12 +321,12 @@ async function applyJson() {
 </script>
 
 <template>
-  <div class="config-backdrop" @click.self="emit('close')">
+  <div class="config-page">
     <section class="config-panel" aria-label="Configuration">
       <header class="config-header">
         <div>
           <h2>Configuration</h2>
-          <span>.viewer.config.json</span>
+          <span>~/.view/config.json</span>
         </div>
         <button class="btn btn-outline-secondary icon-button" type="button" title="Close configuration" @click="emit('close')">
           <i class="bi bi-x"></i>
@@ -149,6 +334,45 @@ async function applyJson() {
       </header>
 
       <div class="config-content">
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('server')">
+            <i class="bi" :class="openSections.server ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Server</span>
+          </button>
+          <div v-if="openSections.server" class="section-body">
+            <div class="server-actions">
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="restarting || stopping" @click="restart">
+                <span v-if="restarting" class="spinner-border spinner-border-sm"></span>
+                <i v-else class="bi bi-arrow-clockwise"></i>
+                <span>{{ restarting ? "Restarting" : "Restart server" }}</span>
+              </button>
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="stopping || restarting" @click="stop">
+                <span v-if="stopping" class="spinner-border spinner-border-sm"></span>
+                <i v-else class="bi bi-stop-fill"></i>
+                <span>{{ stopping ? "Stopping" : "Stop server" }}</span>
+              </button>
+            </div>
+            <div v-if="serverNotice" class="server-notice">{{ serverNotice }}</div>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('users')">
+            <i class="bi" :class="openSections.users ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>User Profile</span>
+          </button>
+          <div v-if="openSections.users" class="section-body">
+            <label class="compact-field">
+              <span>Active profile</span>
+              <select class="form-select form-select-sm" :value="users.activeUserId" @change="switchUser(($event.target as HTMLSelectElement).value)">
+                <option v-for="profile in users.profiles" :key="profile.id" :value="profile.id">
+                  {{ profile.name || profile.id }} - {{ profile.home || "/" }}
+                </option>
+              </select>
+            </label>
+          </div>
+        </section>
+
         <section class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('appearance')">
             <i class="bi" :class="openSections.appearance ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
@@ -159,6 +383,162 @@ async function applyJson() {
               <span>Nav bar size</span>
               <input v-model.number="draft.appearance.navbar_size" class="form-range" type="range" min="22" max="56" step="1" />
               <input v-model.number="draft.appearance.navbar_size" class="form-control form-control-sm number-input" type="number" min="22" max="56" />
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('workspace')">
+            <i class="bi" :class="openSections.workspace ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Workspace</span>
+          </button>
+          <div v-if="openSections.workspace" class="section-body">
+            <label class="setting-row">
+              <span>Workspace count</span>
+              <input v-model.number="draft.workspace.count" class="form-range" type="range" min="1" max="20" step="1" />
+              <input v-model.number="draft.workspace.count" class="form-control form-control-sm number-input" type="number" min="1" max="20" />
+            </label>
+            <label class="setting-row">
+              <span>Heat interval</span>
+              <input v-model.number="draft.workspace.heat_interval_seconds" class="form-range" type="range" min="1" max="300" step="1" />
+              <input v-model.number="draft.workspace.heat_interval_seconds" class="form-control form-control-sm number-input" type="number" min="1" max="300" step="1" />
+            </label>
+            <label class="setting-row">
+              <span>Heat step %</span>
+              <input v-model.number="draft.workspace.heat_step_percent" class="form-range" type="range" min="0.1" max="100" step="0.1" />
+              <input v-model.number="draft.workspace.heat_step_percent" class="form-control form-control-sm number-input" type="number" min="0.1" max="100" step="0.1" />
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('codex')">
+            <i class="bi" :class="openSections.codex ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Codex Models</span>
+          </button>
+          <div v-if="openSections.codex" class="section-body">
+            <label class="compact-field">
+              <span>Default model</span>
+              <input
+                class="form-control form-control-sm"
+                list="codex-model-options"
+                :value="draft.codex.default_model"
+                @input="setDefaultModel(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <datalist id="codex-model-options">
+              <option v-for="model in draft.codex.available_models" :key="model" :value="model"></option>
+            </datalist>
+            <label class="compact-field model-list-field">
+              <span>Available models</span>
+              <textarea
+                class="form-control form-control-sm model-list"
+                :value="draft.codex.available_models.join('\n')"
+                spellcheck="false"
+                @change="normalizeModelList(($event.target as HTMLTextAreaElement).value)"
+              ></textarea>
+            </label>
+            <label class="setting-row">
+              <span>Muted message alpha</span>
+              <input v-model.number="draft.codex.muted_message_alpha" class="form-range" type="range" min="0.15" max="1" step="0.01" />
+              <input v-model.number="draft.codex.muted_message_alpha" class="form-control form-control-sm number-input" type="number" min="0.15" max="1" step="0.01" />
+            </label>
+            <label class="compact-field">
+              <span>Proxy</span>
+              <input
+                v-model.trim="draft.codex.proxy"
+                class="form-control form-control-sm"
+                placeholder="http://localhost:7890"
+              />
+            </label>
+            <label class="compact-field model-list-field">
+              <span>Auto commit prompt</span>
+              <textarea
+                v-model="draft.codex.auto_commit_prompt"
+                class="form-control form-control-sm model-list"
+                spellcheck="false"
+              ></textarea>
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('voice')">
+            <i class="bi" :class="openSections.voice ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Voice</span>
+          </button>
+          <div v-if="openSections.voice" class="section-body">
+            <label class="compact-field checkbox-field">
+              <span>Enabled</span>
+              <input v-model="draft.voice.enabled" class="form-check-input" type="checkbox" />
+            </label>
+            <label class="compact-field">
+              <span>Whisper model</span>
+              <input
+                class="form-control form-control-sm"
+                list="voice-model-options"
+                :value="draft.voice.model"
+                @input="setVoiceModel(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <datalist id="voice-model-options">
+              <option v-for="model in draft.voice.available_models" :key="model" :value="model"></option>
+            </datalist>
+            <label class="compact-field model-list-field">
+              <span>Model options</span>
+              <textarea
+                class="form-control form-control-sm model-list"
+                :value="draft.voice.available_models.join('\n')"
+                spellcheck="false"
+                @change="normalizeVoiceModelList(($event.target as HTMLTextAreaElement).value)"
+              ></textarea>
+            </label>
+            <label class="compact-field">
+              <span>Language</span>
+              <input
+                class="form-control form-control-sm"
+                list="voice-language-options"
+                :value="draft.voice.language"
+                placeholder="auto"
+                @input="setVoiceLanguage(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <datalist id="voice-language-options">
+              <option v-for="language in draft.voice.available_languages" :key="language" :value="language"></option>
+            </datalist>
+            <label class="compact-field checkbox-field">
+              <span>Translate</span>
+              <input v-model="draft.voice.translation_enabled" class="form-check-input" type="checkbox" />
+            </label>
+            <label class="compact-field">
+              <span>Target language</span>
+              <input
+                class="form-control form-control-sm"
+                list="voice-target-language-options"
+                :disabled="!draft.voice.translation_enabled"
+                :value="draft.voice.target_language"
+                @input="setVoiceTargetLanguage(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <datalist id="voice-target-language-options">
+              <option v-for="language in draft.voice.available_target_languages" :key="language" :value="language"></option>
+            </datalist>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('dag')">
+            <i class="bi" :class="openSections.dag ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Task DAG</span>
+          </button>
+          <div v-if="openSections.dag" class="section-body">
+            <label class="compact-field">
+              <span>API base URL</span>
+              <input
+                v-model.trim="draft.dag.base_url"
+                class="form-control form-control-sm"
+                placeholder="http://127.0.0.1:8000"
+              />
             </label>
           </div>
         </section>
@@ -277,23 +657,22 @@ async function applyJson() {
 </template>
 
 <style scoped>
-.config-backdrop {
-  background: rgb(15 23 42 / 0.35);
-  inset: var(--topbar-height) 0 0;
-  position: fixed;
-  z-index: 40;
+.config-page {
+  background: #f6f8fb;
+  height: 100%;
+  overflow: hidden;
 }
 
 .config-panel {
   background: #ffffff;
   border-left: 1px solid var(--border);
-  box-shadow: -8px 0 26px rgb(15 23 42 / 0.18);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   height: 100%;
-  margin-left: auto;
+  margin: 0 auto;
   max-width: 100vw;
-  width: min(720px, 100vw);
+  width: min(960px, 100vw);
 }
 
 .config-header,
@@ -320,7 +699,8 @@ async function applyJson() {
 }
 
 .config-header span,
-.config-error {
+.config-error,
+.server-notice {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -357,6 +737,22 @@ async function applyJson() {
   padding: 0 12px 12px;
 }
 
+.server-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.server-actions .btn {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.server-notice {
+  margin-top: 8px;
+}
+
 .setting-row,
 .compact-field {
   align-items: center;
@@ -368,6 +764,14 @@ async function applyJson() {
 .compact-field {
   grid-template-columns: 120px 1fr;
   margin-top: 10px;
+}
+
+.checkbox-field {
+  justify-content: start;
+}
+
+.checkbox-field .form-check-input {
+  margin: 0;
 }
 
 .number-input {
@@ -438,6 +842,16 @@ async function applyJson() {
   padding: 10px;
   resize: vertical;
   width: 100%;
+}
+
+.model-list-field {
+  align-items: start;
+}
+
+.model-list {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  min-height: 92px;
+  resize: vertical;
 }
 
 @media (max-width: 640px) {

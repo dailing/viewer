@@ -4,10 +4,11 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { terminalSocketUrl } from "../../api/client";
-import VoiceInputButton from "../VoiceInputButton.vue";
+import VoiceTextarea from "../VoiceTextarea.vue";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useLayoutStore } from "../../stores/layout";
 import { useTerminalsStore } from "../../stores/terminals";
+import { useVoiceStore } from "../../stores/voice";
 import type { PaneToolbarAction } from "../../stores/paneToolbar";
 import type { TerminalInfo, TerminalSnapshot } from "../../types/terminals";
 
@@ -15,10 +16,11 @@ const props = defineProps<{ id: string; paneId: string }>();
 const paneToolbar = usePaneToolbarStore();
 const layout = useLayoutStore();
 const terminals = useTerminalsStore();
+const voice = useVoiceStore();
 const terminal = ref<TerminalSnapshot | null>(null);
 const error = ref("");
 const terminalElement = ref<HTMLElement | null>(null);
-const pastePadTextarea = ref<HTMLTextAreaElement | null>(null);
+const pastePadTextarea = ref<InstanceType<typeof VoiceTextarea> | null>(null);
 const controlLatch = ref(false);
 const pastePadOpen = ref(false);
 const pastePadText = ref("");
@@ -48,6 +50,7 @@ let applyingRemoteLayout = false;
 let slowSendToken = 0;
 let lastTouchTap: { time: number; x: number; y: number } | null = null;
 const isActivePane = computed(() => layout.activePaneId === props.paneId);
+const voiceContextId = computed(() => `terminal:${props.id}:paste`);
 
 type SoftKey = {
   title: string;
@@ -360,6 +363,7 @@ function closePastePad() {
 
 function clearPastePad() {
   pastePadText.value = "";
+  voice.clear(voiceContextId.value);
   void nextTick(() => pastePadTextarea.value?.focus());
 }
 
@@ -367,6 +371,8 @@ function sendPastePadText(extra = "") {
   const data = normalizeTerminalInput(pastePadText.value) + extra;
   if (!data) return;
   send(data);
+  pastePadText.value = "";
+  voice.clear(voiceContextId.value);
   closePastePad();
 }
 
@@ -374,6 +380,8 @@ function sendBracketedPaste() {
   const data = normalizeTerminalInput(pastePadText.value);
   if (!data) return;
   send(`\x1b[200~${data}\x1b[201~`);
+  pastePadText.value = "";
+  voice.clear(voiceContextId.value);
   closePastePad();
 }
 
@@ -385,6 +393,10 @@ async function sendSlowPaste() {
   for (let index = 0; index < data.length && token === slowSendToken; index += 32) {
     send(data.slice(index, index + 32));
     await new Promise((resolve) => window.setTimeout(resolve, 25));
+  }
+  if (token === slowSendToken) {
+    pastePadText.value = "";
+    voice.clear(voiceContextId.value);
   }
   xterm?.focus();
 }
@@ -532,6 +544,18 @@ async function load() {
   }
 }
 
+function handleRefresh(event: Event) {
+  const paneId = (event as CustomEvent<{ paneId?: string }>).detail?.paneId;
+  if (paneId !== props.paneId) return;
+  terminal.value = null;
+  hasSnapshot = false;
+  appliedOutputVersion = 0;
+  pendingOutput = [];
+  deferredOutput = [];
+  resetOutput("");
+  void load();
+}
+
 async function endTerminal() {
   await terminals.terminate(props.id);
 }
@@ -559,6 +583,7 @@ onMounted(() => {
   mounted = true;
   window.addEventListener("focus", resize);
   window.addEventListener("resize", resize);
+  window.addEventListener("viewer:pane-refresh", handleRefresh);
   void nextTick(() => {
     ensureTerminal();
     scheduleResize();
@@ -571,6 +596,7 @@ onUnmounted(() => {
   if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
   window.removeEventListener("focus", resize);
   window.removeEventListener("resize", resize);
+  window.removeEventListener("viewer:pane-refresh", handleRefresh);
   socket?.close();
   paneToolbar.clearPaneToolbar(props.paneId);
   disposeTerminal();
@@ -594,25 +620,14 @@ onUnmounted(() => {
           <i class="bi bi-x"></i>
         </button>
       </div>
-      <div class="terminal-paste-pad-input">
-        <textarea
-          ref="pastePadTextarea"
-          v-model="pastePadText"
-          class="terminal-paste-pad-textarea"
-          autocapitalize="off"
-          autocomplete="off"
-          autocorrect="off"
-          spellcheck="false"
-        ></textarea>
-        <VoiceInputButton v-model="pastePadText" @start="pastePadOpen = true" />
-      </div>
-      <div class="terminal-paste-pad-actions">
-        <button class="btn btn-sm btn-primary" type="button" @click="sendPastePadText()">Send</button>
-        <button class="btn btn-sm btn-outline-primary" type="button" @click="sendPastePadText('\r')">Send + Enter</button>
-        <button class="btn btn-sm btn-outline-secondary" type="button" @click="sendBracketedPaste">Bracketed</button>
-        <button class="btn btn-sm btn-outline-secondary" type="button" @click="sendSlowPaste">Slow</button>
-        <button class="btn btn-sm btn-outline-secondary" type="button" @click="clearPastePad">Clear</button>
-      </div>
+      <VoiceTextarea ref="pastePadTextarea" v-model="pastePadText" :context-id="voiceContextId" min-height="92px" @clear="clearPastePad">
+        <template #actions>
+          <button class="btn btn-sm btn-primary" type="button" @click="sendPastePadText()">Send</button>
+          <button class="btn btn-sm btn-outline-primary" type="button" @click="sendPastePadText('\r')">Send + Enter</button>
+          <button class="btn btn-sm btn-outline-secondary" type="button" @click="sendBracketedPaste">Bracketed</button>
+          <button class="btn btn-sm btn-outline-secondary" type="button" @click="sendSlowPaste">Slow</button>
+        </template>
+      </VoiceTextarea>
     </div>
   </div>
 </template>
@@ -685,62 +700,9 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.terminal-paste-pad-textarea {
-  border: 1px solid #c8d0dc;
-  border-radius: 6px;
+.terminal-paste-pad :deep(.voice-textarea) {
   flex: 1 1 auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 14px;
-  line-height: 1.35;
-  min-height: 92px;
-  outline: none;
-  padding: 8px;
-  resize: none;
-}
-
-.terminal-paste-pad-textarea:focus {
-  border-color: #1f6feb;
-  box-shadow: 0 0 0 2px rgb(31 111 235 / 0.16);
-}
-
-.terminal-paste-pad-input {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 92px;
-  min-width: 0;
-  position: relative;
-}
-
-.terminal-paste-pad-input .terminal-paste-pad-textarea {
   min-height: 0;
-  padding-right: 48px;
-  width: 100%;
-}
-
-.terminal-paste-pad-input :deep(.voice-input-button) {
-  align-items: center;
-  border-radius: 999px;
-  bottom: 8px;
-  display: inline-flex;
-  height: 34px;
-  justify-content: center;
-  padding: 0;
-  position: absolute;
-  right: 8px;
-  width: 34px;
-}
-
-.terminal-paste-pad-actions {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 6px;
-  min-width: 0;
-  overflow-x: auto;
   padding-bottom: env(safe-area-inset-bottom);
-}
-
-.terminal-paste-pad-actions .btn {
-  flex: 0 0 auto;
-  white-space: nowrap;
 }
 </style>

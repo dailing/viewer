@@ -17,6 +17,7 @@ export type PaneToolbarControl =
       title: string;
       value: string;
       options: string[];
+      size?: "compact";
       onChange: (value: string) => void | Promise<void>;
     }
   | {

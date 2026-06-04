@@ -1,28 +1,38 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { defineAsyncComponent, onMounted, onUnmounted, ref, watch } from "vue";
 import type { LayoutNode } from "../types/layout";
 import type { FileMeta, WatchEvent } from "../types/files";
 import { getMeta } from "../api/client";
 import { useLayoutStore } from "../stores/layout";
 import { fileChangeAffectsPath } from "../utils/paths";
-import CodexViewer from "./viewers/CodexViewer.vue";
+import { legacyAgentRefForPane } from "../utils/agents";
+import AgentViewer from "./viewers/AgentViewer.vue";
+import CsvViewer from "./viewers/CsvViewer.vue";
+import DiffViewer from "./viewers/DiffViewer.vue";
+import HtmlViewer from "./viewers/HtmlViewer.vue";
 import ImageViewer from "./viewers/ImageViewer.vue";
+import LargeTextViewer from "./viewers/LargeTextViewer.vue";
 import MarkdownViewer from "./viewers/MarkdownViewer.vue";
-import PdfViewer from "./viewers/PdfViewer.vue";
 import TextViewer from "./viewers/TextViewer.vue";
 import TerminalViewer from "./viewers/TerminalViewer.vue";
 import UnsupportedViewer from "./viewers/UnsupportedViewer.vue";
 
-const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }> }>();
+const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }>; workspaceId: string; workspaceLoading?: boolean }>();
+const PdfViewer = defineAsyncComponent(() => import("./viewers/PdfViewer.vue"));
 const layout = useLayoutStore();
 const meta = ref<FileMeta | null>(null);
 const error = ref("");
 const version = ref(0);
 
+function paneAgentRef() {
+  return legacyAgentRefForPane(props.pane);
+}
+
 async function load(clearMeta: boolean) {
   error.value = "";
   if (clearMeta) meta.value = null;
-  if (!props.pane.filePath || props.pane.terminalId || props.pane.codexSessionId) return;
+  if (props.workspaceLoading) return;
+  if (!props.pane.filePath || props.pane.terminalId || paneAgentRef()) return;
   try {
     meta.value = await getMeta(props.pane.filePath);
     version.value += 1;
@@ -36,17 +46,35 @@ function handleChange(event: Event) {
   if (props.pane.filePath && fileChangeAffectsPath(detail.path, props.pane.filePath)) void load(false);
 }
 
-watch(() => props.pane.filePath, () => load(true), { immediate: true });
-watch(() => props.pane.terminalId, () => load(true));
-onMounted(() => window.addEventListener("viewer:file-changed", handleChange));
-onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange));
+function handleRefresh(event: Event) {
+  const paneId = (event as CustomEvent<{ paneId?: string }>).detail?.paneId;
+  if (paneId === props.pane.id) void load(true);
+}
+
+function isCsvPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".csv");
+}
+
+watch(() => [props.pane.filePath, props.pane.terminalId, paneAgentRef(), props.workspaceLoading], () => load(true), { immediate: true });
+onMounted(() => {
+  window.addEventListener("viewer:file-changed", handleChange);
+  window.addEventListener("viewer:pane-refresh", handleRefresh);
+});
+onUnmounted(() => {
+  window.removeEventListener("viewer:file-changed", handleChange);
+  window.removeEventListener("viewer:pane-refresh", handleRefresh);
+});
 </script>
 
 <template>
   <section class="viewer-pane" :class="{ active: layout.activePaneId === pane.id }" @click="layout.setActive(pane.id)">
     <div class="pane-body">
-      <TerminalViewer v-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
-      <CodexViewer v-else-if="pane.codexSessionId" :id="pane.codexSessionId" :pane-id="pane.id" />
+      <div v-if="workspaceLoading" class="empty-state">
+        <div class="spinner-border spinner-border-sm" role="status" aria-label="Loading workspace pane"></div>
+      </div>
+      <TerminalViewer v-else-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
+      <AgentViewer v-else-if="paneAgentRef()" :agent-ref="paneAgentRef()!" :pane-id="pane.id" />
+      <DiffViewer v-else-if="pane.diffPath" :path="pane.diffPath" :cwd="pane.diffCwd ?? ''" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">
         <i class="bi bi-folder2-open"></i>
         <span>Select a file from the sidebar</span>
@@ -55,14 +83,28 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
         <i class="bi bi-exclamation-triangle"></i>
         <span>{{ error }}</span>
       </div>
-      <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" />
-      <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" />
-      <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" />
-      <TextViewer v-else-if="meta?.preview === 'text'" :path="pane.filePath" :version="version" />
+      <ImageViewer v-else-if="meta?.preview === 'image'" :path="pane.filePath" :content-hash="meta.content_hash" :version="version" />
+      <LargeTextViewer v-else-if="meta?.preview === 'markdown' && meta.text_too_large" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="markdown" :size="meta.size" />
+      <MarkdownViewer v-else-if="meta?.preview === 'markdown'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <HtmlViewer v-else-if="meta?.preview === 'html'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" :content-hash="meta.content_hash" />
+      <PdfViewer v-else-if="meta?.preview === 'pdf'" :path="pane.filePath" :content-hash="meta.content_hash" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="csv" :size="meta.size" />
+      <CsvViewer v-else-if="meta?.preview === 'text' && isCsvPath(pane.filePath)" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
+      <LargeTextViewer v-else-if="meta?.preview === 'text' && meta.text_too_large" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" kind="text" :size="meta.size" />
+      <TextViewer v-else-if="meta?.preview === 'text'" :path="pane.filePath" :version="version" :pane-id="pane.id" :workspace-id="workspaceId" />
       <UnsupportedViewer v-else-if="meta" :meta="meta" />
       <div v-else class="empty-state">
         <div class="spinner-border spinner-border-sm" role="status"></div>
       </div>
+      <button
+        v-if="meta?.preview === 'html' && layout.activePaneId !== pane.id"
+        class="pane-activation-shield"
+        type="button"
+        title="Activate pane"
+        aria-label="Activate HTML preview pane"
+        @pointerdown.stop.prevent="layout.setActive(pane.id)"
+        @click.stop.prevent
+      ></button>
     </div>
   </section>
 </template>
@@ -90,6 +132,17 @@ onUnmounted(() => window.removeEventListener("viewer:file-changed", handleChange
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.pane-activation-shield {
+  background: transparent;
+  border: 0;
+  cursor: default;
+  inset: 0;
+  padding: 0;
+  position: absolute;
+  z-index: 2;
 }
 
 .empty-state {

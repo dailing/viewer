@@ -3,7 +3,7 @@ import type { FileEntry } from "../types/files";
 import { useFilesStore } from "../stores/files";
 
 const props = defineProps<{ entries: FileEntry[]; activePaths?: string[] }>();
-const emit = defineEmits<{ "open-file": [path: string] }>();
+const emit = defineEmits<{ "open-file": [path: string]; "delete-file": [entry: FileEntry] }>();
 const files = useFilesStore();
 
 function icon(entry: FileEntry): string {
@@ -15,12 +15,11 @@ function icon(entry: FileEntry): string {
 }
 
 async function select(entry: FileEntry) {
-  if (entry.is_dir) return;
+  if (entry.is_dir) {
+    await files.enterDirectory(entry.path);
+    return;
+  }
   emit("open-file", entry.path);
-}
-
-async function enter(entry: FileEntry) {
-  if (entry.is_dir) await files.enterDirectory(entry.path);
 }
 
 function isActive(entry: FileEntry): boolean {
@@ -32,13 +31,22 @@ function isActive(entry: FileEntry): boolean {
   <div class="tree-list">
     <div v-for="entry in entries" :key="entry.path">
       <div class="tree-row" :class="{ active: isActive(entry) }">
-        <button class="tree-main" type="button" @click="select(entry)" @dblclick="enter(entry)" :title="entry.path">
+        <button class="tree-main" type="button" @click="select(entry)" :title="entry.path">
           <i class="bi" :class="icon(entry)"></i>
           <span class="entry-name">{{ entry.name }}</span>
           <i v-if="entry.is_symlink" class="bi bi-link-45deg muted"></i>
         </button>
-        <button class="btn btn-sm icon-button pin-button" type="button" title="Pin" @click="files.togglePin(entry.path)">
+        <button class="btn btn-sm icon-button pin-button" type="button" title="Pin" @click.stop="files.togglePin(entry.path)">
           <i class="bi" :class="files.pinned.includes(entry.path) ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i>
+        </button>
+        <button
+          v-if="!entry.is_dir"
+          class="btn btn-sm icon-button delete-button"
+          type="button"
+          title="Delete file"
+          @click.stop="emit('delete-file', entry)"
+        >
+          <i class="bi bi-trash"></i>
         </button>
       </div>
     </div>
@@ -54,17 +62,20 @@ function isActive(entry: FileEntry): boolean {
 
 .tree-row {
   align-items: center;
+  border: 1px solid transparent;
   border-radius: 6px;
+  box-sizing: border-box;
   display: flex;
   min-height: 30px;
 }
 
-.tree-row:hover,
-.tree-row.active {
+.tree-row:hover {
   background: #eef3f8;
 }
 
 .tree-row.active {
+  border-color: #2f6fdd;
+  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
   color: #0b5ed7;
   font-weight: 600;
 }
@@ -93,5 +104,18 @@ function isActive(entry: FileEntry): boolean {
   height: 24px;
   opacity: 0.72;
   width: 24px;
+}
+
+.delete-button {
+  color: #b42318;
+  flex: 0 0 auto;
+  height: 24px;
+  opacity: 0.72;
+  width: 24px;
+}
+
+.delete-button:hover {
+  background: #fff1f0;
+  color: #8a1f14;
 }
 </style>

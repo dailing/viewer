@@ -1,5 +1,7 @@
 import { defineStore } from "pinia";
-import type { LayoutNode, SplitDirection } from "../types/layout";
+import type { LayoutNode, PaneContent, SplitDirection } from "../types/layout";
+import { agentRef, legacyAgentRefForPane } from "../utils/agents";
+import { namespacedStorageKey } from "../utils/userProfile";
 
 const STORAGE_KEY = "viewer.layout.v1";
 
@@ -23,6 +25,33 @@ function mapNode(node: LayoutNode, paneId: string, update: (pane: Extract<Layout
 
 function firstPaneId(node: LayoutNode): string {
   return node.type === "pane" ? node.id : firstPaneId(node.first);
+}
+
+function hasPane(node: LayoutNode, paneId: string): boolean {
+  return Boolean(findPane(node, paneId));
+}
+
+function cloneLayout(node: LayoutNode): LayoutNode {
+  return normalizeLayoutNode(JSON.parse(JSON.stringify(node)) as LayoutNode);
+}
+
+function normalizeLayoutNode(node: LayoutNode): LayoutNode {
+  if (node.type === "pane") {
+    const next = { ...node, history: normalizeHistory(node.history) };
+    const ref = legacyAgentRefForPane(next);
+    if (ref) {
+      next.agentSession = ref;
+      next.codexSessionId = undefined;
+      next.hermesSessionId = undefined;
+    }
+    return next;
+  }
+  return { ...node, first: normalizeLayoutNode(node.first), second: normalizeLayoutNode(node.second) };
+}
+
+function normalizeHistory(history: PaneContent[] | undefined): PaneContent[] | undefined {
+  const next = (history ?? []).filter(hasContent).slice(-50);
+  return next.length ? next : undefined;
 }
 
 function mapAllPanes(node: LayoutNode, update: (pane: Extract<LayoutNode, { type: "pane" }>) => LayoutNode): LayoutNode {
@@ -56,6 +85,90 @@ function removePane(node: LayoutNode, paneId: string): { node: LayoutNode; remov
   return { node, removed: false };
 }
 
+function paneContent(pane: Extract<LayoutNode, { type: "pane" }>): PaneContent {
+  const ref = legacyAgentRefForPane(pane);
+  return {
+    filePath: pane.filePath,
+    terminalId: pane.terminalId,
+    agentSession: ref,
+    codexSessionId: pane.codexSessionId,
+    hermesSessionId: pane.hermesSessionId,
+    diffPath: pane.diffPath,
+    diffCwd: pane.diffCwd,
+  };
+}
+
+function hasContent(content: PaneContent | null | undefined): boolean {
+  return Boolean(content?.filePath || content?.terminalId || content?.agentSession || content?.codexSessionId || content?.hermesSessionId || content?.diffPath);
+}
+
+function sameContent(left: PaneContent, right: PaneContent): boolean {
+  return (
+    (left.filePath ?? "") === (right.filePath ?? "") &&
+    (left.terminalId ?? "") === (right.terminalId ?? "") &&
+    (left.agentSession ?? "") === (right.agentSession ?? "") &&
+    (left.codexSessionId ?? "") === (right.codexSessionId ?? "") &&
+    (left.hermesSessionId ?? "") === (right.hermesSessionId ?? "") &&
+    (left.diffPath ?? "") === (right.diffPath ?? "") &&
+    (left.diffCwd ?? "") === (right.diffCwd ?? "")
+  );
+}
+
+function contentForFile(path: string): PaneContent {
+  return { filePath: path };
+}
+
+function contentForTerminal(id: string): PaneContent {
+  return { terminalId: id };
+}
+
+function contentForAgent(ref: string): PaneContent {
+  const [provider, id] = ref.split(":", 2);
+  return {
+    agentSession: ref,
+    codexSessionId: provider === "codex" ? id : undefined,
+    hermesSessionId: provider === "hermes" ? id : undefined,
+  };
+}
+
+function contentForDiff(path: string, cwd = ""): PaneContent {
+  return { diffPath: path, diffCwd: cwd };
+}
+
+function pushPaneHistory(pane: Extract<LayoutNode, { type: "pane" }>, nextContent: PaneContent): PaneContent[] | undefined {
+  const current = paneContent(pane);
+  const history = normalizeHistory(pane.history) ?? [];
+  if (!hasContent(current) || sameContent(current, nextContent)) return history.length ? history : undefined;
+  const previous = history[history.length - 1];
+  const nextHistory = previous && sameContent(previous, current) ? history : [...history, current];
+  return nextHistory.slice(-50);
+}
+
+function applyPaneContent(pane: Extract<LayoutNode, { type: "pane" }>, content: PaneContent): Extract<LayoutNode, { type: "pane" }> {
+  return {
+    ...pane,
+    filePath: content.filePath,
+    terminalId: content.terminalId,
+    agentSession: content.agentSession,
+    codexSessionId: content.codexSessionId,
+    hermesSessionId: content.hermesSessionId,
+    diffPath: content.diffPath,
+    diffCwd: content.diffCwd,
+  };
+}
+
+function replacePaneContent(pane: Extract<LayoutNode, { type: "pane" }>, nextContent: PaneContent): Extract<LayoutNode, { type: "pane" }> {
+  return {
+    ...applyPaneContent(pane, nextContent),
+    history: pushPaneHistory(pane, nextContent),
+  };
+}
+
+function emitPaneBeforeNavigate(paneId: string): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("viewer:pane-before-navigate", { detail: { paneId } }));
+}
+
 export const useLayoutStore = defineStore("layout", {
   state: () => ({
     root: defaultLayout() as LayoutNode,
@@ -64,6 +177,10 @@ export const useLayoutStore = defineStore("layout", {
   getters: {
     activePane(state) {
       return state.activePaneId ? findPane(state.root, state.activePaneId) : null;
+    },
+    activePaneCanGoBack(state): boolean {
+      const pane = state.activePaneId ? findPane(state.root, state.activePaneId) : null;
+      return Boolean(pane?.type === "pane" && normalizeHistory(pane.history)?.length);
     },
     openPaths(state): string[] {
       const paths: string[] = [];
@@ -95,6 +212,7 @@ export const useLayoutStore = defineStore("layout", {
       const ids: string[] = [];
       const visit = (node: LayoutNode) => {
         if (node.type === "pane") {
+          if (node.agentSession?.startsWith("codex:")) ids.push(node.agentSession.slice("codex:".length));
           if (node.codexSessionId) ids.push(node.codexSessionId);
           return;
         }
@@ -104,25 +222,80 @@ export const useLayoutStore = defineStore("layout", {
       visit(state.root);
       return ids;
     },
+    openHermesSessionIds(state): string[] {
+      const ids: string[] = [];
+      const visit = (node: LayoutNode) => {
+        if (node.type === "pane") {
+          if (node.agentSession?.startsWith("hermes:")) ids.push(node.agentSession.slice("hermes:".length));
+          if (node.hermesSessionId) ids.push(node.hermesSessionId);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(state.root);
+      return ids;
+    },
+    openAgentSessionRefs(state): string[] {
+      const refs: string[] = [];
+      const visit = (node: LayoutNode) => {
+        if (node.type === "pane") {
+          const ref = legacyAgentRefForPane(node);
+          if (ref) refs.push(ref);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(state.root);
+      return refs;
+    },
+    openDiffPaths(state): string[] {
+      const paths: string[] = [];
+      const visit = (node: LayoutNode) => {
+        if (node.type === "pane") {
+          if (node.diffPath) paths.push(node.diffPath);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(state.root);
+      return paths;
+    },
   },
   actions: {
     load() {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const key = namespacedStorageKey(STORAGE_KEY);
+      const raw = localStorage.getItem(key);
       if (raw) {
         try {
           const parsed = JSON.parse(raw) as { root: LayoutNode; activePaneId?: string };
-          this.root = parsed.root;
-          this.activePaneId = parsed.activePaneId || firstPaneId(parsed.root);
+          this.root = normalizeLayoutNode(parsed.root);
+          this.activePaneId = parsed.activePaneId || firstPaneId(this.root);
           return;
         } catch {
-          localStorage.removeItem(STORAGE_KEY);
+          localStorage.removeItem(key);
         }
       }
       this.activePaneId = firstPaneId(this.root);
       this.save();
     },
     save() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
+      localStorage.setItem(namespacedStorageKey(STORAGE_KEY), JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
+    },
+    snapshot() {
+      return { root: cloneLayout(this.root), activePaneId: this.activePaneId || firstPaneId(this.root) };
+    },
+    restore(root: LayoutNode, activePaneId?: string | null) {
+      this.root = cloneLayout(root);
+      this.activePaneId = activePaneId && hasPane(this.root, activePaneId) ? activePaneId : firstPaneId(this.root);
+      this.save();
+    },
+    reset() {
+      this.root = defaultLayout();
+      this.activePaneId = firstPaneId(this.root);
+      this.save();
     },
     setActive(paneId: string) {
       this.activePaneId = paneId;
@@ -130,32 +303,67 @@ export const useLayoutStore = defineStore("layout", {
     },
     openFile(path: string) {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      emitPaneBeforeNavigate(this.activePaneId);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForFile(path)));
+      this.save();
+    },
+    openFileInSplit(path: string, direction: SplitDirection) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      const nextPaneId = id("pane");
       this.root = mapNode(this.root, this.activePaneId, (pane) => ({
-        ...pane,
-        filePath: path,
-        terminalId: undefined,
-        codexSessionId: undefined,
+        type: "split",
+        id: id("split"),
+        direction,
+        ratio: 0.5,
+        first: { ...pane },
+        second: { type: "pane", id: nextPaneId, filePath: path },
       }));
+      this.activePaneId = nextPaneId;
       this.save();
     },
     openTerminal(id: string) {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
-      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
-        ...pane,
-        filePath: undefined,
-        terminalId: id,
-        codexSessionId: undefined,
-      }));
+      emitPaneBeforeNavigate(this.activePaneId);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForTerminal(id)));
       this.save();
     },
     openCodexSession(id: string) {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
-      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
-        ...pane,
-        filePath: undefined,
-        terminalId: undefined,
-        codexSessionId: id,
-      }));
+      emitPaneBeforeNavigate(this.activePaneId);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForAgent(agentRef("codex", id))));
+      this.save();
+    },
+    openHermesSession(id: string) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      emitPaneBeforeNavigate(this.activePaneId);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForAgent(agentRef("hermes", id))));
+      this.save();
+    },
+    openAgentSession(ref: string) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      emitPaneBeforeNavigate(this.activePaneId);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForAgent(ref)));
+      this.save();
+    },
+    openDiff(path: string, cwd = "") {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      emitPaneBeforeNavigate(this.activePaneId);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForDiff(path, cwd)));
+      this.save();
+    },
+    goBack(paneId?: string) {
+      const targetPaneId = paneId ?? this.activePaneId;
+      if (!targetPaneId) return;
+      emitPaneBeforeNavigate(targetPaneId);
+      this.root = mapNode(this.root, targetPaneId, (pane) => {
+        const history = normalizeHistory(pane.history) ?? [];
+        const previous = history[history.length - 1];
+        if (!previous) return pane;
+        return {
+          ...applyPaneContent(pane, previous),
+          history: history.slice(0, -1),
+        };
+      });
       this.save();
     },
     splitPane(paneId: string, direction: SplitDirection) {
@@ -178,11 +386,16 @@ export const useLayoutStore = defineStore("layout", {
       this.save();
     },
     clearPane(paneId: string) {
+      emitPaneBeforeNavigate(paneId);
       this.root = mapNode(this.root, paneId, (pane) => ({
         ...pane,
         filePath: undefined,
         terminalId: undefined,
+        agentSession: undefined,
         codexSessionId: undefined,
+        hermesSessionId: undefined,
+        diffPath: undefined,
+        diffCwd: undefined,
       }));
       this.save();
     },
@@ -202,7 +415,15 @@ export const useLayoutStore = defineStore("layout", {
       this.save();
     },
     clearCodexSession(id: string) {
-      this.root = mapAllPanes(this.root, (pane) => (pane.codexSessionId === id ? { ...pane, codexSessionId: undefined } : pane));
+      this.root = mapAllPanes(this.root, (pane) => (pane.codexSessionId === id || pane.agentSession === agentRef("codex", id) ? { ...pane, codexSessionId: undefined, agentSession: undefined } : pane));
+      this.save();
+    },
+    clearHermesSession(id: string) {
+      this.root = mapAllPanes(this.root, (pane) => (pane.hermesSessionId === id || pane.agentSession === agentRef("hermes", id) ? { ...pane, hermesSessionId: undefined, agentSession: undefined } : pane));
+      this.save();
+    },
+    clearAgentSession(ref: string) {
+      this.root = mapAllPanes(this.root, (pane) => (legacyAgentRefForPane(pane) === ref ? { ...pane, agentSession: undefined, codexSessionId: undefined, hermesSessionId: undefined } : pane));
       this.save();
     },
   },

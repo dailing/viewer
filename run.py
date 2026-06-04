@@ -16,7 +16,9 @@ DEFAULT_FRONTEND_DIST = FRONTEND_DIR / "dist"
 DEFAULT_ROOT = Path("~/Sync").expanduser()
 DEFAULT_PORT = 18989
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
+DEFAULT_LOG_DIR = Path("~/.view/logs").expanduser()
+PROJECT_ENV_PATH = PROJECT_ROOT / ".viewer.env"
+DEFAULT_VOICE_SERVICE_WS = "ws://127.0.0.1:8765/v1/voice/ws"
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional target language code for WhisperLiveKit translation output.",
     )
+    parser.add_argument(
+        "--voice-service-ws",
+        default=DEFAULT_VOICE_SERVICE_WS,
+        help=f"Standalone voice service WebSocket URL. Defaults to {DEFAULT_VOICE_SERVICE_WS}.",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +116,25 @@ def resolve_project_path(path: Path) -> Path:
     if path.is_absolute():
         return path.resolve()
     return (PROJECT_ROOT / path).resolve()
+
+
+def load_project_env(path: Path = PROJECT_ENV_PATH) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if not name or name in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[name] = value
 
 
 def build_frontend(debug: bool) -> None:
@@ -132,10 +158,14 @@ def build_frontend(debug: bool) -> None:
 
 def default_log_file(log_dir: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return resolve_project_path(log_dir) / f"viewer-{stamp}.log"
+    target = log_dir.expanduser()
+    if target.is_absolute():
+        return target.resolve() / f"viewer-{stamp}.log"
+    return resolve_project_path(target) / f"viewer-{stamp}.log"
 
 
 def main() -> None:
+    load_project_env()
     args = parse_args()
     root_arg = args.serve_dir if args.serve_dir is not None else args.root
     root = root_arg.expanduser().resolve()
@@ -152,7 +182,8 @@ def main() -> None:
     os.environ["VIEWER_VOICE_MODEL"] = os.environ.get("VIEWER_VOICE_MODEL", args.voice_model)
     os.environ["VIEWER_VOICE_LANGUAGE"] = os.environ.get("VIEWER_VOICE_LANGUAGE", args.voice_language)
     os.environ["VIEWER_VOICE_TARGET_LANGUAGE"] = os.environ.get("VIEWER_VOICE_TARGET_LANGUAGE", args.voice_target_language)
-    os.environ["VIEWER_VOICE_BACKEND"] = os.environ.get("VIEWER_VOICE_BACKEND", "whisper")
+    os.environ["VIEWER_VOICE_SERVICE_WS"] = os.environ.get("VIEWER_VOICE_SERVICE_WS", args.voice_service_ws)
+    os.environ["VIEWER_VOICE_BACKEND"] = os.environ.get("VIEWER_VOICE_BACKEND", "faster-whisper")
     os.environ["VIEWER_VOICE_BACKEND_POLICY"] = os.environ.get("VIEWER_VOICE_BACKEND_POLICY", "localagreement")
     log_file = resolve_project_path(args.log_file) if args.log_file else default_log_file(args.log_dir)
     os.environ["VIEWER_LOG_FILE"] = log_file.as_posix()

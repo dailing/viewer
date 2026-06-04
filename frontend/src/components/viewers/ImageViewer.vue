@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { rawUrl } from "../../api/client";
 
-const props = defineProps<{ path: string; contentHash: string }>();
-const src = computed(() => rawUrl(props.path, props.contentHash));
+const props = defineProps<{ path: string; contentHash: string; version: number }>();
+const src = computed(() => rawUrl(props.path, `${props.contentHash}-${props.version}`));
 const container = ref<HTMLElement | null>(null);
+const naturalWidth = ref(0);
+const naturalHeight = ref(0);
+const viewportWidth = ref(0);
+const viewportHeight = ref(0);
 const scale = ref(1);
 const offsetX = ref(0);
 const offsetY = ref(0);
@@ -15,6 +19,7 @@ const MIN_SCALE = 1;
 const MAX_SCALE = 12;
 const ZOOM_STEP = 1.1;
 const DRAG_THRESHOLD = 1;
+const VIEWER_PADDING = 24;
 
 let dragStartX = 0;
 let dragStartY = 0;
@@ -26,13 +31,45 @@ let pinchStartMidX = 0;
 let pinchStartMidY = 0;
 let pinchStartOffsetX = 0;
 let pinchStartOffsetY = 0;
+let resizeObserver: ResizeObserver | null = null;
 
-const transformStyle = computed(() => ({
-  transform: `translate(${offsetX.value}px, ${offsetY.value}px) scale(${scale.value})`,
+const baseSize = computed(() => {
+  const width = naturalWidth.value;
+  const height = naturalHeight.value;
+  if (width <= 0 || height <= 0) {
+    return { width: 0, height: 0 };
+  }
+
+  const availableWidth = Math.max(1, viewportWidth.value - VIEWER_PADDING);
+  const availableHeight = Math.max(1, viewportHeight.value - VIEWER_PADDING);
+  const fitScale = Math.min(1, availableWidth / width, availableHeight / height);
+  return {
+    width: width * fitScale,
+    height: height * fitScale,
+  };
+});
+
+const displaySize = computed(() => ({
+  width: baseSize.value.width * scale.value,
+  height: baseSize.value.height * scale.value,
+}));
+
+const imageStyle = computed(() => ({
+  height: `${displaySize.value.height}px`,
+  transform: `translate(${offsetX.value}px, ${offsetY.value}px)`,
+  width: `${displaySize.value.width}px`,
 }));
 
 function clampScale(value: number): number {
   return Math.max(MIN_SCALE, Math.min(MAX_SCALE, value));
+}
+
+function imageLeftForScale(value: number): number {
+  return (viewportWidth.value - baseSize.value.width * value) * 0.5;
+}
+
+function imageTopForScale(value: number): number {
+  return (viewportHeight.value - baseSize.value.height * value) * 0.5;
 }
 
 function updateScaleAtPoint(nextScaleRaw: number, clientX: number, clientY: number): void {
@@ -48,14 +85,32 @@ function updateScaleAtPoint(nextScaleRaw: number, clientX: number, clientY: numb
   if (Math.abs(nextScale - currentScale) < 1e-6) {
     return;
   }
-  const worldX = (px - offsetX.value) / currentScale;
-  const worldY = (py - offsetY.value) / currentScale;
+  const worldX = (px - imageLeftForScale(currentScale) - offsetX.value) / currentScale;
+  const worldY = (py - imageTopForScale(currentScale) - offsetY.value) / currentScale;
   scale.value = nextScale;
-  offsetX.value = px - worldX * nextScale;
-  offsetY.value = py - worldY * nextScale;
+  offsetX.value = px - imageLeftForScale(nextScale) - worldX * nextScale;
+  offsetY.value = py - imageTopForScale(nextScale) - worldY * nextScale;
 }
 
-watch(() => [props.path, props.contentHash] as const, async ([newPath], [oldPath, oldHash]) => {
+function updateViewportSize(): void {
+  const root = container.value;
+  if (!root) {
+    viewportWidth.value = 0;
+    viewportHeight.value = 0;
+    return;
+  }
+  const rect = root.getBoundingClientRect();
+  viewportWidth.value = rect.width;
+  viewportHeight.value = rect.height;
+}
+
+function handleImageLoad(event: Event): void {
+  const image = event.target as HTMLImageElement;
+  naturalWidth.value = image.naturalWidth;
+  naturalHeight.value = image.naturalHeight;
+}
+
+watch(() => [props.path, props.contentHash, props.version] as const, async ([newPath], [oldPath, oldHash]) => {
   if (!oldPath || newPath !== oldPath || oldHash !== undefined) {
     scale.value = 1;
     offsetX.value = 0;
@@ -143,11 +198,11 @@ function handlePointerMove(event: PointerEvent): void {
   const unclampedScale = pinchStartScale * (distance / pinchStartDistance);
   const nextScale = clampScale(unclampedScale);
 
-  const worldX = (pinchStartMidX - pinchStartOffsetX) / pinchStartScale;
-  const worldY = (pinchStartMidY - pinchStartOffsetY) / pinchStartScale;
+  const worldX = (pinchStartMidX - imageLeftForScale(pinchStartScale) - pinchStartOffsetX) / pinchStartScale;
+  const worldY = (pinchStartMidY - imageTopForScale(pinchStartScale) - pinchStartOffsetY) / pinchStartScale;
   scale.value = nextScale;
-  offsetX.value = midX - worldX * nextScale;
-  offsetY.value = midY - worldY * nextScale;
+  offsetX.value = midX - imageLeftForScale(nextScale) - worldX * nextScale;
+  offsetY.value = midY - imageTopForScale(nextScale) - worldY * nextScale;
 }
 
 function releasePointer(event: PointerEvent): void {
@@ -163,6 +218,19 @@ function releasePointer(event: PointerEvent): void {
   }
   dragging.value = false;
 }
+
+onMounted(() => {
+  updateViewportSize();
+  if (container.value) {
+    resizeObserver = new ResizeObserver(updateViewportSize);
+    resizeObserver.observe(container.value);
+  }
+});
+
+onUnmounted(() => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+});
 </script>
 
 <template>
@@ -175,7 +243,7 @@ function releasePointer(event: PointerEvent): void {
     @pointerup="releasePointer"
     @pointercancel="releasePointer"
   >
-    <img :src="src" :alt="path" :style="transformStyle" draggable="false" />
+    <img :src="src" :alt="path" :style="imageStyle" draggable="false" @load="handleImageLoad" />
   </div>
 </template>
 
@@ -193,10 +261,8 @@ function releasePointer(event: PointerEvent): void {
 
 img {
   cursor: grab;
-  max-height: 100%;
-  max-width: 100%;
   object-fit: contain;
-  transform-origin: 0 0;
+  transform-origin: center;
   user-select: none;
 }
 

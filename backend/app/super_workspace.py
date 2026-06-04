@@ -1,0 +1,273 @@
+import asyncio
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from fastapi import HTTPException
+from pydantic import BaseModel, Field
+
+from .users import user_state_dir
+
+
+DEFAULT_DISPATCH_MODEL = "deepseek-v4-flash"
+DEFAULT_DISPATCH_URL = "https://api.deepseek.com/v1/chat/completions"
+PROJECT_ENV_PATH = Path(__file__).resolve().parents[2] / ".viewer.env"
+
+
+class SuperRole(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    provider: str = "codex"
+    cwd: str = ""
+    model: str | None = None
+    session_ref: str = ""
+    created_at: float
+    updated_at: float
+
+
+class SuperRoleCreate(BaseModel):
+    name: str
+    description: str = ""
+    provider: str = "codex"
+    cwd: str = ""
+    model: str | None = None
+
+
+class SuperRolePatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    provider: str | None = None
+    cwd: str | None = None
+    model: str | None = None
+    session_ref: str | None = None
+
+
+class SuperWorkspaceData(BaseModel):
+    common_prompt: str = ""
+    roles: list[SuperRole] = Field(default_factory=list)
+
+
+class SuperWorkspacePatch(BaseModel):
+    common_prompt: str | None = None
+
+
+class SuperDispatchRequest(BaseModel):
+    message: str
+    role_ids: list[str] | None = None
+
+
+class SuperDispatchResponse(BaseModel):
+    role_ids: list[str]
+    rationale: str = ""
+    raw: dict[str, Any] | None = None
+
+
+class SuperWorkspaceManager:
+    def _path(self, user_id: str | None):
+        return user_state_dir(user_id) / "super-workspace.json"
+
+    def read(self, user_id: str | None = None) -> SuperWorkspaceData:
+        path = self._path(user_id)
+        if not path.exists():
+            return SuperWorkspaceData()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return SuperWorkspaceData.model_validate(raw)
+        except Exception:
+            return SuperWorkspaceData()
+
+    def write(self, data: SuperWorkspaceData, user_id: str | None = None) -> SuperWorkspaceData:
+        path = self._path(user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return data
+
+    def update(self, patch: SuperWorkspacePatch, user_id: str | None = None) -> SuperWorkspaceData:
+        data = self.read(user_id)
+        update = patch.model_dump(exclude_unset=True)
+        if "common_prompt" in update:
+            data.common_prompt = str(update["common_prompt"] or "").strip()
+        return self.write(data, user_id)
+
+    def create_role(self, request: SuperRoleCreate, user_id: str | None = None) -> SuperWorkspaceData:
+        data = self.read(user_id)
+        now = time.time()
+        role = SuperRole(
+            id=uuid.uuid4().hex[:12],
+            name=(request.name or "New Role").strip()[:120] or "New Role",
+            description=request.description.strip(),
+            provider=(request.provider or "codex").strip() or "codex",
+            cwd=request.cwd.strip(),
+            model=request.model.strip() if request.model else None,
+            created_at=now,
+            updated_at=now,
+        )
+        data.roles.append(role)
+        return self.write(data, user_id)
+
+    def update_role(self, role_id: str, patch: SuperRolePatch, user_id: str | None = None) -> SuperWorkspaceData:
+        data = self.read(user_id)
+        role = self._find_role(data, role_id)
+        update = patch.model_dump(exclude_unset=True)
+        for key, value in update.items():
+            if isinstance(value, str):
+                value = value.strip()
+            if key == "name":
+                value = str(value or "New Role")[:120]
+            if key == "provider":
+                value = str(value or "codex")
+            setattr(role, key, value)
+        role.updated_at = time.time()
+        return self.write(data, user_id)
+
+    def delete_role(self, role_id: str, user_id: str | None = None) -> SuperWorkspaceData:
+        data = self.read(user_id)
+        data.roles = [role for role in data.roles if role.id != role_id]
+        return self.write(data, user_id)
+
+    async def dispatch(self, request: SuperDispatchRequest, user_id: str | None = None) -> SuperDispatchResponse:
+        message = request.message.strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+        data = self.read(user_id)
+        candidates = [role for role in data.roles if role.description.strip()]
+        if request.role_ids:
+            allowed = set(request.role_ids)
+            candidates = [role for role in candidates if role.id in allowed]
+        if not candidates:
+            raise HTTPException(status_code=400, detail="No dispatchable roles have descriptions")
+        raw = await asyncio.to_thread(self._dispatch_sync, message, candidates)
+        selected = self._normalize_selected(raw, candidates)
+        return SuperDispatchResponse(role_ids=selected, rationale=str(raw.get("rationale") or ""), raw=raw)
+
+    def _find_role(self, data: SuperWorkspaceData, role_id: str) -> SuperRole:
+        for role in data.roles:
+            if role.id == role_id:
+                return role
+        raise HTTPException(status_code=404, detail="Role not found")
+
+    def _dispatch_sync(self, message: str, roles: list[SuperRole]) -> dict[str, Any]:
+        api_key = self._dispatch_api_key()
+        if not api_key:
+            raise HTTPException(status_code=503, detail="Set VIEWER_SUPER_DISPATCH_API_KEY or DEEPSEEK_API_KEY for LLM dispatch")
+        model = os.environ.get("VIEWER_SUPER_DISPATCH_MODEL", DEFAULT_DISPATCH_MODEL)
+        url = os.environ.get("VIEWER_SUPER_DISPATCH_URL", DEFAULT_DISPATCH_URL)
+        payload = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You route one user message to the most appropriate persistent agent roles. "
+                        "Return only JSON with role_ids and rationale. role_ids must be an array of ids from the provided roles. "
+                        "Choose multiple roles only when the message clearly asks for multiple independent roles."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "message": message,
+                            "roles": [
+                                {
+                                    "id": role.id,
+                                    "name": role.name,
+                                    "description": role.description,
+                                    "cwd": role.cwd,
+                                    "provider": role.provider,
+                                }
+                                for role in roles
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+        }
+        request = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise HTTPException(status_code=502, detail=f"Dispatch model failed: {detail}") from exc
+        except (OSError, URLError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=502, detail=f"Dispatch model failed: {exc}") from exc
+        content = response_payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail=f"Dispatch model returned non-JSON content: {content[:500]}") from exc
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _dispatch_api_key(self) -> str:
+        for name in ("VIEWER_SUPER_DISPATCH_API_KEY", "VIEWER_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY", "VIEWER_OPENAI_API_KEY", "OPENAI_API_KEY"):
+            value = os.environ.get(name, "").strip()
+            if value:
+                return value
+        for env_path in self._project_env_paths():
+            value = self._read_env_value(env_path, "VIEWER_SUPER_DISPATCH_API_KEY") or self._read_env_value(env_path, "DEEPSEEK_API_KEY")
+            if value:
+                return value
+        return ""
+
+    def _project_env_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        configured = os.environ.get("VIEWER_PROJECT_ENV_PATH", "").strip()
+        if configured:
+            paths.append(Path(configured).expanduser())
+        paths.append(PROJECT_ENV_PATH)
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            key = str(path)
+            if key not in seen:
+                unique.append(path)
+                seen.add(key)
+        return unique
+
+    def _read_env_value(self, path: Path, name: str) -> str:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return ""
+        prefix = f"{name}="
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#") or not line.startswith(prefix):
+                continue
+            value = line[len(prefix):].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            return value.strip()
+        return ""
+
+    def _normalize_selected(self, raw: dict[str, Any], roles: list[SuperRole]) -> list[str]:
+        valid = {role.id for role in roles}
+        values = raw.get("role_ids")
+        if isinstance(values, str):
+            values = [values]
+        selected = []
+        if isinstance(values, list):
+            for value in values:
+                role_id = str(value)
+                if role_id in valid and role_id not in selected:
+                    selected.append(role_id)
+        if not selected:
+            raise HTTPException(status_code=502, detail="Dispatch model did not select a valid role")
+        return selected
+
+
+super_workspace_manager = SuperWorkspaceManager()

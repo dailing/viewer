@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
-import { getConfig, getTree, putConfig } from "../api/client";
-import type { AppearanceConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig } from "../types/files";
+import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
+import type { AppearanceConfig, CodexConfig, DagConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, VoiceConfig, WorkspaceConfig } from "../types/files";
+import { parentPath as resolveParentPath } from "../utils/paths";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   name: "Default",
@@ -33,6 +34,41 @@ export const DEFAULT_APPEARANCE_CONFIG: AppearanceConfig = {
 export const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
   active_theme: DEFAULT_MARKDOWN_THEME.name,
   themes: [DEFAULT_MARKDOWN_THEME],
+};
+
+export const DEFAULT_CODEX_CONFIG: CodexConfig = {
+  available_models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"],
+  default_model: "gpt-5.5",
+  proxy: "",
+  muted_message_alpha: 0.56,
+  auto_commit_prompt: `Review the Git changes in the current directory only.
+
+Summarize the changes briefly, stage the relevant files in this directory, create a concise commit message, and commit them.
+
+If a remote/tracking branch is configured, push the commit after it succeeds.
+
+Do not amend, rebase, reset, or rewrite history. If there are no changes, unrelated changes outside this directory, or anything unsafe or unclear, stop and explain instead of committing.`,
+};
+
+export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
+  enabled: true,
+  available_models: ["large-v3-turbo", "small", "medium", "base", "tiny"],
+  model: "large-v3-turbo",
+  available_languages: ["auto", "en", "zh", "ja", "ko", "fr", "de", "es"],
+  language: "auto",
+  translation_enabled: false,
+  available_target_languages: ["en", "zh", "ja", "ko", "fr", "de", "es"],
+  target_language: "en",
+};
+
+export const DEFAULT_DAG_CONFIG: DagConfig = {
+  base_url: "",
+};
+
+export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfig = {
+  count: 5,
+  heat_interval_seconds: 10,
+  heat_step_percent: 5,
 };
 
 function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
@@ -77,18 +113,95 @@ function normalizeMarkdown(config?: Partial<MarkdownConfig>): MarkdownConfig {
   return { active_theme: activeTheme ?? DEFAULT_MARKDOWN_THEME.name, themes };
 }
 
+function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
+  const seen = new Set<string>();
+  const available = (config?.available_models?.length ? config.available_models : DEFAULT_CODEX_CONFIG.available_models)
+    .map((model) => model.trim())
+    .filter((model) => {
+      if (!model || seen.has(model)) return false;
+      seen.add(model);
+      return true;
+    });
+  const defaultModel = config?.default_model?.trim() || available[0] || DEFAULT_CODEX_CONFIG.default_model;
+  return {
+    available_models: available.includes(defaultModel) ? available : [defaultModel, ...available],
+    default_model: defaultModel,
+    proxy: config?.proxy?.trim() ?? DEFAULT_CODEX_CONFIG.proxy,
+    muted_message_alpha: normalizeAlpha(config?.muted_message_alpha, DEFAULT_CODEX_CONFIG.muted_message_alpha),
+    auto_commit_prompt: config?.auto_commit_prompt?.trim() || DEFAULT_CODEX_CONFIG.auto_commit_prompt,
+  };
+}
+
+function uniqueCleanList(items: string[] | undefined, fallback: string[], options?: { lowercase?: boolean; aliases?: boolean }) {
+  const seen = new Set<string>();
+  const source = items?.length ? items : fallback;
+  return source
+    .map((item) => (options?.lowercase ? item.trim().toLowerCase() : item.trim()))
+    .map((item) => (options?.aliases && item === "cn" ? "zh" : item))
+    .filter((item) => {
+      if (!item || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    });
+}
+
+function normalizeVoiceConfig(config?: Partial<VoiceConfig>): VoiceConfig {
+  const models = uniqueCleanList(config?.available_models, DEFAULT_VOICE_CONFIG.available_models);
+  const languages = uniqueCleanList(config?.available_languages, DEFAULT_VOICE_CONFIG.available_languages, { lowercase: true, aliases: true });
+  const targetLanguages = uniqueCleanList(config?.available_target_languages, DEFAULT_VOICE_CONFIG.available_target_languages, { lowercase: true, aliases: true }).filter(
+    (item) => item !== "auto",
+  );
+  const model = (config?.model?.trim() || models[0] || DEFAULT_VOICE_CONFIG.model);
+  const language = (config?.language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.language).replace(/^cn$/, "zh");
+  const targetLanguage = (config?.target_language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.target_language).replace(/^cn$/, "zh");
+  return {
+    enabled: config?.enabled ?? DEFAULT_VOICE_CONFIG.enabled,
+    available_models: models.includes(model) ? models : [model, ...models],
+    model,
+    available_languages: languages.includes(language) ? languages : [language, ...languages],
+    language,
+    translation_enabled: config?.translation_enabled ?? DEFAULT_VOICE_CONFIG.translation_enabled,
+    available_target_languages: targetLanguages.includes(targetLanguage) ? targetLanguages : [targetLanguage, ...targetLanguages],
+    target_language: targetLanguage,
+  };
+}
+
+function normalizeDagConfig(config?: Partial<DagConfig>): DagConfig {
+  return {
+    base_url: config?.base_url?.trim() ?? DEFAULT_DAG_CONFIG.base_url,
+  };
+}
+
+function normalizeAlpha(value: unknown, fallback: number): number {
+  const alpha = Number(value ?? fallback);
+  if (!Number.isFinite(alpha)) return fallback;
+  return Math.min(1, Math.max(0.15, alpha));
+}
+
+function normalizeWorkspaceConfig(config?: Partial<WorkspaceConfig>): WorkspaceConfig {
+  const count = Number(config?.count ?? DEFAULT_WORKSPACE_CONFIG.count);
+  const interval = Number(config?.heat_interval_seconds ?? DEFAULT_WORKSPACE_CONFIG.heat_interval_seconds);
+  const step = Number(config?.heat_step_percent ?? DEFAULT_WORKSPACE_CONFIG.heat_step_percent);
+  return {
+    count: Math.min(20, Math.max(1, Math.round(Number.isFinite(count) ? count : DEFAULT_WORKSPACE_CONFIG.count))),
+    heat_interval_seconds: Math.min(300, Math.max(1, Number.isFinite(interval) ? interval : DEFAULT_WORKSPACE_CONFIG.heat_interval_seconds)),
+    heat_step_percent: Math.min(100, Math.max(0.1, Number.isFinite(step) ? step : DEFAULT_WORKSPACE_CONFIG.heat_step_percent)),
+  };
+}
+
 export const useFilesStore = defineStore("files", {
   state: () => ({
     listings: {} as Record<string, DirectoryListing>,
     currentPath: "",
     expanded: new Set<string>(),
     pinned: [] as string[],
+    visitTimes: {} as Record<string, number>,
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
-    codexConfig: {
-      available_models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"],
-      default_model: "gpt-5.5",
-    },
+    codexConfig: normalizeCodexConfig(),
+    voiceConfig: normalizeVoiceConfig(),
+    dagConfig: normalizeDagConfig(),
+    workspaceConfig: normalizeWorkspaceConfig(),
     loading: false,
   }),
   getters: {
@@ -96,11 +209,17 @@ export const useFilesStore = defineStore("files", {
       return state.listings[""]?.entries ?? [];
     },
     currentEntries(state): FileEntry[] {
-      return state.listings[state.currentPath]?.entries ?? [];
+      const entries = [...(state.listings[state.currentPath]?.entries ?? [])];
+      return entries.sort((left, right) => {
+        const leftVisited = state.visitTimes[left.path] ?? 0;
+        const rightVisited = state.visitTimes[right.path] ?? 0;
+        if (leftVisited !== rightVisited) return rightVisited - leftVisited;
+        if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1;
+        return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+      });
     },
     parentPath(state): string {
-      if (!state.currentPath) return "";
-      return state.currentPath.includes("/") ? state.currentPath.split("/").slice(0, -1).join("/") : "";
+      return resolveParentPath(state.currentPath);
     },
     activeMarkdownTheme(state): MarkdownTheme {
       return state.markdown.themes.find((theme) => theme.name === state.markdown.active_theme) ?? state.markdown.themes[0] ?? DEFAULT_MARKDOWN_THEME;
@@ -109,34 +228,29 @@ export const useFilesStore = defineStore("files", {
   actions: {
     async loadConfig() {
       const config = await getConfig();
-      this.pinned = config.pinned;
-      this.currentPath = config.current_path;
       this.appearance = normalizeAppearance(config.appearance);
       this.markdown = normalizeMarkdown(config.markdown);
-      this.codexConfig = {
-        available_models: config.codex?.available_models?.length
-          ? [...config.codex.available_models]
-          : this.codexConfig.available_models,
-        default_model: config.codex?.default_model || this.codexConfig.default_model,
-      };
+      this.codexConfig = normalizeCodexConfig(config.codex);
+      this.voiceConfig = normalizeVoiceConfig(config.voice);
+      this.dagConfig = normalizeDagConfig(config.dag);
+      this.workspaceConfig = normalizeWorkspaceConfig(config.workspace);
     },
     async saveConfig() {
       const config: ViewerConfig = {
-        pinned: this.pinned,
-        current_path: this.currentPath,
         appearance: normalizeAppearance(this.appearance),
         markdown: normalizeMarkdown(this.markdown),
-        codex: this.codexConfig,
+        codex: normalizeCodexConfig(this.codexConfig),
+        voice: normalizeVoiceConfig(this.voiceConfig),
+        dag: normalizeDagConfig(this.dagConfig),
+        workspace: normalizeWorkspaceConfig(this.workspaceConfig),
       };
       const saved = await putConfig(config);
-      this.pinned = saved.pinned;
-      this.currentPath = saved.current_path;
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
-      this.codexConfig = {
-        available_models: saved.codex?.available_models?.length ? [...saved.codex.available_models] : this.codexConfig.available_models,
-        default_model: saved.codex?.default_model || this.codexConfig.default_model,
-      };
+      this.codexConfig = normalizeCodexConfig(saved.codex);
+      this.voiceConfig = normalizeVoiceConfig(saved.voice);
+      this.dagConfig = normalizeDagConfig(saved.dag);
+      this.workspaceConfig = normalizeWorkspaceConfig(saved.workspace);
     },
     async saveAppearance(appearance: AppearanceConfig) {
       this.appearance = normalizeAppearance(appearance);
@@ -151,6 +265,15 @@ export const useFilesStore = defineStore("files", {
       this.markdown = normalizeMarkdown(markdown);
       await this.saveConfig();
     },
+    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, voice: VoiceConfig, workspace: WorkspaceConfig, dag: DagConfig) {
+      this.appearance = normalizeAppearance(appearance);
+      this.markdown = normalizeMarkdown(markdown);
+      this.codexConfig = normalizeCodexConfig(codex);
+      this.voiceConfig = normalizeVoiceConfig(voice);
+      this.workspaceConfig = normalizeWorkspaceConfig(workspace);
+      this.dagConfig = normalizeDagConfig(dag);
+      await this.saveConfig();
+    },
     async loadDirectory(path = "") {
       this.loading = true;
       try {
@@ -162,7 +285,10 @@ export const useFilesStore = defineStore("files", {
     async enterDirectory(path: string) {
       await this.loadDirectory(path);
       this.currentPath = path;
-      await this.saveConfig();
+      this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
+    },
+    async recordVisit(path: string) {
+      this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
     },
     async enterParentDirectory() {
       await this.enterDirectory(this.parentPath);
@@ -177,8 +303,21 @@ export const useFilesStore = defineStore("files", {
     },
     async refreshAffected(path: string, isDir: boolean) {
       if (isDir && this.expanded.has(path)) await this.loadDirectory(path);
-      const parent = path.includes("/") ? path.split("/").slice(0, -1).join("/") : "";
+      const parent = resolveParentPath(path);
       if (this.listings[parent]) await this.loadDirectory(parent);
+    },
+    async uploadToCurrent(files: File[]) {
+      for (const file of files) {
+        await uploadFile(this.currentPath, file);
+      }
+      await this.loadDirectory(this.currentPath);
+    },
+    async deletePath(path: string) {
+      await deleteFile(path);
+      this.pinned = this.pinned.filter((item) => item !== path);
+      const parent = resolveParentPath(path);
+      await this.loadDirectory(parent);
+      if (this.currentPath !== parent && this.listings[this.currentPath]) await this.loadDirectory(this.currentPath);
     },
     async togglePin(path: string) {
       if (this.pinned.includes(path)) {
@@ -186,7 +325,6 @@ export const useFilesStore = defineStore("files", {
       } else {
         this.pinned = [path, ...this.pinned];
       }
-      await this.saveConfig();
     },
   },
 });

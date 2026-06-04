@@ -1,4 +1,5 @@
 import { nextTick } from "vue";
+import { namespacedStorageKey } from "./userProfile";
 
 const STORAGE_KEY = "viewer.scrollPositions.v1";
 
@@ -7,35 +8,47 @@ interface ScrollPosition {
   left: number;
 }
 
+export type ScrollMemoryTarget = {
+  path: string;
+  paneId?: string;
+  workspaceId?: string;
+};
+
 function readAll(): Record<string, ScrollPosition> {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") as Record<string, ScrollPosition>;
+    return JSON.parse(localStorage.getItem(namespacedStorageKey(STORAGE_KEY)) || "{}") as Record<string, ScrollPosition>;
   } catch {
     return {};
   }
 }
 
 function writeAll(value: Record<string, ScrollPosition>): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+  localStorage.setItem(namespacedStorageKey(STORAGE_KEY), JSON.stringify(value));
 }
 
-function keyFor(path: string): string {
-  return path;
+function keyFor(target: string | ScrollMemoryTarget): string {
+  if (typeof target === "string") return target;
+  return [target.workspaceId || "workspace", target.paneId || "pane", target.path].join("\u0000");
 }
 
-export function saveScrollPosition(path: string, element: HTMLElement | null): void {
+function legacyKeyFor(target: string | ScrollMemoryTarget): string {
+  return typeof target === "string" ? target : target.path;
+}
+
+export function saveScrollPosition(target: string | ScrollMemoryTarget, element: HTMLElement | null): void {
   if (!element) return;
   const all = readAll();
-  all[keyFor(path)] = {
+  all[keyFor(target)] = {
     top: element.scrollTop,
     left: element.scrollLeft,
   };
   writeAll(all);
 }
 
-export async function restoreScrollPosition(path: string, element: HTMLElement | null): Promise<void> {
+export async function restoreScrollPosition(target: string | ScrollMemoryTarget, element: HTMLElement | null): Promise<void> {
   if (!element) return;
-  const position = readAll()[keyFor(path)];
+  const all = readAll();
+  const position = all[keyFor(target)] ?? all[legacyKeyFor(target)];
   if (!position) return;
 
   await nextTick();

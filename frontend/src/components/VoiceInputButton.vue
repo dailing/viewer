@@ -1,169 +1,131 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
-import { voiceSocketUrl } from "../api/client";
+import { computed, ref, watch } from "vue";
+import { useVoiceStore } from "../stores/voice";
 
 const model = defineModel<string>({ required: true });
+const props = defineProps<{ contextId: string }>();
 const emit = defineEmits<{ start: [] }>();
 
-type VoiceMessage = { type: "ready" | "partial" | "final" | "error"; text?: string; message?: string };
-
-const connecting = ref(false);
-const recording = ref(false);
 const error = ref("");
-
-let voiceSocket: WebSocket | null = null;
-let voiceRecorder: MediaRecorder | null = null;
-let voiceStream: MediaStream | null = null;
-let baseText = "";
-let ready = false;
-
-const active = computed(() => connecting.value || recording.value);
+const voice = useVoiceStore();
+const applyingStoreText = ref(false);
+const state = computed(() => voice.context(props.contextId));
+const languageModelTitle = computed(() => (voice.languageModelRefine ? "Disable language model refine" : "Enable language model refine"));
 const icon = computed(() => {
-  if (error.value) return "bi-exclamation-triangle-fill";
-  if (connecting.value) return "bi-hourglass-split";
-  if (recording.value) return "bi-record-circle-fill";
+  if (error.value || state.value.status === "error") return "bi-exclamation-triangle-fill";
+  if (state.value.status === "connecting" || state.value.status === "processing") return "bi-hourglass-split";
+  if (state.value.status === "recording") return "bi-record-circle-fill";
+  if (state.value.status === "ready") return "bi-check-circle-fill";
   return "bi-mic-fill";
 });
 const title = computed(() => {
-  if (error.value) return error.value;
-  if (connecting.value) return "Connecting voice input";
-  if (recording.value) return "Stop voice input";
+  if (error.value || state.value.status === "error") return error.value || state.value.error;
+  if (state.value.status === "connecting") return "Connecting voice input";
+  if (state.value.status === "processing") return "Processing voice input";
+  if (state.value.status === "recording") return "Stop voice input";
+  if (state.value.status === "ready") return "Voice text ready";
   return "Start voice input";
 });
 const buttonClass = computed(() => {
-  if (error.value) return "btn-outline-danger";
-  if (recording.value) return "btn-danger";
-  if (connecting.value) return "btn-outline-primary";
+  if (error.value || state.value.status === "error") return "btn-outline-danger";
+  if (state.value.status === "recording") return "btn-danger";
+  if (state.value.status === "processing" || state.value.status === "ready") return "btn-warning";
+  if (state.value.status === "connecting") return "btn-outline-primary";
   return "btn-outline-secondary";
 });
 
-function appendVoiceText(text: string) {
-  if (!text) return;
-  const separator = baseText && !/\s$/.test(baseText) ? " " : "";
-  baseText = `${baseText}${separator}${text}`;
-  model.value = baseText;
-}
-
-function applyVoicePartial(text: string) {
-  const separator = baseText && text && !/\s$/.test(baseText) ? " " : "";
-  model.value = `${baseText}${separator}${text}`;
-}
-
-function supportedVoiceMimeType(): string | undefined {
-  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
-}
-
-function stopVoiceInput() {
-  connecting.value = false;
-  recording.value = false;
-  ready = false;
-  if (voiceRecorder && voiceRecorder.state !== "inactive") {
-    voiceRecorder.stop();
-  }
-  voiceRecorder = null;
-  voiceStream?.getTracks().forEach((track) => track.stop());
-  voiceStream = null;
-  if (voiceSocket?.readyState === WebSocket.OPEN) {
-    voiceSocket.send(JSON.stringify({ type: "stop" }));
-  }
-  voiceSocket?.close();
-  voiceSocket = null;
-  baseText = model.value;
-}
-
 async function startVoiceInput() {
-  if (recording.value) return;
-  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-    error.value = "Voice recording is not supported in this browser.";
-    return;
-  }
   emit("start");
   error.value = "";
-  connecting.value = true;
-  baseText = model.value;
-
   try {
-    voiceStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-      },
-    });
-    const mimeType = supportedVoiceMimeType();
-    voiceSocket = new WebSocket(voiceSocketUrl());
-    voiceSocket.binaryType = "arraybuffer";
-    voiceSocket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data) as VoiceMessage;
-      if (message.type === "ready") {
-        ready = true;
-        connecting.value = false;
-        if (voiceRecorder && voiceRecorder.state === "inactive") {
-          voiceRecorder.start(250);
-          recording.value = true;
-        }
-      } else if (message.type === "partial") {
-        applyVoicePartial(message.text ?? "");
-      } else if (message.type === "final") {
-        appendVoiceText(message.text ?? "");
-      } else if (message.type === "error") {
-        error.value = message.message ?? "Voice input failed.";
-        stopVoiceInput();
-      }
-    });
-    voiceSocket.addEventListener("close", () => {
-      if (active.value) stopVoiceInput();
-    });
-    voiceSocket.addEventListener("error", () => {
-      error.value = "Voice input connection failed.";
-      stopVoiceInput();
-    });
-
-    voiceRecorder = new MediaRecorder(voiceStream, mimeType ? { mimeType } : undefined);
-    voiceRecorder.addEventListener("dataavailable", async (event) => {
-      if (ready && event.data.size > 0 && voiceSocket?.readyState === WebSocket.OPEN) {
-        voiceSocket.send(await event.data.arrayBuffer());
-      }
-    });
+    await voice.start(props.contextId, model.value);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
-    stopVoiceInput();
   }
 }
 
 function toggleVoiceInput() {
-  if (active.value) {
-    stopVoiceInput();
+  if (state.value.status === "connecting" || state.value.status === "recording") {
+    void voice.stop(props.contextId);
   } else {
     void startVoiceInput();
   }
 }
 
-onUnmounted(stopVoiceInput);
+function toggleLanguageModelRefine() {
+  voice.toggleLanguageModelRefine();
+}
 
-defineExpose({ stop: stopVoiceInput });
+watch(
+  () => state.value.text,
+  (text) => {
+    if (text === model.value) return;
+    applyingStoreText.value = true;
+    model.value = text;
+    applyingStoreText.value = false;
+  },
+);
+
+watch(
+  model,
+  (text) => {
+    if (applyingStoreText.value) return;
+    voice.syncText(props.contextId, text);
+  },
+  { immediate: true },
+);
+
+defineExpose({ stop: () => voice.stop(props.contextId) });
 </script>
 
 <template>
-  <button
-    class="btn btn-sm voice-input-button"
-    :class="buttonClass"
-    type="button"
-    :title="title"
-    :aria-label="title"
-    @click="toggleVoiceInput"
-  >
-    <i class="bi" :class="icon"></i>
-  </button>
+  <div class="voice-input-control">
+    <button
+      class="btn btn-sm voice-input-button"
+      :class="buttonClass"
+      type="button"
+      :title="title"
+      :aria-label="title"
+      @click="toggleVoiceInput"
+    >
+      <i class="bi" :class="icon"></i>
+    </button>
+    <button
+      class="btn btn-sm voice-language-model-button"
+      :class="voice.languageModelRefine ? 'btn-primary' : 'btn-outline-secondary'"
+      type="button"
+      :title="languageModelTitle"
+      :aria-label="languageModelTitle"
+      :aria-pressed="voice.languageModelRefine"
+      @click="toggleLanguageModelRefine"
+    >
+      11M
+    </button>
+  </div>
 </template>
 
 <style scoped>
+.voice-input-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
 .voice-input-button {
   align-items: center;
   display: inline-flex;
-  flex: 0 0 auto;
   justify-content: center;
   min-width: 34px;
+}
+
+.voice-language-model-button {
+  align-items: center;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 700;
+  justify-content: center;
+  min-width: 38px;
+  padding-left: 7px;
+  padding-right: 7px;
 }
 </style>

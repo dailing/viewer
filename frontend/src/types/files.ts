@@ -1,5 +1,5 @@
 export type EntryType = "file" | "directory" | "symlink" | "other";
-export type PreviewType = "image" | "markdown" | "pdf" | "text" | "unsupported";
+export type PreviewType = "image" | "markdown" | "html" | "pdf" | "text" | "unsupported";
 
 export interface FileEntry {
   name: string;
@@ -26,6 +26,17 @@ export interface FileMeta {
   mime: string;
   preview: PreviewType;
   text_too_large: boolean;
+}
+
+export interface TextLineWindow {
+  path: string;
+  size: number;
+  mtime: number;
+  total_lines: number;
+  start_line: number;
+  lines: string[];
+  truncated_start: boolean;
+  truncated_end: boolean;
 }
 
 export interface AppearanceConfig {
@@ -70,15 +81,51 @@ export interface MarkdownConfig {
   themes: MarkdownTheme[];
 }
 
+export interface CodexConfig {
+  available_models: string[];
+  default_model: string;
+  proxy: string;
+  muted_message_alpha: number;
+  auto_commit_prompt: string;
+}
+
+export interface VoiceConfig {
+  enabled: boolean;
+  available_models: string[];
+  model: string;
+  available_languages: string[];
+  language: string;
+  translation_enabled: boolean;
+  available_target_languages: string[];
+  target_language: string;
+}
+
+export interface DagConfig {
+  base_url: string;
+}
+
+export interface WorkspaceConfig {
+  count: number;
+  heat_interval_seconds: number;
+  heat_step_percent: number;
+}
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  home: string;
+  home_path?: string;
+}
+
 export interface ViewerConfig {
-  pinned: string[];
-  current_path: string;
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
-  codex?: {
-    available_models: string[];
-    default_model: string;
-  };
+  codex?: CodexConfig;
+  voice?: VoiceConfig;
+  dag?: DagConfig;
+  workspace?: WorkspaceConfig;
+  users?: UserProfile[];
+  default_user?: string;
 }
 
 export interface WatchEvent {

@@ -9,6 +9,7 @@ export const useTerminalsStore = defineStore("terminals", {
   }),
   actions: {
     async load() {
+      if (this.loading) return;
       this.loading = true;
       try {
         this.terminals = await listTerminals();

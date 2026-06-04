@@ -19,7 +19,7 @@ function stringify(value: unknown): string {
   }
 }
 
-function sendClientLog(entry: ClientLogEntry) {
+export function sendClientLog(entry: ClientLogEntry) {
   const payload = JSON.stringify({
     source: "frontend",
     url: window.location.href,

@@ -2,7 +2,7 @@ import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerCon
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
-import type { SuperDispatchResponse, SuperRoleCreate, SuperRolePatch, SuperWorkspaceData } from "../types/superWorkspace";
+import type { SuperDispatchResponse, SuperHistoryRun, SuperHistoryRunCreate, SuperHistoryRunsPage, SuperRoleCreate, SuperRolePatch, SuperWorkspaceData, SuperWorkspacePatch } from "../types/superWorkspace";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
 import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskFile, AgentTaskGroup, AgentTaskListResponse, AgentTaskManagerRequest, AgentTaskPatch, AgentTaskPlan, AgentTaskResetAction, AgentTaskResetResponse, AgentTaskSettings } from "../types/agentTasks";
@@ -270,6 +270,14 @@ export async function getSuperWorkspace(): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>("/api/super-workspace");
 }
 
+export async function updateSuperWorkspace(patch: SuperWorkspacePatch): Promise<SuperWorkspaceData> {
+  return request<SuperWorkspaceData>("/api/super-workspace", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
 export async function createSuperRole(role: SuperRoleCreate): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>("/api/super-workspace/roles", {
     method: "POST",
@@ -288,6 +296,20 @@ export async function updateSuperRole(id: string, patch: SuperRolePatch): Promis
 
 export async function deleteSuperRole(id: string): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>(`/api/super-workspace/roles/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function listSuperWorkspaceRuns(limit = 30, before?: number): Promise<SuperHistoryRunsPage> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (before !== undefined) params.set("before", String(before));
+  return request<SuperHistoryRunsPage>(`/api/super-workspace/runs?${params.toString()}`);
+}
+
+export async function createSuperWorkspaceRun(payload: SuperHistoryRunCreate): Promise<SuperHistoryRun> {
+  return request<SuperHistoryRun>("/api/super-workspace/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function dispatchSuperWorkspace(message: string, roleIds?: string[]): Promise<SuperDispatchResponse> {

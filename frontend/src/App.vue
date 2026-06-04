@@ -216,13 +216,13 @@ async function initializeApp() {
   );
   terminalRefresh = window.setInterval(() => {
     void terminals.load();
-  }, 3000);
+  }, 15000);
   codexRefresh = window.setInterval(() => {
     void codex.loadOptions();
-  }, 10000);
+  }, 30000);
   agentRefresh = window.setInterval(() => {
     void agents.load();
-  }, 5000);
+  }, 15000);
   appReady.value = true;
 }
 

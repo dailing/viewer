@@ -13,7 +13,12 @@ export type SuperRole = {
 };
 
 export type SuperWorkspaceData = {
+  common_prompt: string;
   roles: SuperRole[];
+};
+
+export type SuperWorkspacePatch = {
+  common_prompt?: string;
 };
 
 export type SuperRoleCreate = {
@@ -30,4 +35,82 @@ export type SuperDispatchResponse = {
   role_ids: string[];
   rationale: string;
   raw?: Record<string, unknown> | null;
+};
+
+export type AgentHistoryMessage = {
+  id: string;
+  provider: AgentProvider;
+  viewer_session_id?: string | null;
+  provider_session_id?: string | null;
+  index: number;
+  received_at: number;
+  role: string;
+  event_type: string;
+  text: string;
+  query?: string | null;
+  status?: string | null;
+  rationale?: string;
+  error?: string;
+  requested_role_ids?: string[];
+  selected_role_ids?: string[];
+  file_changes: {
+    path: string;
+    change_type: string;
+    diff?: string | null;
+  }[];
+  patch_text?: string | null;
+  raw: Record<string, unknown>;
+  occurred_at: number;
+  query_id?: string | null;
+  query_message_id?: string | null;
+  driver_run_id?: string | null;
+  super_run_id?: string | null;
+  super_target_id?: string | null;
+  parent_message_id?: string | null;
+  sender_role_id?: string | null;
+  recipient_role_id?: string | null;
+};
+
+export type SuperHistoryTarget = {
+  id: string;
+  run_id: string;
+  role_id: string;
+  role_name: string;
+  provider: AgentProvider;
+  viewer_session_id: string;
+  session_ref: string;
+  agent_prompt: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+  messages: AgentHistoryMessage[];
+};
+
+export type SuperHistoryRun = {
+  id: string;
+  user_id: string;
+  message: string;
+  query: string;
+  message_id: string;
+  role_ids: string[];
+  status: "selecting" | "queued" | "running" | "dispatched" | "completed" | "failed";
+  rationale: string;
+  error: string;
+  parent_message_id?: string | null;
+  sender_role_id?: string | null;
+  created_at: number;
+  updated_at: number;
+  targets: SuperHistoryTarget[];
+};
+
+export type SuperHistoryRunsPage = {
+  runs: SuperHistoryRun[];
+  has_more: boolean;
+  next_before?: number | null;
+};
+
+export type SuperHistoryRunCreate = {
+  message: string;
+  parent_message_id?: string | null;
+  sender_role_id?: string | null;
 };

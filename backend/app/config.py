@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+DEFAULT_VOICE_SERVICE_WS = "ws://127.0.0.1:8765/v1/voice/ws"
 
 
 class Settings(BaseSettings):
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
     poll_delay_ms: int = 500
     terminal_shell: str = "zsh"
     voice_enabled: bool = False
+    voice_service_ws: str = DEFAULT_VOICE_SERVICE_WS
     voice_upstream_ws: str = ""
     voice_model: str = "base"
     voice_language: str = "auto"

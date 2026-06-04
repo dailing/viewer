@@ -276,7 +276,7 @@ onUnmounted(() => {
         <span>{{ error }}</span>
         <a :href="src" target="_blank" rel="noreferrer">Open PDF</a>
       </div>
-      <div v-else-if="renderedWidth && doc" class="pdf-document">
+      <div v-else-if="renderedWidth && pageCount" class="pdf-document">
         <div
           v-for="page in pages"
           :key="page"
@@ -293,7 +293,7 @@ onUnmounted(() => {
             annotation-layer
             text-layer
             class="pdf-page"
-            :source="doc"
+            :source="pdfSource"
             :page="page"
             :width="renderedWidth"
             :rotation="rotation"

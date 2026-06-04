@@ -11,17 +11,19 @@ export type VoiceContextState = {
   updatedAt: number;
 };
 
-type VoiceMessage = { type: "ready" | "processing" | "final" | "error"; text?: string; message?: string };
+type VoiceMessage = { type: "ready" | "processing" | "partial" | "committed" | "final" | "error"; text?: string; message?: string };
 type VoiceRuntimeJob = {
   socket: WebSocket;
   recorder: MediaRecorder | null;
   stream: MediaStream | null;
   ready: boolean;
+  baseText: string;
   selectedMimeType: string;
   pendingChunkSends: Promise<void>[];
 };
 
 const runtimeJobs = new Map<string, VoiceRuntimeJob>();
+const LANGUAGE_MODEL_REFINE_STORAGE_KEY = "viewer.voice.languageModelRefine";
 
 function defaultState(text = ""): VoiceContextState {
   return { status: "idle", text, error: "", unread: false, updatedAt: Date.now() };
@@ -66,6 +68,7 @@ export const useVoiceStore = defineStore("voice", {
   state: () => ({
     contexts: {} as Record<string, VoiceContextState>,
     activeRecordingContextId: "",
+    languageModelRefine: loadLanguageModelRefine(),
   }),
   getters: {
     context: (state) => (id: string): VoiceContextState => state.contexts[id] ?? defaultState(),
@@ -101,6 +104,17 @@ export const useVoiceStore = defineStore("voice", {
     clear(id: string) {
       this.setContext(id, defaultState(""));
     },
+    setLanguageModelRefine(enabled: boolean) {
+      this.languageModelRefine = enabled;
+      try {
+        window.localStorage.setItem(LANGUAGE_MODEL_REFINE_STORAGE_KEY, enabled ? "1" : "0");
+      } catch {
+        // Ignore storage failures; the in-memory toggle still works for this page.
+      }
+    },
+    toggleLanguageModelRefine() {
+      this.setLanguageModelRefine(!this.languageModelRefine);
+    },
     async start(id: string, baseText: string) {
       if (this.activeRecordingContextId && this.activeRecordingContextId !== id) {
         throw new Error("Another voice recording is active.");
@@ -123,13 +137,15 @@ export const useVoiceStore = defineStore("voice", {
           },
         });
         const selectedMimeType = supportedVoiceMimeType() ?? "";
+        const recorder = new MediaRecorder(stream, selectedMimeType ? { mimeType: selectedMimeType } : undefined);
         const socket = new WebSocket(voiceSocketUrl());
         socket.binaryType = "arraybuffer";
         const job: VoiceRuntimeJob = {
           socket,
-          recorder: null,
+          recorder,
           stream,
           ready: false,
+          baseText,
           selectedMimeType,
           pendingChunkSends: [],
         };
@@ -146,7 +162,15 @@ export const useVoiceStore = defineStore("voice", {
           if (message.type === "ready") {
             job.ready = true;
             if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({ type: "start", mimeType: selectedMimeType }));
+              socket.send(
+                JSON.stringify({
+                  type: "start",
+                  mimeType: selectedMimeType,
+                  llm_refine: this.languageModelRefine,
+                  language_model_refine: this.languageModelRefine,
+                  languageModelRefine: this.languageModelRefine,
+                }),
+              );
             }
             if (job.recorder?.state === "inactive") {
               job.recorder.start(250);
@@ -154,10 +178,12 @@ export const useVoiceStore = defineStore("voice", {
             }
           } else if (message.type === "processing") {
             this.setContext(id, { status: "processing", error: "" });
+          } else if (message.type === "partial" || message.type === "committed") {
+            const nextStatus = this.activeRecordingContextId === id ? "recording" : "processing";
+            this.setContext(id, { status: nextStatus, text: appendTranscription(job.baseText, message.text ?? ""), error: "", unread: false });
           } else if (message.type === "final") {
-            const currentText = this.contexts[id]?.text ?? "";
             const nextStatus = this.activeRecordingContextId === id ? "recording" : "ready";
-            this.setContext(id, { status: nextStatus, text: appendTranscription(currentText, message.text ?? ""), error: "", unread: true });
+            this.setContext(id, { status: nextStatus, text: appendTranscription(job.baseText, message.text ?? ""), error: "", unread: true });
             this.cleanupRuntime(id, job);
           } else if (message.type === "error") {
             this.setContext(id, { status: "error", error: message.message ?? "Voice input failed." });
@@ -175,8 +201,7 @@ export const useVoiceStore = defineStore("voice", {
           void this.stop(id, false);
         });
 
-        job.recorder = new MediaRecorder(stream, selectedMimeType ? { mimeType: selectedMimeType } : undefined);
-        job.recorder.addEventListener("dataavailable", (event) => {
+        recorder.addEventListener("dataavailable", (event) => {
           const send = sendVoiceChunk(event.data);
           job.pendingChunkSends.push(send);
           void send.finally(() => {
@@ -230,3 +255,14 @@ export const useVoiceStore = defineStore("voice", {
     },
   },
 });
+
+function loadLanguageModelRefine(): boolean {
+  try {
+    const stored = window.localStorage.getItem(LANGUAGE_MODEL_REFINE_STORAGE_KEY);
+    if (stored === "0") return false;
+    if (stored === "1") return true;
+  } catch {
+    // Ignore storage failures and use the requested default.
+  }
+  return true;
+}

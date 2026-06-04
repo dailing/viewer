@@ -2,50 +2,58 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
   createSuperRole,
+  createSuperWorkspaceRun,
   deleteSuperRole,
-  dispatchSuperWorkspace,
   getSuperWorkspace,
+  listSuperWorkspaceRuns,
+  updateSuperWorkspace,
   updateSuperRole,
 } from "../api/client";
 import DirectoryPicker from "./DirectoryPicker.vue";
 import VoiceTextarea from "./VoiceTextarea.vue";
 import { useAgentsStore } from "../stores/agents";
 import type { AgentSessionSnapshot } from "../types/agents";
-import type { SuperRole } from "../types/superWorkspace";
+import type { SuperHistoryRun, SuperHistoryTarget, SuperRole } from "../types/superWorkspace";
 import { parseAgentRef } from "../utils/agents";
 import { renderMarkdown } from "../utils/markdownRender";
-import { namespacedStorageKey } from "../utils/userProfile";
 
-type DispatchRun = {
-  id: string;
-  message: string;
-  role_ids: string[];
-  start_counts: Record<string, number>;
-  rationale: string;
-  created_at: number;
-};
-
-const RUNS_KEY = "viewer.superWorkspace.runs.v1";
 const agents = useAgentsStore();
 const roles = ref<SuperRole[]>([]);
 const selectedRoleId = ref("");
 const snapshots = ref<Record<string, AgentSessionSnapshot>>({});
-const runs = ref<DispatchRun[]>([]);
+const runs = ref<SuperHistoryRun[]>([]);
 const composer = ref("");
+const commonPrompt = ref("");
 const error = ref("");
 const busy = ref(false);
 const roleSaving = ref(false);
-const routeAllRoles = ref(true);
+const commonPromptSaving = ref(false);
+const historyLoading = ref(false);
+const loadingOlder = ref(false);
+const hasOlderRuns = ref(false);
+const nextBefore = ref<number | null>(null);
+const rolePanelOpen = ref(false);
 const selectedRole = computed(() => roles.value.find((role) => role.id === selectedRoleId.value) ?? null);
 const dispatchableRoles = computed(() => roles.value.filter((role) => role.description.trim()));
+const mentionedRoleIds = computed(() => parseLeadingMentionRoleIds(composer.value));
+const displayRuns = computed(() => [...runs.value].reverse());
+const canDispatch = computed(() => {
+  if (!composer.value.trim() || busy.value) return false;
+  return true;
+});
+const dispatchButtonLabel = computed(() => {
+  if (busy.value) return "Dispatching";
+  if (mentionedRoleIds.value.length) return `Dispatch to ${mentionedRoleIds.value.length}`;
+  return "Auto dispatch";
+});
 let pollTimer: number | null = null;
 
 onMounted(async () => {
-  loadRuns();
   await agents.loadProviders();
   await load();
+  await loadRuns(true);
   pollTimer = window.setInterval(() => {
-    void refreshSnapshots();
+    void refreshLiveState();
   }, 3000);
 });
 
@@ -55,11 +63,31 @@ onUnmounted(() => {
 
 async function load() {
   const data = await getSuperWorkspace();
+  commonPrompt.value = data.common_prompt ?? "";
   roles.value = data.roles;
   if (!selectedRoleId.value || !roles.value.some((role) => role.id === selectedRoleId.value)) {
     selectedRoleId.value = "";
+    rolePanelOpen.value = false;
   }
   await refreshSnapshots();
+}
+
+async function refreshLiveState() {
+  await refreshSnapshots();
+  await loadRuns(true);
+}
+
+async function saveCommonPrompt() {
+  commonPromptSaving.value = true;
+  error.value = "";
+  try {
+    const data = await updateSuperWorkspace({ common_prompt: commonPrompt.value });
+    commonPrompt.value = data.common_prompt ?? "";
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    commonPromptSaving.value = false;
+  }
 }
 
 async function refreshSnapshots() {
@@ -84,6 +112,7 @@ async function addRole() {
     const data = await createSuperRole({ name: `Role ${roles.value.length + 1}`, provider: "codex" });
     roles.value = data.roles;
     selectedRoleId.value = roles.value[roles.value.length - 1]?.id ?? "";
+    rolePanelOpen.value = Boolean(selectedRoleId.value);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -122,6 +151,7 @@ async function removeSelectedRole() {
     const data = await deleteSuperRole(roleId);
     roles.value = data.roles;
     selectedRoleId.value = "";
+    rolePanelOpen.value = false;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -147,8 +177,21 @@ async function renewRole(role: SuperRole) {
   }
 }
 
-function toggleRoleConfig(roleId: string) {
-  selectedRoleId.value = selectedRoleId.value === roleId ? "" : roleId;
+function handleRoleClick(roleId: string) {
+  const role = roles.value.find((item) => item.id === roleId);
+  if (!role) return;
+  if (selectedRoleId.value === roleId) {
+    addRoleMention(role);
+    rolePanelOpen.value = true;
+    return;
+  }
+  selectedRoleId.value = roleId;
+  rolePanelOpen.value = false;
+  addRoleMention(role);
+}
+
+function closeRolePanel() {
+  rolePanelOpen.value = false;
 }
 
 async function dispatchMessage() {
@@ -156,29 +199,16 @@ async function dispatchMessage() {
   if (!message || busy.value) return;
   busy.value = true;
   error.value = "";
+  composer.value = "";
   try {
-    const roleIds = routeAllRoles.value ? undefined : selectedRole.value ? [selectedRole.value.id] : undefined;
-    const dispatch = await dispatchSuperWorkspace(message, roleIds);
-    const selected = roles.value.filter((role) => dispatch.role_ids.includes(role.id));
-    const run: DispatchRun = {
-      id: crypto.randomUUID(),
-      message,
-      role_ids: selected.map((role) => role.id),
-      start_counts: {},
-      rationale: dispatch.rationale,
-      created_at: Date.now() / 1000,
-    };
-    runs.value = [run, ...runs.value].slice(0, 80);
-    saveRuns();
-    for (const role of selected) {
-      const snapshot = role.session_ref ? snapshots.value[role.session_ref] : undefined;
-      run.start_counts[role.id] = snapshot?.event_count ?? 0;
-      await sendMessageToRole(role, message);
+    const run = await createSuperWorkspaceRun({ message });
+    upsertRun(run);
+    if (run.status === "failed") {
+      error.value = run.error || "Dispatch failed";
+      return;
     }
-    composer.value = "";
-    saveRuns();
     await agents.load();
-    await refreshSnapshots();
+    await refreshLiveState();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -192,25 +222,58 @@ function handleComposerKeydown(event: KeyboardEvent) {
   void dispatchMessage();
 }
 
-async function sendMessageToRole(role: SuperRole, message: string) {
-  if (!role.session_ref || !parseAgentRef(role.session_ref)) {
-    await createSessionForRole(role, message);
-    return;
-  }
-  const snapshot = snapshots.value[role.session_ref] ?? (await agents.snapshot(role.session_ref, "focus"));
-  const prompt = roleMessagePrompt(message);
-  if (snapshot.status === "running") {
-    await agents.queue(role.session_ref, prompt, role.model ?? undefined);
-    return;
-  }
-  await agents.send(role.session_ref, prompt, role.model ?? undefined);
+function addRoleMention(role: SuperRole) {
+  if (mentionedRoleIds.value.includes(role.id)) return;
+  const insert = `@${roleMentionKey(role)} `;
+  const position = leadingMentionPrefixEnd(composer.value);
+  composer.value = `${composer.value.slice(0, position)}${insert}${composer.value.slice(position)}`;
 }
 
-async function createSessionForRole(role: SuperRole, firstMessage = "") {
-  const prompt = firstMessage ? `${bootstrapPrompt(role)}\n\n${roleMessagePrompt(firstMessage)}` : bootstrapPrompt(role);
-  const session = await agents.create(role.provider || "codex", prompt, role.cwd, role.model ?? undefined);
+function parseLeadingMentionRoleIds(value: string) {
+  const byKey = new Map(roles.value.map((role) => [roleMentionKey(role), role]));
+  const ids: string[] = [];
+  let position = 0;
+  while (position < value.length && value[position] === "@") {
+    const match = /^@([A-Za-z_][A-Za-z0-9_]*) /.exec(value.slice(position));
+    if (!match) break;
+    const role = byKey.get(match[1]);
+    if (role && !ids.includes(role.id)) ids.push(role.id);
+    position += match[0].length;
+  }
+  return ids;
+}
+
+function leadingMentionPrefixEnd(value: string) {
+  let position = 0;
+  while (position < value.length && value[position] === "@") {
+    const match = /^@([A-Za-z_][A-Za-z0-9_]*) /.exec(value.slice(position));
+    if (!match) break;
+    position += match[0].length;
+  }
+  return position;
+}
+
+function roleMentionKey(role: SuperRole) {
+  const parts = role.name.match(/[A-Za-z_][A-Za-z0-9_]*|[0-9]+/g) ?? [];
+  let value = parts.join("_").replace(/^_+|_+$/g, "");
+  if (!value) value = role.id;
+  if (!/^[A-Za-z_]/.test(value)) value = `_${value}`;
+  return value;
+}
+
+async function createSessionForRole(role: SuperRole): Promise<string> {
+  const session = await agents.create(role.provider || "codex", initialPromptForRole(role), role.cwd, role.model ?? undefined);
   const data = await updateSuperRole(role.id, { session_ref: session.ref });
   roles.value = data.roles;
+  const updatedRole = roles.value.find((item) => item.id === role.id);
+  if (updatedRole) role.session_ref = updatedRole.session_ref;
+  return session.ref;
+}
+
+function initialPromptForRole(role: SuperRole) {
+  const common = commonPrompt.value.trim();
+  const rolePrompt = bootstrapPrompt(role);
+  return common ? `${common}\n\n${rolePrompt}` : rolePrompt;
 }
 
 function bootstrapPrompt(role: SuperRole) {
@@ -222,13 +285,6 @@ ${role.description || "(No role rules were provided.)"}
 Operate as this role only. Prefer work that matches the fixed rules, files, topic, and responsibilities above. If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks.`;
 }
 
-function roleMessagePrompt(message: string) {
-  return `Super Workspace routed this message to your role. Apply your fixed role rules and answer only for your own responsibility.
-
-User message:
-${message}`;
-}
-
 function roleSnapshot(role: SuperRole) {
   return role.session_ref ? snapshots.value[role.session_ref] : undefined;
 }
@@ -237,34 +293,30 @@ function roleStatus(role: SuperRole) {
   return roleSnapshot(role)?.status ?? "idle";
 }
 
-function roleDone(role: SuperRole) {
-  const status = roleStatus(role);
-  return status === "exited" || status === "failed";
-}
-
 function contextPercent(role: SuperRole) {
   const value = Number(roleSnapshot(role)?.raw?.context_used_percent);
   if (!Number.isFinite(value)) return "";
   return `${Math.round(value)}%`;
 }
 
-function runRoles(run: DispatchRun) {
-  return run.role_ids.map((id) => roles.value.find((role) => role.id === id)).filter((role): role is SuperRole => Boolean(role));
+function runTargets(run: SuperHistoryRun) {
+  return run.targets;
 }
 
-function runRoleEvents(run: DispatchRun, role: SuperRole) {
-  const snapshot = roleSnapshot(role);
-  if (!snapshot) return [];
-  const start = run.start_counts[role.id] ?? 0;
-  return snapshot.events.filter((event) => event.index >= start && event.text.trim());
-}
-
-function runRoleHtml(run: DispatchRun, role: SuperRole) {
-  const text = runRoleEvents(run, role)
-    .map((event) => event.text)
+function targetHtml(target: SuperHistoryTarget) {
+  const text = target.messages
+    .map((message) => message.text)
     .filter(Boolean)
     .join("\n\n");
-  return text ? renderMarkdown(text, { baseDirectory: roleSnapshot(role)?.cwd_relative ?? "" }) : "";
+  return text ? renderMarkdown(text, { baseDirectory: snapshots.value[target.session_ref]?.cwd_relative ?? "" }) : "";
+}
+
+function targetStatus(target: SuperHistoryTarget) {
+  return snapshots.value[target.session_ref]?.status ?? "idle";
+}
+
+function targetIcon(target: SuperHistoryTarget) {
+  return agents.providerById(target.provider || "codex").icon;
 }
 
 function roleProviderName(role: SuperRole) {
@@ -275,153 +327,208 @@ function roleIcon(role: SuperRole) {
   return agents.providerById(role.provider || "codex").icon;
 }
 
+function roleAbbrev(role: SuperRole) {
+  const words = role.name.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "?";
+  const value = words.length === 1 ? words[0].slice(0, 2) : `${words[0][0] ?? ""}${words[1][0] ?? ""}`;
+  return value.toUpperCase();
+}
+
 function formatTime(value: number) {
   return new Date(value * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function loadRuns() {
+async function loadRuns(reset: boolean) {
+  if (reset) historyLoading.value = true;
+  else loadingOlder.value = true;
   try {
-    const parsed = JSON.parse(localStorage.getItem(namespacedStorageKey(RUNS_KEY)) || "[]");
-    runs.value = Array.isArray(parsed) ? parsed.slice(0, 80) : [];
-  } catch {
-    runs.value = [];
+    const limit = reset ? Math.min(100, Math.max(30, runs.value.length || 30)) : 30;
+    const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined);
+    if (reset) {
+      runs.value = page.runs;
+    } else {
+      const seen = new Set(runs.value.map((run) => run.id));
+      runs.value = [...runs.value, ...page.runs.filter((run) => !seen.has(run.id))];
+    }
+    hasOlderRuns.value = page.has_more;
+    nextBefore.value = page.next_before ?? null;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    historyLoading.value = false;
+    loadingOlder.value = false;
   }
 }
 
-function saveRuns() {
-  localStorage.setItem(namespacedStorageKey(RUNS_KEY), JSON.stringify(runs.value.slice(0, 80)));
+function upsertRun(run: SuperHistoryRun) {
+  const index = runs.value.findIndex((item) => item.id === run.id);
+  if (index >= 0) runs.value.splice(index, 1, run);
+  else runs.value = [run, ...runs.value];
 }
 </script>
 
 <template>
   <div class="super-page">
-    <aside class="super-roles">
-      <div class="super-roles-header">
-        <div class="super-section-title">Roles</div>
-        <button class="btn btn-sm btn-primary icon-button" type="button" title="Add role" :disabled="roleSaving" @click="addRole">
-          <i class="bi bi-plus-lg"></i>
-        </button>
-      </div>
-      <div
+    <aside class="super-role-rail" aria-label="Super Workspace roles">
+      <div class="super-role-list">
+        <div
         v-for="role in roles"
         :key="role.id"
-        class="super-role-row"
-        :class="{ active: role.id === selectedRoleId }"
-        role="button"
-        tabindex="0"
-        @click="toggleRoleConfig(role.id)"
-        @keydown.enter.prevent="toggleRoleConfig(role.id)"
-        @keydown.space.prevent="toggleRoleConfig(role.id)"
-      >
-        <i class="bi" :class="roleIcon(role)"></i>
-        <span class="super-role-name">{{ role.name }}</span>
-        <span class="super-role-status" :class="`status-${roleStatus(role)}`"></span>
-        <button
-          class="btn btn-sm btn-outline-primary super-role-renew"
-          type="button"
-          title="Renew role session"
-          :disabled="busy"
-          @click.stop="renewRole(role)"
+          class="super-role-tile-wrap"
         >
-          <i class="bi bi-plus-circle"></i>
-          <span>Renew</span>
-        </button>
-      </div>
-      <div v-if="!roles.length" class="super-empty">No roles yet</div>
-
-      <section v-if="selectedRole" class="super-role-config">
-        <div class="super-section-title">Config</div>
-        <label class="super-field">
-          <span>Name</span>
-          <input v-model="selectedRole.name" class="form-control form-control-sm" />
-        </label>
-        <label class="super-field">
-          <span>Provider</span>
-          <select v-model="selectedRole.provider" class="form-select form-select-sm">
-            <option v-for="provider in agents.providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
-          </select>
-        </label>
-        <label class="super-field">
-          <span>CWD</span>
-          <DirectoryPicker v-model="selectedRole.cwd" />
-        </label>
-        <label class="super-field">
-          <span>Model</span>
-          <input v-model="selectedRole.model" class="form-control form-control-sm" placeholder="Default" />
-        </label>
-        <label class="super-field">
-          <span>Rules</span>
-          <VoiceTextarea
-            v-model="selectedRole.description"
-            :context-id="`super-role:${selectedRole.id}:rules`"
-            placeholder="Fixed role rules, file scope, responsibilities, and constraints."
-            min-height="180px"
-            :rows="8"
-          />
-        </label>
-        <div class="super-role-meta">
-          <span>{{ roleProviderName(selectedRole) }}</span>
-          <span>{{ roleStatus(selectedRole) }}</span>
-          <span v-if="contextPercent(selectedRole)">ctx {{ contextPercent(selectedRole) }}</span>
-        </div>
-        <div class="super-config-actions">
-          <button class="btn btn-sm btn-outline-secondary" type="button" :disabled="roleSaving" @click="saveSelectedRole">Save</button>
-          <button class="btn btn-sm btn-outline-primary" type="button" :disabled="busy" title="Renew session" @click="renewSelectedRole">
-            <i class="bi bi-plus-circle"></i>
-            <span>Renew</span>
+          <button
+            class="super-role-tile"
+        :class="{ active: role.id === selectedRoleId, mentioned: mentionedRoleIds.includes(role.id) }"
+            type="button"
+            :title="`@${roleMentionKey(role)}`"
+            :aria-pressed="mentionedRoleIds.includes(role.id)"
+            @click="handleRoleClick(role.id)"
+      >
+            <i class="bi super-role-icon" :class="roleIcon(role)"></i>
+            <span class="super-role-abbrev">{{ roleAbbrev(role) }}</span>
+            <span class="super-role-status" :class="`status-${roleStatus(role)}`"></span>
           </button>
-          <button class="btn btn-sm btn-outline-danger" type="button" :disabled="roleSaving" @click="removeSelectedRole">Delete</button>
         </div>
-      </section>
+      </div>
+      <button class="super-role-add" type="button" title="Add role" :disabled="roleSaving" @click="addRole">
+        <i class="bi bi-plus-lg"></i>
+      </button>
     </aside>
 
-    <main class="super-chat">
-      <div class="super-composer">
-        <VoiceTextarea
-          v-model="composer"
-          context-id="super-workspace:composer"
-          placeholder="Write one message; the dispatcher will choose the role session."
-          :rows="3"
-          @keydown="handleComposerKeydown"
-        >
-          <template #actions>
-            <label class="super-check">
-              <input v-model="routeAllRoles" type="checkbox" />
-              <span>Route across all roles</span>
-            </label>
-            <button class="btn btn-primary" type="button" :disabled="busy || !composer.trim() || !dispatchableRoles.length" @click="dispatchMessage">
-              <i class="bi bi-send"></i>
-              <span>{{ busy ? "Dispatching" : "Dispatch" }}</span>
-            </button>
-          </template>
-        </VoiceTextarea>
-        <div v-if="error" class="super-error">{{ error }}</div>
-      </div>
+    <div v-if="rolePanelOpen" class="super-role-panel-backdrop" @click.self="closeRolePanel">
+      <aside class="super-role-panel" aria-label="Role settings">
+        <div class="super-panel-head">
+          <div>
+            <div class="super-section-title">Role Settings</div>
+            <div v-if="selectedRole" class="super-panel-title">{{ selectedRole.name }}</div>
+          </div>
+          <button class="btn btn-sm btn-outline-secondary icon-button" type="button" title="Close" @click="closeRolePanel">
+            <i class="bi bi-x-lg"></i>
+          </button>
+        </div>
 
+        <section class="super-common-prompt">
+          <div class="super-section-title">Common Prompt</div>
+          <VoiceTextarea
+            v-model="commonPrompt"
+            context-id="super-workspace:common-prompt"
+            placeholder="Shared instructions added before every role prompt when a new session starts."
+            min-height="140px"
+            :rows="6"
+          >
+            <template #actions>
+              <button class="btn btn-sm btn-outline-primary" type="button" :disabled="commonPromptSaving" @click="saveCommonPrompt">
+                <i class="bi bi-save"></i>
+                <span>{{ commonPromptSaving ? "Saving" : "Save common prompt" }}</span>
+              </button>
+            </template>
+          </VoiceTextarea>
+        </section>
+
+        <section v-if="selectedRole" class="super-role-config">
+          <label class="super-field">
+            <span>Name</span>
+            <input v-model="selectedRole.name" class="form-control form-control-sm" />
+          </label>
+          <label class="super-field">
+            <span>Provider</span>
+            <select v-model="selectedRole.provider" class="form-select form-select-sm">
+              <option v-for="provider in agents.providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
+            </select>
+          </label>
+          <label class="super-field">
+            <span>CWD</span>
+            <DirectoryPicker v-model="selectedRole.cwd" />
+          </label>
+          <label class="super-field">
+            <span>Model</span>
+            <input v-model="selectedRole.model" class="form-control form-control-sm" placeholder="Default" />
+          </label>
+          <label class="super-field">
+            <span>Rules</span>
+            <VoiceTextarea
+              v-model="selectedRole.description"
+              :context-id="`super-role:${selectedRole.id}:rules`"
+              placeholder="Fixed role rules, file scope, responsibilities, and constraints."
+              min-height="220px"
+              :rows="10"
+            />
+          </label>
+          <div class="super-role-meta">
+            <span>{{ roleProviderName(selectedRole) }}</span>
+            <span>{{ roleStatus(selectedRole) }}</span>
+            <span v-if="contextPercent(selectedRole)">ctx {{ contextPercent(selectedRole) }}</span>
+          </div>
+          <div class="super-config-actions">
+            <button class="btn btn-sm btn-outline-secondary" type="button" :disabled="roleSaving" @click="saveSelectedRole">Save</button>
+            <button class="btn btn-sm btn-outline-primary icon-button" type="button" :disabled="busy" title="Renew session" @click="renewSelectedRole">
+              <i class="bi bi-arrow-clockwise"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-danger" type="button" :disabled="roleSaving" @click="removeSelectedRole">Delete</button>
+          </div>
+        </section>
+
+        <div v-else class="super-empty">Select a role to edit.</div>
+      </aside>
+    </div>
+
+    <main class="super-chat">
       <section class="super-thread">
-        <article v-for="run in runs" :key="run.id" class="super-run">
+        <button v-if="hasOlderRuns" class="btn btn-sm btn-outline-secondary super-load-older" type="button" :disabled="loadingOlder" @click="loadRuns(false)">
+          <span>{{ loadingOlder ? "Loading" : "Load older" }}</span>
+        </button>
+        <article v-for="run in displayRuns" :key="run.id" class="super-run">
           <div class="super-user-message">
             <div class="super-run-time">{{ formatTime(run.created_at) }}</div>
             <div class="super-message-text">{{ run.message }}</div>
           </div>
           <div class="super-route-line">
-            <span v-for="role in runRoles(run)" :key="role.id" class="super-route-chip">
-              <i class="bi" :class="roleIcon(role)"></i>
-              {{ role.name }}
-            </span>
+            <span v-if="run.status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
+            <span v-else-if="run.status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
+            <span v-else-if="run.status === 'running'" class="super-route-pending">starting role dispatch...</span>
+            <span v-else-if="run.status === 'failed'" class="super-route-error">dispatch failed: {{ run.error }}</span>
+            <template v-else>
+              <span class="super-route-label">dispatched to</span>
+              <span v-for="target in runTargets(run)" :key="target.id" class="super-route-chip">
+                <i class="bi" :class="targetIcon(target)"></i>
+                {{ target.role_name }}
+              </span>
+            </template>
             <span v-if="run.rationale" class="super-rationale">{{ run.rationale }}</span>
           </div>
-          <div v-for="role in runRoles(run)" :key="`${run.id}:${role.id}`" class="super-role-response">
+          <div v-for="target in runTargets(run)" :key="`${run.id}:${target.id}`" class="super-role-response">
             <div class="super-response-head">
-              <span class="super-response-role">{{ role.name }}</span>
-              <span class="super-response-status">{{ roleStatus(role) }}</span>
+              <span class="super-response-role">{{ target.role_name }}</span>
+              <span class="super-response-status">{{ targetStatus(target) }}</span>
             </div>
-            <div v-if="roleDone(role) && runRoleHtml(run, role)" class="markdown-body super-response-body" v-html="runRoleHtml(run, role)"></div>
+            <div v-if="targetHtml(target)" class="markdown-body super-response-body" v-html="targetHtml(target)"></div>
             <div v-else class="super-waiting">Waiting for response</div>
           </div>
         </article>
-        <div v-if="!runs.length" class="super-empty-thread">Create roles, write one message, and dispatch it into the persistent role sessions.</div>
+        <div v-if="!runs.length && !historyLoading" class="super-empty-thread">Create roles, write one message, and dispatch it into the persistent role sessions.</div>
+        <div v-if="historyLoading && !runs.length" class="super-empty-thread">Loading history</div>
       </section>
+
+      <div class="super-composer">
+        <div class="super-composer-card">
+          <VoiceTextarea
+            v-model="composer"
+            context-id="super-workspace:composer"
+            placeholder="Message Super Workspace"
+            :rows="2"
+            min-height="58px"
+            @keydown="handleComposerKeydown"
+          >
+            <template #actions>
+              <button class="btn btn-primary super-send-button" type="button" :disabled="!canDispatch" @click="dispatchMessage">
+                <i class="bi bi-send"></i>
+                <span>{{ dispatchButtonLabel }}</span>
+              </button>
+            </template>
+          </VoiceTextarea>
+          <div v-if="error" class="super-error">{{ error }}</div>
+        </div>
+      </div>
     </main>
   </div>
 </template>
@@ -431,22 +538,22 @@ function saveRuns() {
   background: #f6f7f9;
   color: var(--text);
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 64px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
+  position: relative;
 }
 
-.super-roles {
+.super-role-rail {
   background: #ffffff;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  gap: 8px;
   min-height: 0;
-  overflow: auto;
-  padding: 10px;
+  padding: 8px 6px;
 }
 
-.super-roles-header,
 .super-config-actions,
 .super-composer-actions,
 .super-response-head,
@@ -457,9 +564,124 @@ function saveRuns() {
   gap: 8px;
 }
 
-.super-roles-header {
+.super-role-list {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px;
+}
+
+.super-role-tile-wrap {
+  height: 48px;
+  position: relative;
+}
+
+.super-role-tile,
+.super-role-add {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: inherit;
+  display: grid;
+  justify-items: center;
+  padding: 4px;
+  width: 100%;
+}
+
+.super-role-tile {
+  grid-template-rows: 18px 16px;
+  height: 48px;
+}
+
+.super-role-tile.active,
+.super-role-tile:hover,
+.super-role-add:hover {
+  background: #eef3ff;
+  border-color: #c8d8ff;
+}
+
+.super-role-tile.mentioned {
+  background: #e8f7ef;
+  border-color: #8fd6ad;
+}
+
+.super-role-tile.active.mentioned,
+.super-role-tile.mentioned:hover {
+  background: #dff3ea;
+  border-color: #6fc993;
+}
+
+.super-role-tile:focus-visible,
+.super-role-add:focus-visible {
+  outline: 2px solid #86b7fe;
+  outline-offset: 2px;
+}
+
+.super-role-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.super-role-abbrev {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  max-width: 42px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.super-role-status {
+  border: 1px solid #ffffff;
+  border-radius: 999px;
+  bottom: 4px;
+  height: 9px;
+  position: absolute;
+  right: 5px;
+  width: 9px;
+}
+
+.super-role-add {
+  height: 44px;
+  margin-top: auto;
+}
+
+.super-role-panel-backdrop {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 20;
+}
+
+.super-role-panel {
+  background: #ffffff;
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 30px rgba(29, 41, 57, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  margin-left: auto;
+  max-width: min(420px, calc(100vw - 64px));
+  overflow: auto;
+  padding: 12px;
+  pointer-events: auto;
+  width: 420px;
+}
+
+.super-panel-head {
+  align-items: center;
+  display: flex;
   justify-content: space-between;
-  margin-bottom: 8px;
+}
+
+.super-panel-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-top: 2px;
 }
 
 .super-section-title {
@@ -468,52 +690,6 @@ function saveRuns() {
   font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
-}
-
-.super-role-row {
-  align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: inherit;
-  cursor: pointer;
-  display: grid;
-  gap: 8px;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  min-height: 34px;
-  padding: 6px 8px;
-  text-align: left;
-}
-
-.super-role-row.active,
-.super-role-row:hover {
-  background: #eef3ff;
-  border-color: #c8d8ff;
-}
-
-.super-role-row:focus-visible {
-  outline: 2px solid #86b7fe;
-  outline-offset: 2px;
-}
-
-.super-role-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.super-role-status {
-  border-radius: 999px;
-  height: 8px;
-  width: 8px;
-}
-
-.super-role-renew {
-  align-items: center;
-  display: inline-flex;
-  gap: 5px;
-  min-width: 76px;
-  justify-content: center;
 }
 
 .status-idle,
@@ -531,7 +707,13 @@ function saveRuns() {
 
 .super-role-config {
   border-top: 1px solid var(--border);
-  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.super-common-prompt {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
   padding-top: 12px;
 }
 
@@ -559,30 +741,58 @@ function saveRuns() {
 
 .super-chat {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   min-height: 0;
 }
 
 .super-composer {
-  background: #ffffff;
-  border-bottom: 1px solid var(--border);
-  display: grid;
-  gap: 8px;
-  padding: 12px;
+  background: rgba(246, 247, 249, 0.96);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -8px 22px rgba(29, 41, 57, 0.06);
+  padding: 10px 14px 12px;
 }
 
-.super-check {
+.super-composer-card {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 14px rgba(29, 41, 57, 0.07);
+  display: grid;
+  gap: 6px;
+  margin: 0 auto;
+  max-width: 980px;
+  padding: 8px;
+}
+
+.super-composer-card :deep(.voice-textarea) {
+  gap: 6px;
+}
+
+.super-composer-card :deep(textarea) {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  resize: none;
+}
+
+.super-composer-card :deep(textarea:focus) {
+  box-shadow: none;
+}
+
+.super-composer-card :deep(.voice-textarea-actions) {
   align-items: center;
-  color: var(--text-muted);
-  display: inline-flex;
-  font-size: 13px;
-  gap: 7px;
+  justify-content: flex-end;
+}
+
+.super-send-button {
+  border-radius: 999px;
+  min-width: 142px;
 }
 
 .super-thread {
   min-height: 0;
   overflow: auto;
-  padding: 16px;
+  padding: 16px 16px 18px;
 }
 
 .super-run {
@@ -590,6 +800,11 @@ function saveRuns() {
   gap: 8px;
   margin: 0 auto 18px;
   max-width: 980px;
+}
+
+.super-load-older {
+  justify-self: center;
+  margin: 0 auto 16px;
 }
 
 .super-user-message,
@@ -635,6 +850,17 @@ function saveRuns() {
   padding: 3px 8px;
 }
 
+.super-route-label,
+.super-route-pending {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.super-route-error {
+  color: #a33;
+  font-size: 12px;
+}
+
 .super-response-head {
   border-bottom: 1px solid var(--border);
   justify-content: space-between;
@@ -662,14 +888,16 @@ function saveRuns() {
 
 @media (max-width: 760px) {
   .super-page {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-columns: 52px minmax(0, 1fr);
   }
 
-  .super-roles {
-    border-bottom: 1px solid var(--border);
-    border-right: 0;
-    max-height: 44vh;
+  .super-role-rail {
+    padding: 6px 4px;
+  }
+
+  .super-role-panel {
+    max-width: calc(100vw - 52px);
+    width: calc(100vw - 52px);
   }
 }
 </style>

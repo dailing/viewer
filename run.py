@@ -18,6 +18,7 @@ DEFAULT_PORT = 18989
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_LOG_DIR = Path("~/.view/logs").expanduser()
 PROJECT_ENV_PATH = PROJECT_ROOT / ".viewer.env"
+DEFAULT_VOICE_SERVICE_WS = "ws://127.0.0.1:8765/v1/voice/ws"
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional target language code for WhisperLiveKit translation output.",
     )
+    parser.add_argument(
+        "--voice-service-ws",
+        default=DEFAULT_VOICE_SERVICE_WS,
+        help=f"Standalone voice service WebSocket URL. Defaults to {DEFAULT_VOICE_SERVICE_WS}.",
+    )
     return parser.parse_args()
 
 
@@ -176,6 +182,7 @@ def main() -> None:
     os.environ["VIEWER_VOICE_MODEL"] = os.environ.get("VIEWER_VOICE_MODEL", args.voice_model)
     os.environ["VIEWER_VOICE_LANGUAGE"] = os.environ.get("VIEWER_VOICE_LANGUAGE", args.voice_language)
     os.environ["VIEWER_VOICE_TARGET_LANGUAGE"] = os.environ.get("VIEWER_VOICE_TARGET_LANGUAGE", args.voice_target_language)
+    os.environ["VIEWER_VOICE_SERVICE_WS"] = os.environ.get("VIEWER_VOICE_SERVICE_WS", args.voice_service_ws)
     os.environ["VIEWER_VOICE_BACKEND"] = os.environ.get("VIEWER_VOICE_BACKEND", "faster-whisper")
     os.environ["VIEWER_VOICE_BACKEND_POLICY"] = os.environ.get("VIEWER_VOICE_BACKEND_POLICY", "localagreement")
     log_file = resolve_project_path(args.log_file) if args.log_file else default_log_file(args.log_dir)

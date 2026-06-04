@@ -30,6 +30,7 @@ function setMessage(value: string) {
 }
 
 async function load() {
+  if (loading.value) return;
   loading.value = true;
   error.value = "";
   try {
@@ -70,7 +71,7 @@ async function autoCommit() {
 
 onMounted(() => {
   void load();
-  refreshTimer = window.setInterval(() => void load(), 5000);
+  refreshTimer = window.setInterval(() => void load(), 15000);
 });
 
 watch(() => fileStore.currentPath, () => void load());

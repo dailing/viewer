@@ -1,15 +1,18 @@
 import asyncio
 import os
 import re
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from .agent_loops import agent_loop_manager
+from .agent_history import SuperHistoryRunCreate, agent_history_store
 from .agent_tasks import (
     AgentTaskCompleteUpdate,
     AgentTaskCreate,
@@ -59,7 +62,8 @@ from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
 from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceAgentSessionRequest, WorkspaceConfig, WorkspaceSnapshot
 from .restart import request_restart, request_stop
-from .super_workspace import SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, super_workspace_manager
+from .super_workspace import SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
+from .super_workspace_runtime import SuperWorkspaceMessageCreate, super_workspace_runtime
 from .terminals import terminal_manager
 from .users import get_user_profile, list_user_profiles, user_home_path, user_home_relative
 from .voice import connect_voice
@@ -76,6 +80,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 AGENT_PROVIDERS = {
     "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars"},
@@ -87,18 +92,35 @@ AGENT_MANAGERS = {
     "hermes": hermes_session_manager,
 }
 
+NOISY_SUCCESS_PATHS = {
+    "/api/agents/sessions",
+    "/api/codex/models",
+    "/api/git/status",
+    "/api/super-workspace/runs",
+    "/api/terminals",
+}
+SLOW_REQUEST_MS = 1000.0
+
+
+def _is_noisy_success_path(path: str) -> bool:
+    return path in NOISY_SUCCESS_PATHS or path.startswith("/assets/")
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    started = time.perf_counter()
     try:
         response = await call_next(request)
     except Exception:
         logger.exception("HTTP {} {} failed", request.method, request.url.path)
         raise
+    elapsed_ms = (time.perf_counter() - started) * 1000
     if response.status_code >= 400:
-        logger.warning("HTTP {} {} -> {}", request.method, request.url.path, response.status_code)
-    elif settings.debug and request.url.path.startswith("/api/"):
-        logger.debug("HTTP {} {} -> {}", request.method, request.url.path, response.status_code)
+        logger.warning("HTTP {} {} -> {} {:.1f}ms", request.method, request.url.path, response.status_code, elapsed_ms)
+    elif elapsed_ms >= SLOW_REQUEST_MS:
+        logger.info("HTTP {} {} -> {} {:.1f}ms", request.method, request.url.path, response.status_code, elapsed_ms)
+    elif settings.debug and request.url.path.startswith("/api/") and not _is_noisy_success_path(request.url.path):
+        logger.debug("HTTP {} {} -> {} {:.1f}ms", request.method, request.url.path, response.status_code, elapsed_ms)
     return response
 
 
@@ -120,6 +142,7 @@ async def startup() -> None:
     await hermes_session_manager.resume_pending_queues()
     await agent_loop_manager.start()
     await agent_task_manager.start()
+    await super_workspace_runtime.start()
 
 
 @app.on_event("shutdown")
@@ -129,6 +152,7 @@ async def shutdown() -> None:
         watch_stop_event.set()
     if watch_task:
         watch_task.cancel()
+    await super_workspace_runtime.shutdown()
     await agent_task_manager.shutdown()
     await agent_loop_manager.shutdown()
     await terminal_manager.shutdown()
@@ -744,6 +768,11 @@ async def super_workspace(user: str | None = None):
     return super_workspace_manager.read(user)
 
 
+@app.put("/api/super-workspace")
+async def update_super_workspace(request: SuperWorkspacePatch, user: str | None = None):
+    return super_workspace_manager.update(request, user)
+
+
 @app.post("/api/super-workspace/roles")
 async def create_super_role(request: SuperRoleCreate, user: str | None = None):
     return super_workspace_manager.create_role(request, user)
@@ -757,6 +786,37 @@ async def update_super_role(role_id: str, request: SuperRolePatch, user: str | N
 @app.delete("/api/super-workspace/roles/{role_id}")
 async def delete_super_role(role_id: str, user: str | None = None):
     return super_workspace_manager.delete_role(role_id, user)
+
+
+@app.get("/api/super-workspace/runs")
+async def super_workspace_runs(limit: int = Query(default=30, ge=1, le=100), before: float | None = None, user: str | None = None):
+    agent_history_store.sync_super_workspace(user)
+    return agent_history_store.list_super_runs(user, limit=limit, before=before)
+
+
+@app.post("/api/super-workspace/messages")
+async def create_super_workspace_message(request: SuperWorkspaceMessageCreate, user: str | None = None):
+    return await super_workspace_runtime.submit(request, user)
+
+
+@app.get("/api/super-workspace/events")
+async def super_workspace_events(user: str | None = None):
+    return StreamingResponse(super_workspace_runtime.event_hub.subscribe(user), media_type="text/event-stream")
+
+
+@app.post("/api/super-workspace/runs")
+async def create_super_workspace_run(request: SuperHistoryRunCreate, user: str | None = None):
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message is required")
+    return await super_workspace_runtime.submit(
+        SuperWorkspaceMessageCreate(
+            message=message,
+            parent_message_id=request.parent_message_id,
+            sender_role_id=request.sender_role_id,
+        ),
+        user,
+    )
 
 
 @app.post("/api/super-workspace/dispatch")

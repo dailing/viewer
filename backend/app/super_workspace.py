@@ -49,7 +49,12 @@ class SuperRolePatch(BaseModel):
 
 
 class SuperWorkspaceData(BaseModel):
+    common_prompt: str = ""
     roles: list[SuperRole] = Field(default_factory=list)
+
+
+class SuperWorkspacePatch(BaseModel):
+    common_prompt: str | None = None
 
 
 class SuperDispatchRequest(BaseModel):
@@ -82,6 +87,13 @@ class SuperWorkspaceManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
         return data
+
+    def update(self, patch: SuperWorkspacePatch, user_id: str | None = None) -> SuperWorkspaceData:
+        data = self.read(user_id)
+        update = patch.model_dump(exclude_unset=True)
+        if "common_prompt" in update:
+            data.common_prompt = str(update["common_prompt"] or "").strip()
+        return self.write(data, user_id)
 
     def create_role(self, request: SuperRoleCreate, user_id: str | None = None) -> SuperWorkspaceData:
         data = self.read(user_id)

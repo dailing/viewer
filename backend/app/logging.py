@@ -59,9 +59,13 @@ def configure_logging(log_file: str | Path | None = None, debug: bool | None = N
     )
 
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"):
+    for name in ("uvicorn", "uvicorn.error", "fastapi"):
         logging.getLogger(name).handlers = [InterceptHandler()]
         logging.getLogger(name).propagate = False
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.handlers = []
+    access_logger.propagate = False
+    access_logger.disabled = True
     logging.getLogger("watchfiles").setLevel(logging.INFO)
 
     _configured = True

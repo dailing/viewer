@@ -43,6 +43,7 @@ class VoiceRuntimeConfig:
     offline_vad_filter: bool
     vac: bool
     vad: bool
+    service_ws: str
     upstream_ws: str
 
 
@@ -89,6 +90,7 @@ def _voice_config() -> VoiceRuntimeConfig:
         offline_vad_filter=settings.voice_offline_vad_filter,
         vac=settings.voice_vac,
         vad=settings.voice_vad,
+        service_ws=settings.voice_service_ws,
         upstream_ws=settings.voice_upstream_ws,
     )
 
@@ -219,6 +221,89 @@ def _normalize_upstream_message(message: str | bytes, cfg: VoiceRuntimeConfig) -
         return {"type": "partial", "text": text} if text else None
 
     return _normalize_payload(payload, cfg)
+
+
+def _voice_service_start_payload(payload: dict[str, Any], cfg: VoiceRuntimeConfig) -> dict[str, Any]:
+    return {
+        **payload,
+        "type": "start",
+        "model": cfg.model,
+        "language": cfg.language,
+        "translation_enabled": cfg.translation_enabled,
+        "target_language": cfg.target_language,
+        "offline_beam_size": cfg.offline_beam_size,
+        "offline_vad_filter": cfg.offline_vad_filter,
+    }
+
+
+def _normalize_voice_service_message(message: str | bytes) -> dict[str, Any] | None:
+    if isinstance(message, bytes):
+        with suppress(UnicodeDecodeError):
+            message = message.decode("utf-8")
+        if isinstance(message, bytes):
+            return None
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        text = message.strip()
+        return {"type": "partial", "text": text} if text else None
+    if not isinstance(payload, dict):
+        return None
+    message_type = payload.get("type")
+    if message_type in {"ready", "processing", "partial", "committed", "final", "error"}:
+        return payload
+    if payload.get("text"):
+        return {"type": "partial", "text": str(payload["text"])}
+    return None
+
+
+async def _connect_voice_service(websocket: WebSocket, cfg: VoiceRuntimeConfig) -> None:
+    async with websockets.connect(cfg.service_ws, max_size=None) as service:
+        await websocket.send_json({"type": "ready"})
+
+        async def client_to_service() -> None:
+            while True:
+                message = await websocket.receive()
+                if "bytes" in message and message["bytes"] is not None:
+                    await service.send(message["bytes"])
+                    continue
+                if "text" not in message or not message["text"]:
+                    continue
+                try:
+                    payload = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    payload = {"type": message["text"]}
+                if payload.get("type") == "start":
+                    payload = _voice_service_start_payload(payload, cfg)
+                await service.send(json.dumps(payload))
+                if payload.get("type") == "stop":
+                    return
+
+        async def service_to_client() -> None:
+            async for message in service:
+                normalized = _normalize_voice_service_message(message)
+                if normalized:
+                    if normalized.get("type") == "ready":
+                        continue
+                    await websocket.send_json(normalized)
+
+        client_task = asyncio.create_task(client_to_service())
+        service_task = asyncio.create_task(service_to_client())
+        try:
+            done, _ = await asyncio.wait([client_task, service_task], return_when=asyncio.FIRST_COMPLETED)
+            if client_task in done:
+                client_task.result()
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(service_task, timeout=cfg.stop_timeout_seconds + 120)
+            else:
+                service_task.result()
+                client_task.cancel()
+                await asyncio.gather(client_task, return_exceptions=True)
+        finally:
+            for task in (client_task, service_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(client_task, service_task, return_exceptions=True)
 
 
 def _whisper_kwargs(cfg: VoiceRuntimeConfig) -> dict[str, Any]:
@@ -449,6 +534,10 @@ async def connect_voice(websocket: WebSocket) -> None:
         return
 
     try:
+        if cfg.service_ws:
+            await _connect_voice_service(websocket, cfg)
+            return
+
         if not cfg.upstream_ws:
             await _connect_offline_voice(websocket, cfg)
             return

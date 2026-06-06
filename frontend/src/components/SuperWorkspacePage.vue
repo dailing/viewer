@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import {
   createSuperRole,
   createSuperWorkspaceRun,
@@ -9,6 +9,7 @@ import {
   updateSuperWorkspace,
   updateSuperRole,
 } from "../api/client";
+import { connectSuperWorkspaceEvents } from "../api/events";
 import DirectoryPicker from "./DirectoryPicker.vue";
 import VoiceTextarea from "./VoiceTextarea.vue";
 import { useAgentsStore } from "../stores/agents";
@@ -22,6 +23,7 @@ const roles = ref<SuperRole[]>([]);
 const selectedRoleId = ref("");
 const snapshots = ref<Record<string, AgentSessionSnapshot>>({});
 const runs = ref<SuperHistoryRun[]>([]);
+const threadRef = ref<HTMLElement | null>(null);
 const composer = ref("");
 const commonPrompt = ref("");
 const error = ref("");
@@ -32,6 +34,7 @@ const historyLoading = ref(false);
 const loadingOlder = ref(false);
 const hasOlderRuns = ref(false);
 const nextBefore = ref<number | null>(null);
+const runsAfterCursor = ref(0);
 const rolePanelOpen = ref(false);
 const selectedRole = computed(() => roles.value.find((role) => role.id === selectedRoleId.value) ?? null);
 const dispatchableRoles = computed(() => roles.value.filter((role) => role.description.trim()));
@@ -46,19 +49,26 @@ const dispatchButtonLabel = computed(() => {
   if (mentionedRoleIds.value.length) return `Dispatch to ${mentionedRoleIds.value.length}`;
   return "Auto dispatch";
 });
-let pollTimer: number | null = null;
+let fallbackTimer: number | null = null;
+let refreshTimer: number | null = null;
+let superWorkspaceEvents: EventSource | null = null;
 
 onMounted(async () => {
   await agents.loadProviders();
   await load();
   await loadRuns(true);
-  pollTimer = window.setInterval(() => {
-    void refreshLiveState();
-  }, 3000);
+  superWorkspaceEvents = connectSuperWorkspaceEvents(() => {
+    scheduleRefreshLiveState(100);
+  });
+  fallbackTimer = window.setInterval(() => {
+    scheduleRefreshLiveState(0);
+  }, 30000);
 });
 
 onUnmounted(() => {
-  if (pollTimer !== null) window.clearInterval(pollTimer);
+  if (fallbackTimer !== null) window.clearInterval(fallbackTimer);
+  if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+  superWorkspaceEvents?.close();
 });
 
 async function load() {
@@ -74,7 +84,15 @@ async function load() {
 
 async function refreshLiveState() {
   await refreshSnapshots();
-  await loadRuns(true);
+  await loadChangedRuns();
+}
+
+function scheduleRefreshLiveState(delayMs: number) {
+  if (refreshTimer !== null) return;
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null;
+    void refreshLiveState();
+  }, delayMs);
 }
 
 async function saveCommonPrompt() {
@@ -203,6 +221,8 @@ async function dispatchMessage() {
   try {
     const run = await createSuperWorkspaceRun({ message });
     upsertRun(run);
+    updateRunsAfterCursor([run]);
+    await scrollThreadToBottom();
     if (run.status === "failed") {
       error.value = run.error || "Dispatch failed";
       return;
@@ -303,16 +323,19 @@ function runTargets(run: SuperHistoryRun) {
   return run.targets;
 }
 
-function targetHtml(target: SuperHistoryTarget) {
-  const text = target.messages
-    .map((message) => message.text)
-    .filter(Boolean)
-    .join("\n\n");
-  return text ? renderMarkdown(text, { baseDirectory: snapshots.value[target.session_ref]?.cwd_relative ?? "" }) : "";
+function runHasResponse(run: SuperHistoryRun) {
+  return run.targets.some((target) => Boolean(targetFinalMessage(target)));
 }
 
-function targetStatus(target: SuperHistoryTarget) {
-  return snapshots.value[target.session_ref]?.status ?? "idle";
+function targetFinalMessage(target: SuperHistoryTarget) {
+  return [...target.messages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.event_type === "message:assistant" && message.text.trim());
+}
+
+function targetHtml(target: SuperHistoryTarget) {
+  const text = targetFinalMessage(target)?.text.trim() ?? "";
+  return text ? renderMarkdown(text, { baseDirectory: snapshots.value[target.session_ref]?.cwd_relative ?? "" }) : "";
 }
 
 function targetIcon(target: SuperHistoryTarget) {
@@ -346,10 +369,12 @@ async function loadRuns(reset: boolean) {
     const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined);
     if (reset) {
       runs.value = page.runs;
+      await scrollThreadToBottom();
     } else {
       const seen = new Set(runs.value.map((run) => run.id));
       runs.value = [...runs.value, ...page.runs.filter((run) => !seen.has(run.id))];
     }
+    updateRunsAfterCursor(page.runs, page.next_after ?? undefined);
     hasOlderRuns.value = page.has_more;
     nextBefore.value = page.next_before ?? null;
   } catch (err) {
@@ -360,10 +385,48 @@ async function loadRuns(reset: boolean) {
   }
 }
 
+async function loadChangedRuns() {
+  const after = runsAfterCursor.value;
+  if (!after) {
+    await loadRuns(true);
+    return;
+  }
+  const stickToBottom = isThreadNearBottom();
+  try {
+    const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 0.001));
+    for (const run of page.runs) {
+      upsertRun(run);
+    }
+    updateRunsAfterCursor(page.runs, page.next_after ?? undefined);
+    if (stickToBottom && page.runs.length) await scrollThreadToBottom();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
 function upsertRun(run: SuperHistoryRun) {
   const index = runs.value.findIndex((item) => item.id === run.id);
   if (index >= 0) runs.value.splice(index, 1, run);
   else runs.value = [run, ...runs.value];
+  runs.value.sort((left, right) => right.created_at - left.created_at);
+}
+
+function updateRunsAfterCursor(changedRuns: SuperHistoryRun[], nextAfter?: number) {
+  const changedMax = Math.max(0, ...changedRuns.map((run) => run.updated_at).filter(Number.isFinite));
+  runsAfterCursor.value = Math.max(runsAfterCursor.value, changedMax, Number.isFinite(nextAfter) ? Number(nextAfter) : 0);
+}
+
+function isThreadNearBottom() {
+  const element = threadRef.value;
+  if (!element) return true;
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 180;
+}
+
+async function scrollThreadToBottom() {
+  await nextTick();
+  const element = threadRef.value;
+  if (!element) return;
+  element.scrollTop = element.scrollHeight;
 }
 </script>
 
@@ -378,7 +441,7 @@ function upsertRun(run: SuperHistoryRun) {
         >
           <button
             class="super-role-tile"
-        :class="{ active: role.id === selectedRoleId, mentioned: mentionedRoleIds.includes(role.id) }"
+        :class="[{ active: role.id === selectedRoleId, mentioned: mentionedRoleIds.includes(role.id) }, `status-${roleStatus(role)}`]"
             type="button"
             :title="`@${roleMentionKey(role)}`"
             :aria-pressed="mentionedRoleIds.includes(role.id)"
@@ -386,7 +449,6 @@ function upsertRun(run: SuperHistoryRun) {
       >
             <i class="bi super-role-icon" :class="roleIcon(role)"></i>
             <span class="super-role-abbrev">{{ roleAbbrev(role) }}</span>
-            <span class="super-role-status" :class="`status-${roleStatus(role)}`"></span>
           </button>
         </div>
       </div>
@@ -473,7 +535,7 @@ function upsertRun(run: SuperHistoryRun) {
     </div>
 
     <main class="super-chat">
-      <section class="super-thread">
+      <section ref="threadRef" class="super-thread">
         <button v-if="hasOlderRuns" class="btn btn-sm btn-outline-secondary super-load-older" type="button" :disabled="loadingOlder" @click="loadRuns(false)">
           <span>{{ loadingOlder ? "Loading" : "Load older" }}</span>
         </button>
@@ -481,28 +543,26 @@ function upsertRun(run: SuperHistoryRun) {
           <div class="super-user-message">
             <div class="super-run-time">{{ formatTime(run.created_at) }}</div>
             <div class="super-message-text">{{ run.message }}</div>
-          </div>
-          <div class="super-route-line">
-            <span v-if="run.status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
-            <span v-else-if="run.status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
-            <span v-else-if="run.status === 'running'" class="super-route-pending">starting role dispatch...</span>
-            <span v-else-if="run.status === 'failed'" class="super-route-error">dispatch failed: {{ run.error }}</span>
-            <template v-else>
-              <span class="super-route-label">dispatched to</span>
-              <span v-for="target in runTargets(run)" :key="target.id" class="super-route-chip">
-                <i class="bi" :class="targetIcon(target)"></i>
-                {{ target.role_name }}
-              </span>
-            </template>
-            <span v-if="run.rationale" class="super-rationale">{{ run.rationale }}</span>
-          </div>
-          <div v-for="target in runTargets(run)" :key="`${run.id}:${target.id}`" class="super-role-response">
-            <div class="super-response-head">
-              <span class="super-response-role">{{ target.role_name }}</span>
-              <span class="super-response-status">{{ targetStatus(target) }}</span>
+            <div class="super-route-line">
+              <span v-if="run.status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
+              <span v-else-if="run.status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
+              <span v-else-if="run.status === 'running'" class="super-route-pending">starting role dispatch...</span>
+              <span v-else-if="run.status === 'failed' && !runHasResponse(run)" class="super-route-error">dispatch failed: {{ run.error }}</span>
+              <template v-else>
+                <span class="super-route-label">dispatched to</span>
+                <span v-for="target in runTargets(run)" :key="target.id" class="super-route-chip">
+                  <i class="bi" :class="targetIcon(target)"></i>
+                  {{ target.role_name }}
+                </span>
+              </template>
             </div>
-            <div v-if="targetHtml(target)" class="markdown-body super-response-body" v-html="targetHtml(target)"></div>
-            <div v-else class="super-waiting">Waiting for response</div>
+          </div>
+          <div v-for="target in runTargets(run)" :key="`${run.id}:${target.id}`" class="super-role-turn">
+            <div class="super-response-role-label">{{ target.role_name }}</div>
+            <div class="super-role-response">
+              <div v-if="targetHtml(target)" class="markdown-body super-response-body" v-html="targetHtml(target)"></div>
+              <div v-else class="super-waiting">Waiting for response</div>
+            </div>
           </div>
         </article>
         <div v-if="!runs.length && !historyLoading" class="super-empty-thread">Create roles, write one message, and dispatch it into the persistent role sessions.</div>
@@ -538,7 +598,7 @@ function upsertRun(run: SuperHistoryRun) {
   background: #f6f7f9;
   color: var(--text);
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   position: relative;
@@ -549,14 +609,13 @@ function upsertRun(run: SuperHistoryRun) {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   min-height: 0;
-  padding: 8px 6px;
+  padding: 7px 5px;
 }
 
 .super-config-actions,
 .super-composer-actions,
-.super-response-head,
 .super-route-line,
 .super-role-meta {
   align-items: center;
@@ -566,33 +625,34 @@ function upsertRun(run: SuperHistoryRun) {
 
 .super-role-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   min-height: 0;
   overflow: auto;
-  padding: 2px;
+  padding: 1px;
 }
 
 .super-role-tile-wrap {
-  height: 48px;
+  height: 38px;
   position: relative;
 }
 
 .super-role-tile,
 .super-role-add {
   align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 8px;
+  background: var(--role-status-bg, transparent);
+  border: 1px solid var(--role-status-border, transparent);
+  border-radius: 7px;
+  box-shadow: inset 3px 0 0 var(--role-status-color, transparent);
   color: inherit;
   display: grid;
   justify-items: center;
-  padding: 4px;
+  padding: 3px 3px 3px 5px;
   width: 100%;
 }
 
 .super-role-tile {
-  grid-template-rows: 18px 16px;
-  height: 48px;
+  grid-template-rows: 15px 13px;
+  height: 38px;
 }
 
 .super-role-tile.active,
@@ -620,32 +680,22 @@ function upsertRun(run: SuperHistoryRun) {
 }
 
 .super-role-icon {
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1;
 }
 
 .super-role-abbrev {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   line-height: 1;
-  max-width: 42px;
+  max-width: 34px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.super-role-status {
-  border: 1px solid #ffffff;
-  border-radius: 999px;
-  bottom: 4px;
-  height: 9px;
-  position: absolute;
-  right: 5px;
-  width: 9px;
-}
-
 .super-role-add {
-  height: 44px;
+  height: 36px;
   margin-top: auto;
 }
 
@@ -665,7 +715,7 @@ function upsertRun(run: SuperHistoryRun) {
   gap: 12px;
   height: 100%;
   margin-left: auto;
-  max-width: min(420px, calc(100vw - 64px));
+  max-width: min(420px, calc(100vw - 52px));
   overflow: auto;
   padding: 12px;
   pointer-events: auto;
@@ -694,15 +744,21 @@ function upsertRun(run: SuperHistoryRun) {
 
 .status-idle,
 .status-exited {
-  background: #8ca0bd;
+  --role-status-bg: #f6f8fb;
+  --role-status-border: #d8e0ea;
+  --role-status-color: #8ca0bd;
 }
 
 .status-running {
-  background: #0d6efd;
+  --role-status-bg: #edf5ff;
+  --role-status-border: #b8d7ff;
+  --role-status-color: #0d6efd;
 }
 
 .status-failed {
-  background: #dc3545;
+  --role-status-bg: #fff1f2;
+  --role-status-border: #f3b4bc;
+  --role-status-color: #dc3545;
 }
 
 .super-role-config {
@@ -743,6 +799,7 @@ function upsertRun(run: SuperHistoryRun) {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   min-height: 0;
+  min-width: 0;
 }
 
 .super-composer {
@@ -791,6 +848,7 @@ function upsertRun(run: SuperHistoryRun) {
 
 .super-thread {
   min-height: 0;
+  min-width: 0;
   overflow: auto;
   padding: 16px 16px 18px;
 }
@@ -800,6 +858,7 @@ function upsertRun(run: SuperHistoryRun) {
   gap: 8px;
   margin: 0 auto 18px;
   max-width: 980px;
+  min-width: 0;
 }
 
 .super-load-older {
@@ -812,17 +871,17 @@ function upsertRun(run: SuperHistoryRun) {
   background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 8px;
+  max-width: 100%;
+  min-width: 0;
   padding: 10px 12px;
 }
 
 .super-user-message {
   margin-left: auto;
-  max-width: 760px;
+  max-width: min(760px, 100%);
 }
 
 .super-run-time,
-.super-rationale,
-.super-response-status,
 .super-waiting,
 .super-empty,
 .super-empty-thread {
@@ -831,23 +890,24 @@ function upsertRun(run: SuperHistoryRun) {
 }
 
 .super-message-text {
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .super-route-line {
   flex-wrap: wrap;
-  padding-left: 4px;
+  gap: 4px 7px;
+  margin-top: 6px;
 }
 
 .super-route-chip {
   align-items: center;
-  background: #e9eef8;
-  border: 1px solid #ccd8ed;
-  border-radius: 999px;
+  color: var(--text-muted);
   display: inline-flex;
   font-size: 12px;
-  gap: 5px;
-  padding: 3px 8px;
+  gap: 4px;
+  line-height: 1.3;
 }
 
 .super-route-label,
@@ -861,19 +921,42 @@ function upsertRun(run: SuperHistoryRun) {
   font-size: 12px;
 }
 
-.super-response-head {
-  border-bottom: 1px solid var(--border);
-  justify-content: space-between;
-  margin-bottom: 8px;
-  padding-bottom: 6px;
+.super-role-turn {
+  display: grid;
+  gap: 4px;
 }
 
-.super-response-role {
-  font-weight: 700;
+.super-response-role-label {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.3;
+  padding-left: 2px;
 }
 
 .super-response-body {
   font-size: var(--markdown-body-font-size);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.super-response-body :deep(pre) {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.super-response-body :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.super-response-body :deep(img),
+.super-response-body :deep(video) {
+  height: auto;
+  max-width: 100%;
 }
 
 .super-error {
@@ -888,7 +971,7 @@ function upsertRun(run: SuperHistoryRun) {
 
 @media (max-width: 760px) {
   .super-page {
-    grid-template-columns: 52px minmax(0, 1fr);
+    grid-template-columns: 46px minmax(0, 1fr);
   }
 
   .super-role-rail {
@@ -896,8 +979,21 @@ function upsertRun(run: SuperHistoryRun) {
   }
 
   .super-role-panel {
-    max-width: calc(100vw - 52px);
-    width: calc(100vw - 52px);
+    max-width: calc(100vw - 46px);
+    width: calc(100vw - 46px);
+  }
+
+  .super-thread {
+    padding: 10px 6px 12px;
+  }
+
+  .super-run {
+    margin-bottom: 12px;
+  }
+
+  .super-user-message,
+  .super-role-response {
+    padding: 9px 10px;
   }
 }
 </style>

@@ -298,9 +298,10 @@ export async function deleteSuperRole(id: string): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>(`/api/super-workspace/roles/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function listSuperWorkspaceRuns(limit = 30, before?: number): Promise<SuperHistoryRunsPage> {
+export async function listSuperWorkspaceRuns(limit = 30, before?: number, after?: number): Promise<SuperHistoryRunsPage> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (before !== undefined) params.set("before", String(before));
+  if (after !== undefined) params.set("after", String(after));
   return request<SuperHistoryRunsPage>(`/api/super-workspace/runs?${params.toString()}`);
 }
 

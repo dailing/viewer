@@ -107,6 +107,7 @@ export type SuperHistoryRunsPage = {
   runs: SuperHistoryRun[];
   has_more: boolean;
   next_before?: number | null;
+  next_after?: number | null;
 };
 
 export type SuperHistoryRunCreate = {

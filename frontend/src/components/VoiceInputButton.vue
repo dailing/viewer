@@ -11,6 +11,7 @@ const voice = useVoiceStore();
 const applyingStoreText = ref(false);
 const state = computed(() => voice.context(props.contextId));
 const languageModelTitle = computed(() => (voice.languageModelRefine ? "Disable language model refine" : "Enable language model refine"));
+const languageModelIcon = computed(() => (voice.languageModelRefine ? "bi-stars" : "bi-magic"));
 const icon = computed(() => {
   if (error.value || state.value.status === "error") return "bi-exclamation-triangle-fill";
   if (state.value.status === "connecting" || state.value.status === "processing") return "bi-hourglass-split";
@@ -81,7 +82,7 @@ defineExpose({ stop: () => voice.stop(props.contextId) });
 <template>
   <div class="voice-input-control">
     <button
-      class="btn btn-sm voice-input-button"
+      class="btn btn-sm voice-action-button voice-input-button"
       :class="buttonClass"
       type="button"
       :title="title"
@@ -91,7 +92,7 @@ defineExpose({ stop: () => voice.stop(props.contextId) });
       <i class="bi" :class="icon"></i>
     </button>
     <button
-      class="btn btn-sm voice-language-model-button"
+      class="btn btn-sm voice-action-button voice-language-model-button"
       :class="voice.languageModelRefine ? 'btn-primary' : 'btn-outline-secondary'"
       type="button"
       :title="languageModelTitle"
@@ -99,7 +100,7 @@ defineExpose({ stop: () => voice.stop(props.contextId) });
       :aria-pressed="voice.languageModelRefine"
       @click="toggleLanguageModelRefine"
     >
-      11M
+      <i class="bi" :class="languageModelIcon"></i>
     </button>
   </div>
 </template>
@@ -115,17 +116,11 @@ defineExpose({ stop: () => voice.stop(props.contextId) });
   align-items: center;
   display: inline-flex;
   justify-content: center;
-  min-width: 34px;
 }
 
 .voice-language-model-button {
   align-items: center;
   display: inline-flex;
-  font-size: 11px;
-  font-weight: 700;
   justify-content: center;
-  min-width: 38px;
-  padding-left: 7px;
-  padding-right: 7px;
 }
 </style>

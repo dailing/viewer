@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import sqlite3
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, or_, select, text, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
-from .codex_sessions import codex_session_manager
-from .hermes_sessions import HERMES_STATE_DB, hermes_session_manager
-from .models import AgentEventType
 from .storage import AGENT_HISTORY_DB_PATH
 from .users import normalize_user_id
 
-SCHEMA_VERSION = 11
 SUPER_WORKSPACE_PROVIDER = "super_workspace"
 DEFAULT_RUN_LIMIT = 30
 DEFAULT_MESSAGE_LIMIT = 120
@@ -32,10 +32,41 @@ class SuperDriverRunCreate(BaseModel):
     role_id: str
     role_name: str
     provider: str
-    session_ref: str
+    session_ref: str = ""
     agent_prompt: str = ""
     parent_message_id: str | None = None
     sender_role_id: str | None = None
+    role_snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class SuperDispatchTask(BaseModel):
+    id: str
+    query_message_id: str
+    user_id: str
+    role_id: str
+    role_name: str
+    provider: str
+    viewer_session_id: str = ""
+    provider_session_id: str | None = None
+    session_ref: str = ""
+    agent_prompt: str = ""
+    status: str
+    parent_message_id: str | None = None
+    sender_role_id: str | None = None
+    recipient_role_id: str
+    role_snapshot: dict[str, Any] = Field(default_factory=dict)
+    claimed_by: str | None = None
+    claim_expires_at: float | None = None
+    attempt_count: int = 0
+    next_attempt_at: float | None = None
+    driver_pid: int | None = None
+    driver_state_path: str | None = None
+    error: str = ""
+    start_after_occurred_at: float = 0
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    updated_at: float
 
 
 class AgentHistoryFileChange(BaseModel):
@@ -110,134 +141,166 @@ class SuperHistoryRunsPage(BaseModel):
     runs: list[SuperHistoryRun]
     has_more: bool = False
     next_before: float | None = None
+    next_after: float | None = None
+
+
+class AgentHistoryBase(DeclarativeBase):
+    pass
+
+
+class SuperWorkspaceMessageRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_messages"
+    __table_args__ = (
+        UniqueConstraint("provider", "viewer_session_id", "source_event_id"),
+        Index("idx_super_messages_user_query_time", "user_id", "query", "occurred_at", "id"),
+        Index("idx_super_messages_query_message", "query_message_id", "occurred_at", "id"),
+        Index("idx_super_messages_driver_time", "driver_run_id", "occurred_at", "id"),
+        Index("idx_super_messages_session_time", "provider", "viewer_session_id", "occurred_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(String, nullable=False)
+    parent_message_id: Mapped[str | None] = mapped_column(String)
+    sender_role_id: Mapped[str | None] = mapped_column(String)
+    recipient_role_id: Mapped[str | None] = mapped_column(String)
+    role_id: Mapped[str | None] = mapped_column(String)
+    query_message_id: Mapped[str | None] = mapped_column(String)
+    driver_run_id: Mapped[str | None] = mapped_column(String)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    viewer_session_id: Mapped[str | None] = mapped_column(String)
+    provider_session_id: Mapped[str | None] = mapped_column(String)
+    event_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    received_at: Mapped[float] = mapped_column(Float, nullable=False)
+    source_path: Mapped[str | None] = mapped_column(Text)
+    source_event_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_line: Mapped[int | None] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    query: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(String)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    requested_role_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    selected_role_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    patch_text: Mapped[str | None] = mapped_column(Text)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[float] = mapped_column(Float, nullable=False)
+    ingested_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class SuperWorkspaceDriverRunRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_driver_runs"
+    __table_args__ = (
+        Index("idx_super_driver_runs_query_message", "query_message_id", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    query_message_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspace_messages.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    role_id: Mapped[str] = mapped_column(String, nullable=False)
+    role_name: Mapped[str] = mapped_column(String, nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    viewer_session_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    provider_session_id: Mapped[str | None] = mapped_column(String)
+    session_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
+    agent_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    parent_message_id: Mapped[str | None] = mapped_column(String)
+    sender_role_id: Mapped[str | None] = mapped_column(String)
+    recipient_role_id: Mapped[str] = mapped_column(String, nullable=False)
+    role_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    claimed_by: Mapped[str | None] = mapped_column(String)
+    claim_expires_at: Mapped[float | None] = mapped_column(Float)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[float | None] = mapped_column(Float)
+    driver_pid: Mapped[int | None] = mapped_column(Integer)
+    driver_state_path: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    start_after_occurred_at: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    started_at: Mapped[float | None] = mapped_column(Float)
+    finished_at: Mapped[float | None] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class SuperWorkspaceMessageFileChangeRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_message_file_changes"
+
+    message_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspace_messages.id", ondelete="CASCADE"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    change_type: Mapped[str] = mapped_column(String, nullable=False)
+    diff: Mapped[str | None] = mapped_column(Text)
+
+
+class SuperWorkspaceDriverCheckpointRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_driver_checkpoints"
+
+    driver_run_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspace_driver_runs.id", ondelete="CASCADE"), primary_key=True)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    viewer_session_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_path: Mapped[str | None] = mapped_column(Text)
+    byte_offset: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    line_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_source_event_id: Mapped[str | None] = mapped_column(String)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
 class AgentHistoryStore:
     def __init__(self, path: Path = AGENT_HISTORY_DB_PATH) -> None:
         self.path = path
-
-    def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        self._ensure_schema(connection)
-        return connection
+        self.engine = create_engine(f"sqlite:///{self.path.as_posix()}", future=True, poolclass=NullPool)
+        self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False, future=True)
+        self._ensure_schema()
 
-    def _ensure_schema(self, connection: sqlite3.Connection) -> None:
-        current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if current_version != SCHEMA_VERSION:
-            self._reset_schema(connection)
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS super_workspace_messages (
-              id TEXT PRIMARY KEY,
-              user_id TEXT NOT NULL,
-              conversation_id TEXT NOT NULL,
-              parent_message_id TEXT,
-              sender_role_id TEXT,
-              recipient_role_id TEXT,
-              role_id TEXT,
-              query_message_id TEXT,
-              driver_run_id TEXT,
-              provider TEXT NOT NULL,
-              viewer_session_id TEXT,
-              provider_session_id TEXT,
-              event_index INTEGER NOT NULL,
-              received_at REAL NOT NULL,
-              source_path TEXT,
-              source_event_id TEXT NOT NULL,
-              source_line INTEGER,
-              role TEXT NOT NULL,
-              event_type TEXT NOT NULL,
-              text TEXT NOT NULL,
-              query TEXT,
-              status TEXT,
-              rationale TEXT NOT NULL DEFAULT '',
-              error TEXT NOT NULL DEFAULT '',
-              requested_role_ids_json TEXT NOT NULL DEFAULT '[]',
-              selected_role_ids_json TEXT NOT NULL DEFAULT '[]',
-              patch_text TEXT,
-              raw_json TEXT NOT NULL,
-              occurred_at REAL NOT NULL,
-              ingested_at REAL NOT NULL,
-              UNIQUE(provider, viewer_session_id, source_event_id)
-            );
+    @contextmanager
+    def session_scope(self) -> Iterator[Session]:
+        session = self.SessionLocal()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
-            CREATE TABLE IF NOT EXISTS super_workspace_driver_runs (
-              id TEXT PRIMARY KEY,
-              query_message_id TEXT NOT NULL,
-              user_id TEXT NOT NULL,
-              role_id TEXT NOT NULL,
-              role_name TEXT NOT NULL,
-              provider TEXT NOT NULL,
-              viewer_session_id TEXT NOT NULL,
-              provider_session_id TEXT,
-              session_ref TEXT NOT NULL,
-              agent_prompt TEXT NOT NULL,
-              status TEXT NOT NULL,
-              parent_message_id TEXT,
-              sender_role_id TEXT,
-              recipient_role_id TEXT NOT NULL,
-              start_after_occurred_at REAL NOT NULL,
-              created_at REAL NOT NULL,
-              updated_at REAL NOT NULL,
-              FOREIGN KEY (query_message_id) REFERENCES super_workspace_messages(id) ON DELETE CASCADE
-            );
+    @contextmanager
+    def read_session(self) -> Iterator[Session]:
+        session = self.SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
 
-            CREATE TABLE IF NOT EXISTS super_workspace_message_file_changes (
-              message_id TEXT NOT NULL,
-              position INTEGER NOT NULL,
-              path TEXT NOT NULL,
-              change_type TEXT NOT NULL,
-              diff TEXT,
-              PRIMARY KEY (message_id, position),
-              FOREIGN KEY (message_id) REFERENCES super_workspace_messages(id) ON DELETE CASCADE
-            );
+    def _ensure_schema(self) -> None:
+        AgentHistoryBase.metadata.create_all(self.engine)
+        self._ensure_driver_run_columns()
 
-            CREATE TABLE IF NOT EXISTS super_workspace_driver_checkpoints (
-              driver_run_id TEXT PRIMARY KEY,
-              provider TEXT NOT NULL,
-              viewer_session_id TEXT NOT NULL,
-              source_path TEXT,
-              byte_offset INTEGER NOT NULL DEFAULT 0,
-              line_count INTEGER NOT NULL DEFAULT 0,
-              last_source_event_id TEXT,
-              updated_at REAL NOT NULL,
-              FOREIGN KEY (driver_run_id) REFERENCES super_workspace_driver_runs(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_super_messages_user_query_time
-              ON super_workspace_messages(user_id, query, occurred_at DESC, id DESC);
-            CREATE INDEX IF NOT EXISTS idx_super_messages_query_message
-              ON super_workspace_messages(query_message_id, occurred_at, id);
-            CREATE INDEX IF NOT EXISTS idx_super_messages_driver_time
-              ON super_workspace_messages(driver_run_id, occurred_at, id);
-            CREATE INDEX IF NOT EXISTS idx_super_messages_session_time
-              ON super_workspace_messages(provider, viewer_session_id, occurred_at, id);
-            CREATE INDEX IF NOT EXISTS idx_super_driver_runs_query_message
-              ON super_workspace_driver_runs(query_message_id, created_at, id);
-            """
-        )
-        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        connection.commit()
-
-    def _reset_schema(self, connection: sqlite3.Connection) -> None:
-        connection.executescript(
-            """
-            DROP TABLE IF EXISTS super_workspace_driver_checkpoints;
-            DROP TABLE IF EXISTS super_workspace_message_file_changes;
-            DROP TABLE IF EXISTS super_workspace_driver_runs;
-            DROP TABLE IF EXISTS super_workspace_messages;
-            DROP TABLE IF EXISTS super_workspace_queries;
-            DROP TABLE IF EXISTS super_workspace_run_targets;
-            DROP TABLE IF EXISTS super_workspace_runs;
-            DROP TABLE IF EXISTS agent_message_file_changes;
-            DROP TABLE IF EXISTS agent_messages;
-            DROP TABLE IF EXISTS agent_sources;
-            """
-        )
+    def _ensure_driver_run_columns(self) -> None:
+        columns = {
+            "role_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+            "claimed_by": "TEXT",
+            "claim_expires_at": "REAL",
+            "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "next_attempt_at": "REAL",
+            "driver_pid": "INTEGER",
+            "driver_state_path": "TEXT",
+            "error": "TEXT NOT NULL DEFAULT ''",
+            "started_at": "REAL",
+            "finished_at": "REAL",
+        }
+        with self.engine.begin() as connection:
+            existing = {
+                str(row[1])
+                for row in connection.exec_driver_sql("PRAGMA table_info(super_workspace_driver_runs)").all()
+            }
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE super_workspace_driver_runs ADD COLUMN {name} {definition}"))
 
     def create_super_run(
         self,
@@ -261,9 +324,9 @@ class AgentHistoryStore:
             "parent_message_id": parent_message_id,
             "sender_role_id": sender_role_id,
         }
-        with self.connect() as connection:
+        with self.session_scope() as db:
             self._insert_message(
-                connection,
+                db,
                 {
                     "id": message_id,
                     "user_id": normalized_user,
@@ -297,7 +360,6 @@ class AgentHistoryStore:
                     "ingested_at": now,
                 },
             )
-            connection.commit()
         return self.get_super_run(message_id, normalized_user)
 
     def update_super_run(
@@ -312,461 +374,467 @@ class AgentHistoryStore:
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
         now = time.time()
-        with self.connect() as connection:
-            row = connection.execute(
-                "SELECT id FROM super_workspace_messages WHERE id = ? AND user_id = ? AND COALESCE(query, '') != ''",
-                (run_id, normalized_user),
-            ).fetchone()
+        with self.session_scope() as db:
+            row = db.scalar(
+                select(SuperWorkspaceMessageRow).where(
+                    SuperWorkspaceMessageRow.id == run_id,
+                    SuperWorkspaceMessageRow.user_id == normalized_user,
+                    SuperWorkspaceMessageRow.query.is_not(None),
+                    SuperWorkspaceMessageRow.query != "",
+                )
+            )
             if row is None:
                 raise KeyError(run_id)
-            updates = ["ingested_at = ?"]
-            values: list[Any] = [now]
+            row.ingested_at = now
             if status is not None:
-                updates.append("status = ?")
-                values.append(status)
+                row.status = status
             if role_ids is not None:
-                updates.append("selected_role_ids_json = ?")
-                values.append(self._json(role_ids))
+                row.selected_role_ids_json = self._json(role_ids)
             if rationale is not None:
-                updates.append("rationale = ?")
-                values.append(rationale)
+                row.rationale = rationale
             if error is not None:
-                updates.append("error = ?")
-                values.append(error)
-            values.extend([run_id, normalized_user])
-            connection.execute(f"UPDATE super_workspace_messages SET {', '.join(updates)} WHERE id = ? AND user_id = ?", values)
-            connection.commit()
+                row.error = error
         return self.get_super_run(run_id, normalized_user)
 
     def record_super_target(self, user_id: str | None, run_id: str, request: SuperDriverRunCreate) -> SuperHistoryRun:
-        return self.create_driver_run(user_id, run_id, request)
+        return self.create_dispatch_task(user_id, run_id, request)
 
-    def create_driver_run(self, user_id: str | None, query_message_id: str, request: SuperDriverRunCreate) -> SuperHistoryRun:
+    def create_dispatch_task(self, user_id: str | None, query_message_id: str, request: SuperDriverRunCreate) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
         provider, viewer_session_id = self._parse_session_ref(request.session_ref, request.provider)
         provider_session_id = self._provider_session_id(provider, viewer_session_id)
         now = time.time()
-        start = self._latest_session_message(provider, viewer_session_id)
-        with self.connect() as connection:
-            query = connection.execute(
-                """
-                SELECT id, sender_role_id
-                FROM super_workspace_messages
-                WHERE id = ? AND user_id = ? AND COALESCE(query, '') != ''
-                """,
-                (query_message_id, normalized_user),
-            ).fetchone()
+        start = self._latest_session_message(provider, viewer_session_id) if viewer_session_id else None
+        with self.session_scope() as db:
+            query = db.scalar(
+                select(SuperWorkspaceMessageRow).where(
+                    SuperWorkspaceMessageRow.id == query_message_id,
+                    SuperWorkspaceMessageRow.user_id == normalized_user,
+                    SuperWorkspaceMessageRow.query.is_not(None),
+                    SuperWorkspaceMessageRow.query != "",
+                )
+            )
             if query is None:
                 raise KeyError(query_message_id)
-            existing = connection.execute(
-                """
-                SELECT id FROM super_workspace_driver_runs
-                WHERE query_message_id = ? AND role_id = ? AND provider = ? AND viewer_session_id = ?
-                """,
-                (query_message_id, request.role_id, provider, viewer_session_id),
-            ).fetchone()
-            if existing is None:
-                connection.execute(
-                    """
-                    INSERT INTO super_workspace_driver_runs (
-                      id, query_message_id, user_id, role_id, role_name, provider,
-                      viewer_session_id, provider_session_id, session_ref, agent_prompt,
-                      status, parent_message_id, sender_role_id, recipient_role_id,
-                      start_after_occurred_at, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        uuid.uuid4().hex,
-                        query_message_id,
-                        normalized_user,
-                        request.role_id,
-                        request.role_name,
-                        provider,
-                        viewer_session_id,
-                        provider_session_id,
-                        request.session_ref,
-                        request.agent_prompt,
-                        request.parent_message_id or query_message_id,
-                        request.sender_role_id or (str(query["sender_role_id"]) if isinstance(query["sender_role_id"], str) else None),
-                        request.role_id,
-                        float(start["occurred_at"]) if start else now,
-                        now,
-                        now,
-                    ),
+            existing = db.scalar(
+                select(SuperWorkspaceDriverRunRow).where(
+                    SuperWorkspaceDriverRunRow.query_message_id == query_message_id,
+                    SuperWorkspaceDriverRunRow.role_id == request.role_id,
+                    SuperWorkspaceDriverRunRow.provider == provider,
                 )
-            connection.commit()
-        return self.get_super_run(query_message_id, normalized_user, sync_targets=False)
+            )
+            if existing is None:
+                db.add(
+                    SuperWorkspaceDriverRunRow(
+                        id=uuid.uuid4().hex,
+                        query_message_id=query_message_id,
+                        user_id=normalized_user,
+                        role_id=request.role_id,
+                        role_name=request.role_name,
+                        provider=provider,
+                        viewer_session_id=viewer_session_id,
+                        provider_session_id=provider_session_id,
+                        session_ref=request.session_ref,
+                        agent_prompt=request.agent_prompt,
+                        status="queued",
+                        parent_message_id=request.parent_message_id or query_message_id,
+                        sender_role_id=request.sender_role_id or query.sender_role_id,
+                        recipient_role_id=request.role_id,
+                        role_snapshot_json=self._json(request.role_snapshot),
+                        attempt_count=0,
+                        error="",
+                        start_after_occurred_at=float(start.occurred_at) if start else now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+        return self.get_super_run(query_message_id, normalized_user)
 
-    def update_driver_run_status(self, driver_run_id: str, status: str) -> None:
-        with self.connect() as connection:
-            connection.execute("UPDATE super_workspace_driver_runs SET status = ?, updated_at = ? WHERE id = ?", (status, time.time(), driver_run_id))
-            connection.commit()
+    def update_driver_run_status(
+        self,
+        driver_run_id: str,
+        status: str,
+        *,
+        session_ref: str | None = None,
+        agent_prompt: str | None = None,
+        error: str | None = None,
+        driver_pid: int | None = None,
+        driver_state_path: str | None = None,
+        next_attempt_at: float | None = None,
+    ) -> None:
+        values: dict[str, Any] = {"status": status, "updated_at": time.time()}
+        if session_ref is not None:
+            provider, viewer_session_id = self._parse_session_ref(session_ref, "")
+            values["session_ref"] = session_ref
+            values["provider"] = provider
+            values["viewer_session_id"] = viewer_session_id
+            values["provider_session_id"] = self._provider_session_id(provider, viewer_session_id)
+        if agent_prompt is not None:
+            values["agent_prompt"] = agent_prompt
+        if error is not None:
+            values["error"] = error
+        if driver_pid is not None:
+            values["driver_pid"] = driver_pid
+        if driver_state_path is not None:
+            values["driver_state_path"] = driver_state_path
+        if status == "running":
+            values["started_at"] = time.time()
+        if status in {"completed", "failed", "cancelled"}:
+            values["finished_at"] = time.time()
+            values["claimed_by"] = None
+            values["claim_expires_at"] = None
+        if status == "queued":
+            values["claimed_by"] = None
+            values["claim_expires_at"] = None
+            values["next_attempt_at"] = next_attempt_at
+        with self.session_scope() as db:
+            db.execute(
+                update(SuperWorkspaceDriverRunRow)
+                .where(SuperWorkspaceDriverRunRow.id == driver_run_id)
+                .values(**values)
+            )
 
-    def list_super_runs(self, user_id: str | None, limit: int = DEFAULT_RUN_LIMIT, before: float | None = None, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRunsPage:
+    def claim_next_dispatch_task(self, worker_id: str, lease_seconds: float = 60.0) -> SuperDispatchTask | None:
+        now = time.time()
+        with self.session_scope() as db:
+            db.execute(
+                update(SuperWorkspaceDriverRunRow)
+                .where(
+                    SuperWorkspaceDriverRunRow.status == "claimed",
+                    SuperWorkspaceDriverRunRow.claim_expires_at.is_not(None),
+                    SuperWorkspaceDriverRunRow.claim_expires_at <= now,
+                )
+                .values(status="queued", claimed_by=None, claim_expires_at=None, updated_at=now)
+            )
+            candidates = list(
+                db.scalars(
+                    select(SuperWorkspaceDriverRunRow)
+                    .where(
+                        SuperWorkspaceDriverRunRow.status == "queued",
+                        or_(SuperWorkspaceDriverRunRow.next_attempt_at.is_(None), SuperWorkspaceDriverRunRow.next_attempt_at <= now),
+                    )
+                    .order_by(SuperWorkspaceDriverRunRow.created_at.asc(), SuperWorkspaceDriverRunRow.id.asc())
+                    .limit(20)
+                ).all()
+            )
+            for row in candidates:
+                active = db.scalar(
+                    select(SuperWorkspaceDriverRunRow.id)
+                    .where(
+                        SuperWorkspaceDriverRunRow.id != row.id,
+                        SuperWorkspaceDriverRunRow.user_id == row.user_id,
+                        SuperWorkspaceDriverRunRow.role_id == row.role_id,
+                        or_(
+                            SuperWorkspaceDriverRunRow.status == "running",
+                            and_(
+                                SuperWorkspaceDriverRunRow.status == "claimed",
+                                or_(SuperWorkspaceDriverRunRow.claim_expires_at.is_(None), SuperWorkspaceDriverRunRow.claim_expires_at > now),
+                            ),
+                        ),
+                    )
+                    .limit(1)
+                )
+                if active:
+                    continue
+                row.status = "claimed"
+                row.claimed_by = worker_id
+                row.claim_expires_at = now + lease_seconds
+                row.attempt_count = int(row.attempt_count or 0) + 1
+                row.updated_at = now
+                return self._dispatch_task_from_row(row)
+        return None
+
+    def get_dispatch_task(self, task_id: str) -> SuperDispatchTask | None:
+        with self.read_session() as db:
+            row = db.scalar(select(SuperWorkspaceDriverRunRow).where(SuperWorkspaceDriverRunRow.id == task_id))
+            return self._dispatch_task_from_row(row) if row is not None else None
+
+    def summarize_super_run_status(self, run_id: str, user_id: str | None, fallback_error: str = "") -> SuperHistoryRun:
+        run = self.get_super_run(run_id, user_id)
+        statuses = [target.status for target in run.targets]
+        if any(status == "failed" for status in statuses):
+            return self.update_super_run(run_id, user_id, status="failed", error=fallback_error)
+        if statuses and all(status == "completed" for status in statuses):
+            return self.update_super_run(run_id, user_id, status="completed", error="")
+        if any(status in {"claimed", "running"} for status in statuses):
+            return self.update_super_run(run_id, user_id, status="running", error="")
+        return self.update_super_run(run_id, user_id, status="queued", error="")
+
+    def list_super_runs(
+        self,
+        user_id: str | None,
+        limit: int = DEFAULT_RUN_LIMIT,
+        before: float | None = None,
+        after: float | None = None,
+        message_limit: int = DEFAULT_MESSAGE_LIMIT,
+    ) -> SuperHistoryRunsPage:
         normalized_user = normalize_user_id(user_id)
         bounded_limit = max(1, min(limit, 100))
-        params: list[Any] = [normalized_user]
-        where = "WHERE user_id = ? AND COALESCE(query, '') != ''"
-        if before is not None:
-            where += " AND occurred_at < ?"
-            params.append(before)
-        with self.connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT * FROM super_workspace_messages
-                {where}
-                ORDER BY occurred_at DESC, id DESC
-                LIMIT ?
-                """,
-                (*params, bounded_limit + 1),
-            ).fetchall()
-        has_more = len(rows) > bounded_limit
-        rows = rows[:bounded_limit]
+        statement = (
+            select(SuperWorkspaceMessageRow)
+            .where(
+                SuperWorkspaceMessageRow.user_id == normalized_user,
+                SuperWorkspaceMessageRow.query.is_not(None),
+                SuperWorkspaceMessageRow.query != "",
+            )
+        )
+        if after is not None:
+            changed_driver_runs = select(SuperWorkspaceDriverRunRow.query_message_id).where(
+                SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                SuperWorkspaceDriverRunRow.updated_at > after,
+            )
+            statement = statement.where(
+                or_(
+                    SuperWorkspaceMessageRow.ingested_at > after,
+                    SuperWorkspaceMessageRow.id.in_(changed_driver_runs),
+                )
+            )
+        elif before is not None:
+            statement = statement.where(SuperWorkspaceMessageRow.occurred_at < before)
+        statement = statement.order_by(SuperWorkspaceMessageRow.occurred_at.desc(), SuperWorkspaceMessageRow.id.desc())
+        if after is None:
+            statement = statement.limit(bounded_limit + 1)
+        with self.read_session() as db:
+            rows = list(db.scalars(statement).all())
+        has_more = after is None and len(rows) > bounded_limit
+        if after is None:
+            rows = rows[:bounded_limit]
         runs = [self._run_from_message(row, message_limit=message_limit) for row in rows]
-        return SuperHistoryRunsPage(runs=runs, has_more=has_more, next_before=runs[-1].created_at if has_more and runs else None)
+        next_after = max((run.updated_at for run in runs), default=None)
+        return SuperHistoryRunsPage(
+            runs=runs,
+            has_more=has_more,
+            next_before=runs[-1].created_at if has_more and runs else None,
+            next_after=next_after,
+        )
 
-    def get_super_run(self, run_id: str, user_id: str | None, sync_targets: bool = False, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
+    def get_super_run(self, run_id: str, user_id: str | None, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM super_workspace_messages
-                WHERE id = ? AND user_id = ? AND COALESCE(query, '') != ''
-                """,
-                (run_id, normalized_user),
-            ).fetchone()
+        with self.read_session() as db:
+            row = db.scalar(
+                select(SuperWorkspaceMessageRow).where(
+                    SuperWorkspaceMessageRow.id == run_id,
+                    SuperWorkspaceMessageRow.user_id == normalized_user,
+                    SuperWorkspaceMessageRow.query.is_not(None),
+                    SuperWorkspaceMessageRow.query != "",
+                )
+            )
         if row is None:
             raise KeyError(run_id)
-        if sync_targets:
-            for target in self._driver_rows(run_id):
-                self.sync_session(str(target["provider"]), str(target["viewer_session_id"]), normalized_user)
         return self._run_from_message(row, message_limit=message_limit)
 
-    def sync_super_workspace(self, user_id: str | None) -> None:
-        normalized_user = normalize_user_id(user_id)
-        with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT DISTINCT provider, viewer_session_id FROM super_workspace_driver_runs WHERE user_id = ?",
-                (normalized_user,),
-            ).fetchall()
-        for row in rows:
-            self.sync_session(str(row["provider"]), str(row["viewer_session_id"]), normalized_user)
-
-    def sync_session(self, provider: str, viewer_session_id: str, user_id: str | None = None) -> None:
-        if provider == "codex":
-            self._sync_codex_session(viewer_session_id, user_id)
-        elif provider == "hermes":
-            self._sync_hermes_session(viewer_session_id, user_id)
-
-    def _sync_codex_session(self, viewer_session_id: str, user_id: str | None) -> None:
-        try:
-            session = codex_session_manager.get(viewer_session_id)
-        except Exception:
-            return
-        normalized_user = normalize_user_id(user_id or session.user_id)
-        compact_events = codex_session_manager._compact_events(session.events)
-        raw_by_index = {event.get("index"): event for event in session.events}
-        path = session.rollout_path.as_posix() if session.rollout_path else None
-        with self.connect() as connection:
-            for prompt_index, prompt in enumerate(session.prompts):
-                text = prompt.get("text") if isinstance(prompt, dict) else ""
-                created_at = prompt.get("created_at") if isinstance(prompt, dict) else None
-                if not isinstance(text, str) or not text.strip():
-                    continue
-                received_at = float(created_at if isinstance(created_at, (int, float)) else time.time())
-                source_event_id = f"prompt:{prompt_index}:{received_at}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}"
-                self._insert_message(connection, self._provider_message_row(
-                    normalized_user, "codex", viewer_session_id, session.codex_session_id,
-                    prompt_index, received_at, session.meta_path.as_posix(), source_event_id, None,
-                    "user", "message:user", text.strip(), {"type": "codex_prompt", "index": prompt_index, "prompt": prompt},
-                ))
-            for compact in compact_events:
-                raw_event = raw_by_index.get(compact.get("index"))
-                raw = raw_event.get("raw") if isinstance(raw_event, dict) and isinstance(raw_event.get("raw"), dict) else compact.get("raw_preview") or {}
-                index = int(compact.get("index") or 0)
-                source_event_id = self._raw_identifier(raw) or f"{path or viewer_session_id}:{index + 1}"
-                received_at = float(compact.get("received_at") or (raw_event.get("received_at") if isinstance(raw_event, dict) else time.time()))
-                row = self._provider_message_row(
-                    normalized_user, "codex", viewer_session_id, session.codex_session_id,
-                    index, received_at, path, source_event_id, index + 1,
-                    self._codex_role(raw, compact), str(compact.get("event_type") or AgentEventType.OPERATION),
-                    str(compact.get("text") or ""), raw,
-                )
-                row["patch_text"] = compact.get("patch_text") if isinstance(compact.get("patch_text"), str) else None
-                row["file_changes"] = compact.get("file_changes") or []
-                self._insert_message(connection, row)
-            connection.commit()
-
-    def _sync_hermes_session(self, viewer_session_id: str, user_id: str | None) -> None:
-        try:
-            session = hermes_session_manager.get(viewer_session_id)
-        except Exception:
-            return
-        normalized_user = normalize_user_id(user_id or session.user_id)
-        if not session.hermes_session_id or not HERMES_STATE_DB.exists():
-            return
-        source: sqlite3.Connection | None = None
-        try:
-            source = sqlite3.connect(f"file:{HERMES_STATE_DB.as_posix()}?mode=ro", uri=True, timeout=1.0)
-            source.row_factory = sqlite3.Row
-            rows = source.execute(
-                """
-                SELECT id, role, content, tool_call_id, tool_calls, tool_name, timestamp,
-                       token_count, finish_reason, reasoning, reasoning_content,
-                       reasoning_details, codex_reasoning_items, codex_message_items
-                FROM messages
-                WHERE session_id = ?
-                ORDER BY timestamp, id
-                """,
-                (session.hermes_session_id,),
-            ).fetchall()
-        except sqlite3.Error:
-            return
-        finally:
-            if source is not None:
-                source.close()
-        with self.connect() as connection:
-            event_index = 0
-            for row in rows:
-                raw = {key: row[key] for key in row.keys()}
-                for event in self._hermes_events_from_row(row):
-                    source_event_id = f"{row['id']}:{event['source']}"
-                    self._insert_message(connection, self._provider_message_row(
-                        normalized_user, "hermes", viewer_session_id, session.hermes_session_id,
-                        event_index, float(row["timestamp"] or time.time()), HERMES_STATE_DB.as_posix(), source_event_id, None,
-                        event["role"], event["event_type"], event["text"], raw,
-                    ))
-                    event_index += 1
-            connection.commit()
-
-    def _provider_message_row(
-        self,
-        user_id: str,
-        provider: str,
-        viewer_session_id: str,
-        provider_session_id: str | None,
-        event_index: int,
-        received_at: float,
-        source_path: str | None,
-        source_event_id: str,
-        source_line: int | None,
-        role: str,
-        event_type: str,
-        text: str,
-        raw: dict[str, Any],
-    ) -> dict[str, Any]:
-        return {
-            "id": self._message_id(provider, viewer_session_id, source_event_id),
-            "user_id": user_id,
-            "conversation_id": "default",
-            "parent_message_id": None,
-            "sender_role_id": None,
-            "recipient_role_id": None,
-            "role_id": None,
-            "query_message_id": None,
-            "driver_run_id": None,
-            "provider": provider,
-            "viewer_session_id": viewer_session_id,
-            "provider_session_id": provider_session_id,
-            "event_index": event_index,
-            "received_at": received_at,
-            "source_path": source_path,
-            "source_event_id": source_event_id,
-            "source_line": source_line,
-            "role": role,
-            "event_type": event_type,
-            "text": text,
-            "query": None,
-            "status": None,
-            "rationale": "",
-            "error": "",
-            "requested_role_ids_json": "[]",
-            "selected_role_ids_json": "[]",
-            "patch_text": None,
-            "raw_json": self._json(raw),
-            "occurred_at": received_at,
-            "ingested_at": time.time(),
-        }
-
-    def _run_from_message(self, row: sqlite3.Row, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
-        targets = [self._driver_from_row(target, message_limit=message_limit) for target in self._driver_rows(str(row["id"]))]
-        selected_role_ids = [str(value) for value in self._parse_json(row["selected_role_ids_json"], []) if isinstance(value, str)]
+    def _run_from_message(self, row: SuperWorkspaceMessageRow, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
+        targets = [self._driver_from_row(target, message_limit=message_limit) for target in self._driver_rows(str(row.id))]
+        selected_role_ids = [str(value) for value in self._parse_json(row.selected_role_ids_json, []) if isinstance(value, str)]
         target_role_ids = [target.role_id for target in targets]
-        query = str(row["query"] or "")
+        query = str(row.query or "")
+        updated_at = max([float(row.ingested_at), *(target.updated_at for target in targets)])
         return SuperHistoryRun(
-            id=str(row["id"]),
-            user_id=str(row["user_id"]),
+            id=str(row.id),
+            user_id=str(row.user_id),
             message=query,
             query=query,
-            message_id=str(row["id"]),
+            message_id=str(row.id),
             role_ids=target_role_ids or selected_role_ids,
-            status=str(row["status"] or "queued"),
-            rationale=str(row["rationale"] or ""),
-            error=str(row["error"] or ""),
-            parent_message_id=row["parent_message_id"] if isinstance(row["parent_message_id"], str) else None,
-            sender_role_id=row["sender_role_id"] if isinstance(row["sender_role_id"], str) else None,
-            created_at=float(row["occurred_at"]),
-            updated_at=float(row["ingested_at"]),
+            status=str(row.status or "queued"),
+            rationale=str(row.rationale or ""),
+            error=str(row.error or ""),
+            parent_message_id=row.parent_message_id if isinstance(row.parent_message_id, str) else None,
+            sender_role_id=row.sender_role_id if isinstance(row.sender_role_id, str) else None,
+            created_at=float(row.occurred_at),
+            updated_at=updated_at,
             targets=targets,
         )
 
-    def _driver_rows(self, query_message_id: str) -> list[sqlite3.Row]:
-        with self.connect() as connection:
-            return connection.execute(
-                "SELECT * FROM super_workspace_driver_runs WHERE query_message_id = ? ORDER BY created_at, id",
-                (query_message_id,),
-            ).fetchall()
+    def _driver_rows(self, query_message_id: str) -> list[SuperWorkspaceDriverRunRow]:
+        with self.read_session() as db:
+            return list(
+                db.scalars(
+                    select(SuperWorkspaceDriverRunRow)
+                    .where(SuperWorkspaceDriverRunRow.query_message_id == query_message_id)
+                    .order_by(SuperWorkspaceDriverRunRow.created_at, SuperWorkspaceDriverRunRow.id)
+                ).all()
+            )
 
-    def _driver_from_row(self, row: sqlite3.Row, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryTarget:
-        provider = str(row["provider"])
-        viewer_session_id = str(row["viewer_session_id"])
-        self.sync_session(provider, viewer_session_id)
+    def _driver_from_row(self, row: SuperWorkspaceDriverRunRow, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryTarget:
+        provider = str(row.provider)
+        viewer_session_id = str(row.viewer_session_id)
         messages = self._driver_messages(row, message_limit=message_limit)
+        updated_at = max([float(row.updated_at), *(message.occurred_at for message in messages)])
         return SuperHistoryTarget(
-            id=str(row["id"]),
-            run_id=str(row["query_message_id"]),
-            role_id=str(row["role_id"]),
-            role_name=str(row["role_name"]),
+            id=str(row.id),
+            run_id=str(row.query_message_id),
+            role_id=str(row.role_id),
+            role_name=str(row.role_name),
             provider=provider,
             viewer_session_id=viewer_session_id,
-            session_ref=str(row["session_ref"]),
-            agent_prompt=str(row["agent_prompt"] or ""),
-            status=str(row["status"]),
-            created_at=float(row["created_at"]),
-            updated_at=float(row["updated_at"]),
+            session_ref=str(row.session_ref),
+            agent_prompt=str(row.agent_prompt or ""),
+            status=str(row.status),
+            created_at=float(row.created_at),
+            updated_at=updated_at,
             messages=messages,
         )
 
-    def _driver_messages(self, driver: sqlite3.Row, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> list[AgentHistoryMessage]:
-        provider = str(driver["provider"])
-        viewer_session_id = str(driver["viewer_session_id"])
-        driver_id = str(driver["id"])
-        query_message_id = str(driver["query_message_id"])
-        with self.connect() as connection:
-            start = self._driver_anchor_time(connection, driver)
+    def _dispatch_task_from_row(self, row: SuperWorkspaceDriverRunRow) -> SuperDispatchTask:
+        return SuperDispatchTask(
+            id=str(row.id),
+            query_message_id=str(row.query_message_id),
+            user_id=str(row.user_id),
+            role_id=str(row.role_id),
+            role_name=str(row.role_name),
+            provider=str(row.provider),
+            viewer_session_id=str(row.viewer_session_id or ""),
+            provider_session_id=row.provider_session_id if isinstance(row.provider_session_id, str) else None,
+            session_ref=str(row.session_ref or ""),
+            agent_prompt=str(row.agent_prompt or ""),
+            status=str(row.status),
+            parent_message_id=row.parent_message_id if isinstance(row.parent_message_id, str) else None,
+            sender_role_id=row.sender_role_id if isinstance(row.sender_role_id, str) else None,
+            recipient_role_id=str(row.recipient_role_id),
+            role_snapshot=self._parse_json(row.role_snapshot_json, {}),
+            claimed_by=row.claimed_by if isinstance(row.claimed_by, str) else None,
+            claim_expires_at=float(row.claim_expires_at) if isinstance(row.claim_expires_at, (int, float)) else None,
+            attempt_count=int(row.attempt_count or 0),
+            next_attempt_at=float(row.next_attempt_at) if isinstance(row.next_attempt_at, (int, float)) else None,
+            driver_pid=int(row.driver_pid) if isinstance(row.driver_pid, int) else None,
+            driver_state_path=row.driver_state_path if isinstance(row.driver_state_path, str) else None,
+            error=str(row.error or ""),
+            start_after_occurred_at=float(row.start_after_occurred_at or 0),
+            created_at=float(row.created_at),
+            started_at=float(row.started_at) if isinstance(row.started_at, (int, float)) else None,
+            finished_at=float(row.finished_at) if isinstance(row.finished_at, (int, float)) else None,
+            updated_at=float(row.updated_at),
+        )
+
+    def _driver_messages(self, driver: SuperWorkspaceDriverRunRow, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> list[AgentHistoryMessage]:
+        provider = str(driver.provider)
+        viewer_session_id = str(driver.viewer_session_id)
+        driver_id = str(driver.id)
+        with self.read_session() as db:
+            linked_rows = list(
+                db.scalars(
+                    select(SuperWorkspaceMessageRow)
+                    .where(
+                        SuperWorkspaceMessageRow.driver_run_id == driver_id,
+                        SuperWorkspaceMessageRow.role != "user",
+                    )
+                    .order_by(SuperWorkspaceMessageRow.occurred_at.asc(), SuperWorkspaceMessageRow.id.asc())
+                    .limit(max(1, min(message_limit, 300)))
+                ).all()
+            )
+            if linked_rows:
+                return [self._message_from_row(row) for row in linked_rows]
+            start = self._driver_anchor_time(db, driver)
             if start is None:
                 return []
-            next_drivers = connection.execute(
-                """
-                SELECT * FROM super_workspace_driver_runs
-                WHERE provider = ? AND viewer_session_id = ? AND id != ?
-                ORDER BY created_at ASC, id ASC
-                """,
-                (provider, viewer_session_id, driver_id),
-            ).fetchall()
+            next_drivers = list(
+                db.scalars(
+                    select(SuperWorkspaceDriverRunRow)
+                    .where(
+                        SuperWorkspaceDriverRunRow.provider == provider,
+                        SuperWorkspaceDriverRunRow.viewer_session_id == viewer_session_id,
+                        SuperWorkspaceDriverRunRow.id != driver_id,
+                    )
+                    .order_by(SuperWorkspaceDriverRunRow.created_at.asc(), SuperWorkspaceDriverRunRow.id.asc())
+                ).all()
+            )
             next_starts: list[float] = []
             for item in next_drivers:
-                next_start = self._driver_anchor_time(connection, item)
+                next_start = self._driver_anchor_time(db, item)
                 if next_start is not None and next_start > start:
                     next_starts.append(next_start)
-            upper = "AND occurred_at < ?" if next_starts else ""
-            upper_params = [min(next_starts)] if next_starts else []
-            connection.execute(
-                f"""
-                UPDATE super_workspace_messages
-                SET query_message_id = ?, driver_run_id = ?,
-                    parent_message_id = ?, sender_role_id = ?, recipient_role_id = ?, role_id = ?
-                WHERE provider = ? AND viewer_session_id = ? AND occurred_at >= ?
-                  AND role != 'user'
-                  {upper}
-                """,
-                [
-                    query_message_id,
-                    driver_id,
-                    driver["parent_message_id"] if isinstance(driver["parent_message_id"], str) else None,
-                    driver["sender_role_id"] if isinstance(driver["sender_role_id"], str) else None,
-                    driver["recipient_role_id"] if isinstance(driver["recipient_role_id"], str) else str(driver["role_id"]),
-                    str(driver["role_id"]),
-                    provider,
-                    viewer_session_id,
-                    start,
-                    *upper_params,
-                ],
+            update_conditions = [
+                SuperWorkspaceMessageRow.provider == provider,
+                SuperWorkspaceMessageRow.viewer_session_id == viewer_session_id,
+                SuperWorkspaceMessageRow.occurred_at >= start,
+                SuperWorkspaceMessageRow.role != "user",
+            ]
+            select_conditions = list(update_conditions)
+            if next_starts:
+                upper = min(next_starts)
+                update_conditions.append(SuperWorkspaceMessageRow.occurred_at < upper)
+                select_conditions.append(SuperWorkspaceMessageRow.occurred_at < upper)
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceMessageRow)
+                    .where(*select_conditions)
+                    .order_by(SuperWorkspaceMessageRow.occurred_at.asc(), SuperWorkspaceMessageRow.id.asc())
+                    .limit(max(1, min(message_limit, 300)))
+                ).all()
             )
-            connection.commit()
-            rows = connection.execute(
-                f"""
-                SELECT * FROM super_workspace_messages
-                WHERE provider = ? AND viewer_session_id = ? AND occurred_at >= ?
-                  AND role != 'user'
-                  {upper}
-                ORDER BY occurred_at ASC, id ASC
-                LIMIT ?
-                """,
-                [provider, viewer_session_id, start, *upper_params, max(1, min(message_limit, 300))],
-            ).fetchall()
         return [self._message_from_row(row) for row in rows]
 
-    def _driver_anchor_time(self, connection: sqlite3.Connection, driver: sqlite3.Row) -> float | None:
-        provider = str(driver["provider"])
-        viewer_session_id = str(driver["viewer_session_id"])
-        start = float(driver["start_after_occurred_at"] or driver["created_at"])
-        prompt = str(driver["agent_prompt"] or "").strip()
+    def _driver_anchor_time(self, db: Session, driver: SuperWorkspaceDriverRunRow) -> float | None:
+        provider = str(driver.provider)
+        viewer_session_id = str(driver.viewer_session_id)
+        start = float(driver.start_after_occurred_at or driver.created_at)
+        prompt = str(driver.agent_prompt or "").strip()
         if not prompt:
             return start
-        row = connection.execute(
-            """
-            SELECT occurred_at
-            FROM super_workspace_messages
-            WHERE provider = ? AND viewer_session_id = ? AND role = 'user'
-              AND text = ? AND occurred_at >= ?
-            ORDER BY occurred_at ASC, id ASC
-            LIMIT 1
-            """,
-            (provider, viewer_session_id, prompt, start),
-        ).fetchone()
-        if row is None:
+        occurred_at = db.scalar(
+            select(SuperWorkspaceMessageRow.occurred_at)
+            .where(
+                SuperWorkspaceMessageRow.provider == provider,
+                SuperWorkspaceMessageRow.viewer_session_id == viewer_session_id,
+                SuperWorkspaceMessageRow.role == "user",
+                SuperWorkspaceMessageRow.text == prompt,
+                SuperWorkspaceMessageRow.occurred_at >= start,
+            )
+            .order_by(SuperWorkspaceMessageRow.occurred_at.asc(), SuperWorkspaceMessageRow.id.asc())
+            .limit(1)
+        )
+        if occurred_at is None:
             return None
-        return float(row["occurred_at"])
+        return float(occurred_at)
 
-    def _message_from_row(self, row: sqlite3.Row) -> AgentHistoryMessage:
-        query = row["query"] if isinstance(row["query"], str) and row["query"] else None
-        query_message_id = row["query_message_id"] if isinstance(row["query_message_id"], str) else (str(row["id"]) if query else None)
-        driver_run_id = row["driver_run_id"] if isinstance(row["driver_run_id"], str) else None
+    def _message_from_row(self, row: SuperWorkspaceMessageRow) -> AgentHistoryMessage:
+        query = row.query if isinstance(row.query, str) and row.query else None
+        query_message_id = row.query_message_id if isinstance(row.query_message_id, str) else (str(row.id) if query else None)
+        driver_run_id = row.driver_run_id if isinstance(row.driver_run_id, str) else None
         return AgentHistoryMessage(
-            id=str(row["id"]),
-            provider=str(row["provider"]),
-            viewer_session_id=row["viewer_session_id"] if isinstance(row["viewer_session_id"], str) else None,
-            provider_session_id=row["provider_session_id"] if isinstance(row["provider_session_id"], str) else None,
-            index=int(row["event_index"]),
-            received_at=float(row["received_at"]),
-            role=str(row["role"]),
-            event_type=str(row["event_type"]),
-            text=str(row["text"] or ""),
+            id=str(row.id),
+            provider=str(row.provider),
+            viewer_session_id=row.viewer_session_id if isinstance(row.viewer_session_id, str) else None,
+            provider_session_id=row.provider_session_id if isinstance(row.provider_session_id, str) else None,
+            index=int(row.event_index),
+            received_at=float(row.received_at),
+            role=str(row.role),
+            event_type=str(row.event_type),
+            text=str(row.text or ""),
             query=query,
-            status=row["status"] if isinstance(row["status"], str) else None,
-            rationale=str(row["rationale"] or ""),
-            error=str(row["error"] or ""),
-            requested_role_ids=[str(value) for value in self._parse_json(row["requested_role_ids_json"], []) if isinstance(value, str)],
-            selected_role_ids=[str(value) for value in self._parse_json(row["selected_role_ids_json"], []) if isinstance(value, str)],
-            file_changes=self._file_changes_for_message(str(row["id"])),
-            patch_text=row["patch_text"] if isinstance(row["patch_text"], str) else None,
-            raw=self._parse_json(row["raw_json"], {}),
-            occurred_at=float(row["occurred_at"]),
+            status=row.status if isinstance(row.status, str) else None,
+            rationale=str(row.rationale or ""),
+            error=str(row.error or ""),
+            requested_role_ids=[str(value) for value in self._parse_json(row.requested_role_ids_json, []) if isinstance(value, str)],
+            selected_role_ids=[str(value) for value in self._parse_json(row.selected_role_ids_json, []) if isinstance(value, str)],
+            file_changes=self._file_changes_for_message(str(row.id)),
+            patch_text=row.patch_text if isinstance(row.patch_text, str) else None,
+            raw=self._parse_json(row.raw_json, {}),
+            occurred_at=float(row.occurred_at),
             query_id=query_message_id,
             query_message_id=query_message_id,
             driver_run_id=driver_run_id,
             super_run_id=query_message_id,
             super_target_id=driver_run_id,
-            parent_message_id=row["parent_message_id"] if isinstance(row["parent_message_id"], str) else None,
-            sender_role_id=row["sender_role_id"] if isinstance(row["sender_role_id"], str) else None,
-            recipient_role_id=row["recipient_role_id"] if isinstance(row["recipient_role_id"], str) else None,
+            parent_message_id=row.parent_message_id if isinstance(row.parent_message_id, str) else None,
+            sender_role_id=row.sender_role_id if isinstance(row.sender_role_id, str) else None,
+            recipient_role_id=row.recipient_role_id if isinstance(row.recipient_role_id, str) else None,
         )
 
-    def _insert_message(self, connection: sqlite3.Connection, row: dict[str, Any]) -> None:
+    def _insert_message(self, db: Session, row: dict[str, Any]) -> None:
         file_changes = row.pop("file_changes", [])
-        columns = ", ".join(row.keys())
-        placeholders = ", ".join("?" for _ in row)
-        updates = ", ".join(f"{key}=excluded.{key}" for key in row.keys() if key != "id")
-        connection.execute(
-            f"INSERT INTO super_workspace_messages ({columns}) VALUES ({placeholders}) ON CONFLICT(provider, viewer_session_id, source_event_id) DO UPDATE SET {updates}",
-            tuple(row.values()),
+        statement = sqlite_insert(SuperWorkspaceMessageRow).values(**row)
+        db.execute(
+            statement.on_conflict_do_update(
+                index_elements=["provider", "viewer_session_id", "source_event_id"],
+                set_={key: statement.excluded[key] for key in row.keys() if key != "id"},
+            )
         )
-        self._replace_file_changes(connection, str(row["id"]), file_changes)
+        self._replace_file_changes(db, str(row["id"]), file_changes)
 
-    def _replace_file_changes(self, connection: sqlite3.Connection, message_id: str, file_changes: Any) -> None:
-        connection.execute("DELETE FROM super_workspace_message_file_changes WHERE message_id = ?", (message_id,))
+    def _replace_file_changes(self, db: Session, message_id: str, file_changes: Any) -> None:
+        db.execute(delete(SuperWorkspaceMessageFileChangeRow).where(SuperWorkspaceMessageFileChangeRow.message_id == message_id))
         if not isinstance(file_changes, list):
             return
         for position, item in enumerate(file_changes):
@@ -777,92 +845,44 @@ class AgentHistoryStore:
             if not isinstance(path, str) or not isinstance(change_type, str):
                 continue
             diff = item.get("diff") if isinstance(item.get("diff"), str) else None
-            connection.execute(
-                "INSERT INTO super_workspace_message_file_changes (message_id, position, path, change_type, diff) VALUES (?, ?, ?, ?, ?)",
-                (message_id, position, path, change_type, diff),
+            db.add(
+                SuperWorkspaceMessageFileChangeRow(
+                    message_id=message_id,
+                    position=position,
+                    path=path,
+                    change_type=change_type,
+                    diff=diff,
+                )
             )
 
     def _file_changes_for_message(self, message_id: str) -> list[AgentHistoryFileChange]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT path, change_type, diff FROM super_workspace_message_file_changes WHERE message_id = ? ORDER BY position",
-                (message_id,),
-            ).fetchall()
-        return [AgentHistoryFileChange(path=str(row["path"]), change_type=str(row["change_type"]), diff=row["diff"] if isinstance(row["diff"], str) else None) for row in rows]
+        with self.read_session() as db:
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceMessageFileChangeRow)
+                    .where(SuperWorkspaceMessageFileChangeRow.message_id == message_id)
+                    .order_by(SuperWorkspaceMessageFileChangeRow.position)
+                ).all()
+            )
+        return [AgentHistoryFileChange(path=str(row.path), change_type=str(row.change_type), diff=row.diff if isinstance(row.diff, str) else None) for row in rows]
 
-    def _latest_session_message(self, provider: str, viewer_session_id: str) -> sqlite3.Row | None:
-        with self.connect() as connection:
-            return connection.execute(
-                "SELECT id, occurred_at FROM super_workspace_messages WHERE provider = ? AND viewer_session_id = ? ORDER BY occurred_at DESC, id DESC LIMIT 1",
-                (provider, viewer_session_id),
-            ).fetchone()
+    def _latest_session_message(self, provider: str, viewer_session_id: str) -> SuperWorkspaceMessageRow | None:
+        with self.read_session() as db:
+            return db.scalar(
+                select(SuperWorkspaceMessageRow)
+                .where(SuperWorkspaceMessageRow.provider == provider, SuperWorkspaceMessageRow.viewer_session_id == viewer_session_id)
+                .order_by(SuperWorkspaceMessageRow.occurred_at.desc(), SuperWorkspaceMessageRow.id.desc())
+                .limit(1)
+            )
 
     def _provider_session_id(self, provider: str, viewer_session_id: str) -> str | None:
-        try:
-            if provider == "codex":
-                return codex_session_manager.get(viewer_session_id).codex_session_id
-            if provider == "hermes":
-                return hermes_session_manager.get(viewer_session_id).hermes_session_id
-        except Exception:
-            return None
         return None
-
-    def _hermes_events_from_row(self, row: sqlite3.Row) -> list[dict[str, str]]:
-        role = str(row["role"] or "")
-        events: list[dict[str, str]] = []
-        if role == "user":
-            text = row["content"] if isinstance(row["content"], str) else ""
-            if text.strip():
-                events.append({"source": "content", "role": "user", "event_type": "message:user", "text": text.strip()})
-            return events
-        reasoning = row["reasoning_content"] if isinstance(row["reasoning_content"], str) and row["reasoning_content"].strip() else row["reasoning"] if isinstance(row["reasoning"], str) else ""
-        if reasoning.strip():
-            events.append({"source": "reasoning", "role": "assistant", "event_type": AgentEventType.REASONING, "text": reasoning.strip()})
-        content = row["content"] if isinstance(row["content"], str) else ""
-        if role == "tool" and content.strip():
-            tool_name = row["tool_name"] if isinstance(row["tool_name"], str) else ""
-            prefix = f"Tool output: {tool_name}" if tool_name else "Tool output"
-            events.append({"source": "tool_content", "role": "tool", "event_type": AgentEventType.TOOL_RESULT, "text": "\n".join(part for part in (prefix, content.strip()) if part)})
-        elif content.strip():
-            events.append({"source": "content", "role": role or "assistant", "event_type": "message:assistant" if role == "assistant" else f"message:{role}", "text": content.strip()})
-        tool_calls = row["tool_calls"]
-        if isinstance(tool_calls, str) and tool_calls.strip():
-            events.append({"source": "tool_calls", "role": "assistant", "event_type": AgentEventType.TOOL_CALL, "text": tool_calls.strip()})
-        return events
 
     def _parse_session_ref(self, session_ref: str, fallback_provider: str) -> tuple[str, str]:
         if ":" in session_ref:
             provider, session_id = session_ref.split(":", 1)
             return provider or fallback_provider, session_id
         return fallback_provider, session_ref
-
-    def _codex_role(self, raw: dict, compact: dict) -> str:
-        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
-        role = payload.get("role")
-        if isinstance(role, str):
-            return role
-        event_type = str(compact.get("event_type") or "")
-        if event_type.startswith("message:"):
-            return event_type.split(":", 1)[1]
-        if event_type in {AgentEventType.TOOL_RESULT, AgentEventType.TOOL_CALL, AgentEventType.FUNCTION_CALL, AgentEventType.CUSTOM_TOOL_CALL}:
-            return "tool"
-        return "assistant"
-
-    def _raw_identifier(self, value: Any) -> str | None:
-        if isinstance(value, dict):
-            for key in ("id", "message_id", "item_id", "call_id", "turn_id"):
-                item = value.get(key)
-                if isinstance(item, str) and item:
-                    return item
-            found = self._raw_identifier(value.get("payload"))
-            if found:
-                return found
-            return self._raw_identifier(value.get("item"))
-        return None
-
-    def _message_id(self, provider: str, viewer_session_id: str | None, source_event_id: str | None) -> str:
-        value = f"{provider}:{viewer_session_id or ''}:{source_event_id or uuid.uuid4().hex}"
-        return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     def _json(self, value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)

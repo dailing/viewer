@@ -11,6 +11,7 @@ dependencies = [
   "loguru>=0.7.3",
   "websockets>=13.0",
   "whisperlivekit>=0.2.20.post1",
+  "sqlalchemy>=2.0",
 ]
 
 [dependency-groups]

@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 
+const apiTarget = process.env.VITE_VIEWER_API_TARGET || "http://127.0.0.1:18989";
+
 export default defineConfig({
   plugins: [vue()],
   build: {
@@ -9,7 +11,7 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     proxy: {
-      "/api": "http://127.0.0.1:8000",
+      "/api": apiTarget,
     },
   },
 });

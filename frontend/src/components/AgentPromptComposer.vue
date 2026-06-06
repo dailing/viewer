@@ -86,6 +86,7 @@ function handleKeydown(event: KeyboardEvent) {
       :context-id="voiceContextId"
       :placeholder="placeholder"
       :clearable="!isEditingQueue"
+      :trailing-actions="!isEditingQueue"
       @keydown="handleKeydown"
       @clear="emit('clear-prompt')"
     >
@@ -105,15 +106,30 @@ function handleKeydown(event: KeyboardEvent) {
         </button>
       </template>
       <template v-else>
-        <button class="btn btn-outline-primary" type="button" :disabled="!canQueue" title="Queue message (Cmd/Ctrl+Enter)" @click="emit('queue-prompt')">
-          <i class="bi bi-list-ol"></i>
-          <span>Queue</span>
-        </button>
-        <button class="btn btn-outline-danger" type="button" :disabled="!isRunning || stopping" @click="emit('stop-run')">
-          <i class="bi bi-stop-fill"></i>
-          <span>{{ stopping ? "Stopping" : "Stop" }}</span>
+        <button
+          class="btn btn-outline-primary voice-action-button"
+          type="button"
+          :disabled="!canQueue"
+          title="Queue message (Cmd/Ctrl+Enter)"
+          aria-label="Queue message"
+          @click="emit('queue-prompt')"
+        >
+          <i class="bi bi-send"></i>
         </button>
       </template>
+      </template>
+      <template #trailing-actions>
+        <button
+          v-if="!isEditingQueue"
+          class="btn btn-outline-danger voice-action-button"
+          type="button"
+          :disabled="!isRunning || stopping"
+          :title="stopping ? 'Stopping run' : 'Stop run'"
+          :aria-label="stopping ? 'Stopping run' : 'Stop run'"
+          @click="emit('stop-run')"
+        >
+          <i class="bi bi-stop-fill"></i>
+        </button>
       </template>
     </VoiceTextarea>
   </form>

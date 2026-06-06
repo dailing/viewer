@@ -2,19 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import re
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
 from loguru import logger
 from pydantic import BaseModel
 
-from .agent_history import SuperDriverRunCreate, SuperHistoryRun, agent_history_store
+from .agent_history import SuperDispatchTask, SuperDriverRunCreate, SuperHistoryRun, agent_history_store
 from .codex_sessions import codex_session_manager
 from .hermes_sessions import hermes_session_manager
+from .process_registry import process_slot_state, write_process_state
+from .storage import LOG_DIR
 from .super_workspace import SuperDispatchRequest, SuperRole, SuperRolePatch, super_workspace_manager
 from .users import normalize_user_id
 
@@ -23,13 +31,6 @@ class SuperWorkspaceMessageCreate(BaseModel):
     message: str
     parent_message_id: str | None = None
     sender_role_id: str | None = None
-
-
-@dataclass
-class SuperQueuedRun:
-    run_id: str
-    user_id: str
-    role_id: str
 
 
 class SuperWorkspaceEventHub:
@@ -66,31 +67,52 @@ class SuperWorkspaceEventHub:
 class SuperAgentDriver:
     provider = ""
 
-    async def ensure_session(self, role: SuperRole, user_id: str) -> str:
+    def active_session_id(self, role: SuperRole) -> str | None:
         if role.session_ref:
             provider, session_id = self.parse_ref(role.session_ref, role.provider)
             if provider == self.provider and session_id:
                 try:
-                    self.manager().snapshot(session_id, "focus")
+                    snapshot = self.manager().snapshot(session_id, "focus")
+                    if snapshot.get("status") == "running":
+                        return session_id
+                    return None
+                except Exception:
+                    return None
+        return None
+
+    async def dispatch_task(self, role: SuperRole, user_id: str, prompt: str, lineage: dict[str, Any]) -> str:
+        if role.session_ref:
+            provider, session_id = self.parse_ref(role.session_ref, role.provider)
+            if provider == self.provider and session_id:
+                try:
+                    snapshot = self.manager().snapshot(session_id, "focus")
+                    if snapshot.get("status") == "running":
+                        raise HTTPException(status_code=409, detail="Role session is already running")
+                    await self._send(session_id, prompt, role.model, lineage)
                     return role.session_ref
+                except HTTPException:
+                    raise
                 except Exception:
                     logger.warning("Super Workspace role {} has stale session_ref {}; creating a replacement", role.id, role.session_ref)
-        session = await self.create_session(role, user_id)
+        first_prompt = f"{self.initial_prompt(role, user_id)}\n\n{prompt}"
+        session = await self._create(first_prompt, role.cwd, role.model, user_id, lineage)
         session_ref = f"{self.provider}:{session['id']}"
-        super_workspace_manager.update_role(role.id, SuperRolePatch(session_ref=session_ref), user_id)
+        try:
+            super_workspace_manager.update_role(role.id, SuperRolePatch(session_ref=session_ref), user_id)
+        except HTTPException:
+            logger.warning("Super Workspace role {} disappeared before session_ref could be saved", role.id)
         role.session_ref = session_ref
         return session_ref
 
-    async def dispatch(self, role: SuperRole, user_id: str, prompt: str) -> dict[str, Any]:
-        session_ref = await self.ensure_session(role, user_id)
-        _, session_id = self.parse_ref(session_ref, role.provider)
-        snapshot = self.manager().snapshot(session_id, "focus")
-        if snapshot.get("status") == "running":
-            return await self.manager().enqueue(session_id, prompt, role.model)
-        return await self.manager().send(session_id, prompt, role.model)
+    async def _create(self, prompt: str, cwd: str, model: str | None, user_id: str, lineage: dict[str, Any]) -> dict[str, Any]:
+        if self.provider == "codex":
+            return await self.manager().create(prompt, cwd, model, user_id, lineage=lineage)
+        return await self.manager().create(prompt, cwd, model, user_id)
 
-    async def create_session(self, role: SuperRole, user_id: str) -> dict[str, Any]:
-        return await self.manager().create(self.initial_prompt(role, user_id), role.cwd, role.model, user_id)
+    async def _send(self, session_id: str, prompt: str, model: str | None, lineage: dict[str, Any]) -> dict[str, Any]:
+        if self.provider == "codex":
+            return await self.manager().send(session_id, prompt, model, lineage=lineage)
+        return await self.manager().send(session_id, prompt, model)
 
     def manager(self):
         raise NotImplementedError
@@ -130,10 +152,12 @@ class HermesSuperDriver(SuperAgentDriver):
 
 
 class SuperWorkspaceRuntime:
-    def __init__(self) -> None:
+    def __init__(self, notify_url: str | None = None) -> None:
         self.event_hub = SuperWorkspaceEventHub()
-        self._queues: dict[str, asyncio.Queue[SuperQueuedRun]] = {}
-        self._workers: dict[str, asyncio.Task] = {}
+        self._worker_id = f"backend:{uuid4().hex}"
+        self._notify_url = notify_url
+        self._worker_task: asyncio.Task | None = None
+        self._active_tasks: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
         self._drivers: dict[str, SuperAgentDriver] = {
             "codex": CodexSuperDriver(),
@@ -142,16 +166,74 @@ class SuperWorkspaceRuntime:
 
     async def start(self) -> None:
         self._stop.clear()
+        self.ensure_worker_process()
         logger.info("Super Workspace runtime started")
 
     async def shutdown(self) -> None:
         self._stop.set()
-        for task in self._workers.values():
+        if self._worker_task is not None:
+            self._worker_task.cancel()
+            await asyncio.gather(self._worker_task, return_exceptions=True)
+        for task in list(self._active_tasks):
             task.cancel()
-        if self._workers:
-            await asyncio.gather(*self._workers.values(), return_exceptions=True)
-        self._workers.clear()
-        self._queues.clear()
+        if self._active_tasks:
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+        self._active_tasks.clear()
+
+    def ensure_worker_process(self) -> None:
+        name = "worker"
+        slot = process_slot_state(name)
+        if slot["pid_file_exists"] and slot["alive"]:
+            logger.error(
+                "Super Workspace worker pid file already points to a live process; not starting duplicate pid={} pid_file={}",
+                slot["pid"],
+                slot["pid_path"],
+            )
+            return
+        if slot["pid_file_exists"]:
+            logger.warning(
+                "Stale Super Workspace worker pid file found; overwriting pid={} pid_file={}",
+                slot["pid"],
+                slot["pid_path"],
+            )
+        log_path = LOG_DIR / "super-workspace-worker.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        project_root = Path(__file__).resolve().parents[2]
+        env = dict(os.environ)
+        env.setdefault("VIEWER_SUPER_WORKSPACE_NOTIFY_URL", self._default_notify_url())
+        with log_path.open("ab") as log:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "backend.app.super_workspace_worker"],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                cwd=project_root,
+                env=env,
+                start_new_session=True,
+            )
+        write_process_state(name, process.pid, {"kind": "super_workspace_worker", "log_path": log_path.as_posix()})
+        logger.info("Started Super Workspace worker pid={} log={}", process.pid, log_path)
+
+    def _default_notify_url(self) -> str:
+        port = os.environ.get("VIEWER_PORT", "8000")
+        return f"http://127.0.0.1:{port}/internal/super-workspace/notify"
+
+    async def notify(self, event: dict[str, Any]) -> None:
+        await self._emit_update(event)
+
+    async def _emit_update(self, event: dict[str, Any]) -> None:
+        await self.event_hub.publish(event)
+        if self._notify_url:
+            await asyncio.to_thread(self._post_notify, event)
+
+    def _post_notify(self, event: dict[str, Any]) -> None:
+        body = json.dumps(event, ensure_ascii=False).encode("utf-8")
+        request = Request(self._notify_url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urlopen(request, timeout=2.0) as response:
+                response.read()
+        except (OSError, URLError):
+            pass
 
     async def submit(self, request: SuperWorkspaceMessageCreate, user_id: str | None = None) -> SuperHistoryRun:
         message = request.message.strip()
@@ -170,25 +252,42 @@ class SuperWorkspaceRuntime:
             parent_message_id=request.parent_message_id,
             sender_role_id=request.sender_role_id,
         )
-        await self.event_hub.publish({"type": "run-created", "user_id": normalized_user, "run_id": run.id})
+        await self._emit_update({"type": "run-created", "user_id": normalized_user, "run_id": run.id})
         rationale = ""
         if not role_ids:
             try:
                 dispatch = await super_workspace_manager.dispatch(SuperDispatchRequest(message=query), normalized_user)
-                role_ids = dispatch.role_ids
+                role_ids = self._expand_role_names(dispatch.role_ids, data.roles)
                 rationale = dispatch.rationale
             except HTTPException as exc:
                 failed = agent_history_store.update_super_run(run.id, normalized_user, status="failed", error=str(exc.detail))
-                await self.event_hub.publish({"type": "run-updated", "user_id": normalized_user, "run_id": run.id})
+                await self._emit_update({"type": "run-updated", "user_id": normalized_user, "run_id": run.id})
                 return failed
         queued = agent_history_store.update_super_run(run.id, normalized_user, status="queued", role_ids=role_ids, rationale=rationale)
+        roles_by_id = {role.id: role for role in data.roles}
         for role_id in role_ids:
-            self._enqueue(SuperQueuedRun(run_id=run.id, user_id=normalized_user, role_id=role_id))
-        await self.event_hub.publish({"type": "run-updated", "user_id": normalized_user, "run_id": run.id})
-        return queued
+            role = roles_by_id.get(role_id)
+            if role is None:
+                continue
+            agent_history_store.record_super_target(
+                normalized_user,
+                run.id,
+                SuperDriverRunCreate(
+                    role_id=role.id,
+                    role_name=role.name,
+                    provider=role.provider or "codex",
+                    parent_message_id=run.parent_message_id or run.message_id,
+                    sender_role_id=run.sender_role_id,
+                    role_snapshot=role.model_dump(),
+                ),
+            )
+        await self._emit_update({"type": "run-updated", "user_id": normalized_user, "run_id": run.id})
+        return agent_history_store.get_super_run(queued.id, normalized_user)
 
     def _parse_query_prefix(self, message: str, roles: list[SuperRole]) -> tuple[list[str], str]:
-        by_key = {self.mention_key(role): role for role in roles}
+        by_key: dict[str, list[SuperRole]] = {}
+        for role in roles:
+            by_key.setdefault(self.mention_key(role), []).append(role)
         role_ids: list[str] = []
         position = 0
         while position < len(message) and message[position] == "@":
@@ -196,13 +295,23 @@ class SuperWorkspaceRuntime:
             if not match:
                 break
             key = match.group(1)
-            role = by_key.get(key)
-            if role is None:
+            matched_roles = by_key.get(key)
+            if not matched_roles:
                 raise HTTPException(status_code=400, detail=f"Unknown Super Workspace role mention: @{key}")
-            if role.id not in role_ids:
-                role_ids.append(role.id)
+            for role in matched_roles:
+                if role.id not in role_ids:
+                    role_ids.append(role.id)
             position += match.end()
         return role_ids, message[position:].strip()
+
+    def _expand_role_names(self, role_ids: list[str], roles: list[SuperRole]) -> list[str]:
+        by_id = {role.id: role for role in roles}
+        selected_names = {by_id[role_id].name for role_id in role_ids if role_id in by_id}
+        expanded: list[str] = []
+        for role in roles:
+            if role.name in selected_names and role.id not in expanded:
+                expanded.append(role.id)
+        return expanded
 
     def mention_key(self, role: SuperRole) -> str:
         parts = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+", role.name.strip())
@@ -213,79 +322,94 @@ class SuperWorkspaceRuntime:
             value = f"_{value}"
         return value
 
-    def _enqueue(self, item: SuperQueuedRun) -> None:
-        queue = self._queues.setdefault(item.role_id, asyncio.Queue())
-        queue.put_nowait(item)
-        if item.role_id not in self._workers or self._workers[item.role_id].done():
-            self._workers[item.role_id] = asyncio.create_task(self._role_worker(item.role_id))
-
-    async def _role_worker(self, role_id: str) -> None:
-        queue = self._queues[role_id]
+    async def _dispatch_worker_loop(self) -> None:
+        logger.info("Super Workspace DB dispatch worker started id={}", self._worker_id)
         while not self._stop.is_set():
-            item = await queue.get()
-            try:
-                await self._dispatch_role(item)
-            except Exception:
-                logger.exception("Super Workspace role dispatch failed role={} run={}", item.role_id, item.run_id)
-                try:
-                    agent_history_store.update_super_run(item.run_id, item.user_id, status="failed", error="Role dispatch failed")
-                    await self.event_hub.publish({"type": "run-updated", "user_id": item.user_id, "run_id": item.run_id})
-                except Exception:
-                    logger.exception("Failed to mark Super Workspace run failed")
-            finally:
-                queue.task_done()
+            self._active_tasks = {task for task in self._active_tasks if not task.done()}
+            while len(self._active_tasks) < 4:
+                task = agent_history_store.claim_next_dispatch_task(self._worker_id)
+                if task is None:
+                    break
+                worker = asyncio.create_task(self._process_dispatch_task(task))
+                self._active_tasks.add(worker)
+            await asyncio.sleep(0.5 if self._active_tasks else 1.0)
 
-    async def _dispatch_role(self, item: SuperQueuedRun) -> None:
-        run = agent_history_store.get_super_run(item.run_id, item.user_id)
-        data = super_workspace_manager.read(item.user_id)
-        role = next((candidate for candidate in data.roles if candidate.id == item.role_id), None)
-        if role is None:
-            agent_history_store.update_super_run(run.id, item.user_id, status="failed", error=f"Role not found: {item.role_id}")
-            return
+    async def _process_dispatch_task(self, task: SuperDispatchTask) -> None:
+        try:
+            await self._dispatch_task(task)
+        except Exception as exc:
+            logger.exception("Super Workspace dispatch task failed task={} role={}", task.id, task.role_id)
+            agent_history_store.update_driver_run_status(task.id, "failed", error=str(exc) or "Dispatch task failed")
+            agent_history_store.summarize_super_run_status(task.query_message_id, task.user_id, fallback_error=str(exc))
+            await self._emit_update({"type": "run-updated", "user_id": task.user_id, "run_id": task.query_message_id})
+
+    async def _dispatch_task(self, task: SuperDispatchTask) -> None:
+        run = agent_history_store.get_super_run(task.query_message_id, task.user_id)
+        role = self._role_for_task(task)
         driver = self._drivers.get(role.provider or "codex")
         if driver is None:
-            agent_history_store.update_super_run(run.id, item.user_id, status="failed", error=f"Unsupported provider: {role.provider}")
+            agent_history_store.update_driver_run_status(task.id, "failed", error=f"Unsupported provider: {role.provider}")
+            agent_history_store.summarize_super_run_status(run.id, task.user_id, fallback_error=f"Unsupported provider: {role.provider}")
             return
-        agent_history_store.update_super_run(run.id, item.user_id, status="running")
-        await self.event_hub.publish({"type": "run-updated", "user_id": item.user_id, "run_id": run.id})
+        active_session_id = driver.active_session_id(role)
+        if active_session_id is not None:
+            agent_history_store.update_driver_run_status(task.id, "queued", next_attempt_at=time.time() + 2.0)
+            await self._emit_update({"type": "run-updated", "user_id": task.user_id, "run_id": run.id})
+            return
         prompt = self.role_message_prompt(run, role)
-        session_ref = await driver.ensure_session(role, item.user_id)
-        target_request = SuperDriverRunCreate(
-            role_id=role.id,
-            role_name=role.name,
-            provider=role.provider or driver.provider,
-            session_ref=session_ref,
-            agent_prompt=prompt,
-            parent_message_id=run.parent_message_id or run.message_id,
-            sender_role_id=run.sender_role_id,
-        )
-        recorded = agent_history_store.record_super_target(item.user_id, run.id, target_request)
-        driver_run_id = ""
-        for target in recorded.targets:
-            if target.role_id == role.id and target.session_ref == session_ref:
-                driver_run_id = target.id
-                break
-        await driver.dispatch(role, item.user_id, prompt)
+        lineage = {
+            "query_message_id": run.message_id,
+            "driver_run_id": task.id,
+            "parent_message_id": task.parent_message_id or run.message_id,
+            "sender_role_id": task.sender_role_id,
+            "recipient_role_id": role.id,
+            "role_id": role.id,
+            "role_name": role.name,
+        }
+        agent_history_store.update_super_run(run.id, task.user_id, status="running")
+        agent_history_store.update_driver_run_status(task.id, "running", agent_prompt=prompt, error="")
+        await self._emit_update({"type": "run-updated", "user_id": task.user_id, "run_id": run.id})
+        session_ref = await driver.dispatch_task(role, task.user_id, prompt, lineage)
+        agent_history_store.update_driver_run_status(task.id, "running", session_ref=session_ref, agent_prompt=prompt)
         provider, session_id = driver.parse_ref(session_ref, role.provider)
-        completed = await self._wait_for_session(provider, session_id, item.user_id, run.id, driver_run_id)
-        await self.event_hub.publish(
+        completed = await self._wait_for_session(driver, session_id, task.user_id, run.id, task.id)
+        await self._emit_update(
             {
                 "type": "run-updated",
-                "user_id": item.user_id,
+                "user_id": task.user_id,
                 "run_id": run.id,
                 "status": completed.status,
                 "updated_at": time.time(),
             }
         )
 
-    async def _wait_for_session(self, provider: str, session_id: str, user_id: str, run_id: str, driver_run_id: str) -> SuperHistoryRun:
-        manager = self._drivers[provider].manager()
+    def _role_for_task(self, task: SuperDispatchTask) -> SuperRole:
+        data = super_workspace_manager.read(task.user_id)
+        current = next((candidate for candidate in data.roles if candidate.id == task.role_id), None)
+        raw = dict(task.role_snapshot)
+        if current is not None:
+            raw["session_ref"] = current.session_ref or raw.get("session_ref") or ""
+        raw.setdefault("id", task.role_id)
+        raw.setdefault("name", task.role_name)
+        raw.setdefault("provider", task.provider or "codex")
+        raw.setdefault("description", "")
+        raw.setdefault("cwd", "")
+        raw.setdefault("model", None)
+        now = time.time()
+        raw.setdefault("created_at", now)
+        raw.setdefault("updated_at", now)
+        return SuperRole.model_validate(raw)
+
+    async def _wait_for_session(self, driver: SuperAgentDriver, session_id: str, user_id: str, run_id: str, driver_run_id: str) -> SuperHistoryRun:
+        manager = driver.manager()
+        provider = driver.provider
         while not self._stop.is_set():
-            agent_history_store.sync_session(provider, session_id, user_id)
             snapshot = manager.snapshot(session_id, "focus")
             queue = snapshot.get("queue") if isinstance(snapshot.get("queue"), list) else []
             status = str(snapshot.get("status") or "")
-            await self.event_hub.publish(
+            if driver_run_id:
+                agent_history_store.update_driver_run_status(driver_run_id, "running")
+            await self._emit_update(
                 {
                     "type": "run-updated",
                     "user_id": user_id,
@@ -298,6 +422,9 @@ class SuperWorkspaceRuntime:
             )
             if status not in {"running"} and not queue:
                 if status == "failed":
+                    if driver_run_id and self._driver_has_final_response(run_id, user_id, driver_run_id):
+                        agent_history_store.update_driver_run_status(driver_run_id, "completed")
+                        return self._summarize_run_status(run_id, user_id)
                     if driver_run_id:
                         agent_history_store.update_driver_run_status(driver_run_id, "failed")
                     return self._summarize_run_status(run_id, user_id, fallback_error="Role session failed")
@@ -309,12 +436,32 @@ class SuperWorkspaceRuntime:
 
     def _summarize_run_status(self, run_id: str, user_id: str, fallback_error: str = "") -> SuperHistoryRun:
         run = agent_history_store.get_super_run(run_id, user_id)
-        statuses = [target.status for target in run.targets]
+        statuses: list[str] = []
+        for target in run.targets:
+            if target.status == "failed" and self._target_has_final_response(target):
+                agent_history_store.update_driver_run_status(target.id, "completed")
+                statuses.append("completed")
+            else:
+                statuses.append(target.status)
         if any(status == "failed" for status in statuses):
             return agent_history_store.update_super_run(run_id, user_id, status="failed", error=fallback_error)
         if statuses and all(status == "completed" for status in statuses):
             return agent_history_store.update_super_run(run_id, user_id, status="completed")
         return agent_history_store.update_super_run(run_id, user_id, status="running")
+
+    def _driver_has_final_response(self, run_id: str, user_id: str, driver_run_id: str) -> bool:
+        run = agent_history_store.get_super_run(run_id, user_id)
+        target = next((item for item in run.targets if item.id == driver_run_id), None)
+        return self._target_has_final_response(target) if target else False
+
+    @staticmethod
+    def _target_has_final_response(target: Any) -> bool:
+        return any(
+            message.role == "assistant"
+            and message.event_type == "message:assistant"
+            and message.text.strip()
+            for message in target.messages
+        )
 
     def role_message_prompt(self, run: SuperHistoryRun, role: SuperRole) -> str:
         lineage = {

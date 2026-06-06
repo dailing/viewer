@@ -622,10 +622,18 @@ onUnmounted(() => {
       </div>
       <VoiceTextarea ref="pastePadTextarea" v-model="pastePadText" :context-id="voiceContextId" min-height="92px" @clear="clearPastePad">
         <template #actions>
-          <button class="btn btn-sm btn-primary" type="button" @click="sendPastePadText()">Send</button>
-          <button class="btn btn-sm btn-outline-primary" type="button" @click="sendPastePadText('\r')">Send + Enter</button>
-          <button class="btn btn-sm btn-outline-secondary" type="button" @click="sendBracketedPaste">Bracketed</button>
-          <button class="btn btn-sm btn-outline-secondary" type="button" @click="sendSlowPaste">Slow</button>
+          <button class="btn btn-sm btn-primary voice-action-button" type="button" title="Send" aria-label="Send" @click="sendPastePadText()">
+            <i class="bi bi-send"></i>
+          </button>
+          <button class="btn btn-sm btn-outline-primary voice-action-button" type="button" title="Send and press Enter" aria-label="Send and press Enter" @click="sendPastePadText('\r')">
+            <i class="bi bi-arrow-return-left"></i>
+          </button>
+          <button class="btn btn-sm btn-outline-secondary voice-action-button" type="button" title="Bracketed paste" aria-label="Bracketed paste" @click="sendBracketedPaste">
+            <i class="bi bi-braces"></i>
+          </button>
+          <button class="btn btn-sm btn-outline-secondary voice-action-button" type="button" title="Slow paste" aria-label="Slow paste" @click="sendSlowPaste">
+            <i class="bi bi-hourglass-split"></i>
+          </button>
         </template>
       </VoiceTextarea>
     </div>

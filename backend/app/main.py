@@ -61,6 +61,7 @@ from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git
 from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
 from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceAgentSessionRequest, WorkspaceConfig, WorkspaceSnapshot
+from .profiling import api_profiler
 from .restart import request_restart, request_stop
 from .super_workspace import SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
 from .super_workspace_runtime import SuperWorkspaceMessageCreate, super_workspace_runtime
@@ -112,9 +113,12 @@ async def log_requests(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        api_profiler.record(request, 500, elapsed_ms)
         logger.exception("HTTP {} {} failed", request.method, request.url.path)
         raise
     elapsed_ms = (time.perf_counter() - started) * 1000
+    api_profiler.record(request, response.status_code, elapsed_ms)
     if response.status_code >= 400:
         logger.warning("HTTP {} {} -> {} {:.1f}ms", request.method, request.url.path, response.status_code, elapsed_ms)
     elif elapsed_ms >= SLOW_REQUEST_MS:
@@ -163,6 +167,22 @@ async def shutdown() -> None:
 @app.get("/api/health")
 async def health() -> dict[str, str | int]:
     return {"status": "ok", "root": settings.root_resolved.as_posix(), "pid": os.getpid()}
+
+
+@app.get("/profile", response_class=HTMLResponse)
+async def profile_report() -> HTMLResponse:
+    return HTMLResponse(api_profiler.html_report())
+
+
+@app.get("/api/profile")
+async def profile_data():
+    return api_profiler.snapshot()
+
+
+@app.post("/api/profile/reset")
+async def reset_profile_data() -> dict[str, str]:
+    api_profiler.reset()
+    return {"status": "reset"}
 
 
 @app.get("/api/debug/info")
@@ -789,9 +809,13 @@ async def delete_super_role(role_id: str, user: str | None = None):
 
 
 @app.get("/api/super-workspace/runs")
-async def super_workspace_runs(limit: int = Query(default=30, ge=1, le=100), before: float | None = None, user: str | None = None):
-    agent_history_store.sync_super_workspace(user)
-    return agent_history_store.list_super_runs(user, limit=limit, before=before)
+async def super_workspace_runs(
+    limit: int = Query(default=30, ge=1, le=100),
+    before: float | None = None,
+    after: float | None = None,
+    user: str | None = None,
+):
+    return agent_history_store.list_super_runs(user, limit=limit, before=before, after=after)
 
 
 @app.post("/api/super-workspace/messages")
@@ -802,6 +826,12 @@ async def create_super_workspace_message(request: SuperWorkspaceMessageCreate, u
 @app.get("/api/super-workspace/events")
 async def super_workspace_events(user: str | None = None):
     return StreamingResponse(super_workspace_runtime.event_hub.subscribe(user), media_type="text/event-stream")
+
+
+@app.post("/internal/super-workspace/notify")
+async def notify_super_workspace(event: dict):
+    await super_workspace_runtime.notify(event)
+    return {"ok": True}
 
 
 @app.post("/api/super-workspace/runs")

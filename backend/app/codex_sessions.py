@@ -20,7 +20,8 @@ from watchfiles import awatch
 from .config import settings
 from .files import resolve_served_directory
 from .models import AgentEventType
-from .storage import CODEX_LOG_DIR, CODEX_RUN_DIR
+from .process_registry import driver_process_name, process_slot_state
+from .storage import AGENT_HISTORY_DB_PATH, CODEX_LOG_DIR, CODEX_RUN_DIR
 from .users import default_user_id, normalize_user_id
 from .ws_clients import WebSocketClient, add_client, enqueue, remove_client
 
@@ -331,6 +332,12 @@ class CodexSessionManager:
             session.codex_pid = codex_pid
         state_status = state.get("status")
         exit_code = state.get("exit_code")
+        codex_session_id = state.get("codex_session_id")
+        rollout_path = self._rollout_path_from_meta(state.get("rollout_path"))
+        if isinstance(codex_session_id, str) and codex_session_id:
+            session.codex_session_id = codex_session_id
+        if rollout_path is not None:
+            session.rollout_path = rollout_path
         if isinstance(exit_code, int):
             session.exit_code = exit_code
 
@@ -850,7 +857,14 @@ class CodexSessionManager:
         self._sync_rollout_events(session)
         return session
 
-    async def create(self, prompt: str, cwd: str | None = None, model: str | None = None, user_id: str | None = None) -> dict:
+    async def create(
+        self,
+        prompt: str,
+        cwd: str | None = None,
+        model: str | None = None,
+        user_id: str | None = None,
+        lineage: dict[str, str | None] | None = None,
+    ) -> dict:
         self._ensure_loaded()
         session_id = uuid.uuid4().hex
         normalized_user_id = normalize_user_id(user_id)
@@ -875,7 +889,7 @@ class CodexSessionManager:
         stderr_path.write_text("", encoding="utf-8")
         self._write_meta(session)
         if cleaned_prompt:
-            session.run_task = asyncio.create_task(self._run(session, cleaned_prompt, resume=False))
+            session.run_task = asyncio.create_task(self._run(session, cleaned_prompt, resume=False, lineage=lineage))
         return session.summary()
 
     async def enqueue(self, session_id: str, prompt: str, model: str | None = None) -> dict:
@@ -928,7 +942,7 @@ class CodexSessionManager:
         await self._broadcast(session, {"type": "status", "session": session.summary()})
         return session.summary()
 
-    async def send(self, session_id: str, prompt: str, model: str | None = None) -> dict:
+    async def send(self, session_id: str, prompt: str, model: str | None = None, lineage: dict[str, str | None] | None = None) -> dict:
         session = self.get(session_id)
         if not prompt.strip():
             raise HTTPException(status_code=400, detail="Prompt is required")
@@ -946,7 +960,7 @@ class CodexSessionManager:
         session.updated_at = now
         self._write_meta(session)
         await self._broadcast(session, {"type": "status", "session": session.summary()})
-        session.run_task = asyncio.create_task(self._run(session, prompt, resume=resume))
+        session.run_task = asyncio.create_task(self._run(session, prompt, resume=resume, lineage=lineage))
         return session.summary()
 
     async def _start_next_queued(self, session: CodexSession) -> bool:
@@ -1226,7 +1240,7 @@ class CodexSessionManager:
                 env.pop(key, None)
         return env
 
-    async def _run(self, session: CodexSession, prompt: str, *, resume: bool) -> None:
+    async def _run(self, session: CodexSession, prompt: str, *, resume: bool, lineage: dict[str, str | None] | None = None) -> None:
         command = ["codex", "exec"]
         if resume:
             assert session.codex_session_id is not None
@@ -1279,7 +1293,48 @@ class CodexSessionManager:
             session.cwd,
             "--command",
             json.dumps(command),
+            "--history-db",
+            AGENT_HISTORY_DB_PATH.as_posix(),
+            "--viewer-session-id",
+            session.id,
+            "--user-id",
+            session.user_id,
         ]
+        for key, option in (
+            ("query_message_id", "--query-message-id"),
+            ("driver_run_id", "--driver-run-id"),
+            ("parent_message_id", "--parent-message-id"),
+            ("sender_role_id", "--sender-role-id"),
+            ("recipient_role_id", "--recipient-role-id"),
+            ("role_id", "--role-id"),
+            ("role_name", "--role-name"),
+        ):
+            value = lineage.get(key) if lineage else None
+            if isinstance(value, str) and value:
+                runner_command.extend([option, value])
+        registry_name = self._driver_registry_name(lineage)
+        if registry_name:
+            slot = process_slot_state(registry_name)
+            if slot["pid_file_exists"] and slot["alive"]:
+                logger.error(
+                    "Codex driver pid file already points to a live process; not starting duplicate session={} pid={} pid_file={}",
+                    session.id,
+                    slot["pid"],
+                    slot["pid_path"],
+                )
+                session.status = "failed"
+                session.exit_code = -2
+                session.updated_at = time.time()
+                self._write_meta(session)
+                await self._broadcast(session, {"type": "status", "session": session.summary()})
+                return
+            if slot["pid_file_exists"]:
+                logger.warning(
+                    "Stale Codex driver pid file found; overwriting session={} pid={} pid_file={}",
+                    session.id,
+                    slot["pid"],
+                    slot["pid_path"],
+                )
         logger.info("Starting background Codex session {} resume={} cwd={} run_dir={}", session.id, resume, session.cwd, state_path.parent)
         try:
             process = subprocess.Popen(
@@ -1303,6 +1358,15 @@ class CodexSessionManager:
         session.pid = process.pid
         self._write_meta(session)
         await self._monitor_background_run(session)
+
+    def _driver_registry_name(self, lineage: dict[str, str | None] | None) -> str | None:
+        if not lineage:
+            return None
+        driver_run_id = lineage.get("driver_run_id")
+        role_id = lineage.get("role_id")
+        if not driver_run_id or not role_id:
+            return None
+        return driver_process_name(lineage.get("role_name"), role_id, driver_run_id)
 
     async def _monitor_background_run(self, session: CodexSession) -> None:
         try:

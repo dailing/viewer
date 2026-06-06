@@ -3,7 +3,6 @@ from contextlib import contextmanager
 import json
 import os
 import shutil
-import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -12,6 +11,10 @@ from typing import Any, Iterator, Literal
 from fastapi import HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
+from sqlalchemy import Float, Integer, String, Text, create_engine, delete, func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from .config import settings
 from .codex_sessions import codex_session_manager
@@ -244,111 +247,101 @@ def _now() -> float:
     return time.time()
 
 
+class AgentTaskBase(DeclarativeBase):
+    pass
+
+
+class AgentTaskRow(AgentTaskBase):
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    group_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    root_id: Mapped[str | None] = mapped_column(String)
+    parent_id: Mapped[str | None] = mapped_column(String)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    blocked_reason: Mapped[str | None] = mapped_column(String)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    workspace: Mapped[str] = mapped_column(Text, nullable=False)
+    assigned_agent: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str | None] = mapped_column(String)
+    agent_session_id: Mapped[str | None] = mapped_column(String)
+    depends_on: Mapped[str] = mapped_column(Text, nullable=False)
+    execution: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime: Mapped[str] = mapped_column(Text, nullable=False)
+    artifacts: Mapped[str] = mapped_column(Text, nullable=False)
+    result: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[str] = mapped_column("metadata", Text, nullable=False)
+    policy: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class AgentTaskEventRow(AgentTaskBase):
+    __tablename__ = "events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str | None] = mapped_column(String, index=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    group_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    agent_session_id: Mapped[str | None] = mapped_column(String)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    before_json: Mapped[str | None] = mapped_column(Text)
+    after_json: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class AgentTaskSettingsRow(AgentTaskBase):
+    __tablename__ = "settings"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    group_id: Mapped[str] = mapped_column(String, primary_key=True)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    default_agent: Mapped[str] = mapped_column(String, nullable=False)
+    default_model: Mapped[str | None] = mapped_column(String)
+    auto_tick_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    goal: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    plan: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    context: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    constraints_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    project_root: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    manager_session_id: Mapped[str | None] = mapped_column(String)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class AgentTaskManager:
     def __init__(self) -> None:
         self.db_path = AGENT_TASKS_DB_PATH
+        ensure_view_home()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.engine = create_engine(f"sqlite:///{self.db_path.as_posix()}", future=True, poolclass=NullPool)
+        self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False, future=True)
         self._started = False
         self._monitor_task: asyncio.Task | None = None
         self._stop_event: asyncio.Event | None = None
+        self._init_db()
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        ensure_view_home()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
+    def _session(self) -> Iterator[Session]:
+        session = self.SessionLocal()
         try:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
-            yield conn
+            yield session
+            session.commit()
         except Exception:
-            conn.rollback()
+            session.rollback()
             raise
         finally:
-            conn.close()
+            session.close()
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    group_id TEXT NOT NULL,
-                    root_id TEXT,
-                    parent_id TEXT,
-                    title TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    blocked_reason TEXT,
-                    priority INTEGER NOT NULL,
-                    kind TEXT NOT NULL,
-                    workspace TEXT NOT NULL,
-                    assigned_agent TEXT NOT NULL,
-                    model TEXT,
-                    agent_session_id TEXT,
-                    depends_on TEXT NOT NULL,
-                    execution TEXT NOT NULL,
-                    runtime TEXT NOT NULL,
-                    artifacts TEXT NOT NULL,
-                    result TEXT NOT NULL,
-                    metadata TEXT NOT NULL,
-                    policy TEXT NOT NULL,
-                    version INTEGER NOT NULL,
-                    created_by TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,
-                    task_id TEXT,
-                    user_id TEXT NOT NULL,
-                    group_id TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    agent_session_id TEXT,
-                    type TEXT NOT NULL,
-                    before_json TEXT,
-                    after_json TEXT,
-                    reason TEXT NOT NULL,
-                    created_at REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS settings (
-                    user_id TEXT NOT NULL,
-                    group_id TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    default_agent TEXT NOT NULL,
-                    default_model TEXT,
-                    auto_tick_seconds INTEGER NOT NULL,
-                    goal TEXT NOT NULL DEFAULT '',
-                    plan TEXT NOT NULL DEFAULT '',
-                    context TEXT NOT NULL DEFAULT '',
-                    constraints_json TEXT NOT NULL DEFAULT '[]',
-                    project_root TEXT NOT NULL DEFAULT '',
-                    manager_session_id TEXT,
-                    updated_at REAL NOT NULL,
-                    PRIMARY KEY (user_id, group_id)
-                )
-                """
-            )
-            for column, ddl in (
-                ("goal", "ALTER TABLE settings ADD COLUMN goal TEXT NOT NULL DEFAULT ''"),
-                ("plan", "ALTER TABLE settings ADD COLUMN plan TEXT NOT NULL DEFAULT ''"),
-                ("context", "ALTER TABLE settings ADD COLUMN context TEXT NOT NULL DEFAULT ''"),
-                ("constraints_json", "ALTER TABLE settings ADD COLUMN constraints_json TEXT NOT NULL DEFAULT '[]'"),
-                ("project_root", "ALTER TABLE settings ADD COLUMN project_root TEXT NOT NULL DEFAULT ''"),
-                ("manager_session_id", "ALTER TABLE settings ADD COLUMN manager_session_id TEXT"),
-            ):
-                existing = [row["name"] for row in conn.execute("PRAGMA table_info(settings)").fetchall()]
-                if column not in existing:
-                    conn.execute(ddl)
-            conn.commit()
+        AgentTaskBase.metadata.create_all(self.engine)
 
     async def start(self) -> None:
         if self._started:
@@ -372,10 +365,10 @@ class AgentTaskManager:
     def settings(self, user_id: str | None, group_id: str = "default") -> dict:
         self._init_db()
         user = normalize_user_id(user_id)
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM settings WHERE user_id=? AND group_id=?", (user, group_id)).fetchone()
+        with self._session() as db:
+            row = db.get(AgentTaskSettingsRow, (user, group_id))
             if row:
-                return dict(row)
+                return self._settings_from_row(row)
         return {
             "user_id": user,
             "group_id": group_id,
@@ -419,33 +412,7 @@ class AgentTaskManager:
             "manager_session_id": current.get("manager_session_id"),
             "updated_at": _now(),
         }
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO settings (
-                    user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
-                    goal, plan, context, constraints_json, project_root, manager_session_id, updated_at
-                )
-                VALUES (
-                    :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
-                    :goal, :plan, :context, :constraints_json, :project_root, :manager_session_id, :updated_at
-                )
-                ON CONFLICT(user_id, group_id) DO UPDATE SET
-                    mode=excluded.mode,
-                    default_agent=excluded.default_agent,
-                    default_model=excluded.default_model,
-                    auto_tick_seconds=excluded.auto_tick_seconds,
-                    goal=excluded.goal,
-                    plan=excluded.plan,
-                    context=excluded.context,
-                    constraints_json=excluded.constraints_json,
-                    project_root=excluded.project_root,
-                    manager_session_id=excluded.manager_session_id,
-                    updated_at=excluded.updated_at
-                """,
-                payload,
-            )
-            conn.commit()
+        self._upsert_settings(payload)
         self._record_event(None, user, group_id, "user", None, "settings_updated", current, payload, "Updated task scheduler settings")
         return payload
 
@@ -476,27 +443,7 @@ class AgentTaskManager:
             "constraints_json": _json(update.constraints),
             "updated_at": _now(),
         }
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO settings (
-                    user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
-                    goal, plan, context, constraints_json, project_root, manager_session_id, updated_at
-                )
-                VALUES (
-                    :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
-                    :goal, :plan, :context, :constraints_json, :project_root, :manager_session_id, :updated_at
-                )
-                ON CONFLICT(user_id, group_id) DO UPDATE SET
-                    goal=excluded.goal,
-                    plan=excluded.plan,
-                    context=excluded.context,
-                    constraints_json=excluded.constraints_json,
-                    updated_at=excluded.updated_at
-                """,
-                next_settings,
-            )
-            conn.commit()
+        self._upsert_settings(next_settings)
         after = self.plan(user, group_id)
         self._record_event(None, user, group_id, actor, current.get("manager_session_id"), "plan_updated", before, after, update.reason)
         return after
@@ -505,19 +452,19 @@ class AgentTaskManager:
         self._init_db()
         user = normalize_user_id(user_id)
         self.recompute_ready(user, group_id)
-        clauses = ["user_id=?"]
-        params: list[Any] = [user]
+        conditions = [AgentTaskRow.user_id == user]
         if group_id:
-            clauses.append("group_id=?")
-            params.append(group_id)
+            conditions.append(AgentTaskRow.group_id == group_id)
         if status:
-            clauses.append("status=?")
-            params.append(status)
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT * FROM tasks WHERE {' AND '.join(clauses)} ORDER BY priority DESC, updated_at DESC",
-                params,
-            ).fetchall()
+            conditions.append(AgentTaskRow.status == status)
+        with self._session() as db:
+            rows = list(
+                db.scalars(
+                    select(AgentTaskRow)
+                    .where(*conditions)
+                    .order_by(AgentTaskRow.priority.desc(), AgentTaskRow.updated_at.desc())
+                ).all()
+            )
         tasks = [self._task_from_row(row) for row in rows]
         groups = sorted({task["group_id"] for task in tasks} | ({group_id} if group_id else set()))
         return {
@@ -529,22 +476,20 @@ class AgentTaskManager:
     def groups(self, user_id: str | None = None) -> list[dict]:
         self._init_db()
         user = normalize_user_id(user_id)
-        with self._connect() as conn:
-            task_rows = conn.execute(
-                """
-                SELECT group_id, COUNT(*) AS task_count, MAX(updated_at) AS updated_at
-                FROM tasks WHERE user_id=? GROUP BY group_id
-                """,
-                (user,),
-            ).fetchall()
-            setting_rows = conn.execute("SELECT * FROM settings WHERE user_id=?", (user,)).fetchall()
+        with self._session() as db:
+            task_rows = db.execute(
+                select(AgentTaskRow.group_id, func.count().label("task_count"), func.max(AgentTaskRow.updated_at).label("updated_at"))
+                .where(AgentTaskRow.user_id == user)
+                .group_by(AgentTaskRow.group_id)
+            ).all()
+            setting_rows = list(db.scalars(select(AgentTaskSettingsRow).where(AgentTaskSettingsRow.user_id == user)).all())
         by_group: dict[str, dict] = {}
         for row in task_rows:
-            by_group[row["group_id"]] = {
+            by_group[row.group_id] = {
                 "user_id": user,
-                "group_id": row["group_id"],
-                "task_count": row["task_count"],
-                "updated_at": row["updated_at"] or 0,
+                "group_id": row.group_id,
+                "task_count": row.task_count,
+                "updated_at": row.updated_at or 0,
                 "goal": "",
                 "manager_session_id": None,
                 "mode": "manual",
@@ -552,21 +497,21 @@ class AgentTaskManager:
             }
         for row in setting_rows:
             item = by_group.setdefault(
-                row["group_id"],
+                row.group_id,
                 {
                     "user_id": user,
-                    "group_id": row["group_id"],
+                    "group_id": row.group_id,
                     "task_count": 0,
-                    "updated_at": row["updated_at"],
+                    "updated_at": row.updated_at,
                 },
             )
             item.update(
                 {
-                    "goal": row["goal"],
-                    "manager_session_id": row["manager_session_id"],
-                    "mode": row["mode"],
-                    "project_root": row["project_root"],
-                    "updated_at": max(float(item.get("updated_at") or 0), float(row["updated_at"] or 0)),
+                    "goal": row.goal,
+                    "manager_session_id": row.manager_session_id,
+                    "mode": row.mode,
+                    "project_root": row.project_root,
+                    "updated_at": max(float(item.get("updated_at") or 0), float(row.updated_at or 0)),
                 }
             )
         if not by_group:
@@ -590,16 +535,16 @@ class AgentTaskManager:
         task = self._get_task(task_id, user_id)
         if task["status"] in {"running", "waiting_process"}:
             raise HTTPException(status_code=409, detail="Cannot delete running or waiting-process tasks")
-        with self._connect() as conn:
-            dependents = conn.execute(
-                "SELECT id, depends_on FROM tasks WHERE user_id=? AND group_id=?",
-                (task["user_id"], task["group_id"]),
-            ).fetchall()
-            blocking = [row["id"] for row in dependents if task_id in _loads(row["depends_on"], [])]
+        with self._session() as db:
+            dependents = list(
+                db.scalars(
+                    select(AgentTaskRow).where(AgentTaskRow.user_id == task["user_id"], AgentTaskRow.group_id == task["group_id"])
+                ).all()
+            )
+            blocking = [row.id for row in dependents if task_id in _loads(row.depends_on, [])]
             if blocking:
                 raise HTTPException(status_code=409, detail=f"Task is still a dependency of: {', '.join(blocking[:5])}")
-            conn.execute("DELETE FROM tasks WHERE id=? AND user_id=?", (task_id, task["user_id"]))
-            conn.commit()
+            db.execute(delete(AgentTaskRow).where(AgentTaskRow.id == task_id, AgentTaskRow.user_id == task["user_id"]))
         self._record_event(task_id, task["user_id"], task["group_id"], "user", task.get("agent_session_id"), "deleted", task, None, "Deleted task")
         return {"status": "deleted", "task_id": task_id}
 
@@ -796,22 +741,8 @@ class AgentTaskManager:
         }
         self._validate_dependencies(row["id"], user, row["group_id"], depends_on)
         row["status"], row["blocked_reason"] = self._normalized_status(row["status"], depends_on, user)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO tasks (
-                    id, user_id, group_id, root_id, parent_id, title, description, status, blocked_reason, priority,
-                    kind, workspace, assigned_agent, model, agent_session_id, depends_on, execution, runtime,
-                    artifacts, result, metadata, policy, version, created_by, created_at, updated_at
-                ) VALUES (
-                    :id, :user_id, :group_id, :root_id, :parent_id, :title, :description, :status, :blocked_reason,
-                    :priority, :kind, :workspace, :assigned_agent, :model, :agent_session_id, :depends_on, :execution,
-                    :runtime, :artifacts, :result, :metadata, :policy, :version, :created_by, :created_at, :updated_at
-                )
-                """,
-                row,
-            )
-            conn.commit()
+        with self._session() as db:
+            db.add(self._task_row_from_payload(row))
         task = self._get_task(task_id, user)
         self._record_event(task_id, user, task["group_id"], actor, None, "created", None, task, "Created task")
         self.recompute_ready(user, task["group_id"])
@@ -981,16 +912,18 @@ class AgentTaskManager:
     async def dispatch_ready(self, user_id: str | None = None, group_id: str | None = None, limit: int = 1, force: bool = False) -> dict:
         user = normalize_user_id(user_id)
         self.recompute_ready(user, group_id)
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM tasks
-                WHERE user_id=? AND status='ready' AND (? IS NULL OR group_id=?)
-                ORDER BY priority DESC, updated_at ASC
-                LIMIT ?
-                """,
-                (user, group_id, group_id, limit),
-            ).fetchall()
+        conditions = [AgentTaskRow.user_id == user, AgentTaskRow.status == "ready"]
+        if group_id is not None:
+            conditions.append(AgentTaskRow.group_id == group_id)
+        with self._session() as db:
+            rows = list(
+                db.scalars(
+                    select(AgentTaskRow)
+                    .where(*conditions)
+                    .order_by(AgentTaskRow.priority.desc(), AgentTaskRow.updated_at.asc())
+                    .limit(limit)
+                ).all()
+            )
         dispatched = []
         for row in rows:
             task = self._task_from_row(row)
@@ -1061,11 +994,11 @@ class AgentTaskManager:
     def recompute_ready(self, user_id: str | None = None, group_id: str | None = None) -> None:
         self._init_db()
         user = normalize_user_id(user_id)
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM tasks WHERE user_id=? AND (? IS NULL OR group_id=?)",
-                (user, group_id, group_id),
-            ).fetchall()
+        conditions = [AgentTaskRow.user_id == user]
+        if group_id is not None:
+            conditions.append(AgentTaskRow.group_id == group_id)
+        with self._session() as db:
+            rows = list(db.scalars(select(AgentTaskRow).where(*conditions)).all())
         for row in rows:
             task = self._task_from_row(row)
             if task["status"] not in {"backlog", "ready", "blocked"}:
@@ -1080,22 +1013,23 @@ class AgentTaskManager:
     def events(self, task_id: str | None, user_id: str | None = None, limit: int = 100) -> list[dict]:
         self._init_db()
         user = normalize_user_id(user_id)
-        clauses = ["user_id=?"]
-        params: list[Any] = [user]
+        conditions = [AgentTaskEventRow.user_id == user]
         if task_id:
-            clauses.append("task_id=?")
-            params.append(task_id)
-        params.append(limit)
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT * FROM events WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
-                params,
-            ).fetchall()
+            conditions.append(AgentTaskEventRow.task_id == task_id)
+        with self._session() as db:
+            rows = list(
+                db.scalars(
+                    select(AgentTaskEventRow)
+                    .where(*conditions)
+                    .order_by(AgentTaskEventRow.created_at.desc())
+                    .limit(limit)
+                ).all()
+            )
         return [
             {
-                **dict(row),
-                "before": _loads(row["before_json"], None),
-                "after": _loads(row["after_json"], None),
+                **self._event_from_row(row),
+                "before": _loads(row.before_json, None),
+                "after": _loads(row.after_json, None),
             }
             for row in rows
         ]
@@ -1111,8 +1045,8 @@ class AgentTaskManager:
 
     async def _monitor_once(self) -> None:
         self._init_db()
-        with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM tasks WHERE status='waiting_process'").fetchall()
+        with self._session() as db:
+            rows = list(db.scalars(select(AgentTaskRow).where(AgentTaskRow.status == "waiting_process")).all())
         for row in rows:
             task = self._task_from_row(row)
             runtime = task["runtime"]
@@ -1127,10 +1061,14 @@ class AgentTaskManager:
             await self._request_manager_after_process(task)
 
     async def _auto_dispatch_once(self) -> None:
-        with self._connect() as conn:
-            groups = conn.execute("SELECT DISTINCT user_id, group_id FROM settings WHERE mode='auto'").fetchall()
+        with self._session() as db:
+            groups = db.execute(
+                select(AgentTaskSettingsRow.user_id, AgentTaskSettingsRow.group_id)
+                .where(AgentTaskSettingsRow.mode == "auto")
+                .distinct()
+            ).all()
         for row in groups:
-            await self.dispatch_ready(row["user_id"], row["group_id"], limit=1)
+            await self.dispatch_ready(row.user_id, row.group_id, limit=1)
 
     async def _request_manager_after_process(self, task: dict) -> None:
         prompt = self._process_finished_prompt(task)
@@ -1375,14 +1313,43 @@ When you make a graph or plan change, include a concise reason. If user approval
             raise HTTPException(status_code=404, detail="Task not found")
         self._init_db()
         user = normalize_user_id(user_id)
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (task_id, user)).fetchone()
+        with self._session() as db:
+            row = db.get(AgentTaskRow, task_id)
+            if row and row.user_id != user:
+                row = None
         if not row:
             raise HTTPException(status_code=404, detail="Task not found")
         return self._task_from_row(row)
 
-    def _task_from_row(self, row: sqlite3.Row) -> dict:
-        task = dict(row)
+    def _task_from_row(self, row: AgentTaskRow) -> dict:
+        task = {
+            "id": row.id,
+            "user_id": row.user_id,
+            "group_id": row.group_id,
+            "root_id": row.root_id,
+            "parent_id": row.parent_id,
+            "title": row.title,
+            "description": row.description,
+            "status": row.status,
+            "blocked_reason": row.blocked_reason,
+            "priority": row.priority,
+            "kind": row.kind,
+            "workspace": row.workspace,
+            "assigned_agent": row.assigned_agent,
+            "model": row.model,
+            "agent_session_id": row.agent_session_id,
+            "depends_on": row.depends_on,
+            "execution": row.execution,
+            "runtime": row.runtime,
+            "artifacts": row.artifacts,
+            "result": row.result,
+            "metadata": row.metadata_json,
+            "policy": row.policy,
+            "version": row.version,
+            "created_by": row.created_by,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
         task["depends_on"] = _loads(task["depends_on"], [])
         task["execution"] = _loads(task["execution"], {})
         task["runtime"] = _loads(task["runtime"], {})
@@ -1428,24 +1395,7 @@ When you make a graph or plan change, include a concise reason. If user approval
     def _set_manager_session(self, user_id: str, group_id: str, session_id: str) -> None:
         settings = self.settings(user_id, group_id)
         payload = {**settings, "manager_session_id": session_id, "updated_at": _now()}
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO settings (
-                    user_id, group_id, mode, default_agent, default_model, auto_tick_seconds,
-                    goal, plan, context, constraints_json, project_root, manager_session_id, updated_at
-                )
-                VALUES (
-                    :user_id, :group_id, :mode, :default_agent, :default_model, :auto_tick_seconds,
-                    :goal, :plan, :context, :constraints_json, :project_root, :manager_session_id, :updated_at
-                )
-                ON CONFLICT(user_id, group_id) DO UPDATE SET
-                    manager_session_id=excluded.manager_session_id,
-                    updated_at=excluded.updated_at
-                """,
-                payload,
-            )
-            conn.commit()
+        self._upsert_settings(payload)
 
     def _write_task(self, task: dict, bump: bool) -> None:
         task = dict(task)
@@ -1462,20 +1412,35 @@ When you make a graph or plan change, include a concise reason. If user approval
             "metadata": _json(task["metadata"]),
             "policy": _json(task["policy"]),
         }
-        with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE tasks SET
-                    group_id=:group_id, root_id=:root_id, parent_id=:parent_id, title=:title, description=:description,
-                    status=:status, blocked_reason=:blocked_reason, priority=:priority, kind=:kind, workspace=:workspace,
-                    assigned_agent=:assigned_agent, model=:model, agent_session_id=:agent_session_id, depends_on=:depends_on,
-                    execution=:execution, runtime=:runtime, artifacts=:artifacts, result=:result, metadata=:metadata,
-                    policy=:policy, version=:version, updated_at=:updated_at
-                WHERE id=:id AND user_id=:user_id
-                """,
-                row,
+        with self._session() as db:
+            db.execute(
+                update(AgentTaskRow)
+                .where(AgentTaskRow.id == row["id"], AgentTaskRow.user_id == row["user_id"])
+                .values(
+                    group_id=row["group_id"],
+                    root_id=row["root_id"],
+                    parent_id=row["parent_id"],
+                    title=row["title"],
+                    description=row["description"],
+                    status=row["status"],
+                    blocked_reason=row["blocked_reason"],
+                    priority=row["priority"],
+                    kind=row["kind"],
+                    workspace=row["workspace"],
+                    assigned_agent=row["assigned_agent"],
+                    model=row["model"],
+                    agent_session_id=row["agent_session_id"],
+                    depends_on=row["depends_on"],
+                    execution=row["execution"],
+                    runtime=row["runtime"],
+                    artifacts=row["artifacts"],
+                    result=row["result"],
+                    metadata_json=row["metadata"],
+                    policy=row["policy"],
+                    version=row["version"],
+                    updated_at=row["updated_at"],
+                )
             )
-            conn.commit()
 
     def _record_event(
         self,
@@ -1489,27 +1454,94 @@ When you make a graph or plan change, include a concise reason. If user approval
         after: Any,
         reason: str,
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO events (id, task_id, user_id, group_id, actor, agent_session_id, type, before_json, after_json, reason, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    f"evt_{uuid.uuid4().hex[:12]}",
-                    task_id,
-                    user_id,
-                    group_id,
-                    actor,
-                    agent_session_id,
-                    event_type,
-                    _json(before) if before is not None else None,
-                    _json(after) if after is not None else None,
-                    reason,
-                    _now(),
-                ),
+        with self._session() as db:
+            db.add(
+                AgentTaskEventRow(
+                    id=f"evt_{uuid.uuid4().hex[:12]}",
+                    task_id=task_id,
+                    user_id=user_id,
+                    group_id=group_id,
+                    actor=actor,
+                    agent_session_id=agent_session_id,
+                    type=event_type,
+                    before_json=_json(before) if before is not None else None,
+                    after_json=_json(after) if after is not None else None,
+                    reason=reason,
+                    created_at=_now(),
+                )
             )
-            conn.commit()
+
+    def _settings_from_row(self, row: AgentTaskSettingsRow) -> dict:
+        return {
+            "user_id": row.user_id,
+            "group_id": row.group_id,
+            "mode": row.mode,
+            "default_agent": row.default_agent,
+            "default_model": row.default_model,
+            "auto_tick_seconds": row.auto_tick_seconds,
+            "goal": row.goal,
+            "plan": row.plan,
+            "context": row.context,
+            "constraints_json": row.constraints_json,
+            "project_root": row.project_root,
+            "manager_session_id": row.manager_session_id,
+            "updated_at": row.updated_at,
+        }
+
+    def _upsert_settings(self, payload: dict) -> None:
+        statement = sqlite_insert(AgentTaskSettingsRow).values(**payload)
+        with self._session() as db:
+            db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["user_id", "group_id"],
+                    set_={key: statement.excluded[key] for key in payload.keys() if key not in {"user_id", "group_id"}},
+                )
+            )
+
+    def _task_row_from_payload(self, row: dict) -> AgentTaskRow:
+        return AgentTaskRow(
+            id=row["id"],
+            user_id=row["user_id"],
+            group_id=row["group_id"],
+            root_id=row.get("root_id"),
+            parent_id=row.get("parent_id"),
+            title=row["title"],
+            description=row["description"],
+            status=row["status"],
+            blocked_reason=row.get("blocked_reason"),
+            priority=int(row["priority"]),
+            kind=row["kind"],
+            workspace=row["workspace"],
+            assigned_agent=row["assigned_agent"],
+            model=row.get("model"),
+            agent_session_id=row.get("agent_session_id"),
+            depends_on=row["depends_on"],
+            execution=row["execution"],
+            runtime=row["runtime"],
+            artifacts=row["artifacts"],
+            result=row["result"],
+            metadata_json=row["metadata"],
+            policy=row["policy"],
+            version=int(row["version"]),
+            created_by=row["created_by"],
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+        )
+
+    def _event_from_row(self, row: AgentTaskEventRow) -> dict:
+        return {
+            "id": row.id,
+            "task_id": row.task_id,
+            "user_id": row.user_id,
+            "group_id": row.group_id,
+            "actor": row.actor,
+            "agent_session_id": row.agent_session_id,
+            "type": row.type,
+            "before_json": row.before_json,
+            "after_json": row.after_json,
+            "reason": row.reason,
+            "created_at": row.created_at,
+        }
 
     def _assert_mutable(self, task: dict) -> None:
         if task["status"] not in MUTABLE_STATUSES:
@@ -1518,13 +1550,10 @@ When you make a graph or plan change, include a concise reason. If user approval
     def _validate_dependencies(self, task_id: str, user_id: str, group_id: str, depends_on: list[str]) -> None:
         if task_id in depends_on:
             raise HTTPException(status_code=400, detail="Task cannot depend on itself")
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT id, group_id, depends_on FROM tasks WHERE user_id=?",
-                (user_id,),
-            ).fetchall()
-        graph = {row["id"]: _loads(row["depends_on"], []) for row in rows}
-        groups = {row["id"]: row["group_id"] for row in rows}
+        with self._session() as db:
+            rows = list(db.scalars(select(AgentTaskRow).where(AgentTaskRow.user_id == user_id)).all())
+        graph = {row.id: _loads(row.depends_on, []) for row in rows}
+        groups = {row.id: row.group_id for row in rows}
         for dep in depends_on:
             if dep not in graph:
                 raise HTTPException(status_code=400, detail=f"Dependency not found: {dep}")
@@ -1563,23 +1592,24 @@ When you make a graph or plan change, include a concise reason. If user approval
     def _has_unfinished_dependency(self, depends_on: list[str], user_id: str) -> bool:
         if not depends_on:
             return False
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT status FROM tasks WHERE user_id=? AND id IN ({','.join('?' for _ in depends_on)})",
-                [user_id, *depends_on],
-            ).fetchall()
-        statuses = [row["status"] for row in rows]
+        with self._session() as db:
+            statuses = list(
+                db.scalars(
+                    select(AgentTaskRow.status).where(AgentTaskRow.user_id == user_id, AgentTaskRow.id.in_(depends_on))
+                ).all()
+            )
         return len(statuses) != len(depends_on) or any(status != "done" for status in statuses)
 
     def _has_failed_dependency(self, depends_on: list[str], user_id: str) -> bool:
         if not depends_on:
             return False
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT status FROM tasks WHERE user_id=? AND id IN ({','.join('?' for _ in depends_on)})",
-                [user_id, *depends_on],
-            ).fetchall()
-        return any(row["status"] in {"failed", "cancelled"} for row in rows)
+        with self._session() as db:
+            statuses = list(
+                db.scalars(
+                    select(AgentTaskRow.status).where(AgentTaskRow.user_id == user_id, AgentTaskRow.id.in_(depends_on))
+                ).all()
+            )
+        return any(status in {"failed", "cancelled"} for status in statuses)
 
     def _pid_alive(self, pid: int) -> bool:
         try:

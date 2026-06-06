@@ -241,17 +241,21 @@ class SuperWorkspaceRuntime:
             raise HTTPException(status_code=400, detail="Message is required")
         normalized_user = normalize_user_id(user_id)
         data = super_workspace_manager.read(normalized_user)
-        role_ids, query = self._parse_query_prefix(message, data.roles)
+        role_ids, citation_ids, query = self._parse_query_prefix(message, data.roles)
         if not query:
             raise HTTPException(status_code=400, detail="Query is required")
-        run = agent_history_store.create_super_run(
-            normalized_user,
-            query,
-            "selecting",
-            role_ids,
-            parent_message_id=request.parent_message_id,
-            sender_role_id=request.sender_role_id,
-        )
+        try:
+            run = agent_history_store.create_super_run(
+                normalized_user,
+                query,
+                "selecting",
+                role_ids,
+                citation_ids=citation_ids,
+                parent_message_id=request.parent_message_id,
+                sender_role_id=request.sender_role_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         await self._emit_update({"type": "run-created", "user_id": normalized_user, "run_id": run.id})
         rationale = ""
         if not role_ids:
@@ -284,25 +288,32 @@ class SuperWorkspaceRuntime:
         await self._emit_update({"type": "run-updated", "user_id": normalized_user, "run_id": run.id})
         return agent_history_store.get_super_run(queued.id, normalized_user)
 
-    def _parse_query_prefix(self, message: str, roles: list[SuperRole]) -> tuple[list[str], str]:
+    def _parse_query_prefix(self, message: str, roles: list[SuperRole]) -> tuple[list[str], list[str], str]:
         by_key: dict[str, list[SuperRole]] = {}
         for role in roles:
             by_key.setdefault(self.mention_key(role), []).append(role)
         role_ids: list[str] = []
+        citation_ids: list[str] = []
         position = 0
         while position < len(message) and message[position] == "@":
-            match = re.match(r"@([A-Za-z_][A-Za-z0-9_]*) ", message[position:])
+            match = re.match(r"@(\S+)(?:\s+|$)", message[position:])
             if not match:
                 break
-            key = match.group(1)
-            matched_roles = by_key.get(key)
-            if not matched_roles:
-                raise HTTPException(status_code=400, detail=f"Unknown Super Workspace role mention: @{key}")
-            for role in matched_roles:
-                if role.id not in role_ids:
-                    role_ids.append(role.id)
+            token = match.group(1)
+            matched_roles = by_key.get(token)
+            if matched_roles:
+                for role in matched_roles:
+                    if role.id not in role_ids:
+                        role_ids.append(role.id)
+            else:
+                citation_match = re.fullmatch(r"(?:msg|message)-([A-Za-z0-9_.:-]+)", token)
+                if not citation_match:
+                    raise HTTPException(status_code=400, detail=f"Unknown Super Workspace mention: @{token}")
+                message_id = citation_match.group(1)
+                if message_id not in citation_ids:
+                    citation_ids.append(message_id)
             position += match.end()
-        return role_ids, message[position:].strip()
+        return role_ids, citation_ids, message[position:].strip()
 
     def _expand_role_names(self, role_ids: list[str], roles: list[SuperRole]) -> list[str]:
         by_id = {role.id: role for role in roles}
@@ -471,11 +482,38 @@ class SuperWorkspaceRuntime:
             "sender_role_id": run.sender_role_id,
             "recipient_role_id": role.id,
         }
+        cited_messages = agent_history_store.cited_messages_for_query(run.user_id, run.message_id)
+        cited_section = self._citation_prompt_section(cited_messages)
+        query_heading = "The below is the query for this time:" if cited_section else "User message:"
         return (
             "Super Workspace routed this message to your role. Apply your fixed role rules and answer only for your own responsibility.\n\n"
             f"Routing metadata:\n{json.dumps(lineage, ensure_ascii=False)}\n\n"
-            f"User message:\n{run.message}"
+            f"{cited_section}"
+            f"{query_heading}\n{run.message}"
         )
+
+    def _citation_prompt_section(self, messages: list[Any]) -> str:
+        if not messages:
+            return ""
+        blocks: list[str] = ["The user cited the following Super Workspace message(s) for context:"]
+        for index, message in enumerate(messages, start=1):
+            content = (message.query or message.text or "").strip()
+            if not content:
+                content = "(No visible focus-mode text.)"
+            metadata = {
+                "message_id": message.id,
+                "provider": message.provider,
+                "role": message.role,
+                "event_type": message.event_type,
+                "occurred_at": message.occurred_at,
+                "sender_role_id": message.sender_role_id,
+                "recipient_role_id": message.recipient_role_id,
+            }
+            blocks.append(
+                f"[{index}] Metadata:\n{json.dumps(metadata, ensure_ascii=False)}\n\n"
+                f"Message:\n{content}"
+            )
+        return "\n\n".join(blocks) + "\n\n"
 
 
 super_workspace_runtime = SuperWorkspaceRuntime()

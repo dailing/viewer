@@ -93,6 +93,7 @@ export type SuperHistoryRun = {
   query: string;
   message_id: string;
   role_ids: string[];
+  citation_ids?: string[];
   status: "selecting" | "queued" | "running" | "dispatched" | "completed" | "failed";
   rationale: string;
   error: string;

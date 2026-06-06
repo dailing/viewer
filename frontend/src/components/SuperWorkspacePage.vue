@@ -249,16 +249,20 @@ function addRoleMention(role: SuperRole) {
   composer.value = `${composer.value.slice(0, position)}${insert}${composer.value.slice(position)}`;
 }
 
+function addMessageCitation(messageId: string) {
+  const token = `@msg-${messageId}`;
+  if (leadingMentionTokens(composer.value).includes(token)) return;
+  const insert = `${token} `;
+  const position = leadingMentionPrefixEnd(composer.value);
+  composer.value = `${composer.value.slice(0, position)}${insert}${composer.value.slice(position)}`;
+}
+
 function parseLeadingMentionRoleIds(value: string) {
   const byKey = new Map(roles.value.map((role) => [roleMentionKey(role), role]));
   const ids: string[] = [];
-  let position = 0;
-  while (position < value.length && value[position] === "@") {
-    const match = /^@([A-Za-z_][A-Za-z0-9_]*) /.exec(value.slice(position));
-    if (!match) break;
-    const role = byKey.get(match[1]);
+  for (const token of leadingMentionTokens(value)) {
+    const role = byKey.get(token.slice(1));
     if (role && !ids.includes(role.id)) ids.push(role.id);
-    position += match[0].length;
   }
   return ids;
 }
@@ -266,11 +270,23 @@ function parseLeadingMentionRoleIds(value: string) {
 function leadingMentionPrefixEnd(value: string) {
   let position = 0;
   while (position < value.length && value[position] === "@") {
-    const match = /^@([A-Za-z_][A-Za-z0-9_]*) /.exec(value.slice(position));
+    const match = /^@\S+(?:\s+|$)/.exec(value.slice(position));
     if (!match) break;
     position += match[0].length;
   }
   return position;
+}
+
+function leadingMentionTokens(value: string) {
+  const tokens: string[] = [];
+  let position = 0;
+  while (position < value.length && value[position] === "@") {
+    const match = /^@(\S+)(?:\s+|$)/.exec(value.slice(position));
+    if (!match) break;
+    tokens.push(`@${match[1]}`);
+    position += match[0].length;
+  }
+  return tokens;
 }
 
 function roleMentionKey(role: SuperRole) {
@@ -331,6 +347,10 @@ function targetFinalMessage(target: SuperHistoryTarget) {
   return [...target.messages]
     .reverse()
     .find((message) => message.role === "assistant" && message.event_type === "message:assistant" && message.text.trim());
+}
+
+function targetFinalMessageId(target: SuperHistoryTarget) {
+  return targetFinalMessage(target)?.id ?? "";
 }
 
 function targetHtml(target: SuperHistoryTarget) {
@@ -543,6 +563,12 @@ async function scrollThreadToBottom() {
           <div class="super-user-message">
             <div class="super-run-time">{{ formatTime(run.created_at) }}</div>
             <div class="super-message-text">{{ run.message }}</div>
+            <div class="super-message-actions">
+              <button class="super-cite-button" type="button" :title="`Cite @msg-${run.message_id}`" @click="addMessageCitation(run.message_id)">
+                <i class="bi bi-link-45deg"></i>
+                <span>Cite</span>
+              </button>
+            </div>
             <div class="super-route-line">
               <span v-if="run.status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
               <span v-else-if="run.status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
@@ -562,6 +588,17 @@ async function scrollThreadToBottom() {
             <div class="super-role-response">
               <div v-if="targetHtml(target)" class="markdown-body super-response-body" v-html="targetHtml(target)"></div>
               <div v-else class="super-waiting">Waiting for response</div>
+              <div v-if="targetFinalMessageId(target)" class="super-message-actions">
+                <button
+                  class="super-cite-button"
+                  type="button"
+                  :title="`Cite @msg-${targetFinalMessageId(target)}`"
+                  @click="addMessageCitation(targetFinalMessageId(target))"
+                >
+                  <i class="bi bi-link-45deg"></i>
+                  <span>Cite</span>
+                </button>
+              </div>
             </div>
           </div>
         </article>
@@ -893,6 +930,29 @@ async function scrollThreadToBottom() {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.super-message-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.super-cite-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  display: inline-flex;
+  font-size: 11px;
+  gap: 3px;
+  line-height: 1.2;
+  padding: 2px 0;
+}
+
+.super-cite-button:hover,
+.super-cite-button:focus-visible {
+  color: #1d4ed8;
 }
 
 .super-route-line {

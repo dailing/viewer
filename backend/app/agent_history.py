@@ -127,6 +127,7 @@ class SuperHistoryRun(BaseModel):
     query: str
     message_id: str
     role_ids: list[str] = Field(default_factory=list)
+    citation_ids: list[str] = Field(default_factory=list)
     status: str
     rationale: str = ""
     error: str = ""
@@ -235,6 +236,19 @@ class SuperWorkspaceMessageFileChangeRow(AgentHistoryBase):
     diff: Mapped[str | None] = mapped_column(Text)
 
 
+class SuperWorkspaceMessageCitationRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_message_citations"
+    __table_args__ = (
+        Index("idx_super_citations_source", "source_message_id", "position"),
+        Index("idx_super_citations_cited", "cited_message_id"),
+    )
+
+    source_message_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspace_messages.id", ondelete="CASCADE"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cited_message_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspace_messages.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class SuperWorkspaceDriverCheckpointRow(AgentHistoryBase):
     __tablename__ = "super_workspace_driver_checkpoints"
 
@@ -308,6 +322,7 @@ class AgentHistoryStore:
         message: str,
         status: str,
         role_ids: list[str] | None = None,
+        citation_ids: list[str] | None = None,
         rationale: str = "",
         raw: dict[str, Any] | None = None,
         parent_message_id: str | None = None,
@@ -316,15 +331,18 @@ class AgentHistoryStore:
         normalized_user = normalize_user_id(user_id)
         now = time.time()
         message_id = uuid.uuid4().hex
+        normalized_citation_ids = self._normalize_citation_ids(citation_ids or [])
         raw_message = raw or {
             "type": "super_workspace_query_message",
             "message_id": message_id,
             "query": message,
             "role_ids": role_ids or [],
+            "citation_ids": normalized_citation_ids,
             "parent_message_id": parent_message_id,
             "sender_role_id": sender_role_id,
         }
         with self.session_scope() as db:
+            self._validate_citation_ids(db, normalized_user, normalized_citation_ids)
             self._insert_message(
                 db,
                 {
@@ -360,6 +378,7 @@ class AgentHistoryStore:
                     "ingested_at": now,
                 },
             )
+            self._replace_citations(db, message_id, normalized_citation_ids, now)
         return self.get_super_run(message_id, normalized_user)
 
     def update_super_run(
@@ -636,6 +655,7 @@ class AgentHistoryStore:
             query=query,
             message_id=str(row.id),
             role_ids=target_role_ids or selected_role_ids,
+            citation_ids=self.citation_ids_for_message(str(row.id)),
             status=str(row.status or "queued"),
             rationale=str(row.rationale or ""),
             error=str(row.error or ""),
@@ -645,6 +665,41 @@ class AgentHistoryStore:
             updated_at=updated_at,
             targets=targets,
         )
+
+    def citation_ids_for_message(self, message_id: str) -> list[str]:
+        with self.read_session() as db:
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceMessageCitationRow)
+                    .where(SuperWorkspaceMessageCitationRow.source_message_id == message_id)
+                    .order_by(SuperWorkspaceMessageCitationRow.position.asc())
+                ).all()
+            )
+        return [str(row.cited_message_id) for row in rows]
+
+    def cited_messages_for_query(self, user_id: str | None, query_message_id: str) -> list[AgentHistoryMessage]:
+        normalized_user = normalize_user_id(user_id)
+        with self.read_session() as db:
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceMessageCitationRow)
+                    .where(SuperWorkspaceMessageCitationRow.source_message_id == query_message_id)
+                    .order_by(SuperWorkspaceMessageCitationRow.position.asc())
+                ).all()
+            )
+            cited_ids = [str(row.cited_message_id) for row in rows]
+            if not cited_ids:
+                return []
+            messages = {
+                str(row.id): self._message_from_row(row)
+                for row in db.scalars(
+                    select(SuperWorkspaceMessageRow).where(
+                        SuperWorkspaceMessageRow.user_id == normalized_user,
+                        SuperWorkspaceMessageRow.id.in_(cited_ids),
+                    )
+                ).all()
+            }
+        return [messages[message_id] for message_id in cited_ids if message_id in messages]
 
     def _driver_rows(self, query_message_id: str) -> list[SuperWorkspaceDriverRunRow]:
         with self.read_session() as db:
@@ -832,6 +887,42 @@ class AgentHistoryStore:
             )
         )
         self._replace_file_changes(db, str(row["id"]), file_changes)
+
+    def _replace_citations(self, db: Session, source_message_id: str, citation_ids: list[str], created_at: float) -> None:
+        db.execute(delete(SuperWorkspaceMessageCitationRow).where(SuperWorkspaceMessageCitationRow.source_message_id == source_message_id))
+        for position, cited_message_id in enumerate(self._normalize_citation_ids(citation_ids)):
+            db.add(
+                SuperWorkspaceMessageCitationRow(
+                    source_message_id=source_message_id,
+                    position=position,
+                    cited_message_id=cited_message_id,
+                    created_at=created_at,
+                )
+            )
+
+    def _validate_citation_ids(self, db: Session, user_id: str, citation_ids: list[str]) -> None:
+        if not citation_ids:
+            return
+        found = set(
+            db.scalars(
+                select(SuperWorkspaceMessageRow.id).where(
+                    SuperWorkspaceMessageRow.user_id == user_id,
+                    SuperWorkspaceMessageRow.id.in_(citation_ids),
+                )
+            ).all()
+        )
+        missing = [message_id for message_id in citation_ids if message_id not in found]
+        if missing:
+            raise ValueError(f"Unknown cited Super Workspace message id: {missing[0]}")
+
+    @staticmethod
+    def _normalize_citation_ids(citation_ids: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in citation_ids:
+            message_id = str(value).strip()
+            if message_id and message_id not in normalized:
+                normalized.append(message_id)
+        return normalized
 
     def _replace_file_changes(self, db: Session, message_id: str, file_changes: Any) -> None:
         db.execute(delete(SuperWorkspaceMessageFileChangeRow).where(SuperWorkspaceMessageFileChangeRow.message_id == message_id))

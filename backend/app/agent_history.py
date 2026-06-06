@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, or_, select, text, update
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -17,7 +17,8 @@ from sqlalchemy.pool import NullPool
 from .storage import AGENT_HISTORY_DB_PATH
 from .users import normalize_user_id
 
-SUPER_WORKSPACE_PROVIDER = "super_workspace"
+DEFAULT_SUPER_WORKSPACE_ID = "default"
+DEFAULT_SUPER_WORKSPACE_NAME = "Default Super Workspace"
 DEFAULT_RUN_LIMIT = 30
 DEFAULT_MESSAGE_LIMIT = 120
 
@@ -29,6 +30,7 @@ class SuperHistoryRunCreate(BaseModel):
 
 
 class SuperDriverRunCreate(BaseModel):
+    workspace_id: str = DEFAULT_SUPER_WORKSPACE_ID
     role_id: str
     role_name: str
     provider: str
@@ -41,6 +43,7 @@ class SuperDriverRunCreate(BaseModel):
 
 class SuperDispatchTask(BaseModel):
     id: str
+    workspace_id: str
     query_message_id: str
     user_id: str
     role_id: str
@@ -77,6 +80,7 @@ class AgentHistoryFileChange(BaseModel):
 
 class AgentHistoryMessage(BaseModel):
     id: str
+    workspace_id: str | None = None
     provider: str
     viewer_session_id: str | None = None
     provider_session_id: str | None = None
@@ -107,6 +111,7 @@ class AgentHistoryMessage(BaseModel):
 
 class SuperHistoryTarget(BaseModel):
     id: str
+    workspace_id: str
     run_id: str
     role_id: str
     role_name: str
@@ -122,6 +127,7 @@ class SuperHistoryTarget(BaseModel):
 
 class SuperHistoryRun(BaseModel):
     id: str
+    workspace_id: str
     user_id: str
     message: str
     query: str
@@ -138,6 +144,51 @@ class SuperHistoryRun(BaseModel):
     targets: list[SuperHistoryTarget] = Field(default_factory=list)
 
 
+class SuperDisplayTarget(BaseModel):
+    id: str
+    workspace_id: str
+    role_id: str
+    role_name: str
+    provider: str
+    session_ref: str
+    status: str
+
+
+class SuperDisplayItem(BaseModel):
+    id: str
+    workspace_id: str
+    kind: str
+    user_id: str
+    text: str
+    role: str
+    event_type: str
+    provider: str
+    created_at: float
+    updated_at: float
+    message_id: str
+    query_message_id: str | None = None
+    driver_run_id: str | None = None
+    parent_message_id: str | None = None
+    sender_role_id: str | None = None
+    recipient_role_id: str | None = None
+    role_id: str | None = None
+    role_name: str = ""
+    session_ref: str = ""
+    target_status: str = ""
+    run_status: str = ""
+    error: str = ""
+    citation_ids: list[str] = Field(default_factory=list)
+    dispatch_targets: list[SuperDisplayTarget] = Field(default_factory=list)
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class SuperDisplayItemsPage(BaseModel):
+    items: list[SuperDisplayItem]
+    has_more: bool = False
+    next_before: float | None = None
+    next_after: float | None = None
+
+
 class SuperHistoryRunsPage(BaseModel):
     runs: list[SuperHistoryRun]
     has_more: bool = False
@@ -147,6 +198,40 @@ class SuperHistoryRunsPage(BaseModel):
 
 class AgentHistoryBase(DeclarativeBase):
     pass
+
+
+class SuperWorkspaceRow(AgentHistoryBase):
+    __tablename__ = "super_workspaces"
+    __table_args__ = (
+        UniqueConstraint("user_id", "id"),
+        Index("idx_super_workspaces_user", "user_id", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    common_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class SuperWorkspaceRoleRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_roles"
+    __table_args__ = (
+        Index("idx_super_roles_workspace", "user_id", "workspace_id", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspaces.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    provider: Mapped[str] = mapped_column(String, nullable=False, default="codex")
+    cwd: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    model: Mapped[str | None] = mapped_column(String)
+    session_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
 class SuperWorkspaceMessageRow(AgentHistoryBase):
@@ -160,6 +245,7 @@ class SuperWorkspaceMessageRow(AgentHistoryBase):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(String, ForeignKey("super_workspaces.id", ondelete="CASCADE"))
     user_id: Mapped[str] = mapped_column(String, nullable=False)
     conversation_id: Mapped[str] = mapped_column(String, nullable=False)
     parent_message_id: Mapped[str | None] = mapped_column(String)
@@ -198,6 +284,7 @@ class SuperWorkspaceDriverRunRow(AgentHistoryBase):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspaces.id", ondelete="CASCADE"), nullable=False)
     query_message_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspace_messages.id", ondelete="CASCADE"), nullable=False)
     user_id: Mapped[str] = mapped_column(String, nullable=False)
     role_id: Mapped[str] = mapped_column(String, nullable=False)
@@ -292,29 +379,132 @@ class AgentHistoryStore:
 
     def _ensure_schema(self) -> None:
         AgentHistoryBase.metadata.create_all(self.engine)
-        self._ensure_driver_run_columns()
 
-    def _ensure_driver_run_columns(self) -> None:
-        columns = {
-            "role_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
-            "claimed_by": "TEXT",
-            "claim_expires_at": "REAL",
-            "attempt_count": "INTEGER NOT NULL DEFAULT 0",
-            "next_attempt_at": "REAL",
-            "driver_pid": "INTEGER",
-            "driver_state_path": "TEXT",
-            "error": "TEXT NOT NULL DEFAULT ''",
-            "started_at": "REAL",
-            "finished_at": "REAL",
-        }
-        with self.engine.begin() as connection:
-            existing = {
-                str(row[1])
-                for row in connection.exec_driver_sql("PRAGMA table_info(super_workspace_driver_runs)").all()
-            }
-            for name, definition in columns.items():
-                if name not in existing:
-                    connection.execute(text(f"ALTER TABLE super_workspace_driver_runs ADD COLUMN {name} {definition}"))
+    def ensure_default_workspace(self, user_id: str | None) -> SuperWorkspaceRow:
+        normalized_user = normalize_user_id(user_id)
+        workspace_id = self.default_workspace_id(normalized_user)
+        now = time.time()
+        with self.session_scope() as db:
+            row = db.scalar(
+                select(SuperWorkspaceRow).where(
+                    SuperWorkspaceRow.id == workspace_id,
+                    SuperWorkspaceRow.user_id == normalized_user,
+                )
+            )
+            if row is None:
+                row = SuperWorkspaceRow(
+                    id=workspace_id,
+                    user_id=normalized_user,
+                    name=DEFAULT_SUPER_WORKSPACE_NAME,
+                    common_prompt="",
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(row)
+        with self.read_session() as db:
+            found = db.scalar(
+                select(SuperWorkspaceRow).where(
+                    SuperWorkspaceRow.id == workspace_id,
+                    SuperWorkspaceRow.user_id == normalized_user,
+                )
+            )
+            if found is None:
+                raise KeyError(workspace_id)
+            return found
+
+    @staticmethod
+    def default_workspace_id(user_id: str | None) -> str:
+        return f"{normalize_user_id(user_id)}:default"
+
+    def super_workspace_data(self, user_id: str | None) -> tuple[SuperWorkspaceRow, list[SuperWorkspaceRoleRow]]:
+        workspace = self.ensure_default_workspace(user_id)
+        with self.read_session() as db:
+            row = db.scalar(
+                select(SuperWorkspaceRow).where(
+                    SuperWorkspaceRow.id == workspace.id,
+                    SuperWorkspaceRow.user_id == workspace.user_id,
+                )
+            )
+            if row is None:
+                raise KeyError(workspace.id)
+            roles = list(
+                db.scalars(
+                    select(SuperWorkspaceRoleRow)
+                    .where(
+                        SuperWorkspaceRoleRow.workspace_id == workspace.id,
+                        SuperWorkspaceRoleRow.user_id == workspace.user_id,
+                    )
+                    .order_by(SuperWorkspaceRoleRow.created_at.asc(), SuperWorkspaceRoleRow.id.asc())
+                ).all()
+            )
+            return row, roles
+
+    def update_super_workspace_common_prompt(self, user_id: str | None, common_prompt: str) -> None:
+        workspace = self.ensure_default_workspace(user_id)
+        now = time.time()
+        with self.session_scope() as db:
+            db.execute(
+                update(SuperWorkspaceRow)
+                .where(SuperWorkspaceRow.id == workspace.id, SuperWorkspaceRow.user_id == workspace.user_id)
+                .values(common_prompt=common_prompt, updated_at=now)
+            )
+
+    def create_super_workspace_role(
+        self,
+        user_id: str | None,
+        *,
+        name: str,
+        description: str = "",
+        provider: str = "codex",
+        cwd: str = "",
+        model: str | None = None,
+    ) -> None:
+        workspace = self.ensure_default_workspace(user_id)
+        now = time.time()
+        with self.session_scope() as db:
+            db.add(
+                SuperWorkspaceRoleRow(
+                    id=uuid.uuid4().hex[:12],
+                    workspace_id=workspace.id,
+                    user_id=workspace.user_id,
+                    name=name,
+                    description=description,
+                    provider=provider,
+                    cwd=cwd,
+                    model=model,
+                    session_ref="",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+    def update_super_workspace_role(self, user_id: str | None, role_id: str, values: dict[str, Any]) -> None:
+        workspace = self.ensure_default_workspace(user_id)
+        cleaned = {key: value for key, value in values.items() if value is not None}
+        if not cleaned:
+            return
+        cleaned["updated_at"] = time.time()
+        with self.session_scope() as db:
+            db.execute(
+                update(SuperWorkspaceRoleRow)
+                .where(
+                    SuperWorkspaceRoleRow.id == role_id,
+                    SuperWorkspaceRoleRow.workspace_id == workspace.id,
+                    SuperWorkspaceRoleRow.user_id == workspace.user_id,
+                )
+                .values(**cleaned)
+            )
+
+    def delete_super_workspace_role(self, user_id: str | None, role_id: str) -> None:
+        workspace = self.ensure_default_workspace(user_id)
+        with self.session_scope() as db:
+            db.execute(
+                delete(SuperWorkspaceRoleRow).where(
+                    SuperWorkspaceRoleRow.id == role_id,
+                    SuperWorkspaceRoleRow.workspace_id == workspace.id,
+                    SuperWorkspaceRoleRow.user_id == workspace.user_id,
+                )
+            )
 
     def create_super_run(
         self,
@@ -329,6 +519,7 @@ class AgentHistoryStore:
         sender_role_id: str | None = None,
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
+        workspace = self.ensure_default_workspace(normalized_user)
         now = time.time()
         message_id = uuid.uuid4().hex
         normalized_citation_ids = self._normalize_citation_ids(citation_ids or [])
@@ -347,6 +538,7 @@ class AgentHistoryStore:
                 db,
                 {
                     "id": message_id,
+                    "workspace_id": workspace.id,
                     "user_id": normalized_user,
                     "conversation_id": "default",
                     "parent_message_id": parent_message_id,
@@ -355,7 +547,7 @@ class AgentHistoryStore:
                     "role_id": sender_role_id or "user",
                     "query_message_id": None,
                     "driver_run_id": None,
-                    "provider": SUPER_WORKSPACE_PROVIDER,
+                    "provider": "",
                     "viewer_session_id": None,
                     "provider_session_id": None,
                     "event_index": 0,
@@ -392,11 +584,13 @@ class AgentHistoryStore:
         error: str | None = None,
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
+        workspace = self.ensure_default_workspace(normalized_user)
         now = time.time()
         with self.session_scope() as db:
             row = db.scalar(
                 select(SuperWorkspaceMessageRow).where(
                     SuperWorkspaceMessageRow.id == run_id,
+                    SuperWorkspaceMessageRow.workspace_id == workspace.id,
                     SuperWorkspaceMessageRow.user_id == normalized_user,
                     SuperWorkspaceMessageRow.query.is_not(None),
                     SuperWorkspaceMessageRow.query != "",
@@ -420,6 +614,7 @@ class AgentHistoryStore:
 
     def create_dispatch_task(self, user_id: str | None, query_message_id: str, request: SuperDriverRunCreate) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
+        workspace = self.ensure_default_workspace(normalized_user)
         provider, viewer_session_id = self._parse_session_ref(request.session_ref, request.provider)
         provider_session_id = self._provider_session_id(provider, viewer_session_id)
         now = time.time()
@@ -428,6 +623,7 @@ class AgentHistoryStore:
             query = db.scalar(
                 select(SuperWorkspaceMessageRow).where(
                     SuperWorkspaceMessageRow.id == query_message_id,
+                    SuperWorkspaceMessageRow.workspace_id == workspace.id,
                     SuperWorkspaceMessageRow.user_id == normalized_user,
                     SuperWorkspaceMessageRow.query.is_not(None),
                     SuperWorkspaceMessageRow.query != "",
@@ -438,6 +634,7 @@ class AgentHistoryStore:
             existing = db.scalar(
                 select(SuperWorkspaceDriverRunRow).where(
                     SuperWorkspaceDriverRunRow.query_message_id == query_message_id,
+                    SuperWorkspaceDriverRunRow.workspace_id == workspace.id,
                     SuperWorkspaceDriverRunRow.role_id == request.role_id,
                     SuperWorkspaceDriverRunRow.provider == provider,
                 )
@@ -446,6 +643,7 @@ class AgentHistoryStore:
                 db.add(
                     SuperWorkspaceDriverRunRow(
                         id=uuid.uuid4().hex,
+                        workspace_id=workspace.id,
                         query_message_id=query_message_id,
                         user_id=normalized_user,
                         role_id=request.role_id,
@@ -541,6 +739,7 @@ class AgentHistoryStore:
                     select(SuperWorkspaceDriverRunRow.id)
                     .where(
                         SuperWorkspaceDriverRunRow.id != row.id,
+                        SuperWorkspaceDriverRunRow.workspace_id == row.workspace_id,
                         SuperWorkspaceDriverRunRow.user_id == row.user_id,
                         SuperWorkspaceDriverRunRow.role_id == row.role_id,
                         or_(
@@ -588,10 +787,12 @@ class AgentHistoryStore:
         message_limit: int = DEFAULT_MESSAGE_LIMIT,
     ) -> SuperHistoryRunsPage:
         normalized_user = normalize_user_id(user_id)
+        workspace = self.ensure_default_workspace(normalized_user)
         bounded_limit = max(1, min(limit, 100))
         statement = (
             select(SuperWorkspaceMessageRow)
             .where(
+                SuperWorkspaceMessageRow.workspace_id == workspace.id,
                 SuperWorkspaceMessageRow.user_id == normalized_user,
                 SuperWorkspaceMessageRow.query.is_not(None),
                 SuperWorkspaceMessageRow.query != "",
@@ -600,6 +801,7 @@ class AgentHistoryStore:
         if after is not None:
             changed_driver_runs = select(SuperWorkspaceDriverRunRow.query_message_id).where(
                 SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                SuperWorkspaceDriverRunRow.workspace_id == workspace.id,
                 SuperWorkspaceDriverRunRow.updated_at > after,
             )
             statement = statement.where(
@@ -627,12 +829,70 @@ class AgentHistoryStore:
             next_after=next_after,
         )
 
+    def list_super_display_items(
+        self,
+        user_id: str | None,
+        limit: int = DEFAULT_RUN_LIMIT,
+        before: float | None = None,
+        after: float | None = None,
+    ) -> SuperDisplayItemsPage:
+        normalized_user = normalize_user_id(user_id)
+        workspace = self.ensure_default_workspace(normalized_user)
+        bounded_limit = max(1, min(limit, 100))
+        query_condition = and_(
+            SuperWorkspaceMessageRow.workspace_id == workspace.id,
+            SuperWorkspaceMessageRow.query.is_not(None),
+            SuperWorkspaceMessageRow.query != "",
+        )
+        assistant_condition = and_(
+            SuperWorkspaceMessageRow.workspace_id == workspace.id,
+            SuperWorkspaceMessageRow.role == "assistant",
+            SuperWorkspaceMessageRow.event_type == "message:assistant",
+            SuperWorkspaceMessageRow.text != "",
+        )
+        statement = select(SuperWorkspaceMessageRow).where(
+            SuperWorkspaceMessageRow.user_id == normalized_user,
+            or_(query_condition, assistant_condition),
+        )
+        if after is not None:
+            changed_driver_runs = select(SuperWorkspaceDriverRunRow.query_message_id).where(
+                SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                SuperWorkspaceDriverRunRow.workspace_id == workspace.id,
+                SuperWorkspaceDriverRunRow.updated_at > after,
+            )
+            statement = statement.where(
+                or_(
+                    SuperWorkspaceMessageRow.ingested_at > after,
+                    SuperWorkspaceMessageRow.id.in_(changed_driver_runs),
+                )
+            )
+        elif before is not None:
+            statement = statement.where(SuperWorkspaceMessageRow.occurred_at < before)
+        statement = statement.order_by(SuperWorkspaceMessageRow.occurred_at.desc(), SuperWorkspaceMessageRow.id.desc())
+        if after is None:
+            statement = statement.limit(bounded_limit + 1)
+        with self.read_session() as db:
+            rows = list(db.scalars(statement).all())
+            has_more = after is None and len(rows) > bounded_limit
+            if after is None:
+                rows = rows[:bounded_limit]
+            items = self._display_items_from_rows(db, rows)
+        next_after = max((item.updated_at for item in items), default=None)
+        return SuperDisplayItemsPage(
+            items=items,
+            has_more=has_more,
+            next_before=items[-1].created_at if has_more and items else None,
+            next_after=next_after,
+        )
+
     def get_super_run(self, run_id: str, user_id: str | None, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
+        workspace = self.ensure_default_workspace(normalized_user)
         with self.read_session() as db:
             row = db.scalar(
                 select(SuperWorkspaceMessageRow).where(
                     SuperWorkspaceMessageRow.id == run_id,
+                    SuperWorkspaceMessageRow.workspace_id == workspace.id,
                     SuperWorkspaceMessageRow.user_id == normalized_user,
                     SuperWorkspaceMessageRow.query.is_not(None),
                     SuperWorkspaceMessageRow.query != "",
@@ -642,6 +902,85 @@ class AgentHistoryStore:
             raise KeyError(run_id)
         return self._run_from_message(row, message_limit=message_limit)
 
+    def _display_items_from_rows(self, db: Session, rows: list[SuperWorkspaceMessageRow]) -> list[SuperDisplayItem]:
+        query_ids = {str(row.id) for row in rows if isinstance(row.query, str) and row.query}
+        driver_ids = {str(row.driver_run_id) for row in rows if isinstance(row.driver_run_id, str) and row.driver_run_id}
+        if not query_ids and not driver_ids:
+            return []
+        target_conditions = []
+        if query_ids:
+            target_conditions.append(SuperWorkspaceDriverRunRow.query_message_id.in_(query_ids))
+        if driver_ids:
+            target_conditions.append(SuperWorkspaceDriverRunRow.id.in_(driver_ids))
+        target_rows = list(
+            db.scalars(
+                select(SuperWorkspaceDriverRunRow)
+                .where(or_(*target_conditions))
+                .order_by(SuperWorkspaceDriverRunRow.created_at.asc(), SuperWorkspaceDriverRunRow.id.asc())
+            ).all()
+        )
+        targets_by_query: dict[str, list[SuperWorkspaceDriverRunRow]] = {}
+        targets_by_id: dict[str, SuperWorkspaceDriverRunRow] = {}
+        for target in target_rows:
+            targets_by_query.setdefault(str(target.query_message_id), []).append(target)
+            targets_by_id[str(target.id)] = target
+        return [self._display_item_from_row(row, targets_by_query, targets_by_id) for row in rows]
+
+    def _display_item_from_row(
+        self,
+        row: SuperWorkspaceMessageRow,
+        targets_by_query: dict[str, list[SuperWorkspaceDriverRunRow]],
+        targets_by_id: dict[str, SuperWorkspaceDriverRunRow],
+    ) -> SuperDisplayItem:
+        is_query = isinstance(row.query, str) and bool(row.query)
+        query_message_id = str(row.id) if is_query else row.query_message_id if isinstance(row.query_message_id, str) else None
+        driver_run_id = row.driver_run_id if isinstance(row.driver_run_id, str) else None
+        target = targets_by_id.get(driver_run_id or "")
+        dispatch_targets = [self._display_target_from_row(item) for item in targets_by_query.get(str(row.id), [])] if is_query else []
+        updated_at = float(row.ingested_at)
+        if is_query and dispatch_targets:
+            updated_at = max(updated_at, *(float(item.updated_at) for item in targets_by_query.get(str(row.id), [])))
+        text_value = str(row.query or "") if is_query else str(row.text or "")
+        return SuperDisplayItem(
+            id=str(row.id),
+            workspace_id=str(row.workspace_id or ""),
+            kind="query" if is_query else "message",
+            user_id=str(row.user_id),
+            text=text_value,
+            role=str(row.role),
+            event_type=str(row.event_type),
+            provider=str(row.provider),
+            created_at=float(row.occurred_at),
+            updated_at=updated_at,
+            message_id=str(row.id),
+            query_message_id=query_message_id,
+            driver_run_id=driver_run_id,
+            parent_message_id=row.parent_message_id if isinstance(row.parent_message_id, str) else None,
+            sender_role_id=row.sender_role_id if isinstance(row.sender_role_id, str) else None,
+            recipient_role_id=row.recipient_role_id if isinstance(row.recipient_role_id, str) else None,
+            role_id=(str(target.role_id) if target is not None else row.role_id if isinstance(row.role_id, str) else None),
+            role_name=str(target.role_name) if target is not None else "",
+            session_ref=str(target.session_ref) if target is not None else "",
+            target_status=str(target.status) if target is not None else "",
+            run_status=str(row.status or "") if is_query else "",
+            error=str(row.error or "") if is_query else "",
+            citation_ids=self.citation_ids_for_message(str(row.id)) if is_query else [],
+            dispatch_targets=dispatch_targets,
+            raw=self._parse_json(row.raw_json, {}),
+        )
+
+    @staticmethod
+    def _display_target_from_row(row: SuperWorkspaceDriverRunRow) -> SuperDisplayTarget:
+        return SuperDisplayTarget(
+            id=str(row.id),
+            workspace_id=str(row.workspace_id),
+            role_id=str(row.role_id),
+            role_name=str(row.role_name),
+            provider=str(row.provider),
+            session_ref=str(row.session_ref),
+            status=str(row.status),
+        )
+
     def _run_from_message(self, row: SuperWorkspaceMessageRow, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
         targets = [self._driver_from_row(target, message_limit=message_limit) for target in self._driver_rows(str(row.id))]
         selected_role_ids = [str(value) for value in self._parse_json(row.selected_role_ids_json, []) if isinstance(value, str)]
@@ -650,6 +989,7 @@ class AgentHistoryStore:
         updated_at = max([float(row.ingested_at), *(target.updated_at for target in targets)])
         return SuperHistoryRun(
             id=str(row.id),
+            workspace_id=str(row.workspace_id or DEFAULT_SUPER_WORKSPACE_ID),
             user_id=str(row.user_id),
             message=query,
             query=query,
@@ -718,6 +1058,7 @@ class AgentHistoryStore:
         updated_at = max([float(row.updated_at), *(message.occurred_at for message in messages)])
         return SuperHistoryTarget(
             id=str(row.id),
+            workspace_id=str(row.workspace_id),
             run_id=str(row.query_message_id),
             role_id=str(row.role_id),
             role_name=str(row.role_name),
@@ -734,6 +1075,7 @@ class AgentHistoryStore:
     def _dispatch_task_from_row(self, row: SuperWorkspaceDriverRunRow) -> SuperDispatchTask:
         return SuperDispatchTask(
             id=str(row.id),
+            workspace_id=str(row.workspace_id),
             query_message_id=str(row.query_message_id),
             user_id=str(row.user_id),
             role_id=str(row.role_id),
@@ -849,6 +1191,7 @@ class AgentHistoryStore:
         driver_run_id = row.driver_run_id if isinstance(row.driver_run_id, str) else None
         return AgentHistoryMessage(
             id=str(row.id),
+            workspace_id=row.workspace_id if isinstance(row.workspace_id, str) else None,
             provider=str(row.provider),
             viewer_session_id=row.viewer_session_id if isinstance(row.viewer_session_id, str) else None,
             provider_session_id=row.provider_session_id if isinstance(row.provider_session_id, str) else None,

@@ -14,7 +14,7 @@ import DirectoryPicker from "./DirectoryPicker.vue";
 import VoiceTextarea from "./VoiceTextarea.vue";
 import { useAgentsStore } from "../stores/agents";
 import type { AgentSessionSnapshot } from "../types/agents";
-import type { SuperHistoryRun, SuperHistoryTarget, SuperRole } from "../types/superWorkspace";
+import type { SuperDisplayItem, SuperDisplayTarget, SuperHistoryRun, SuperRole } from "../types/superWorkspace";
 import { parseAgentRef } from "../utils/agents";
 import { renderMarkdown } from "../utils/markdownRender";
 
@@ -22,9 +22,10 @@ const agents = useAgentsStore();
 const roles = ref<SuperRole[]>([]);
 const selectedRoleId = ref("");
 const snapshots = ref<Record<string, AgentSessionSnapshot>>({});
-const runs = ref<SuperHistoryRun[]>([]);
+const items = ref<SuperDisplayItem[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
 const composer = ref("");
+const selectedComposerMentionToken = ref("");
 const commonPrompt = ref("");
 const error = ref("");
 const busy = ref(false);
@@ -39,15 +40,11 @@ const rolePanelOpen = ref(false);
 const selectedRole = computed(() => roles.value.find((role) => role.id === selectedRoleId.value) ?? null);
 const dispatchableRoles = computed(() => roles.value.filter((role) => role.description.trim()));
 const mentionedRoleIds = computed(() => parseLeadingMentionRoleIds(composer.value));
-const displayRuns = computed(() => [...runs.value].reverse());
+const composerMentionItems = computed(() => buildComposerMentionItems(composer.value));
+const displayItems = computed(() => [...items.value].reverse());
 const canDispatch = computed(() => {
   if (!composer.value.trim() || busy.value) return false;
   return true;
-});
-const dispatchButtonLabel = computed(() => {
-  if (busy.value) return "Dispatching";
-  if (mentionedRoleIds.value.length) return `Dispatch to ${mentionedRoleIds.value.length}`;
-  return "Auto dispatch";
 });
 let fallbackTimer: number | null = null;
 let refreshTimer: number | null = null;
@@ -220,8 +217,8 @@ async function dispatchMessage() {
   composer.value = "";
   try {
     const run = await createSuperWorkspaceRun({ message });
-    upsertRun(run);
-    updateRunsAfterCursor([run]);
+    upsertDisplayItem(displayItemFromRun(run));
+    updateItemsAfterCursor([displayItemFromRun(run)]);
     await scrollThreadToBottom();
     if (run.status === "failed") {
       error.value = run.error || "Dispatch failed";
@@ -257,6 +254,54 @@ function addMessageCitation(messageId: string) {
   composer.value = `${composer.value.slice(0, position)}${insert}${composer.value.slice(position)}`;
 }
 
+function handleComposerMentionClick(token: string) {
+  if (selectedComposerMentionToken.value === token) {
+    removeComposerMention(token);
+    selectedComposerMentionToken.value = "";
+    return;
+  }
+  selectedComposerMentionToken.value = token;
+}
+
+function removeComposerMention(token: string) {
+  const entry = leadingMentionEntries(composer.value).find((item) => item.token === token);
+  if (!entry) return;
+  composer.value = `${composer.value.slice(0, entry.start)}${composer.value.slice(entry.end)}`;
+}
+
+function buildComposerMentionItems(value: string) {
+  return leadingMentionEntries(value).map((entry) => {
+    const role = roles.value.find((item) => `@${roleMentionKey(item)}` === entry.token);
+    if (role) {
+      return {
+        ...entry,
+        type: "dispatch",
+        icon: roleIcon(role),
+        label: role.name,
+        detail: entry.token,
+      };
+    }
+    const messageId = citationMessageId(entry.token);
+    const citedItem = messageId ? items.value.find((item) => item.message_id === messageId) : undefined;
+    if (messageId) {
+      return {
+        ...entry,
+        type: "citation",
+        icon: "bi-link-45deg",
+        label: citedItem?.kind === "message" ? citedItem.role_name || "Role message" : "User message",
+        detail: entry.token,
+      };
+    }
+    return {
+      ...entry,
+      type: "unknown",
+      icon: "bi-at",
+      label: entry.token,
+      detail: "unrecognized",
+    };
+  });
+}
+
 function parseLeadingMentionRoleIds(value: string) {
   const byKey = new Map(roles.value.map((role) => [roleMentionKey(role), role]));
   const ids: string[] = [];
@@ -278,15 +323,25 @@ function leadingMentionPrefixEnd(value: string) {
 }
 
 function leadingMentionTokens(value: string) {
-  const tokens: string[] = [];
+  return leadingMentionEntries(value).map((entry) => entry.token);
+}
+
+function leadingMentionEntries(value: string) {
+  const entries: Array<{ token: string; start: number; end: number }> = [];
   let position = 0;
   while (position < value.length && value[position] === "@") {
     const match = /^@(\S+)(?:\s+|$)/.exec(value.slice(position));
     if (!match) break;
-    tokens.push(`@${match[1]}`);
+    const token = `@${match[1]}`;
+    entries.push({ token, start: position, end: position + match[0].length });
     position += match[0].length;
   }
-  return tokens;
+  return entries;
+}
+
+function citationMessageId(token: string) {
+  const match = /^@(?:msg|message)-(.+)$/.exec(token);
+  return match?.[1] ?? "";
 }
 
 function roleMentionKey(role: SuperRole) {
@@ -335,30 +390,15 @@ function contextPercent(role: SuperRole) {
   return `${Math.round(value)}%`;
 }
 
-function runTargets(run: SuperHistoryRun) {
-  return run.targets;
+function itemHtml(item: SuperDisplayItem) {
+  return item.text ? renderMarkdown(item.text.trim(), { baseDirectory: snapshots.value[item.session_ref]?.cwd_relative ?? "" }) : "";
 }
 
-function runHasResponse(run: SuperHistoryRun) {
-  return run.targets.some((target) => Boolean(targetFinalMessage(target)));
+function itemIcon(item: SuperDisplayItem) {
+  return agents.providerById(item.provider || "codex").icon;
 }
 
-function targetFinalMessage(target: SuperHistoryTarget) {
-  return [...target.messages]
-    .reverse()
-    .find((message) => message.role === "assistant" && message.event_type === "message:assistant" && message.text.trim());
-}
-
-function targetFinalMessageId(target: SuperHistoryTarget) {
-  return targetFinalMessage(target)?.id ?? "";
-}
-
-function targetHtml(target: SuperHistoryTarget) {
-  const text = targetFinalMessage(target)?.text.trim() ?? "";
-  return text ? renderMarkdown(text, { baseDirectory: snapshots.value[target.session_ref]?.cwd_relative ?? "" }) : "";
-}
-
-function targetIcon(target: SuperHistoryTarget) {
+function targetIcon(target: SuperDisplayTarget) {
   return agents.providerById(target.provider || "codex").icon;
 }
 
@@ -385,16 +425,16 @@ async function loadRuns(reset: boolean) {
   if (reset) historyLoading.value = true;
   else loadingOlder.value = true;
   try {
-    const limit = reset ? Math.min(100, Math.max(30, runs.value.length || 30)) : 30;
+    const limit = reset ? Math.min(100, Math.max(30, items.value.length || 30)) : 30;
     const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined);
     if (reset) {
-      runs.value = page.runs;
+      items.value = page.items;
       await scrollThreadToBottom();
     } else {
-      const seen = new Set(runs.value.map((run) => run.id));
-      runs.value = [...runs.value, ...page.runs.filter((run) => !seen.has(run.id))];
+      const seen = new Set(items.value.map((item) => item.id));
+      items.value = [...items.value, ...page.items.filter((item) => !seen.has(item.id))];
     }
-    updateRunsAfterCursor(page.runs, page.next_after ?? undefined);
+    updateItemsAfterCursor(page.items, page.next_after ?? undefined);
     hasOlderRuns.value = page.has_more;
     nextBefore.value = page.next_before ?? null;
   } catch (err) {
@@ -414,26 +454,62 @@ async function loadChangedRuns() {
   const stickToBottom = isThreadNearBottom();
   try {
     const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 0.001));
-    for (const run of page.runs) {
-      upsertRun(run);
+    for (const item of page.items) {
+      upsertDisplayItem(item);
     }
-    updateRunsAfterCursor(page.runs, page.next_after ?? undefined);
-    if (stickToBottom && page.runs.length) await scrollThreadToBottom();
+    updateItemsAfterCursor(page.items, page.next_after ?? undefined);
+    if (stickToBottom && page.items.length) await scrollThreadToBottom();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
 }
 
-function upsertRun(run: SuperHistoryRun) {
-  const index = runs.value.findIndex((item) => item.id === run.id);
-  if (index >= 0) runs.value.splice(index, 1, run);
-  else runs.value = [run, ...runs.value];
-  runs.value.sort((left, right) => right.created_at - left.created_at);
+function upsertDisplayItem(item: SuperDisplayItem) {
+  const index = items.value.findIndex((existing) => existing.id === item.id);
+  if (index >= 0) items.value.splice(index, 1, item);
+  else items.value = [item, ...items.value];
+  items.value.sort((left, right) => right.created_at - left.created_at);
 }
 
-function updateRunsAfterCursor(changedRuns: SuperHistoryRun[], nextAfter?: number) {
-  const changedMax = Math.max(0, ...changedRuns.map((run) => run.updated_at).filter(Number.isFinite));
+function updateItemsAfterCursor(changedItems: SuperDisplayItem[], nextAfter?: number) {
+  const changedMax = Math.max(0, ...changedItems.map((item) => item.updated_at).filter(Number.isFinite));
   runsAfterCursor.value = Math.max(runsAfterCursor.value, changedMax, Number.isFinite(nextAfter) ? Number(nextAfter) : 0);
+}
+
+function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
+  return {
+    id: run.id,
+    kind: "query",
+    user_id: run.user_id,
+    text: run.message,
+    role: "user",
+    event_type: "message:query",
+    provider: "",
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+    message_id: run.message_id,
+    query_message_id: run.message_id,
+    driver_run_id: null,
+    parent_message_id: run.parent_message_id ?? null,
+    sender_role_id: run.sender_role_id ?? null,
+    recipient_role_id: null,
+    role_id: run.sender_role_id ?? "user",
+    role_name: "",
+    session_ref: "",
+    target_status: "",
+    run_status: run.status,
+    error: run.error,
+    citation_ids: run.citation_ids ?? [],
+    dispatch_targets: run.targets.map((target) => ({
+      id: target.id,
+      role_id: target.role_id,
+      role_name: target.role_name,
+      provider: target.provider,
+      session_ref: target.session_ref,
+      status: target.status,
+    })),
+    raw: {},
+  };
 }
 
 function isThreadNearBottom() {
@@ -559,42 +635,39 @@ async function scrollThreadToBottom() {
         <button v-if="hasOlderRuns" class="btn btn-sm btn-outline-secondary super-load-older" type="button" :disabled="loadingOlder" @click="loadRuns(false)">
           <span>{{ loadingOlder ? "Loading" : "Load older" }}</span>
         </button>
-        <article v-for="run in displayRuns" :key="run.id" class="super-run">
-          <div class="super-user-message">
-            <div class="super-run-time">{{ formatTime(run.created_at) }}</div>
-            <div class="super-message-text">{{ run.message }}</div>
+        <article v-for="item in displayItems" :key="item.id" class="super-run">
+          <div v-if="item.kind === 'query'" class="super-user-message">
+            <div class="super-run-time">{{ formatTime(item.created_at) }}</div>
+            <div class="super-message-text">{{ item.text }}</div>
             <div class="super-message-actions">
-              <button class="super-cite-button" type="button" :title="`Cite @msg-${run.message_id}`" @click="addMessageCitation(run.message_id)">
+              <button class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
                 <i class="bi bi-link-45deg"></i>
                 <span>Cite</span>
               </button>
             </div>
             <div class="super-route-line">
-              <span v-if="run.status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
-              <span v-else-if="run.status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
-              <span v-else-if="run.status === 'running'" class="super-route-pending">starting role dispatch...</span>
-              <span v-else-if="run.status === 'failed' && !runHasResponse(run)" class="super-route-error">dispatch failed: {{ run.error }}</span>
+              <span v-if="item.run_status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
+              <span v-else-if="item.run_status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
+              <span v-else-if="item.run_status === 'running'" class="super-route-pending">starting role dispatch...</span>
+              <span v-else-if="item.run_status === 'failed'" class="super-route-error">dispatch failed: {{ item.error }}</span>
               <template v-else>
                 <span class="super-route-label">dispatched to</span>
-                <span v-for="target in runTargets(run)" :key="target.id" class="super-route-chip">
+                <span v-for="target in item.dispatch_targets" :key="target.id" class="super-route-chip">
                   <i class="bi" :class="targetIcon(target)"></i>
                   {{ target.role_name }}
                 </span>
               </template>
             </div>
           </div>
-          <div v-for="target in runTargets(run)" :key="`${run.id}:${target.id}`" class="super-role-turn">
-            <div class="super-response-role-label">{{ target.role_name }}</div>
+          <div v-else class="super-role-turn">
+            <div class="super-response-role-label">
+              <i class="bi" :class="itemIcon(item)"></i>
+              {{ item.role_name }}
+            </div>
             <div class="super-role-response">
-              <div v-if="targetHtml(target)" class="markdown-body super-response-body" v-html="targetHtml(target)"></div>
-              <div v-else class="super-waiting">Waiting for response</div>
-              <div v-if="targetFinalMessageId(target)" class="super-message-actions">
-                <button
-                  class="super-cite-button"
-                  type="button"
-                  :title="`Cite @msg-${targetFinalMessageId(target)}`"
-                  @click="addMessageCitation(targetFinalMessageId(target))"
-                >
+              <div class="markdown-body super-response-body" v-html="itemHtml(item)"></div>
+              <div class="super-message-actions">
+                <button class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
                   <i class="bi bi-link-45deg"></i>
                   <span>Cite</span>
                 </button>
@@ -602,12 +675,28 @@ async function scrollThreadToBottom() {
             </div>
           </div>
         </article>
-        <div v-if="!runs.length && !historyLoading" class="super-empty-thread">Create roles, write one message, and dispatch it into the persistent role sessions.</div>
-        <div v-if="historyLoading && !runs.length" class="super-empty-thread">Loading history</div>
+        <div v-if="!items.length && !historyLoading" class="super-empty-thread">Create roles, write one message, and dispatch it into the persistent role sessions.</div>
+        <div v-if="historyLoading && !items.length" class="super-empty-thread">Loading history</div>
       </section>
 
       <div class="super-composer">
         <div class="super-composer-card">
+          <div v-if="composerMentionItems.length" class="super-composer-mentions" aria-label="Composer mentions">
+            <button
+              v-for="mention in composerMentionItems"
+              :key="mention.token"
+              class="super-composer-mention"
+              :class="[`type-${mention.type}`, { selected: selectedComposerMentionToken === mention.token }]"
+              type="button"
+              :title="selectedComposerMentionToken === mention.token ? `Remove ${mention.detail}` : `Select ${mention.detail}`"
+              @click="handleComposerMentionClick(mention.token)"
+            >
+              <i class="bi" :class="mention.icon"></i>
+              <span class="super-composer-mention-label">{{ mention.label }}</span>
+              <span class="super-composer-mention-token">{{ mention.detail }}</span>
+              <i v-if="selectedComposerMentionToken === mention.token" class="bi bi-x-lg super-composer-mention-remove"></i>
+            </button>
+          </div>
           <VoiceTextarea
             v-model="composer"
             context-id="super-workspace:composer"
@@ -617,9 +706,15 @@ async function scrollThreadToBottom() {
             @keydown="handleComposerKeydown"
           >
             <template #actions>
-              <button class="btn btn-primary super-send-button" type="button" :disabled="!canDispatch" @click="dispatchMessage">
+              <button
+                class="btn btn-outline-primary voice-action-button super-send-button"
+                type="button"
+                :disabled="!canDispatch"
+                title="Send message (Cmd/Ctrl+Enter)"
+                aria-label="Send message"
+                @click="dispatchMessage"
+              >
                 <i class="bi bi-send"></i>
-                <span>{{ dispatchButtonLabel }}</span>
               </button>
             </template>
           </VoiceTextarea>
@@ -858,6 +953,74 @@ async function scrollThreadToBottom() {
   padding: 8px;
 }
 
+.super-composer-mentions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.super-composer-mention {
+  align-items: center;
+  background: #f7f9fc;
+  border: 1px solid #dbe3ee;
+  border-radius: 7px;
+  color: #243041;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+  line-height: 1.2;
+  max-width: min(100%, 360px);
+  min-height: 24px;
+  min-width: 0;
+  padding: 3px 7px;
+}
+
+.super-composer-mention.type-dispatch {
+  background: #edf7f2;
+  border-color: #b8dfc8;
+}
+
+.super-composer-mention.type-citation {
+  background: #f4f7ff;
+  border-color: #cbd8f5;
+}
+
+.super-composer-mention.selected {
+  background: #fff7ed;
+  border-color: #f0b36c;
+  color: #7a3d08;
+}
+
+.super-composer-mention:hover,
+.super-composer-mention:focus-visible {
+  border-color: #7ea3d8;
+}
+
+.super-composer-mention-label,
+.super-composer-mention-token {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.super-composer-mention-label {
+  font-weight: 600;
+  min-width: 0;
+}
+
+.super-composer-mention-token {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  min-width: 34px;
+}
+
+.super-composer-mention-remove {
+  font-size: 10px;
+  line-height: 1;
+}
+
 .super-composer-card :deep(.voice-textarea) {
   gap: 6px;
 }
@@ -879,8 +1042,7 @@ async function scrollThreadToBottom() {
 }
 
 .super-send-button {
-  border-radius: 999px;
-  min-width: 142px;
+  flex: 0 0 auto;
 }
 
 .super-thread {

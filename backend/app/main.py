@@ -815,7 +815,7 @@ async def super_workspace_runs(
     after: float | None = None,
     user: str | None = None,
 ):
-    return agent_history_store.list_super_runs(user, limit=limit, before=before, after=after)
+    return agent_history_store.list_super_display_items(user, limit=limit, before=before, after=after)
 
 
 @app.post("/api/super-workspace/messages")

@@ -1,8 +1,6 @@
 import asyncio
 import json
 import os
-import time
-import uuid
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -11,7 +9,7 @@ from urllib.request import Request, urlopen
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from .users import user_state_dir
+from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, agent_history_store
 
 
 DEFAULT_DISPATCH_MODEL = "deepseek-v4-flash"
@@ -49,6 +47,8 @@ class SuperRolePatch(BaseModel):
 
 
 class SuperWorkspaceData(BaseModel):
+    id: str = DEFAULT_SUPER_WORKSPACE_ID
+    name: str = DEFAULT_SUPER_WORKSPACE_NAME
     common_prompt: str = ""
     roles: list[SuperRole] = Field(default_factory=list)
 
@@ -69,47 +69,47 @@ class SuperDispatchResponse(BaseModel):
 
 
 class SuperWorkspaceManager:
-    def _path(self, user_id: str | None):
-        return user_state_dir(user_id) / "super-workspace.json"
-
     def read(self, user_id: str | None = None) -> SuperWorkspaceData:
-        path = self._path(user_id)
-        if not path.exists():
-            return SuperWorkspaceData()
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            return SuperWorkspaceData.model_validate(raw)
-        except Exception:
-            return SuperWorkspaceData()
+        workspace, roles = agent_history_store.super_workspace_data(user_id)
+        return SuperWorkspaceData(
+            id=workspace.id,
+            name=workspace.name,
+            common_prompt=workspace.common_prompt,
+            roles=[
+                SuperRole(
+                    id=role.id,
+                    name=role.name,
+                    description=role.description,
+                    provider=role.provider,
+                    cwd=role.cwd,
+                    model=role.model,
+                    session_ref=role.session_ref,
+                    created_at=role.created_at,
+                    updated_at=role.updated_at,
+                )
+                for role in roles
+            ],
+        )
 
     def write(self, data: SuperWorkspaceData, user_id: str | None = None) -> SuperWorkspaceData:
-        path = self._path(user_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
         return data
 
     def update(self, patch: SuperWorkspacePatch, user_id: str | None = None) -> SuperWorkspaceData:
-        data = self.read(user_id)
         update = patch.model_dump(exclude_unset=True)
         if "common_prompt" in update:
-            data.common_prompt = str(update["common_prompt"] or "").strip()
-        return self.write(data, user_id)
+            agent_history_store.update_super_workspace_common_prompt(user_id, str(update["common_prompt"] or "").strip())
+        return self.read(user_id)
 
     def create_role(self, request: SuperRoleCreate, user_id: str | None = None) -> SuperWorkspaceData:
-        data = self.read(user_id)
-        now = time.time()
-        role = SuperRole(
-            id=uuid.uuid4().hex[:12],
+        agent_history_store.create_super_workspace_role(
+            user_id,
             name=(request.name or "New Role").strip()[:120] or "New Role",
             description=request.description.strip(),
             provider=(request.provider or "codex").strip() or "codex",
             cwd=request.cwd.strip(),
             model=request.model.strip() if request.model else None,
-            created_at=now,
-            updated_at=now,
         )
-        data.roles.append(role)
-        return self.write(data, user_id)
+        return self.read(user_id)
 
     def update_role(self, role_id: str, patch: SuperRolePatch, user_id: str | None = None) -> SuperWorkspaceData:
         data = self.read(user_id)
@@ -123,13 +123,23 @@ class SuperWorkspaceManager:
             if key == "provider":
                 value = str(value or "codex")
             setattr(role, key, value)
-        role.updated_at = time.time()
-        return self.write(data, user_id)
+        agent_history_store.update_super_workspace_role(
+            user_id,
+            role_id,
+            {
+                "name": role.name,
+                "description": role.description,
+                "provider": role.provider,
+                "cwd": role.cwd,
+                "model": role.model,
+                "session_ref": role.session_ref,
+            },
+        )
+        return self.read(user_id)
 
     def delete_role(self, role_id: str, user_id: str | None = None) -> SuperWorkspaceData:
-        data = self.read(user_id)
-        data.roles = [role for role in data.roles if role.id != role_id]
-        return self.write(data, user_id)
+        agent_history_store.delete_super_workspace_role(user_id, role_id)
+        return self.read(user_id)
 
     async def dispatch(self, request: SuperDispatchRequest, user_id: str | None = None) -> SuperDispatchResponse:
         message = request.message.strip()

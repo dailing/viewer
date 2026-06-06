@@ -2,7 +2,7 @@ import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerCon
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
-import type { SuperDispatchResponse, SuperHistoryRun, SuperHistoryRunCreate, SuperHistoryRunsPage, SuperRoleCreate, SuperRolePatch, SuperWorkspaceData, SuperWorkspacePatch } from "../types/superWorkspace";
+import type { SuperDisplayItemsPage, SuperDispatchResponse, SuperHistoryRun, SuperHistoryRunCreate, SuperRoleCreate, SuperRolePatch, SuperWorkspaceData, SuperWorkspacePatch } from "../types/superWorkspace";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
 import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskFile, AgentTaskGroup, AgentTaskListResponse, AgentTaskManagerRequest, AgentTaskPatch, AgentTaskPlan, AgentTaskResetAction, AgentTaskResetResponse, AgentTaskSettings } from "../types/agentTasks";
@@ -298,11 +298,11 @@ export async function deleteSuperRole(id: string): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>(`/api/super-workspace/roles/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function listSuperWorkspaceRuns(limit = 30, before?: number, after?: number): Promise<SuperHistoryRunsPage> {
+export async function listSuperWorkspaceRuns(limit = 30, before?: number, after?: number): Promise<SuperDisplayItemsPage> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (before !== undefined) params.set("before", String(before));
   if (after !== undefined) params.set("after", String(after));
-  return request<SuperHistoryRunsPage>(`/api/super-workspace/runs?${params.toString()}`);
+  return request<SuperDisplayItemsPage>(`/api/super-workspace/runs?${params.toString()}`);
 }
 
 export async function createSuperWorkspaceRun(payload: SuperHistoryRunCreate): Promise<SuperHistoryRun> {

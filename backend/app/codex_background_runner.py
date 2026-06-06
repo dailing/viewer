@@ -359,6 +359,7 @@ def insert_provider_message(
     db_path: Path,
     *,
     user_id: str,
+    workspace_id: str | None,
     provider: str,
     viewer_session_id: str,
     provider_session_id: str | None,
@@ -388,14 +389,15 @@ def insert_provider_message(
         connection.execute(
             """
             INSERT INTO super_workspace_messages (
-              id, user_id, conversation_id, parent_message_id, sender_role_id, recipient_role_id, role_id,
+              id, workspace_id, user_id, conversation_id, parent_message_id, sender_role_id, recipient_role_id, role_id,
               query_message_id, driver_run_id, provider, viewer_session_id, provider_session_id,
               event_index, received_at, source_path, source_event_id, source_line, role, event_type,
               text, query, status, rationale, error, requested_role_ids_json, selected_role_ids_json,
               patch_text, raw_json, occurred_at, ingested_at
             )
-            VALUES (?, ?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', '[]', '[]', ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', '[]', '[]', ?, ?, ?, ?)
             ON CONFLICT(provider, viewer_session_id, source_event_id) DO UPDATE SET
+              workspace_id=excluded.workspace_id,
               user_id=excluded.user_id,
               parent_message_id=excluded.parent_message_id,
               sender_role_id=excluded.sender_role_id,
@@ -418,6 +420,7 @@ def insert_provider_message(
             """,
             (
                 row_id,
+                workspace_id,
                 user_id,
                 parent_message_id,
                 sender_role_id,
@@ -477,6 +480,7 @@ def record_prompt(
     insert_provider_message(
         db_path,
         user_id=user_id,
+        workspace_id=lineage.get("workspace_id"),
         provider="codex",
         viewer_session_id=viewer_session_id,
         provider_session_id=provider_session_id,
@@ -537,6 +541,7 @@ def write_rollout_events(db_path: Path, state: dict, rollout_path: Path, new_eve
         insert_provider_message(
             db_path,
             user_id=str(state["user_id"]),
+            workspace_id=state.get("workspace_id") if isinstance(state.get("workspace_id"), str) else None,
             provider="codex",
             viewer_session_id=str(state["viewer_session_id"]),
             provider_session_id=state.get("codex_session_id") if isinstance(state.get("codex_session_id"), str) else None,
@@ -594,6 +599,7 @@ def main() -> int:
     parser.add_argument("--history-db", required=True)
     parser.add_argument("--viewer-session-id", required=True)
     parser.add_argument("--user-id", required=True)
+    parser.add_argument("--workspace-id")
     parser.add_argument("--query-message-id")
     parser.add_argument("--driver-run-id")
     parser.add_argument("--parent-message-id")
@@ -612,6 +618,7 @@ def main() -> int:
     started_at = time.time()
     lineage = {
         "query_message_id": args.query_message_id,
+        "workspace_id": args.workspace_id,
         "driver_run_id": args.driver_run_id,
         "parent_message_id": args.parent_message_id,
         "sender_role_id": args.sender_role_id,

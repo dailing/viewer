@@ -13,6 +13,8 @@ export type SuperRole = {
 };
 
 export type SuperWorkspaceData = {
+  id: string;
+  name: string;
   common_prompt: string;
   roles: SuperRole[];
 };
@@ -106,6 +108,49 @@ export type SuperHistoryRun = {
 
 export type SuperHistoryRunsPage = {
   runs: SuperHistoryRun[];
+  has_more: boolean;
+  next_before?: number | null;
+  next_after?: number | null;
+};
+
+export type SuperDisplayTarget = {
+  id: string;
+  role_id: string;
+  role_name: string;
+  provider: AgentProvider;
+  session_ref: string;
+  status: string;
+};
+
+export type SuperDisplayItem = {
+  id: string;
+  kind: "query" | "message";
+  user_id: string;
+  text: string;
+  role: string;
+  event_type: string;
+  provider: AgentProvider;
+  created_at: number;
+  updated_at: number;
+  message_id: string;
+  query_message_id?: string | null;
+  driver_run_id?: string | null;
+  parent_message_id?: string | null;
+  sender_role_id?: string | null;
+  recipient_role_id?: string | null;
+  role_id?: string | null;
+  role_name: string;
+  session_ref: string;
+  target_status: string;
+  run_status: string;
+  error: string;
+  citation_ids?: string[];
+  dispatch_targets: SuperDisplayTarget[];
+  raw: Record<string, unknown>;
+};
+
+export type SuperDisplayItemsPage = {
+  items: SuperDisplayItem[];
   has_more: boolean;
   next_before?: number | null;
   next_after?: number | null;

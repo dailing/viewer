@@ -277,6 +277,7 @@ class SuperWorkspaceRuntime:
                 normalized_user,
                 run.id,
                 SuperDriverRunCreate(
+                    workspace_id=run.workspace_id,
                     role_id=role.id,
                     role_name=role.name,
                     provider=role.provider or "codex",
@@ -369,6 +370,7 @@ class SuperWorkspaceRuntime:
             return
         prompt = self.role_message_prompt(run, role)
         lineage = {
+            "workspace_id": task.workspace_id,
             "query_message_id": run.message_id,
             "driver_run_id": task.id,
             "parent_message_id": task.parent_message_id or run.message_id,
@@ -476,6 +478,7 @@ class SuperWorkspaceRuntime:
 
     def role_message_prompt(self, run: SuperHistoryRun, role: SuperRole) -> str:
         lineage = {
+            "workspace_id": run.workspace_id,
             "run_id": run.id,
             "message_id": run.message_id,
             "parent_message_id": run.parent_message_id,

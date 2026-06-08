@@ -15,6 +15,9 @@ body,
 #app {
   height: 100%;
   margin: 0;
+  min-height: 0;
+  overscroll-behavior: none;
+  overflow: hidden;
 }
 
 body {
@@ -27,6 +30,9 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
+  overscroll-behavior: none;
+  overflow: hidden;
 }
 
 .user-select-page {
@@ -91,6 +97,7 @@ body {
   flex: 0 0 var(--topbar-height);
   gap: 4px;
   min-width: 0;
+  overscroll-behavior: none;
   padding: 0 6px;
 }
 
@@ -292,6 +299,8 @@ body {
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
+  overscroll-behavior: none;
+  overflow: hidden;
   position: relative;
 }
 
@@ -303,6 +312,7 @@ body {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  overscroll-behavior: none;
   overflow: visible;
   position: relative;
   width: 42px;
@@ -345,15 +355,19 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+  overscroll-behavior: none;
+  overflow: hidden;
 }
 
 .top-level-page {
   flex: 1 1 auto;
   min-height: 0;
+  overscroll-behavior: none;
   overflow: hidden;
 }
 
 .task-dag-top-page {
+  overscroll-behavior: contain;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -424,6 +438,8 @@ body {
 }
 
 .scroll-area {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   overflow: auto;
 }
 

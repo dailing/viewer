@@ -6,24 +6,37 @@ import {
   deleteSuperRole,
   getSuperWorkspace,
   listSuperWorkspaceRuns,
+  resolveDirectoryLink,
   updateSuperWorkspace,
   updateSuperRole,
 } from "../api/client";
 import { connectSuperWorkspaceEvents } from "../api/events";
 import DirectoryPicker from "./DirectoryPicker.vue";
+import LocalFilePreview from "./LocalFilePreview.vue";
 import VoiceTextarea from "./VoiceTextarea.vue";
 import { useAgentsStore } from "../stores/agents";
+import { useFilesStore } from "../stores/files";
+import { useLayoutStore } from "../stores/layout";
 import type { AgentSessionSnapshot } from "../types/agents";
+import type { SplitDirection } from "../types/layout";
 import type { SuperDisplayItem, SuperDisplayTarget, SuperHistoryRun, SuperRole } from "../types/superWorkspace";
 import { parseAgentRef } from "../utils/agents";
 import { renderMarkdown } from "../utils/markdownRender";
 
+type SuperThreadItem = SuperDisplayItem & {
+  merged_message_ids?: string[];
+};
+
 const agents = useAgentsStore();
+const files = useFilesStore();
+const layout = useLayoutStore();
 const roles = ref<SuperRole[]>([]);
 const selectedRoleId = ref("");
 const snapshots = ref<Record<string, AgentSessionSnapshot>>({});
 const items = ref<SuperDisplayItem[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
+const previewPath = ref<string | null>(null);
+const stoppingRoleIds = ref<Set<string>>(new Set());
 const composer = ref("");
 const selectedComposerMentionToken = ref("");
 const commonPrompt = ref("");
@@ -41,7 +54,22 @@ const selectedRole = computed(() => roles.value.find((role) => role.id === selec
 const dispatchableRoles = computed(() => roles.value.filter((role) => role.description.trim()));
 const mentionedRoleIds = computed(() => parseLeadingMentionRoleIds(composer.value));
 const composerMentionItems = computed(() => buildComposerMentionItems(composer.value));
-const displayItems = computed(() => [...items.value].reverse());
+const displayItems = computed<SuperThreadItem[]>(() => mergeConsecutiveRoleMessages([...items.value].reverse()));
+const activeRoleStatuses = computed(() => {
+  const statuses = new Map<string, string>();
+  const activeOrder = ["running", "claimed", "queued"];
+  for (const item of items.value) {
+    for (const target of item.dispatch_targets) {
+      if (activeOrder.includes(target.status)) {
+        statuses.set(target.role_id, normalizeRoleStatus(target.status));
+      }
+    }
+    if (item.role_id && activeOrder.includes(item.target_status)) {
+      statuses.set(item.role_id, normalizeRoleStatus(item.target_status));
+    }
+  }
+  return statuses;
+});
 const canDispatch = computed(() => {
   if (!composer.value.trim() || busy.value) return false;
   return true;
@@ -179,6 +207,11 @@ async function renewSelectedRole() {
   await renewRole(selectedRole.value);
 }
 
+async function stopSelectedRole() {
+  if (!selectedRole.value) return;
+  await stopRole(selectedRole.value);
+}
+
 async function renewRole(role: SuperRole) {
   busy.value = true;
   error.value = "";
@@ -190,6 +223,50 @@ async function renewRole(role: SuperRole) {
   } finally {
     busy.value = false;
   }
+}
+
+function roleStopSessionRef(role: SuperRole) {
+  const activeStatuses = new Set(["claimed", "running"]);
+  for (const item of items.value) {
+    for (const target of item.dispatch_targets) {
+      if (target.role_id === role.id && activeStatuses.has(target.status) && target.session_ref) return target.session_ref;
+    }
+    if (item.role_id === role.id && activeStatuses.has(item.target_status) && item.session_ref) return item.session_ref;
+  }
+  return roleStatus(role) === "running" ? role.session_ref : "";
+}
+
+function canStopRole(role: SuperRole | null) {
+  return Boolean(role && roleStopSessionRef(role) && !stoppingRoleIds.value.has(role.id));
+}
+
+async function stopRole(role: SuperRole) {
+  const sessionRef = roleStopSessionRef(role);
+  if (!sessionRef || stoppingRoleIds.value.has(role.id)) return;
+  stoppingRoleIds.value = new Set([...stoppingRoleIds.value, role.id]);
+  error.value = "";
+  try {
+    await agents.terminate(sessionRef);
+    markRoleStopped(role.id);
+    await refreshSnapshots();
+    await loadChangedRuns();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    const next = new Set(stoppingRoleIds.value);
+    next.delete(role.id);
+    stoppingRoleIds.value = next;
+  }
+}
+
+function markRoleStopped(roleId: string) {
+  items.value = items.value.map((item) => ({
+    ...item,
+    target_status: item.role_id === roleId && ["claimed", "running"].includes(item.target_status) ? "cancelled" : item.target_status,
+    dispatch_targets: item.dispatch_targets.map((target) =>
+      target.role_id === roleId && ["claimed", "running"].includes(target.status) ? { ...target, status: "cancelled" } : target,
+    ),
+  }));
 }
 
 function handleRoleClick(roleId: string) {
@@ -247,11 +324,50 @@ function addRoleMention(role: SuperRole) {
 }
 
 function addMessageCitation(messageId: string) {
-  const token = `@msg-${messageId}`;
-  if (leadingMentionTokens(composer.value).includes(token)) return;
-  const insert = `${token} `;
+  addMessageCitations([messageId]);
+}
+
+function addMessageCitations(messageIds: string[]) {
+  const existing = new Set(leadingMentionTokens(composer.value));
+  const tokens = [...new Set(messageIds)].map((messageId) => `@msg-${messageId}`).filter((token) => !existing.has(token));
+  if (!tokens.length) return;
+  const insert = `${tokens.join(" ")} `;
   const position = leadingMentionPrefixEnd(composer.value);
   composer.value = `${composer.value.slice(0, position)}${insert}${composer.value.slice(position)}`;
+}
+
+function citationIdsForItem(item: SuperThreadItem) {
+  return item.merged_message_ids?.length ? item.merged_message_ids : [item.message_id];
+}
+
+function mergeConsecutiveRoleMessages(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
+  const merged: SuperThreadItem[] = [];
+  for (const item of orderedItems) {
+    const last = merged[merged.length - 1];
+    if (last && canMergeRoleMessages(last, item)) {
+      const messageIds = [...citationIdsForItem(last)];
+      if (!messageIds.includes(item.message_id)) messageIds.push(item.message_id);
+      merged[merged.length - 1] = {
+        ...last,
+        id: `${last.id}:${item.id}`,
+        text: [last.text.trimEnd(), item.text.trimStart()].filter(Boolean).join("\n\n"),
+        updated_at: Math.max(last.updated_at, item.updated_at),
+        message_id: item.message_id,
+        merged_message_ids: messageIds,
+      };
+      continue;
+    }
+    merged.push({ ...item, merged_message_ids: item.kind === "message" ? [item.message_id] : undefined });
+  }
+  return merged;
+}
+
+function canMergeRoleMessages(left: SuperThreadItem, right: SuperDisplayItem) {
+  return left.kind === "message" && right.kind === "message" && roleMessageMergeKey(left) === roleMessageMergeKey(right);
+}
+
+function roleMessageMergeKey(item: Pick<SuperDisplayItem, "role_id" | "role_name" | "provider" | "session_ref">) {
+  return item.role_id || `${item.provider}:${item.session_ref}:${item.role_name}`;
 }
 
 function handleComposerMentionClick(token: string) {
@@ -381,7 +497,12 @@ function roleSnapshot(role: SuperRole) {
 }
 
 function roleStatus(role: SuperRole) {
-  return roleSnapshot(role)?.status ?? "idle";
+  return activeRoleStatuses.value.get(role.id) ?? normalizeRoleStatus(roleSnapshot(role)?.status ?? "idle");
+}
+
+function normalizeRoleStatus(status: string) {
+  if (status === "claimed" || status === "queued") return "running";
+  return status || "idle";
 }
 
 function contextPercent(role: SuperRole) {
@@ -390,8 +511,41 @@ function contextPercent(role: SuperRole) {
   return `${Math.round(value)}%`;
 }
 
+function itemBaseDirectory(item: SuperDisplayItem) {
+  return snapshots.value[item.session_ref]?.cwd_relative ?? "";
+}
+
 function itemHtml(item: SuperDisplayItem) {
-  return item.text ? renderMarkdown(item.text.trim(), { baseDirectory: snapshots.value[item.session_ref]?.cwd_relative ?? "" }) : "";
+  return item.text ? renderMarkdown(item.text.trim(), { baseDirectory: itemBaseDirectory(item) }) : "";
+}
+
+async function openItemLink(event: MouseEvent, item: SuperDisplayItem) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const element = event.target instanceof Element ? event.target : null;
+  const link = element?.closest<HTMLAnchorElement>("a[data-viewer-link]");
+  const target = link?.dataset.viewerTarget;
+  if (!target) return;
+  event.preventDefault();
+  error.value = "";
+  try {
+    const resolved = await resolveDirectoryLink(itemBaseDirectory(item), target);
+    await files.recordVisit(resolved.path);
+    previewPath.value = resolved.path;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function openPreviewInPane(path: string) {
+  previewPath.value = null;
+  void files.recordVisit(path);
+  layout.openFile(path);
+}
+
+function openPreviewInSplit(path: string, direction: SplitDirection) {
+  previewPath.value = null;
+  void files.recordVisit(path);
+  layout.openFileInSplit(path, direction);
 }
 
 function itemIcon(item: SuperDisplayItem) {
@@ -424,6 +578,9 @@ function formatTime(value: number) {
 async function loadRuns(reset: boolean) {
   if (reset) historyLoading.value = true;
   else loadingOlder.value = true;
+  const thread = reset ? null : threadRef.value;
+  const previousScrollHeight = thread?.scrollHeight ?? 0;
+  const previousScrollTop = thread?.scrollTop ?? 0;
   try {
     const limit = reset ? Math.min(100, Math.max(30, items.value.length || 30)) : 30;
     const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined);
@@ -433,6 +590,8 @@ async function loadRuns(reset: boolean) {
     } else {
       const seen = new Set(items.value.map((item) => item.id));
       items.value = [...items.value, ...page.items.filter((item) => !seen.has(item.id))];
+      await nextTick();
+      if (thread) thread.scrollTop = thread.scrollHeight - previousScrollHeight + previousScrollTop;
     }
     updateItemsAfterCursor(page.items, page.next_after ?? undefined);
     hasOlderRuns.value = page.has_more;
@@ -443,6 +602,12 @@ async function loadRuns(reset: boolean) {
     historyLoading.value = false;
     loadingOlder.value = false;
   }
+}
+
+function handleThreadScroll() {
+  const element = threadRef.value;
+  if (!element || element.scrollTop > 96 || historyLoading.value || loadingOlder.value || !hasOlderRuns.value) return;
+  void loadRuns(false);
 }
 
 async function loadChangedRuns() {
@@ -539,7 +704,7 @@ async function scrollThreadToBottom() {
             class="super-role-tile"
         :class="[{ active: role.id === selectedRoleId, mentioned: mentionedRoleIds.includes(role.id) }, `status-${roleStatus(role)}`]"
             type="button"
-            :title="`@${roleMentionKey(role)}`"
+            :title="`@${roleMentionKey(role)} · ${roleStatus(role)}`"
             :aria-pressed="mentionedRoleIds.includes(role.id)"
             @click="handleRoleClick(role.id)"
       >
@@ -619,6 +784,10 @@ async function scrollThreadToBottom() {
           </div>
           <div class="super-config-actions">
             <button class="btn btn-sm btn-outline-secondary" type="button" :disabled="roleSaving" @click="saveSelectedRole">Save</button>
+            <button class="btn btn-sm btn-outline-danger" type="button" :disabled="!canStopRole(selectedRole)" @click="stopSelectedRole">
+              <i class="bi bi-stop-fill"></i>
+              <span>{{ selectedRole && stoppingRoleIds.has(selectedRole.id) ? "Stopping" : "Stop" }}</span>
+            </button>
             <button class="btn btn-sm btn-outline-primary icon-button" type="button" :disabled="busy" title="Renew session" @click="renewSelectedRole">
               <i class="bi bi-arrow-clockwise"></i>
             </button>
@@ -631,47 +800,51 @@ async function scrollThreadToBottom() {
     </div>
 
     <main class="super-chat">
-      <section ref="threadRef" class="super-thread">
-        <button v-if="hasOlderRuns" class="btn btn-sm btn-outline-secondary super-load-older" type="button" :disabled="loadingOlder" @click="loadRuns(false)">
-          <span>{{ loadingOlder ? "Loading" : "Load older" }}</span>
-        </button>
+      <section ref="threadRef" class="super-thread" @scroll.passive="handleThreadScroll">
+        <div v-if="items.length && (loadingOlder || !hasOlderRuns)" class="super-history-boundary">
+          <span>{{ loadingOlder ? "Loading older messages" : "No more messages" }}</span>
+        </div>
         <article v-for="item in displayItems" :key="item.id" class="super-run">
-          <div v-if="item.kind === 'query'" class="super-user-message">
-            <div class="super-run-time">{{ formatTime(item.created_at) }}</div>
-            <div class="super-message-text">{{ item.text }}</div>
-            <div class="super-message-actions">
+          <div v-if="item.kind === 'query'" class="super-user-turn">
+            <div class="super-message-top super-user-message-top">
+              <div class="super-message-meta">
+                <div class="super-run-time">{{ formatTime(item.created_at) }}</div>
+                <div class="super-route-line">
+                  <span v-if="item.run_status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
+                  <span v-else-if="item.run_status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
+                  <span v-else-if="item.run_status === 'running'" class="super-route-pending">starting role dispatch...</span>
+                  <span v-else-if="item.run_status === 'failed'" class="super-route-error">dispatch failed: {{ item.error }}</span>
+                  <template v-else>
+                    <span class="super-route-label">dispatched to</span>
+                    <span v-for="target in item.dispatch_targets" :key="target.id" class="super-route-chip">
+                      <i class="bi" :class="targetIcon(target)"></i>
+                      {{ target.role_name }}
+                    </span>
+                  </template>
+                </div>
+              </div>
               <button class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
                 <i class="bi bi-link-45deg"></i>
                 <span>Cite</span>
               </button>
             </div>
-            <div class="super-route-line">
-              <span v-if="item.run_status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
-              <span v-else-if="item.run_status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
-              <span v-else-if="item.run_status === 'running'" class="super-route-pending">starting role dispatch...</span>
-              <span v-else-if="item.run_status === 'failed'" class="super-route-error">dispatch failed: {{ item.error }}</span>
-              <template v-else>
-                <span class="super-route-label">dispatched to</span>
-                <span v-for="target in item.dispatch_targets" :key="target.id" class="super-route-chip">
-                  <i class="bi" :class="targetIcon(target)"></i>
-                  {{ target.role_name }}
-                </span>
-              </template>
+            <div class="super-user-message">
+              <div class="super-message-text">{{ item.text }}</div>
             </div>
           </div>
           <div v-else class="super-role-turn">
-            <div class="super-response-role-label">
-              <i class="bi" :class="itemIcon(item)"></i>
-              {{ item.role_name }}
-            </div>
-            <div class="super-role-response">
-              <div class="markdown-body super-response-body" v-html="itemHtml(item)"></div>
-              <div class="super-message-actions">
-                <button class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
-                  <i class="bi bi-link-45deg"></i>
-                  <span>Cite</span>
-                </button>
+            <div class="super-message-top">
+              <div class="super-response-role-label">
+                <i class="bi" :class="itemIcon(item)"></i>
+                {{ item.role_name }}
               </div>
+              <button class="super-cite-button" type="button" :title="`Cite @msg-${citationIdsForItem(item).join(' @msg-')}`" @click="addMessageCitations(citationIdsForItem(item))">
+                <i class="bi bi-link-45deg"></i>
+                <span>Cite</span>
+              </button>
+            </div>
+            <div class="super-role-response" @click="openItemLink($event, item)">
+              <div class="markdown-body super-response-body" v-html="itemHtml(item)"></div>
             </div>
           </div>
         </article>
@@ -722,6 +895,13 @@ async function scrollThreadToBottom() {
         </div>
       </div>
     </main>
+    <LocalFilePreview
+      v-if="previewPath"
+      :path="previewPath"
+      @close="previewPath = null"
+      @open-pane="openPreviewInPane"
+      @open-split="openPreviewInSplit"
+    />
   </div>
 </template>
 
@@ -887,10 +1067,40 @@ async function scrollThreadToBottom() {
   --role-status-color: #0d6efd;
 }
 
+.super-role-tile.status-running,
+.super-role-tile.status-running.active,
+.super-role-tile.status-running.mentioned,
+.super-role-tile.status-running.active.mentioned,
+.super-role-tile.status-running:hover {
+  background: #e8f3ff;
+  border-color: #7fb9ff;
+  box-shadow: inset 6px 0 0 #0d6efd, 0 0 0 1px rgba(13, 110, 253, 0.12);
+}
+
+.super-role-tile.status-running .super-role-icon,
+.super-role-tile.status-running .super-role-abbrev {
+  color: #0b5ed7;
+}
+
 .status-failed {
   --role-status-bg: #fff1f2;
   --role-status-border: #f3b4bc;
   --role-status-color: #dc3545;
+}
+
+.super-role-tile.status-failed,
+.super-role-tile.status-failed.active,
+.super-role-tile.status-failed.mentioned,
+.super-role-tile.status-failed.active.mentioned,
+.super-role-tile.status-failed:hover {
+  background: #fff1f2;
+  border-color: #ef8f9b;
+  box-shadow: inset 6px 0 0 #dc3545, 0 0 0 1px rgba(220, 53, 69, 0.12);
+}
+
+.super-role-tile.status-failed .super-role-icon,
+.super-role-tile.status-failed .super-role-abbrev {
+  color: #b02a37;
 }
 
 .super-role-config {
@@ -1046,8 +1256,10 @@ async function scrollThreadToBottom() {
 }
 
 .super-thread {
+  -webkit-overflow-scrolling: touch;
   min-height: 0;
   min-width: 0;
+  overscroll-behavior: contain;
   overflow: auto;
   padding: 16px 16px 18px;
 }
@@ -1060,23 +1272,57 @@ async function scrollThreadToBottom() {
   min-width: 0;
 }
 
-.super-load-older {
-  justify-self: center;
+.super-history-boundary {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  font-size: 12px;
+  gap: 10px;
+  justify-content: center;
   margin: 0 auto 16px;
+  max-width: 520px;
+}
+
+.super-history-boundary::before,
+.super-history-boundary::after {
+  background: #d7dde8;
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  min-width: 24px;
+}
+
+.super-history-boundary span {
+  flex: 0 0 auto;
 }
 
 .super-user-message,
 .super-role-response {
-  background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 8px;
   max-width: 100%;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
 }
 
 .super-user-message {
+  background: #eef8f3;
+  border-color: #cfe8d9;
   margin-left: auto;
+  max-width: min(760px, 100%);
+}
+
+.super-role-response {
+  background: #ffffff;
+}
+
+.super-user-turn {
+  display: grid;
+  gap: 3px;
+  justify-items: end;
+}
+
+.super-user-message-top {
   max-width: min(760px, 100%);
 }
 
@@ -1094,10 +1340,20 @@ async function scrollThreadToBottom() {
   word-break: break-word;
 }
 
-.super-message-actions {
+.super-message-top {
+  align-items: center;
   display: flex;
-  justify-content: flex-end;
-  margin-top: 6px;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.super-message-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  min-width: 0;
 }
 
 .super-cite-button {
@@ -1120,7 +1376,7 @@ async function scrollThreadToBottom() {
 .super-route-line {
   flex-wrap: wrap;
   gap: 4px 7px;
-  margin-top: 6px;
+  margin-top: 0;
 }
 
 .super-route-chip {
@@ -1145,15 +1401,21 @@ async function scrollThreadToBottom() {
 
 .super-role-turn {
   display: grid;
-  gap: 4px;
+  gap: 3px;
 }
 
 .super-response-role-label {
+  align-items: center;
   color: #111827;
+  display: inline-flex;
   font-size: 12px;
   font-weight: 400;
+  gap: 4px;
   line-height: 1.3;
-  padding-left: 2px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .super-response-body {
@@ -1161,6 +1423,14 @@ async function scrollThreadToBottom() {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.super-response-body :deep(> :first-child) {
+  margin-top: 0;
+}
+
+.super-response-body :deep(> :last-child) {
+  margin-bottom: 0;
 }
 
 .super-response-body :deep(pre) {

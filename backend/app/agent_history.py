@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, or_, select, update
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, event, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -353,9 +353,29 @@ class AgentHistoryStore:
     def __init__(self, path: Path = AGENT_HISTORY_DB_PATH) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.engine = create_engine(f"sqlite:///{self.path.as_posix()}", future=True, poolclass=NullPool)
+        self.engine = create_engine(
+            f"sqlite:///{self.path.as_posix()}",
+            future=True,
+            poolclass=NullPool,
+            connect_args={"timeout": 30.0},
+        )
+        event.listen(self.engine, "connect", self._configure_sqlite_connection)
         self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False, future=True)
+        self._ensure_sqlite_wal()
         self._ensure_schema()
+
+    @staticmethod
+    def _configure_sqlite_connection(connection, _record) -> None:
+        cursor = connection.cursor()
+        try:
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+        finally:
+            cursor.close()
+
+    def _ensure_sqlite_wal(self) -> None:
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA journal_mode=WAL")
 
     @contextmanager
     def session_scope(self) -> Iterator[Session]:
@@ -385,32 +405,23 @@ class AgentHistoryStore:
         workspace_id = self.default_workspace_id(normalized_user)
         now = time.time()
         with self.session_scope() as db:
-            row = db.scalar(
-                select(SuperWorkspaceRow).where(
-                    SuperWorkspaceRow.id == workspace_id,
-                    SuperWorkspaceRow.user_id == normalized_user,
-                )
+            statement = sqlite_insert(SuperWorkspaceRow).values(
+                id=workspace_id,
+                user_id=normalized_user,
+                name=DEFAULT_SUPER_WORKSPACE_NAME,
+                common_prompt="",
+                created_at=now,
+                updated_at=now,
             )
-            if row is None:
-                row = SuperWorkspaceRow(
-                    id=workspace_id,
-                    user_id=normalized_user,
-                    name=DEFAULT_SUPER_WORKSPACE_NAME,
-                    common_prompt="",
-                    created_at=now,
-                    updated_at=now,
-                )
-                db.add(row)
-        with self.read_session() as db:
-            found = db.scalar(
-                select(SuperWorkspaceRow).where(
-                    SuperWorkspaceRow.id == workspace_id,
-                    SuperWorkspaceRow.user_id == normalized_user,
-                )
-            )
-            if found is None:
-                raise KeyError(workspace_id)
-            return found
+            db.execute(statement.on_conflict_do_nothing(index_elements=["user_id", "id"]))
+        return SuperWorkspaceRow(
+            id=workspace_id,
+            user_id=normalized_user,
+            name=DEFAULT_SUPER_WORKSPACE_NAME,
+            common_prompt="",
+            created_at=now,
+            updated_at=now,
+        )
 
     @staticmethod
     def default_workspace_id(user_id: str | None) -> str:
@@ -586,27 +597,29 @@ class AgentHistoryStore:
         normalized_user = normalize_user_id(user_id)
         workspace = self.ensure_default_workspace(normalized_user)
         now = time.time()
+        values: dict[str, Any] = {"ingested_at": now}
+        if status is not None:
+            values["status"] = status
+        if role_ids is not None:
+            values["selected_role_ids_json"] = self._json(role_ids)
+        if rationale is not None:
+            values["rationale"] = rationale
+        if error is not None:
+            values["error"] = error
         with self.session_scope() as db:
-            row = db.scalar(
-                select(SuperWorkspaceMessageRow).where(
+            result = db.execute(
+                update(SuperWorkspaceMessageRow)
+                .where(
                     SuperWorkspaceMessageRow.id == run_id,
                     SuperWorkspaceMessageRow.workspace_id == workspace.id,
                     SuperWorkspaceMessageRow.user_id == normalized_user,
                     SuperWorkspaceMessageRow.query.is_not(None),
                     SuperWorkspaceMessageRow.query != "",
                 )
+                .values(**values)
             )
-            if row is None:
+            if result.rowcount == 0:
                 raise KeyError(run_id)
-            row.ingested_at = now
-            if status is not None:
-                row.status = status
-            if role_ids is not None:
-                row.selected_role_ids_json = self._json(role_ids)
-            if rationale is not None:
-                row.rationale = rationale
-            if error is not None:
-                row.error = error
         return self.get_super_run(run_id, normalized_user)
 
     def record_super_target(self, user_id: str | None, run_id: str, request: SuperDriverRunCreate) -> SuperHistoryRun:
@@ -619,7 +632,7 @@ class AgentHistoryStore:
         provider_session_id = self._provider_session_id(provider, viewer_session_id)
         now = time.time()
         start = self._latest_session_message(provider, viewer_session_id) if viewer_session_id else None
-        with self.session_scope() as db:
+        with self.read_session() as db:
             query = db.scalar(
                 select(SuperWorkspaceMessageRow).where(
                     SuperWorkspaceMessageRow.id == query_message_id,
@@ -632,14 +645,16 @@ class AgentHistoryStore:
             if query is None:
                 raise KeyError(query_message_id)
             existing = db.scalar(
-                select(SuperWorkspaceDriverRunRow).where(
+                select(SuperWorkspaceDriverRunRow.id).where(
                     SuperWorkspaceDriverRunRow.query_message_id == query_message_id,
                     SuperWorkspaceDriverRunRow.workspace_id == workspace.id,
                     SuperWorkspaceDriverRunRow.role_id == request.role_id,
                     SuperWorkspaceDriverRunRow.provider == provider,
                 )
             )
-            if existing is None:
+            sender_role_id = request.sender_role_id or query.sender_role_id
+        if existing is None:
+            with self.session_scope() as db:
                 db.add(
                     SuperWorkspaceDriverRunRow(
                         id=uuid.uuid4().hex,
@@ -655,7 +670,7 @@ class AgentHistoryStore:
                         agent_prompt=request.agent_prompt,
                         status="queued",
                         parent_message_id=request.parent_message_id or query_message_id,
-                        sender_role_id=request.sender_role_id or query.sender_role_id,
+                        sender_role_id=sender_role_id,
                         recipient_role_id=request.role_id,
                         role_snapshot_json=self._json(request.role_snapshot),
                         attempt_count=0,
@@ -723,6 +738,7 @@ class AgentHistoryStore:
                 )
                 .values(status="queued", claimed_by=None, claim_expires_at=None, updated_at=now)
             )
+        with self.read_session() as db:
             candidates = list(
                 db.scalars(
                     select(SuperWorkspaceDriverRunRow)
@@ -734,32 +750,44 @@ class AgentHistoryStore:
                     .limit(20)
                 ).all()
             )
-            for row in candidates:
-                active = db.scalar(
-                    select(SuperWorkspaceDriverRunRow.id)
-                    .where(
-                        SuperWorkspaceDriverRunRow.id != row.id,
-                        SuperWorkspaceDriverRunRow.workspace_id == row.workspace_id,
-                        SuperWorkspaceDriverRunRow.user_id == row.user_id,
-                        SuperWorkspaceDriverRunRow.role_id == row.role_id,
-                        or_(
-                            SuperWorkspaceDriverRunRow.status == "running",
-                            and_(
-                                SuperWorkspaceDriverRunRow.status == "claimed",
-                                or_(SuperWorkspaceDriverRunRow.claim_expires_at.is_(None), SuperWorkspaceDriverRunRow.claim_expires_at > now),
-                            ),
+        for row in candidates:
+            active = (
+                select(SuperWorkspaceDriverRunRow.id)
+                .where(
+                    SuperWorkspaceDriverRunRow.id != row.id,
+                    SuperWorkspaceDriverRunRow.workspace_id == row.workspace_id,
+                    SuperWorkspaceDriverRunRow.user_id == row.user_id,
+                    SuperWorkspaceDriverRunRow.role_id == row.role_id,
+                    or_(
+                        SuperWorkspaceDriverRunRow.status == "running",
+                        and_(
+                            SuperWorkspaceDriverRunRow.status == "claimed",
+                            or_(SuperWorkspaceDriverRunRow.claim_expires_at.is_(None), SuperWorkspaceDriverRunRow.claim_expires_at > now),
                         ),
-                    )
-                    .limit(1)
+                    ),
                 )
-                if active:
-                    continue
-                row.status = "claimed"
-                row.claimed_by = worker_id
-                row.claim_expires_at = now + lease_seconds
-                row.attempt_count = int(row.attempt_count or 0) + 1
-                row.updated_at = now
-                return self._dispatch_task_from_row(row)
+                .limit(1)
+                .exists()
+            )
+            with self.session_scope() as db:
+                claimed = db.scalar(
+                    update(SuperWorkspaceDriverRunRow)
+                    .where(
+                        SuperWorkspaceDriverRunRow.id == row.id,
+                        SuperWorkspaceDriverRunRow.status == "queued",
+                        ~active,
+                    )
+                    .values(
+                        status="claimed",
+                        claimed_by=worker_id,
+                        claim_expires_at=now + lease_seconds,
+                        attempt_count=int(row.attempt_count or 0) + 1,
+                        updated_at=now,
+                    )
+                    .returning(SuperWorkspaceDriverRunRow)
+                )
+                if claimed is not None:
+                    return self._dispatch_task_from_row(claimed)
         return None
 
     def get_dispatch_task(self, task_id: str) -> SuperDispatchTask | None:

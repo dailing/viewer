@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ from urllib.request import Request, urlopen
 from fastapi import HTTPException
 from loguru import logger
 from pydantic import BaseModel
+from sqlalchemy.exc import OperationalError
 
 from .agent_history import SuperDispatchTask, SuperDriverRunCreate, SuperHistoryRun, agent_history_store
 from .codex_sessions import codex_session_manager
@@ -339,7 +341,14 @@ class SuperWorkspaceRuntime:
         while not self._stop.is_set():
             self._active_tasks = {task for task in self._active_tasks if not task.done()}
             while len(self._active_tasks) < 4:
-                task = agent_history_store.claim_next_dispatch_task(self._worker_id)
+                try:
+                    task = agent_history_store.claim_next_dispatch_task(self._worker_id)
+                except OperationalError as exc:
+                    if self._is_database_locked(exc):
+                        logger.warning("Super Workspace dispatch worker waiting for agent-history DB lock")
+                        await asyncio.sleep(1.0)
+                        break
+                    raise
                 if task is None:
                     break
                 worker = asyncio.create_task(self._process_dispatch_task(task))
@@ -349,11 +358,23 @@ class SuperWorkspaceRuntime:
     async def _process_dispatch_task(self, task: SuperDispatchTask) -> None:
         try:
             await self._dispatch_task(task)
+        except OperationalError as exc:
+            if self._is_database_locked(exc):
+                logger.warning("Super Workspace dispatch task waiting for agent-history DB lock task={} role={}", task.id, task.role_id)
+                with contextlib.suppress(Exception):
+                    agent_history_store.update_driver_run_status(task.id, "queued", next_attempt_at=time.time() + 1.0)
+                await asyncio.sleep(1.0)
+                return
+            raise
         except Exception as exc:
             logger.exception("Super Workspace dispatch task failed task={} role={}", task.id, task.role_id)
             agent_history_store.update_driver_run_status(task.id, "failed", error=str(exc) or "Dispatch task failed")
             agent_history_store.summarize_super_run_status(task.query_message_id, task.user_id, fallback_error=str(exc))
             await self._emit_update({"type": "run-updated", "user_id": task.user_id, "run_id": task.query_message_id})
+
+    @staticmethod
+    def _is_database_locked(exc: OperationalError) -> bool:
+        return "database is locked" in str(exc).lower()
 
     async def _dispatch_task(self, task: SuperDispatchTask) -> None:
         run = agent_history_store.get_super_run(task.query_message_id, task.user_id)

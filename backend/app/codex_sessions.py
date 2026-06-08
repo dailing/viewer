@@ -351,6 +351,9 @@ class CodexSessionManager:
             return
 
         if session.status == "running" and not self._pid_alive(session.pid):
+            started_at = session.run_started_at or session.updated_at
+            if started_at and time.time() - started_at < 10.0:
+                return
             session.status = "failed"
             if session.exit_code is None:
                 session.exit_code = -1

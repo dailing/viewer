@@ -355,6 +355,12 @@ def message_id(provider: str, viewer_session_id: str | None, source_event_id: st
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def configure_history_connection(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=30000")
+
+
 def insert_provider_message(
     db_path: Path,
     *,
@@ -382,85 +388,138 @@ def insert_provider_message(
     file_changes: list[dict[str, Any]] | None = None,
 ) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path, timeout=30.0) as connection:
+        configure_history_connection(connection)
+        insert_provider_message_row(
+            connection,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            provider=provider,
+            viewer_session_id=viewer_session_id,
+            provider_session_id=provider_session_id,
+            query_message_id=query_message_id,
+            driver_run_id=driver_run_id,
+            parent_message_id=parent_message_id,
+            sender_role_id=sender_role_id,
+            recipient_role_id=recipient_role_id,
+            role_id=role_id,
+            event_index=event_index,
+            received_at=received_at,
+            source_path=source_path,
+            source_event_id=source_event_id,
+            source_line=source_line,
+            role=role,
+            event_type=event_type,
+            text=text,
+            raw=raw,
+            patch_text=patch_text,
+            file_changes=file_changes,
+        )
+
+
+def insert_provider_message_row(
+    connection: sqlite3.Connection,
+    *,
+    user_id: str,
+    workspace_id: str | None,
+    provider: str,
+    viewer_session_id: str,
+    provider_session_id: str | None,
+    query_message_id: str | None,
+    driver_run_id: str | None,
+    parent_message_id: str | None,
+    sender_role_id: str | None,
+    recipient_role_id: str | None,
+    role_id: str | None,
+    event_index: int,
+    received_at: float,
+    source_path: str | None,
+    source_event_id: str,
+    source_line: int | None,
+    role: str,
+    event_type: str,
+    text: str,
+    raw: dict[str, Any],
+    patch_text: str | None = None,
+    file_changes: list[dict[str, Any]] | None = None,
+) -> None:
     row_id = message_id(provider, viewer_session_id, source_event_id)
     now = time.time()
-    with sqlite3.connect(db_path, timeout=10.0) as connection:
-        connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute(
+        """
+        INSERT INTO super_workspace_messages (
+          id, workspace_id, user_id, conversation_id, parent_message_id, sender_role_id, recipient_role_id, role_id,
+          query_message_id, driver_run_id, provider, viewer_session_id, provider_session_id,
+          event_index, received_at, source_path, source_event_id, source_line, role, event_type,
+          text, query, status, rationale, error, requested_role_ids_json, selected_role_ids_json,
+          patch_text, raw_json, occurred_at, ingested_at
+        )
+        VALUES (?, ?, ?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', '[]', '[]', ?, ?, ?, ?)
+        ON CONFLICT(provider, viewer_session_id, source_event_id) DO UPDATE SET
+          workspace_id=excluded.workspace_id,
+          user_id=excluded.user_id,
+          parent_message_id=excluded.parent_message_id,
+          sender_role_id=excluded.sender_role_id,
+          recipient_role_id=excluded.recipient_role_id,
+          role_id=excluded.role_id,
+          query_message_id=excluded.query_message_id,
+          driver_run_id=excluded.driver_run_id,
+          provider_session_id=excluded.provider_session_id,
+          event_index=excluded.event_index,
+          received_at=excluded.received_at,
+          source_path=excluded.source_path,
+          source_line=excluded.source_line,
+          role=excluded.role,
+          event_type=excluded.event_type,
+          text=excluded.text,
+          patch_text=excluded.patch_text,
+          raw_json=excluded.raw_json,
+          occurred_at=excluded.occurred_at,
+          ingested_at=excluded.ingested_at
+        """,
+        (
+            row_id,
+            workspace_id,
+            user_id,
+            parent_message_id,
+            sender_role_id,
+            recipient_role_id,
+            role_id,
+            query_message_id,
+            driver_run_id,
+            provider,
+            viewer_session_id,
+            provider_session_id,
+            event_index,
+            received_at,
+            source_path,
+            source_event_id,
+            source_line,
+            role,
+            event_type,
+            text,
+            patch_text,
+            json_dumps(raw),
+            received_at,
+            now,
+        ),
+    )
+    connection.execute("DELETE FROM super_workspace_message_file_changes WHERE message_id = ?", (row_id,))
+    for position, item in enumerate(file_changes or []):
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        change_type = item.get("change_type")
+        if not isinstance(path, str) or not isinstance(change_type, str):
+            continue
+        diff = item.get("diff") if isinstance(item.get("diff"), str) else None
         connection.execute(
             """
-            INSERT INTO super_workspace_messages (
-              id, workspace_id, user_id, conversation_id, parent_message_id, sender_role_id, recipient_role_id, role_id,
-              query_message_id, driver_run_id, provider, viewer_session_id, provider_session_id,
-              event_index, received_at, source_path, source_event_id, source_line, role, event_type,
-              text, query, status, rationale, error, requested_role_ids_json, selected_role_ids_json,
-              patch_text, raw_json, occurred_at, ingested_at
-            )
-            VALUES (?, ?, ?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', '[]', '[]', ?, ?, ?, ?)
-            ON CONFLICT(provider, viewer_session_id, source_event_id) DO UPDATE SET
-              workspace_id=excluded.workspace_id,
-              user_id=excluded.user_id,
-              parent_message_id=excluded.parent_message_id,
-              sender_role_id=excluded.sender_role_id,
-              recipient_role_id=excluded.recipient_role_id,
-              role_id=excluded.role_id,
-              query_message_id=excluded.query_message_id,
-              driver_run_id=excluded.driver_run_id,
-              provider_session_id=excluded.provider_session_id,
-              event_index=excluded.event_index,
-              received_at=excluded.received_at,
-              source_path=excluded.source_path,
-              source_line=excluded.source_line,
-              role=excluded.role,
-              event_type=excluded.event_type,
-              text=excluded.text,
-              patch_text=excluded.patch_text,
-              raw_json=excluded.raw_json,
-              occurred_at=excluded.occurred_at,
-              ingested_at=excluded.ingested_at
+            INSERT INTO super_workspace_message_file_changes (message_id, position, path, change_type, diff)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (
-                row_id,
-                workspace_id,
-                user_id,
-                parent_message_id,
-                sender_role_id,
-                recipient_role_id,
-                role_id,
-                query_message_id,
-                driver_run_id,
-                provider,
-                viewer_session_id,
-                provider_session_id,
-                event_index,
-                received_at,
-                source_path,
-                source_event_id,
-                source_line,
-                role,
-                event_type,
-                text,
-                patch_text,
-                json_dumps(raw),
-                received_at,
-                now,
-            ),
+            (row_id, position, path, change_type, diff),
         )
-        connection.execute("DELETE FROM super_workspace_message_file_changes WHERE message_id = ?", (row_id,))
-        for position, item in enumerate(file_changes or []):
-            if not isinstance(item, dict):
-                continue
-            path = item.get("path")
-            change_type = item.get("change_type")
-            if not isinstance(path, str) or not isinstance(change_type, str):
-                continue
-            diff = item.get("diff") if isinstance(item.get("diff"), str) else None
-            connection.execute(
-                """
-                INSERT INTO super_workspace_message_file_changes (message_id, position, path, change_type, diff)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (row_id, position, path, change_type, diff),
-            )
 
 
 def record_prompt(
@@ -533,36 +592,45 @@ def write_rollout_events(db_path: Path, state: dict, rollout_path: Path, new_eve
         if is_assistant_response_item(raw)
     }
     assistant_response_texts.discard("")
+    rows: list[dict[str, Any]] = []
     for line_number, raw in new_events:
         compact = compact_event(raw, line_number, assistant_response_texts)
         if compact is None:
             continue
         source_event_id = raw_identifier(raw) or f"{rollout_path.as_posix()}:{line_number + 1}"
-        insert_provider_message(
-            db_path,
-            user_id=str(state["user_id"]),
-            workspace_id=state.get("workspace_id") if isinstance(state.get("workspace_id"), str) else None,
-            provider="codex",
-            viewer_session_id=str(state["viewer_session_id"]),
-            provider_session_id=state.get("codex_session_id") if isinstance(state.get("codex_session_id"), str) else None,
-            query_message_id=state.get("query_message_id") if isinstance(state.get("query_message_id"), str) else None,
-            driver_run_id=state.get("driver_run_id") if isinstance(state.get("driver_run_id"), str) else None,
-            parent_message_id=state.get("parent_message_id") if isinstance(state.get("parent_message_id"), str) else None,
-            sender_role_id=state.get("sender_role_id") if isinstance(state.get("sender_role_id"), str) else None,
-            recipient_role_id=state.get("recipient_role_id") if isinstance(state.get("recipient_role_id"), str) else None,
-            role_id=state.get("role_id") if isinstance(state.get("role_id"), str) else None,
-            event_index=line_number,
-            received_at=float(compact["received_at"]),
-            source_path=rollout_path.as_posix(),
-            source_event_id=source_event_id,
-            source_line=line_number + 1,
-            role=codex_role(raw, compact),
-            event_type=str(compact.get("event_type") or "operation"),
-            text=str(compact.get("text") or ""),
-            raw=raw,
-            patch_text=compact.get("patch_text") if isinstance(compact.get("patch_text"), str) else None,
-            file_changes=compact.get("file_changes") if isinstance(compact.get("file_changes"), list) else [],
+        rows.append(
+            {
+                "user_id": str(state["user_id"]),
+                "workspace_id": state.get("workspace_id") if isinstance(state.get("workspace_id"), str) else None,
+                "provider": "codex",
+                "viewer_session_id": str(state["viewer_session_id"]),
+                "provider_session_id": state.get("codex_session_id") if isinstance(state.get("codex_session_id"), str) else None,
+                "query_message_id": state.get("query_message_id") if isinstance(state.get("query_message_id"), str) else None,
+                "driver_run_id": state.get("driver_run_id") if isinstance(state.get("driver_run_id"), str) else None,
+                "parent_message_id": state.get("parent_message_id") if isinstance(state.get("parent_message_id"), str) else None,
+                "sender_role_id": state.get("sender_role_id") if isinstance(state.get("sender_role_id"), str) else None,
+                "recipient_role_id": state.get("recipient_role_id") if isinstance(state.get("recipient_role_id"), str) else None,
+                "role_id": state.get("role_id") if isinstance(state.get("role_id"), str) else None,
+                "event_index": line_number,
+                "received_at": float(compact["received_at"]),
+                "source_path": rollout_path.as_posix(),
+                "source_event_id": source_event_id,
+                "source_line": line_number + 1,
+                "role": codex_role(raw, compact),
+                "event_type": str(compact.get("event_type") or "operation"),
+                "text": str(compact.get("text") or ""),
+                "raw": raw,
+                "patch_text": compact.get("patch_text") if isinstance(compact.get("patch_text"), str) else None,
+                "file_changes": compact.get("file_changes") if isinstance(compact.get("file_changes"), list) else [],
+            }
         )
+    if not rows:
+        return
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path, timeout=30.0) as connection:
+        configure_history_connection(connection)
+        for row in rows:
+            insert_provider_message_row(connection, **row)
 
 
 def stdout_reader(process: subprocess.Popen, stdout_path: Path, state_path: Path, state: dict, lock: threading.Lock) -> None:

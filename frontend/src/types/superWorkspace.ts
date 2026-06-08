@@ -19,6 +19,29 @@ export type SuperWorkspaceData = {
   roles: SuperRole[];
 };
 
+export type SuperWorkspaceSummary = {
+  id: string;
+  name: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export type SuperWorkspaceList = {
+  active_workspace_id: string;
+  workspaces: SuperWorkspaceSummary[];
+};
+
+export type SuperRoleStatus = {
+  role_id: string;
+  status: "idle" | "busy" | "failed";
+  updated_at?: number | null;
+};
+
+export type SuperRoleStatuses = {
+  workspace_id: string;
+  items: SuperRoleStatus[];
+};
+
 export type SuperWorkspacePatch = {
   common_prompt?: string;
 };

@@ -39,7 +39,7 @@ const appReady = ref(false);
 const selectingUser = ref(false);
 const sidebarOpen = ref(false);
 const sidebarPinned = ref(false);
-const activePage = ref<"workspace" | "settings" | "loops" | "tasks" | "super">("workspace");
+const activePage = ref<"workspace" | "settings" | "loops" | "tasks" | "super">("super");
 const mobileToolbarOpen = ref(false);
 const agentStatusByRef = ref<Record<string, AgentStatus>>({});
 const workspaceHeat = ref<Record<string, number>>({});
@@ -695,10 +695,19 @@ onUnmounted(() => {
     <header class="topbar">
       <button
         class="btn btn-outline-secondary icon-button"
+        :class="{ active: activePage === 'workspace' }"
+        type="button"
+        title="Workspace"
+        @click="activePage = 'workspace'"
+      >
+        <i class="bi bi-window"></i>
+      </button>
+      <button
+        class="btn btn-outline-secondary icon-button"
         :class="{ active: activePage === 'settings' }"
         type="button"
         title="Settings"
-        @click="activePage = activePage === 'settings' ? 'workspace' : 'settings'"
+        @click="activePage = activePage === 'settings' ? 'super' : 'settings'"
       >
         <i class="bi bi-gear"></i>
       </button>
@@ -707,7 +716,7 @@ onUnmounted(() => {
         :class="{ active: activePage === 'loops' }"
         type="button"
         title="Loop Tasks"
-        @click="activePage = activePage === 'loops' ? 'workspace' : 'loops'"
+        @click="activePage = activePage === 'loops' ? 'super' : 'loops'"
       >
         <i class="bi bi-clock-history"></i>
       </button>
@@ -716,7 +725,7 @@ onUnmounted(() => {
         :class="{ active: activePage === 'tasks' }"
         type="button"
         title="Task DAG"
-        @click="activePage = activePage === 'tasks' ? 'workspace' : 'tasks'"
+        @click="activePage = activePage === 'tasks' ? 'super' : 'tasks'"
       >
         <i class="bi bi-diagram-3"></i>
       </button>
@@ -725,7 +734,7 @@ onUnmounted(() => {
         :class="{ active: activePage === 'super' }"
         type="button"
         title="Super Workspace"
-        @click="activePage = activePage === 'super' ? 'workspace' : 'super'"
+        @click="activePage = 'super'"
       >
         <i class="bi bi-people"></i>
       </button>
@@ -861,7 +870,7 @@ onUnmounted(() => {
       </main>
     </div>
     <main v-else-if="activePage === 'settings'" class="top-level-page">
-      <ConfigPanel @close="activePage = 'workspace'" />
+      <ConfigPanel @close="activePage = 'super'" />
     </main>
     <main v-else-if="activePage === 'loops'" class="top-level-page">
       <LoopTasksPage />

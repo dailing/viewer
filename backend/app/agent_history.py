@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, event, or_, select, update
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, case, create_engine, delete, event, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -196,6 +196,29 @@ class SuperHistoryRunsPage(BaseModel):
     next_after: float | None = None
 
 
+class SuperWorkspaceSummary(BaseModel):
+    id: str
+    name: str
+    created_at: float
+    updated_at: float
+
+
+class SuperWorkspaceList(BaseModel):
+    active_workspace_id: str
+    workspaces: list[SuperWorkspaceSummary]
+
+
+class SuperRoleStatus(BaseModel):
+    role_id: str
+    status: str
+    updated_at: float | None = None
+
+
+class SuperRoleStatuses(BaseModel):
+    workspace_id: str
+    items: list[SuperRoleStatus]
+
+
 class AgentHistoryBase(DeclarativeBase):
     pass
 
@@ -212,6 +235,14 @@ class SuperWorkspaceRow(AgentHistoryBase):
     name: Mapped[str] = mapped_column(String, nullable=False)
     common_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class SuperWorkspaceUserStateRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_user_state"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    active_workspace_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspaces.id", ondelete="CASCADE"), nullable=False)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
@@ -281,6 +312,7 @@ class SuperWorkspaceDriverRunRow(AgentHistoryBase):
     __tablename__ = "super_workspace_driver_runs"
     __table_args__ = (
         Index("idx_super_driver_runs_query_message", "query_message_id", "created_at", "id"),
+        Index("idx_super_driver_runs_role_status", "user_id", "workspace_id", "role_id", "status", "updated_at"),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -399,6 +431,8 @@ class AgentHistoryStore:
 
     def _ensure_schema(self) -> None:
         AgentHistoryBase.metadata.create_all(self.engine)
+        for index in SuperWorkspaceDriverRunRow.__table__.indexes:
+            index.create(self.engine, checkfirst=True)
 
     def ensure_default_workspace(self, user_id: str | None) -> SuperWorkspaceRow:
         normalized_user = normalize_user_id(user_id)
@@ -414,6 +448,17 @@ class AgentHistoryStore:
                 updated_at=now,
             )
             db.execute(statement.on_conflict_do_nothing(index_elements=["user_id", "id"]))
+            row = db.scalar(
+                select(SuperWorkspaceRow).where(
+                    SuperWorkspaceRow.id == workspace_id,
+                    SuperWorkspaceRow.user_id == normalized_user,
+                )
+            )
+            state = db.scalar(select(SuperWorkspaceUserStateRow).where(SuperWorkspaceUserStateRow.user_id == normalized_user))
+            if state is None:
+                db.add(SuperWorkspaceUserStateRow(user_id=normalized_user, active_workspace_id=workspace_id, updated_at=now))
+            if row is not None:
+                return row
         return SuperWorkspaceRow(
             id=workspace_id,
             user_id=normalized_user,
@@ -427,8 +472,88 @@ class AgentHistoryStore:
     def default_workspace_id(user_id: str | None) -> str:
         return f"{normalize_user_id(user_id)}:default"
 
+    def list_super_workspaces(self, user_id: str | None) -> SuperWorkspaceList:
+        workspace = self.active_super_workspace(user_id)
+        with self.read_session() as db:
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceRow)
+                    .where(SuperWorkspaceRow.user_id == workspace.user_id)
+                    .order_by(SuperWorkspaceRow.created_at.asc(), SuperWorkspaceRow.id.asc())
+                ).all()
+            )
+        return SuperWorkspaceList(
+            active_workspace_id=workspace.id,
+            workspaces=[
+                SuperWorkspaceSummary(
+                    id=str(row.id),
+                    name=str(row.name),
+                    created_at=float(row.created_at),
+                    updated_at=float(row.updated_at),
+                )
+                for row in rows
+            ],
+        )
+
+    def active_super_workspace(self, user_id: str | None) -> SuperWorkspaceRow:
+        default = self.ensure_default_workspace(user_id)
+        normalized_user = default.user_id
+        now = time.time()
+        with self.session_scope() as db:
+            state = db.scalar(select(SuperWorkspaceUserStateRow).where(SuperWorkspaceUserStateRow.user_id == normalized_user))
+            active_id = state.active_workspace_id if state is not None else ""
+            row = None
+            if active_id:
+                row = db.scalar(
+                    select(SuperWorkspaceRow).where(
+                        SuperWorkspaceRow.id == active_id,
+                        SuperWorkspaceRow.user_id == normalized_user,
+                    )
+                )
+            if row is None:
+                row = db.scalar(
+                    select(SuperWorkspaceRow)
+                    .where(SuperWorkspaceRow.user_id == normalized_user)
+                    .order_by(SuperWorkspaceRow.created_at.asc(), SuperWorkspaceRow.id.asc())
+                    .limit(1)
+                )
+            if row is None:
+                row = default
+            if state is None:
+                db.add(SuperWorkspaceUserStateRow(user_id=normalized_user, active_workspace_id=row.id, updated_at=now))
+            elif state.active_workspace_id != row.id:
+                state.active_workspace_id = row.id
+                state.updated_at = now
+            return row
+
+    def activate_super_workspace(self, user_id: str | None, workspace_id: str) -> SuperWorkspaceList:
+        normalized_user = normalize_user_id(user_id)
+        self.ensure_default_workspace(normalized_user)
+        now = time.time()
+        with self.session_scope() as db:
+            row = db.scalar(
+                select(SuperWorkspaceRow).where(
+                    SuperWorkspaceRow.id == workspace_id,
+                    SuperWorkspaceRow.user_id == normalized_user,
+                )
+            )
+            if row is None:
+                raise KeyError(workspace_id)
+            statement = sqlite_insert(SuperWorkspaceUserStateRow).values(
+                user_id=normalized_user,
+                active_workspace_id=workspace_id,
+                updated_at=now,
+            )
+            db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["user_id"],
+                    set_={"active_workspace_id": workspace_id, "updated_at": now},
+                )
+            )
+        return self.list_super_workspaces(normalized_user)
+
     def super_workspace_data(self, user_id: str | None) -> tuple[SuperWorkspaceRow, list[SuperWorkspaceRoleRow]]:
-        workspace = self.ensure_default_workspace(user_id)
+        workspace = self.active_super_workspace(user_id)
         with self.read_session() as db:
             row = db.scalar(
                 select(SuperWorkspaceRow).where(
@@ -451,7 +576,7 @@ class AgentHistoryStore:
             return row, roles
 
     def update_super_workspace_common_prompt(self, user_id: str | None, common_prompt: str) -> None:
-        workspace = self.ensure_default_workspace(user_id)
+        workspace = self.active_super_workspace(user_id)
         now = time.time()
         with self.session_scope() as db:
             db.execute(
@@ -470,7 +595,7 @@ class AgentHistoryStore:
         cwd: str = "",
         model: str | None = None,
     ) -> None:
-        workspace = self.ensure_default_workspace(user_id)
+        workspace = self.active_super_workspace(user_id)
         now = time.time()
         with self.session_scope() as db:
             db.add(
@@ -490,7 +615,7 @@ class AgentHistoryStore:
             )
 
     def update_super_workspace_role(self, user_id: str | None, role_id: str, values: dict[str, Any]) -> None:
-        workspace = self.ensure_default_workspace(user_id)
+        workspace = self.active_super_workspace(user_id)
         cleaned = {key: value for key, value in values.items() if value is not None}
         if not cleaned:
             return
@@ -507,7 +632,7 @@ class AgentHistoryStore:
             )
 
     def delete_super_workspace_role(self, user_id: str | None, role_id: str) -> None:
-        workspace = self.ensure_default_workspace(user_id)
+        workspace = self.active_super_workspace(user_id)
         with self.session_scope() as db:
             db.execute(
                 delete(SuperWorkspaceRoleRow).where(
@@ -530,7 +655,7 @@ class AgentHistoryStore:
         sender_role_id: str | None = None,
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.ensure_default_workspace(normalized_user)
+        workspace = self.active_super_workspace(normalized_user)
         now = time.time()
         message_id = uuid.uuid4().hex
         normalized_citation_ids = self._normalize_citation_ids(citation_ids or [])
@@ -595,7 +720,7 @@ class AgentHistoryStore:
         error: str | None = None,
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.ensure_default_workspace(normalized_user)
+        workspace = self.active_super_workspace(normalized_user)
         now = time.time()
         values: dict[str, Any] = {"ingested_at": now}
         if status is not None:
@@ -627,7 +752,7 @@ class AgentHistoryStore:
 
     def create_dispatch_task(self, user_id: str | None, query_message_id: str, request: SuperDriverRunCreate) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.ensure_default_workspace(normalized_user)
+        workspace = self.active_super_workspace(normalized_user)
         provider, viewer_session_id = self._parse_session_ref(request.session_ref, request.provider)
         provider_session_id = self._provider_session_id(provider, viewer_session_id)
         now = time.time()
@@ -815,7 +940,7 @@ class AgentHistoryStore:
         message_limit: int = DEFAULT_MESSAGE_LIMIT,
     ) -> SuperHistoryRunsPage:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.ensure_default_workspace(normalized_user)
+        workspace = self.active_super_workspace(normalized_user)
         bounded_limit = max(1, min(limit, 100))
         statement = (
             select(SuperWorkspaceMessageRow)
@@ -865,7 +990,7 @@ class AgentHistoryStore:
         after: float | None = None,
     ) -> SuperDisplayItemsPage:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.ensure_default_workspace(normalized_user)
+        workspace = self.active_super_workspace(normalized_user)
         bounded_limit = max(1, min(limit, 100))
         query_condition = and_(
             SuperWorkspaceMessageRow.workspace_id == workspace.id,
@@ -913,9 +1038,107 @@ class AgentHistoryStore:
             next_after=next_after,
         )
 
+    def list_super_role_statuses(self, user_id: str | None, workspace_id: str) -> SuperRoleStatuses:
+        normalized_user = normalize_user_id(user_id)
+        self.ensure_default_workspace(normalized_user)
+        active_statuses = {"queued", "claimed", "running"}
+        with self.read_session() as db:
+            workspace = db.scalar(
+                select(SuperWorkspaceRow).where(
+                    SuperWorkspaceRow.id == workspace_id,
+                    SuperWorkspaceRow.user_id == normalized_user,
+                )
+            )
+            if workspace is None:
+                raise KeyError(workspace_id)
+            roles = list(
+                db.scalars(
+                    select(SuperWorkspaceRoleRow)
+                    .where(
+                        SuperWorkspaceRoleRow.workspace_id == workspace_id,
+                        SuperWorkspaceRoleRow.user_id == normalized_user,
+                    )
+                    .order_by(SuperWorkspaceRoleRow.created_at.asc(), SuperWorkspaceRoleRow.id.asc())
+                ).all()
+            )
+            role_ids = [str(role.id) for role in roles]
+            if not role_ids:
+                return SuperRoleStatuses(workspace_id=workspace_id, items=[])
+
+            active_priority = case(
+                (SuperWorkspaceDriverRunRow.status == "running", 0),
+                (SuperWorkspaceDriverRunRow.status == "claimed", 1),
+                (SuperWorkspaceDriverRunRow.status == "queued", 2),
+                else_=3,
+            )
+            active_ranked = (
+                select(
+                    SuperWorkspaceDriverRunRow.role_id.label("role_id"),
+                    SuperWorkspaceDriverRunRow.updated_at.label("updated_at"),
+                    func.row_number()
+                    .over(
+                        partition_by=SuperWorkspaceDriverRunRow.role_id,
+                        order_by=(active_priority.asc(), SuperWorkspaceDriverRunRow.updated_at.desc(), SuperWorkspaceDriverRunRow.id.desc()),
+                    )
+                    .label("rn"),
+                )
+                .where(
+                    SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                    SuperWorkspaceDriverRunRow.workspace_id == workspace_id,
+                    SuperWorkspaceDriverRunRow.role_id.in_(role_ids),
+                    SuperWorkspaceDriverRunRow.status.in_(active_statuses),
+                )
+                .subquery()
+            )
+            active_rows = db.execute(
+                select(active_ranked.c.role_id, active_ranked.c.updated_at).where(active_ranked.c.rn == 1)
+            ).all()
+            busy_by_role = {str(row.role_id): float(row.updated_at) for row in active_rows}
+
+            missing_role_ids = [role_id for role_id in role_ids if role_id not in busy_by_role]
+            latest_by_role: dict[str, tuple[str, float]] = {}
+            if missing_role_ids:
+                latest_ranked = (
+                    select(
+                        SuperWorkspaceDriverRunRow.role_id.label("role_id"),
+                        SuperWorkspaceDriverRunRow.status.label("status"),
+                        SuperWorkspaceDriverRunRow.updated_at.label("updated_at"),
+                        func.row_number()
+                        .over(
+                            partition_by=SuperWorkspaceDriverRunRow.role_id,
+                            order_by=(SuperWorkspaceDriverRunRow.updated_at.desc(), SuperWorkspaceDriverRunRow.id.desc()),
+                        )
+                        .label("rn"),
+                    )
+                    .where(
+                        SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                        SuperWorkspaceDriverRunRow.workspace_id == workspace_id,
+                        SuperWorkspaceDriverRunRow.role_id.in_(missing_role_ids),
+                    )
+                    .subquery()
+                )
+                latest_rows = db.execute(
+                    select(latest_ranked.c.role_id, latest_ranked.c.status, latest_ranked.c.updated_at).where(latest_ranked.c.rn == 1)
+                ).all()
+                latest_by_role = {str(row.role_id): (str(row.status), float(row.updated_at)) for row in latest_rows}
+
+        items: list[SuperRoleStatus] = []
+        for role in roles:
+            role_id = str(role.id)
+            if role_id in busy_by_role:
+                items.append(SuperRoleStatus(role_id=role_id, status="busy", updated_at=busy_by_role[role_id]))
+                continue
+            latest = latest_by_role.get(role_id)
+            if latest is None:
+                items.append(SuperRoleStatus(role_id=role_id, status="idle", updated_at=float(role.updated_at)))
+                continue
+            latest_status, updated_at = latest
+            items.append(SuperRoleStatus(role_id=role_id, status="failed" if latest_status == "failed" else "idle", updated_at=updated_at))
+        return SuperRoleStatuses(workspace_id=workspace_id, items=items)
+
     def get_super_run(self, run_id: str, user_id: str | None, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.ensure_default_workspace(normalized_user)
+        workspace = self.active_super_workspace(normalized_user)
         with self.read_session() as db:
             row = db.scalar(
                 select(SuperWorkspaceMessageRow).where(

@@ -793,6 +793,21 @@ async def update_super_workspace(request: SuperWorkspacePatch, user: str | None 
     return super_workspace_manager.update(request, user)
 
 
+@app.get("/api/super-workspace/workspaces")
+async def super_workspaces(user: str | None = None):
+    return super_workspace_manager.list_workspaces(user)
+
+
+@app.post("/api/super-workspace/active-workspace/{workspace_id}")
+async def activate_super_workspace(workspace_id: str, user: str | None = None):
+    return super_workspace_manager.activate_workspace(workspace_id, user)
+
+
+@app.get("/api/super-workspace/role-statuses/{workspace_id}")
+async def super_role_statuses(workspace_id: str, user: str | None = None):
+    return super_workspace_manager.role_statuses(workspace_id, user)
+
+
 @app.post("/api/super-workspace/roles")
 async def create_super_role(request: SuperRoleCreate, user: str | None = None):
     return super_workspace_manager.create_role(request, user)

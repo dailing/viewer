@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, agent_history_store
+from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperRoleStatuses, SuperWorkspaceList, agent_history_store
 
 
 DEFAULT_DISPATCH_MODEL = "deepseek-v4-flash"
@@ -69,6 +69,21 @@ class SuperDispatchResponse(BaseModel):
 
 
 class SuperWorkspaceManager:
+    def list_workspaces(self, user_id: str | None = None) -> SuperWorkspaceList:
+        return agent_history_store.list_super_workspaces(user_id)
+
+    def activate_workspace(self, workspace_id: str, user_id: str | None = None) -> SuperWorkspaceList:
+        try:
+            return agent_history_store.activate_super_workspace(user_id, workspace_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Super Workspace not found") from exc
+
+    def role_statuses(self, workspace_id: str, user_id: str | None = None) -> SuperRoleStatuses:
+        try:
+            return agent_history_store.list_super_role_statuses(user_id, workspace_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Super Workspace not found") from exc
+
     def read(self, user_id: str | None = None) -> SuperWorkspaceData:
         workspace, roles = agent_history_store.super_workspace_data(user_id)
         return SuperWorkspaceData(

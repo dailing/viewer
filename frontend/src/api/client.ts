@@ -2,7 +2,18 @@ import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerCon
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
 import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
-import type { SuperDisplayItemsPage, SuperDispatchResponse, SuperHistoryRun, SuperHistoryRunCreate, SuperRoleCreate, SuperRolePatch, SuperWorkspaceData, SuperWorkspacePatch } from "../types/superWorkspace";
+import type {
+  SuperDisplayItemsPage,
+  SuperDispatchResponse,
+  SuperHistoryRun,
+  SuperHistoryRunCreate,
+  SuperRoleCreate,
+  SuperRolePatch,
+  SuperRoleStatuses,
+  SuperWorkspaceData,
+  SuperWorkspaceList,
+  SuperWorkspacePatch,
+} from "../types/superWorkspace";
 import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
 import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskFile, AgentTaskGroup, AgentTaskListResponse, AgentTaskManagerRequest, AgentTaskPatch, AgentTaskPlan, AgentTaskResetAction, AgentTaskResetResponse, AgentTaskSettings } from "../types/agentTasks";
@@ -276,6 +287,18 @@ export async function updateSuperWorkspace(patch: SuperWorkspacePatch): Promise<
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
+}
+
+export async function listSuperWorkspaces(): Promise<SuperWorkspaceList> {
+  return request<SuperWorkspaceList>("/api/super-workspace/workspaces");
+}
+
+export async function activateSuperWorkspace(workspaceId: string): Promise<SuperWorkspaceList> {
+  return request<SuperWorkspaceList>(`/api/super-workspace/active-workspace/${workspaceId}`, { method: "POST" });
+}
+
+export async function getSuperRoleStatuses(workspaceId: string): Promise<SuperRoleStatuses> {
+  return request<SuperRoleStatuses>(`/api/super-workspace/role-statuses/${workspaceId}`);
 }
 
 export async function createSuperRole(role: SuperRoleCreate): Promise<SuperWorkspaceData> {

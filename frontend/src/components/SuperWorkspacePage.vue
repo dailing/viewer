@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import {
+  getSuperRoleStatuses,
   createSuperRole,
   createSuperWorkspaceRun,
   deleteSuperRole,
   getSuperWorkspace,
+  listSuperWorkspaces,
   listSuperWorkspaceRuns,
   resolveDirectoryLink,
   updateSuperWorkspace,
@@ -19,7 +21,7 @@ import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
 import type { AgentSessionSnapshot } from "../types/agents";
 import type { SplitDirection } from "../types/layout";
-import type { SuperDisplayItem, SuperDisplayTarget, SuperHistoryRun, SuperRole } from "../types/superWorkspace";
+import type { SuperDisplayItem, SuperDisplayTarget, SuperHistoryRun, SuperRole, SuperRoleStatus, SuperWorkspaceSummary } from "../types/superWorkspace";
 import { parseAgentRef } from "../utils/agents";
 import { renderMarkdown } from "../utils/markdownRender";
 
@@ -30,9 +32,12 @@ type SuperThreadItem = SuperDisplayItem & {
 const agents = useAgentsStore();
 const files = useFilesStore();
 const layout = useLayoutStore();
+const workspaces = ref<SuperWorkspaceSummary[]>([]);
+const activeWorkspaceId = ref("");
 const roles = ref<SuperRole[]>([]);
 const selectedRoleId = ref("");
 const snapshots = ref<Record<string, AgentSessionSnapshot>>({});
+const roleStatuses = ref<Record<string, SuperRoleStatus>>({});
 const items = ref<SuperDisplayItem[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
 const previewPath = ref<string | null>(null);
@@ -55,21 +60,6 @@ const dispatchableRoles = computed(() => roles.value.filter((role) => role.descr
 const mentionedRoleIds = computed(() => parseLeadingMentionRoleIds(composer.value));
 const composerMentionItems = computed(() => buildComposerMentionItems(composer.value));
 const displayItems = computed<SuperThreadItem[]>(() => mergeConsecutiveRoleMessages([...items.value].reverse()));
-const activeRoleStatuses = computed(() => {
-  const statuses = new Map<string, string>();
-  const activeOrder = ["running", "claimed", "queued"];
-  for (const item of items.value) {
-    for (const target of item.dispatch_targets) {
-      if (activeOrder.includes(target.status)) {
-        statuses.set(target.role_id, normalizeRoleStatus(target.status));
-      }
-    }
-    if (item.role_id && activeOrder.includes(item.target_status)) {
-      statuses.set(item.role_id, normalizeRoleStatus(item.target_status));
-    }
-  }
-  return statuses;
-});
 const canDispatch = computed(() => {
   if (!composer.value.trim() || busy.value) return false;
   return true;
@@ -80,8 +70,9 @@ let superWorkspaceEvents: EventSource | null = null;
 
 onMounted(async () => {
   await agents.loadProviders();
+  await loadWorkspaceState();
   await load();
-  await loadRuns(true);
+  await Promise.all([loadRuns(true), refreshRoleStatuses()]);
   superWorkspaceEvents = connectSuperWorkspaceEvents(() => {
     scheduleRefreshLiveState(100);
   });
@@ -98,6 +89,7 @@ onUnmounted(() => {
 
 async function load() {
   const data = await getSuperWorkspace();
+  activeWorkspaceId.value = data.id || activeWorkspaceId.value;
   commonPrompt.value = data.common_prompt ?? "";
   roles.value = data.roles;
   if (!selectedRoleId.value || !roles.value.some((role) => role.id === selectedRoleId.value)) {
@@ -108,8 +100,21 @@ async function load() {
 }
 
 async function refreshLiveState() {
-  await refreshSnapshots();
+  await Promise.all([refreshSnapshots(), refreshRoleStatuses()]);
   await loadChangedRuns();
+}
+
+async function loadWorkspaceState() {
+  const data = await listSuperWorkspaces();
+  workspaces.value = data.workspaces;
+  activeWorkspaceId.value = data.active_workspace_id;
+}
+
+async function refreshRoleStatuses() {
+  if (!activeWorkspaceId.value) return;
+  const data = await getSuperRoleStatuses(activeWorkspaceId.value);
+  if (data.workspace_id !== activeWorkspaceId.value) return;
+  roleStatuses.value = Object.fromEntries(data.items.map((item) => [item.role_id, item]));
 }
 
 function scheduleRefreshLiveState(delayMs: number) {
@@ -156,6 +161,7 @@ async function addRole() {
     roles.value = data.roles;
     selectedRoleId.value = roles.value[roles.value.length - 1]?.id ?? "";
     rolePanelOpen.value = Boolean(selectedRoleId.value);
+    await refreshRoleStatuses();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -178,6 +184,7 @@ async function saveSelectedRole() {
       session_ref: role.session_ref,
     });
     roles.value = data.roles;
+    await refreshRoleStatuses();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -195,6 +202,7 @@ async function removeSelectedRole() {
     roles.value = data.roles;
     selectedRoleId.value = "";
     rolePanelOpen.value = false;
+    await refreshRoleStatuses();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -233,7 +241,7 @@ function roleStopSessionRef(role: SuperRole) {
     }
     if (item.role_id === role.id && activeStatuses.has(item.target_status) && item.session_ref) return item.session_ref;
   }
-  return roleStatus(role) === "running" ? role.session_ref : "";
+  return roleStatus(role) === "busy" ? role.session_ref : "";
 }
 
 function canStopRole(role: SuperRole | null) {
@@ -497,11 +505,12 @@ function roleSnapshot(role: SuperRole) {
 }
 
 function roleStatus(role: SuperRole) {
-  return activeRoleStatuses.value.get(role.id) ?? normalizeRoleStatus(roleSnapshot(role)?.status ?? "idle");
+  return roleStatuses.value[role.id]?.status ?? normalizeRoleStatus(roleSnapshot(role)?.status ?? "idle");
 }
 
 function normalizeRoleStatus(status: string) {
-  if (status === "claimed" || status === "queued") return "running";
+  if (status === "claimed" || status === "queued" || status === "running") return "busy";
+  if (status === "failed") return "failed";
   return status || "idle";
 }
 
@@ -812,7 +821,7 @@ async function scrollThreadToBottom() {
                 <div class="super-route-line">
                   <span v-if="item.run_status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
                   <span v-else-if="item.run_status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
-                  <span v-else-if="item.run_status === 'running'" class="super-route-pending">starting role dispatch...</span>
+                  <span v-else-if="item.run_status === 'running'" class="super-route-pending">role running...</span>
                   <span v-else-if="item.run_status === 'failed'" class="super-route-error">dispatch failed: {{ item.error }}</span>
                   <template v-else>
                     <span class="super-route-label">dispatched to</span>
@@ -1061,24 +1070,24 @@ async function scrollThreadToBottom() {
   --role-status-color: #8ca0bd;
 }
 
-.status-running {
+.status-busy {
   --role-status-bg: #edf5ff;
   --role-status-border: #b8d7ff;
   --role-status-color: #0d6efd;
 }
 
-.super-role-tile.status-running,
-.super-role-tile.status-running.active,
-.super-role-tile.status-running.mentioned,
-.super-role-tile.status-running.active.mentioned,
-.super-role-tile.status-running:hover {
+.super-role-tile.status-busy,
+.super-role-tile.status-busy.active,
+.super-role-tile.status-busy.mentioned,
+.super-role-tile.status-busy.active.mentioned,
+.super-role-tile.status-busy:hover {
   background: #e8f3ff;
   border-color: #7fb9ff;
   box-shadow: inset 6px 0 0 #0d6efd, 0 0 0 1px rgba(13, 110, 253, 0.12);
 }
 
-.super-role-tile.status-running .super-role-icon,
-.super-role-tile.status-running .super-role-abbrev {
+.super-role-tile.status-busy .super-role-icon,
+.super-role-tile.status-busy .super-role-abbrev {
   color: #0b5ed7;
 }
 

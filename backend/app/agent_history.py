@@ -28,12 +28,15 @@ DEFAULT_MESSAGE_LIMIT = 120
 
 class SuperHistoryRunCreate(BaseModel):
     message: str
+    chat_id: str | None = None
+    role_ids: list[str] | None = None
     parent_message_id: str | None = None
     sender_role_id: str | None = None
 
 
 class SuperDriverRunCreate(BaseModel):
     workspace_id: str = DEFAULT_SUPER_WORKSPACE_ID
+    chat_id: str | None = None
     role_id: str
     role_name: str
     provider: str
@@ -47,6 +50,7 @@ class SuperDriverRunCreate(BaseModel):
 class SuperDispatchTask(BaseModel):
     id: str
     workspace_id: str
+    chat_id: str = ""
     query_message_id: str
     user_id: str
     role_id: str
@@ -84,6 +88,7 @@ class AgentHistoryFileChange(BaseModel):
 class AgentHistoryMessage(BaseModel):
     id: str
     workspace_id: str | None = None
+    chat_id: str | None = None
     provider: str
     viewer_session_id: str | None = None
     provider_session_id: str | None = None
@@ -115,6 +120,7 @@ class AgentHistoryMessage(BaseModel):
 class SuperHistoryTarget(BaseModel):
     id: str
     workspace_id: str
+    chat_id: str = ""
     run_id: str
     role_id: str
     role_name: str
@@ -131,6 +137,7 @@ class SuperHistoryTarget(BaseModel):
 class SuperHistoryRun(BaseModel):
     id: str
     workspace_id: str
+    chat_id: str = ""
     user_id: str
     message: str
     query: str
@@ -150,6 +157,7 @@ class SuperHistoryRun(BaseModel):
 class SuperDisplayTarget(BaseModel):
     id: str
     workspace_id: str
+    chat_id: str = ""
     role_id: str
     role_name: str
     provider: str
@@ -160,6 +168,7 @@ class SuperDisplayTarget(BaseModel):
 class SuperDisplayItem(BaseModel):
     id: str
     workspace_id: str
+    chat_id: str
     kind: str
     user_id: str
     text: str
@@ -211,6 +220,22 @@ class SuperWorkspaceList(BaseModel):
     workspaces: list[SuperWorkspaceSummary]
 
 
+class SuperChatSummary(BaseModel):
+    id: str
+    workspace_id: str
+    name: str
+    type: str = "group"
+    common_prompt: str = ""
+    member_role_ids: list[str] = Field(default_factory=list)
+    created_at: float
+    updated_at: float
+
+
+class SuperChatList(BaseModel):
+    active_chat_id: str
+    chats: list[SuperChatSummary]
+
+
 class SuperRoleStatus(BaseModel):
     role_id: str
     status: str
@@ -246,6 +271,25 @@ class SuperWorkspaceUserStateRow(AgentHistoryBase):
 
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
     active_workspace_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspaces.id", ondelete="CASCADE"), nullable=False)
+    active_chat_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class SuperWorkspaceChatRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_chats"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", "id"),
+        Index("idx_super_chats_workspace", "user_id", "workspace_id", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspaces.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    type: Mapped[str] = mapped_column(String, nullable=False, default="group")
+    common_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    member_role_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
@@ -434,6 +478,13 @@ class AgentHistoryStore:
 
     def _ensure_schema(self) -> None:
         AgentHistoryBase.metadata.create_all(self.engine)
+        with self.engine.begin() as connection:
+            columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(super_workspace_user_state)").all()}
+            if "active_chat_id" not in columns:
+                connection.exec_driver_sql("ALTER TABLE super_workspace_user_state ADD COLUMN active_chat_id VARCHAR NOT NULL DEFAULT ''")
+            chat_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(super_workspace_chats)").all()}
+            if "member_role_ids_json" not in chat_columns:
+                connection.exec_driver_sql("ALTER TABLE super_workspace_chats ADD COLUMN member_role_ids_json TEXT NOT NULL DEFAULT '[]'")
         for index in SuperWorkspaceDriverRunRow.__table__.indexes:
             index.create(self.engine, checkfirst=True)
 
@@ -459,7 +510,14 @@ class AgentHistoryStore:
             )
             state = db.scalar(select(SuperWorkspaceUserStateRow).where(SuperWorkspaceUserStateRow.user_id == normalized_user))
             if state is None:
-                db.add(SuperWorkspaceUserStateRow(user_id=normalized_user, active_workspace_id=workspace_id, updated_at=now))
+                db.add(
+                    SuperWorkspaceUserStateRow(
+                        user_id=normalized_user,
+                        active_workspace_id=workspace_id,
+                        active_chat_id="",
+                        updated_at=now,
+                    )
+                )
             if row is not None:
                 return row
         return SuperWorkspaceRow(
@@ -692,6 +750,246 @@ class AgentHistoryStore:
             ],
         )
 
+    def active_super_chat(self, user_id: str | None, workspace_id: str | None = None) -> SuperWorkspaceChatRow:
+        workspace = self._workspace_for_run(normalize_user_id(user_id), workspace_id)
+        normalized_user = workspace.user_id
+        with self.read_session() as db:
+            state = db.scalar(select(SuperWorkspaceUserStateRow).where(SuperWorkspaceUserStateRow.user_id == normalized_user))
+            active_chat_id = state.active_chat_id.strip() if state is not None else ""
+            if not active_chat_id:
+                raise KeyError("No active chat")
+            row = db.scalar(
+                select(SuperWorkspaceChatRow).where(
+                    SuperWorkspaceChatRow.id == active_chat_id,
+                    SuperWorkspaceChatRow.workspace_id == workspace.id,
+                    SuperWorkspaceChatRow.user_id == normalized_user,
+                )
+            )
+            if row is None:
+                raise KeyError(active_chat_id)
+            return row
+
+    def list_super_chats(self, user_id: str | None, workspace_id: str | None = None) -> SuperChatList:
+        workspace = self._workspace_for_run(normalize_user_id(user_id), workspace_id)
+        with self.read_session() as db:
+            state = db.scalar(select(SuperWorkspaceUserStateRow).where(SuperWorkspaceUserStateRow.user_id == workspace.user_id))
+            active_chat_id = state.active_chat_id.strip() if state is not None and state.active_workspace_id == workspace.id else ""
+            role_names = dict(
+                db.execute(
+                    select(SuperWorkspaceRoleRow.id, SuperWorkspaceRoleRow.name).where(
+                        SuperWorkspaceRoleRow.workspace_id == workspace.id,
+                        SuperWorkspaceRoleRow.user_id == workspace.user_id,
+                    )
+                ).all()
+            )
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceChatRow)
+                    .where(
+                        SuperWorkspaceChatRow.workspace_id == workspace.id,
+                        SuperWorkspaceChatRow.user_id == workspace.user_id,
+                    )
+                    .order_by(SuperWorkspaceChatRow.created_at.asc(), SuperWorkspaceChatRow.id.asc())
+                ).all()
+            )
+        if active_chat_id and all(str(row.id) != active_chat_id for row in rows):
+            active_chat_id = ""
+        return SuperChatList(
+            active_chat_id=active_chat_id,
+            chats=[
+                SuperChatSummary(
+                    id=str(row.id),
+                    workspace_id=str(row.workspace_id),
+                    name=self._display_chat_name(row, role_names),
+                    type=str(row.type or "group"),
+                    common_prompt=str(row.common_prompt or ""),
+                    member_role_ids=[value for value in self._parse_json(row.member_role_ids_json, []) if isinstance(value, str)],
+                    created_at=float(row.created_at),
+                    updated_at=float(row.updated_at),
+                )
+                for row in rows
+            ],
+        )
+
+    def create_super_chat(
+        self,
+        user_id: str | None,
+        *,
+        name: str,
+        chat_type: str = "group",
+        common_prompt: str = "",
+        member_role_ids: list[str] | None = None,
+        workspace_id: str | None = None,
+    ) -> SuperChatList:
+        workspace = self._workspace_for_run(normalize_user_id(user_id), workspace_id)
+        normalized_name, normalized_type, normalized_role_ids = self._normalize_chat_values(
+            workspace.user_id,
+            workspace.id,
+            name=name,
+            chat_type=chat_type,
+            member_role_ids=member_role_ids or [],
+        )
+        now = time.time()
+        chat_id = uuid.uuid4().hex[:12]
+        with self.session_scope() as db:
+            db.add(
+                SuperWorkspaceChatRow(
+                    id=chat_id,
+                    workspace_id=workspace.id,
+                    user_id=workspace.user_id,
+                    name=normalized_name,
+                    type=normalized_type,
+                    common_prompt=common_prompt.strip(),
+                    member_role_ids_json=self._json(normalized_role_ids),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            statement = sqlite_insert(SuperWorkspaceUserStateRow).values(
+                user_id=workspace.user_id,
+                active_workspace_id=workspace.id,
+                active_chat_id=chat_id,
+                updated_at=now,
+            )
+            db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["user_id"],
+                    set_={"active_workspace_id": workspace.id, "active_chat_id": chat_id, "updated_at": now},
+                )
+            )
+        return self.list_super_chats(workspace.user_id, workspace.id)
+
+    def update_super_chat(self, user_id: str | None, chat_id: str, values: dict[str, Any], workspace_id: str | None = None) -> SuperChatList:
+        workspace = self._workspace_for_run(normalize_user_id(user_id), workspace_id)
+        with self.session_scope() as db:
+            row = db.scalar(
+                select(SuperWorkspaceChatRow).where(
+                    SuperWorkspaceChatRow.id == chat_id,
+                    SuperWorkspaceChatRow.workspace_id == workspace.id,
+                    SuperWorkspaceChatRow.user_id == workspace.user_id,
+                )
+            )
+            if row is None:
+                raise KeyError(chat_id)
+            if values:
+                next_name = values["name"] if "name" in values else row.name
+                next_type = values["type"] if "type" in values else row.type
+                next_member_ids = values["member_role_ids"] if "member_role_ids" in values else self._parse_json(row.member_role_ids_json, [])
+                normalized_name, normalized_type, normalized_role_ids = self._normalize_chat_values(
+                    workspace.user_id,
+                    workspace.id,
+                    name=str(next_name or ""),
+                    chat_type=str(next_type or "group"),
+                    member_role_ids=[str(value) for value in next_member_ids if isinstance(value, str)],
+                )
+                row.name = normalized_name
+                row.type = normalized_type
+                row.member_role_ids_json = self._json(normalized_role_ids)
+                if "common_prompt" in values:
+                    row.common_prompt = str(values["common_prompt"] or "").strip()
+                row.updated_at = time.time()
+        return self.list_super_chats(workspace.user_id, workspace.id)
+
+    def _normalize_chat_member_role_ids(self, user_id: str, workspace_id: str, role_ids: list[str]) -> list[str]:
+        requested = [str(role_id).strip() for role_id in role_ids if str(role_id).strip()]
+        if not requested:
+            return []
+        with self.read_session() as db:
+            existing = {
+                str(role_id)
+                for role_id in db.scalars(
+                    select(SuperWorkspaceRoleRow.id).where(
+                        SuperWorkspaceRoleRow.user_id == user_id,
+                        SuperWorkspaceRoleRow.workspace_id == workspace_id,
+                        SuperWorkspaceRoleRow.id.in_(requested),
+                    )
+                ).all()
+            }
+        return [role_id for role_id in requested if role_id in existing]
+
+    def _normalize_chat_values(
+        self,
+        user_id: str,
+        workspace_id: str,
+        *,
+        name: str,
+        chat_type: str,
+        member_role_ids: list[str],
+    ) -> tuple[str, str, list[str]]:
+        normalized_type = chat_type if chat_type in {"group", "direct"} else "group"
+        normalized_role_ids = self._normalize_chat_member_role_ids(user_id, workspace_id, member_role_ids)
+        if normalized_type == "direct":
+            if len(normalized_role_ids) != 1:
+                raise ValueError("Direct chats require exactly one role")
+            role_name = self._role_name(user_id, workspace_id, normalized_role_ids[0])
+            return role_name[:120] or "Direct", normalized_type, normalized_role_ids
+        return name.strip()[:120] or "New Chat", normalized_type, normalized_role_ids
+
+    def _role_name(self, user_id: str, workspace_id: str, role_id: str) -> str:
+        with self.read_session() as db:
+            name = db.scalar(
+                select(SuperWorkspaceRoleRow.name).where(
+                    SuperWorkspaceRoleRow.user_id == user_id,
+                    SuperWorkspaceRoleRow.workspace_id == workspace_id,
+                    SuperWorkspaceRoleRow.id == role_id,
+                )
+            )
+        if name is None:
+            raise ValueError("Direct chat role not found")
+        return str(name)
+
+    def _display_chat_name(self, row: SuperWorkspaceChatRow, role_names: dict[str, str]) -> str:
+        member_ids = [value for value in self._parse_json(row.member_role_ids_json, []) if isinstance(value, str)]
+        if str(row.type or "group") == "direct" and len(member_ids) == 1:
+            return str(role_names.get(member_ids[0]) or row.name)
+        return str(row.name)
+
+    def delete_super_chat(self, user_id: str | None, chat_id: str, workspace_id: str | None = None) -> SuperChatList:
+        workspace = self._workspace_for_run(normalize_user_id(user_id), workspace_id)
+        now = time.time()
+        with self.session_scope() as db:
+            result = db.execute(
+                delete(SuperWorkspaceChatRow).where(
+                    SuperWorkspaceChatRow.id == chat_id,
+                    SuperWorkspaceChatRow.workspace_id == workspace.id,
+                    SuperWorkspaceChatRow.user_id == workspace.user_id,
+                )
+            )
+            if result.rowcount == 0:
+                raise KeyError(chat_id)
+            state = db.scalar(select(SuperWorkspaceUserStateRow).where(SuperWorkspaceUserStateRow.user_id == workspace.user_id))
+            if state is not None and state.active_chat_id == chat_id:
+                state.active_chat_id = ""
+                state.updated_at = now
+        return self.list_super_chats(workspace.user_id, workspace.id)
+
+    def activate_super_chat(self, user_id: str | None, chat_id: str, workspace_id: str | None = None) -> SuperChatList:
+        workspace = self._workspace_for_run(normalize_user_id(user_id), workspace_id)
+        now = time.time()
+        with self.session_scope() as db:
+            row = db.scalar(
+                select(SuperWorkspaceChatRow).where(
+                    SuperWorkspaceChatRow.id == chat_id,
+                    SuperWorkspaceChatRow.workspace_id == workspace.id,
+                    SuperWorkspaceChatRow.user_id == workspace.user_id,
+                )
+            )
+            if row is None:
+                raise KeyError(chat_id)
+            statement = sqlite_insert(SuperWorkspaceUserStateRow).values(
+                user_id=workspace.user_id,
+                active_workspace_id=workspace.id,
+                active_chat_id=chat_id,
+                updated_at=now,
+            )
+            db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["user_id"],
+                    set_={"active_workspace_id": workspace.id, "active_chat_id": chat_id, "updated_at": now},
+                )
+            )
+        return self.list_super_chats(workspace.user_id, workspace.id)
+
     def active_super_workspace(self, user_id: str | None) -> SuperWorkspaceRow:
         default = self.ensure_default_workspace(user_id)
         normalized_user = default.user_id
@@ -717,9 +1015,17 @@ class AgentHistoryStore:
             if row is None:
                 row = default
             if state is None:
-                db.add(SuperWorkspaceUserStateRow(user_id=normalized_user, active_workspace_id=row.id, updated_at=now))
+                db.add(
+                    SuperWorkspaceUserStateRow(
+                        user_id=normalized_user,
+                        active_workspace_id=row.id,
+                        active_chat_id="",
+                        updated_at=now,
+                    )
+                )
             elif state.active_workspace_id != row.id:
                 state.active_workspace_id = row.id
+                state.active_chat_id = ""
                 state.updated_at = now
             return row
 
@@ -739,12 +1045,13 @@ class AgentHistoryStore:
             statement = sqlite_insert(SuperWorkspaceUserStateRow).values(
                 user_id=normalized_user,
                 active_workspace_id=workspace_id,
+                active_chat_id="",
                 updated_at=now,
             )
             db.execute(
                 statement.on_conflict_do_update(
                     index_elements=["user_id"],
-                    set_={"active_workspace_id": workspace_id, "updated_at": now},
+                    set_={"active_workspace_id": workspace_id, "active_chat_id": "", "updated_at": now},
                 )
             )
         return self.list_super_workspaces(normalized_user)
@@ -851,9 +1158,11 @@ class AgentHistoryStore:
         parent_message_id: str | None = None,
         sender_role_id: str | None = None,
         workspace_id: str | None = None,
+        chat_id: str | None = None,
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
         workspace = self._workspace_for_run(normalized_user, workspace_id)
+        chat = self.active_super_chat(normalized_user, workspace.id) if not chat_id else self._chat_for_run(normalized_user, workspace.id, chat_id)
         now = time.time()
         message_id = uuid.uuid4().hex
         normalized_citation_ids = self._normalize_citation_ids(citation_ids or [])
@@ -865,6 +1174,7 @@ class AgentHistoryStore:
             "citation_ids": normalized_citation_ids,
             "parent_message_id": parent_message_id,
             "sender_role_id": sender_role_id,
+            "chat_id": chat.id,
         }
         with self.session_scope() as db:
             self._validate_citation_ids(db, normalized_user, normalized_citation_ids)
@@ -874,7 +1184,7 @@ class AgentHistoryStore:
                     "id": message_id,
                     "workspace_id": workspace.id,
                     "user_id": normalized_user,
-                    "conversation_id": "default",
+                    "conversation_id": chat.id,
                     "parent_message_id": parent_message_id,
                     "sender_role_id": sender_role_id,
                     "recipient_role_id": None,
@@ -906,6 +1216,19 @@ class AgentHistoryStore:
             )
             self._replace_citations(db, message_id, normalized_citation_ids, now)
         return self.get_super_run(message_id, normalized_user)
+
+    def _chat_for_run(self, user_id: str, workspace_id: str, chat_id: str) -> SuperWorkspaceChatRow:
+        with self.read_session() as db:
+            row = db.scalar(
+                select(SuperWorkspaceChatRow).where(
+                    SuperWorkspaceChatRow.id == chat_id,
+                    SuperWorkspaceChatRow.workspace_id == workspace_id,
+                    SuperWorkspaceChatRow.user_id == user_id,
+                )
+            )
+            if row is None:
+                raise KeyError(chat_id)
+            return row
 
     def _workspace_for_run(self, user_id: str, workspace_id: str | None = None) -> SuperWorkspaceRow:
         if workspace_id:
@@ -988,6 +1311,7 @@ class AgentHistoryStore:
                 )
             )
             sender_role_id = request.sender_role_id or query.sender_role_id
+            chat_id = request.chat_id or str(query.conversation_id or "")
         if existing is None:
             with self.session_scope() as db:
                 db.add(
@@ -1198,17 +1522,24 @@ class AgentHistoryStore:
         limit: int = DEFAULT_RUN_LIMIT,
         before: float | None = None,
         after: float | None = None,
+        chat_id: str | None = None,
     ) -> SuperDisplayItemsPage:
         normalized_user = normalize_user_id(user_id)
         workspace = self.active_super_workspace(normalized_user)
+        try:
+            chat = self.active_super_chat(normalized_user, workspace.id) if not chat_id else self._chat_for_run(normalized_user, workspace.id, chat_id)
+        except KeyError:
+            return SuperDisplayItemsPage(items=[], has_more=False, next_before=None, next_after=after)
         bounded_limit = max(1, min(limit, 100))
         query_condition = and_(
             SuperWorkspaceMessageRow.workspace_id == workspace.id,
+            SuperWorkspaceMessageRow.conversation_id == chat.id,
             SuperWorkspaceMessageRow.query.is_not(None),
             SuperWorkspaceMessageRow.query != "",
         )
         assistant_condition = and_(
             SuperWorkspaceMessageRow.workspace_id == workspace.id,
+            SuperWorkspaceMessageRow.conversation_id == chat.id,
             SuperWorkspaceMessageRow.role == "assistant",
             SuperWorkspaceMessageRow.event_type == "message:assistant",
             SuperWorkspaceMessageRow.text != "",
@@ -1389,7 +1720,7 @@ class AgentHistoryStore:
         self,
         *,
         user_id: str,
-        workspace_id: str | None,
+            workspace_id: str | None,
         provider: str,
         viewer_session_id: str,
         provider_session_id: str | None,
@@ -1419,7 +1750,7 @@ class AgentHistoryStore:
                     "id": row_id,
                     "workspace_id": workspace_id,
                     "user_id": user_id,
-                    "conversation_id": "default",
+                    "conversation_id": str(raw.get("chat_id") or raw.get("conversation_id") or ""),
                     "parent_message_id": parent_message_id,
                     "sender_role_id": sender_role_id,
                     "recipient_role_id": recipient_role_id,
@@ -1469,6 +1800,7 @@ class AgentHistoryStore:
         return SuperDisplayItem(
             id=str(row.id),
             workspace_id=str(row.workspace_id or ""),
+            chat_id=str(row.conversation_id or ""),
             kind="query" if is_query else "message",
             user_id=str(row.user_id),
             text=text_value,
@@ -1494,11 +1826,16 @@ class AgentHistoryStore:
             raw=self._parse_json(row.raw_json, {}),
         )
 
-    @staticmethod
-    def _display_target_from_row(row: SuperWorkspaceDriverRunRow) -> SuperDisplayTarget:
+    def _query_chat_id(self, query_message_id: str) -> str:
+        with self.read_session() as db:
+            row = db.scalar(select(SuperWorkspaceMessageRow.conversation_id).where(SuperWorkspaceMessageRow.id == query_message_id))
+        return str(row or "")
+
+    def _display_target_from_row(self, row: SuperWorkspaceDriverRunRow) -> SuperDisplayTarget:
         return SuperDisplayTarget(
             id=str(row.id),
             workspace_id=str(row.workspace_id),
+            chat_id=self._query_chat_id(str(row.query_message_id)),
             role_id=str(row.role_id),
             role_name=str(row.role_name),
             provider=str(row.provider),
@@ -1515,6 +1852,7 @@ class AgentHistoryStore:
         return SuperHistoryRun(
             id=str(row.id),
             workspace_id=str(row.workspace_id or DEFAULT_SUPER_WORKSPACE_ID),
+            chat_id=str(row.conversation_id or ""),
             user_id=str(row.user_id),
             message=query,
             query=query,
@@ -1584,6 +1922,7 @@ class AgentHistoryStore:
         return SuperHistoryTarget(
             id=str(row.id),
             workspace_id=str(row.workspace_id),
+            chat_id=self._query_chat_id(str(row.query_message_id)),
             run_id=str(row.query_message_id),
             role_id=str(row.role_id),
             role_name=str(row.role_name),
@@ -1601,6 +1940,7 @@ class AgentHistoryStore:
         return SuperDispatchTask(
             id=str(row.id),
             workspace_id=str(row.workspace_id),
+            chat_id=self._query_chat_id(str(row.query_message_id)),
             query_message_id=str(row.query_message_id),
             user_id=str(row.user_id),
             role_id=str(row.role_id),
@@ -1717,6 +2057,7 @@ class AgentHistoryStore:
         return AgentHistoryMessage(
             id=str(row.id),
             workspace_id=row.workspace_id if isinstance(row.workspace_id, str) else None,
+            chat_id=str(row.conversation_id or ""),
             provider=str(row.provider),
             viewer_session_id=row.viewer_session_id if isinstance(row.viewer_session_id, str) else None,
             provider_session_id=row.provider_session_id if isinstance(row.provider_session_id, str) else None,

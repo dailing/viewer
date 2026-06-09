@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperRoleStatuses, SuperWorkspaceList, agent_history_store
+from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, SuperRoleStatuses, SuperWorkspaceList, agent_history_store
 
 
 DEFAULT_DISPATCH_MODEL = "deepseek-v4-flash"
@@ -57,6 +57,20 @@ class SuperWorkspacePatch(BaseModel):
     common_prompt: str | None = None
 
 
+class SuperChatCreate(BaseModel):
+    name: str = "New Chat"
+    type: str = "group"
+    common_prompt: str = ""
+    member_role_ids: list[str] = Field(default_factory=list)
+
+
+class SuperChatPatch(BaseModel):
+    name: str | None = None
+    type: str | None = None
+    common_prompt: str | None = None
+    member_role_ids: list[str] | None = None
+
+
 class SuperDispatchRequest(BaseModel):
     message: str
     role_ids: list[str] | None = None
@@ -83,6 +97,71 @@ class SuperWorkspaceManager:
             return agent_history_store.list_super_role_statuses(user_id, workspace_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Super Workspace not found") from exc
+
+    def list_chats(self, user_id: str | None = None) -> SuperChatList:
+        return agent_history_store.list_super_chats(user_id)
+
+    def active_chat(self, user_id: str | None = None, chat_id: str | None = None) -> SuperChatSummary:
+        try:
+            if chat_id:
+                active_workspace = agent_history_store.active_super_workspace(user_id)
+                chats = agent_history_store.list_super_chats(user_id, active_workspace.id)
+                selected = next((chat for chat in chats.chats if chat.id == chat_id), None)
+                if selected is None:
+                    raise KeyError(chat_id)
+                return selected
+            else:
+                chats = agent_history_store.list_super_chats(user_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Chat not found") from exc
+        active = next((chat for chat in chats.chats if chat.id == chats.active_chat_id), None)
+        if active is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return active
+
+    def chat_for_run(self, user_id: str | None, workspace_id: str, chat_id: str) -> SuperChatSummary:
+        try:
+            chats = agent_history_store.list_super_chats(user_id, workspace_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Chat not found") from exc
+        active = next((chat for chat in chats.chats if chat.id == chat_id), None)
+        if active is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return active
+
+    def create_chat(self, request: SuperChatCreate, user_id: str | None = None) -> SuperChatList:
+        try:
+            return agent_history_store.create_super_chat(
+                user_id,
+                name=request.name,
+                chat_type=request.type,
+                common_prompt=request.common_prompt,
+                member_role_ids=request.member_role_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def update_chat(self, chat_id: str, patch: SuperChatPatch, user_id: str | None = None) -> SuperChatList:
+        try:
+            return agent_history_store.update_super_chat(user_id, chat_id, patch.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Chat not found") from exc
+
+    def delete_chat(self, chat_id: str, user_id: str | None = None) -> SuperChatList:
+        try:
+            return agent_history_store.delete_super_chat(user_id, chat_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Chat not found") from exc
+
+    def activate_chat(self, chat_id: str, user_id: str | None = None) -> SuperChatList:
+        try:
+            return agent_history_store.activate_super_chat(user_id, chat_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Chat not found") from exc
 
     def read(self, user_id: str | None = None) -> SuperWorkspaceData:
         workspace, roles = agent_history_store.super_workspace_data(user_id)

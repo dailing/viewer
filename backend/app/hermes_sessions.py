@@ -399,6 +399,7 @@ class HermesSessionManager:
         for offset, event in enumerate(events):
             absolute_index = start_index + offset
             raw = event.get("raw_preview") if isinstance(event.get("raw_preview"), dict) else {"source": "hermes"}
+            raw = {**raw, "chat_id": lineage.get("chat_id")}
             event_type = event.get("event_type")
             agent_history_store.record_provider_message(
                 user_id=session.user_id,

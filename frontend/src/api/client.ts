@@ -1,7 +1,10 @@
-import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerConfig, WorkspaceConfig } from "../types/files";
+import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
 import type { CodexCliStatus, CodexModelOptions } from "../types/codex";
 import type {
+  SuperChatCreate,
+  SuperChatList,
+  SuperChatPatch,
   SuperDisplayItemsPage,
   SuperDispatchResponse,
   SuperHistoryRun,
@@ -13,7 +16,6 @@ import type {
   SuperWorkspaceList,
   SuperWorkspacePatch,
 } from "../types/superWorkspace";
-import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
 import type { AgentLoopDefinition, AgentLoopInfo, AgentLoopRunRecord } from "../types/agentLoops";
 import type { AgentTask, AgentTaskContext, AgentTaskCreate, AgentTaskDependencyPatch, AgentTaskFile, AgentTaskGroup, AgentTaskListResponse, AgentTaskManagerRequest, AgentTaskPatch, AgentTaskPlan, AgentTaskResetAction, AgentTaskResetResponse, AgentTaskSettings } from "../types/agentTasks";
 import type { AgentProvider, AgentProviderInfo } from "../types/agents";
@@ -176,50 +178,6 @@ export async function putConfig(config: ViewerConfig): Promise<ViewerConfig> {
   });
 }
 
-export async function getWorkspaces(): Promise<WorkspaceData> {
-  return request<WorkspaceData>("/api/workspaces");
-}
-
-export async function getWorkspaceConfig(): Promise<WorkspaceConfig> {
-  return request<WorkspaceConfig>("/api/workspaces/config");
-}
-
-export async function putWorkspaceConfig(config: WorkspaceConfig): Promise<WorkspaceData> {
-  return request<WorkspaceData>("/api/workspaces/config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
-  });
-}
-
-export async function putWorkspace(id: string, snapshot: WorkspaceSnapshot): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(snapshot),
-  });
-}
-
-export async function attachWorkspaceRole(id: string, ref: string): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/roles`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ref }),
-  });
-}
-
-export async function removeWorkspaceRole(id: string, ref: string): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/roles/${encodeURIComponent(ref)}`, { method: "DELETE" });
-}
-
-export async function activateWorkspace(id: string): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/active-workspace/${encodeURIComponent(id)}`, { method: "POST" });
-}
-
-export async function getWorkspaceRoleStatuses(workspaceId: string): Promise<SuperRoleStatuses> {
-  return request<SuperRoleStatuses>(`/api/workspaces/role-statuses/${encodeURIComponent(workspaceId)}`);
-}
-
 export async function restartServer(): Promise<{ status: string; pid: number }> {
   return request<{ status: string; pid: number }>("/api/admin/restart", { method: "POST" });
 }
@@ -280,6 +238,34 @@ export async function activateSuperWorkspace(workspaceId: string): Promise<Super
   return request<SuperWorkspaceList>(`/api/super-workspace/active-workspace/${workspaceId}`, { method: "POST" });
 }
 
+export async function listSuperChats(): Promise<SuperChatList> {
+  return request<SuperChatList>("/api/super-workspace/chats");
+}
+
+export async function createSuperChat(chat: SuperChatCreate): Promise<SuperChatList> {
+  return request<SuperChatList>("/api/super-workspace/chats", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(chat),
+  });
+}
+
+export async function updateSuperChat(id: string, patch: SuperChatPatch): Promise<SuperChatList> {
+  return request<SuperChatList>(`/api/super-workspace/chats/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteSuperChat(id: string): Promise<SuperChatList> {
+  return request<SuperChatList>(`/api/super-workspace/chats/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function activateSuperChat(id: string): Promise<SuperChatList> {
+  return request<SuperChatList>(`/api/super-workspace/active-chat/${encodeURIComponent(id)}`, { method: "POST" });
+}
+
 export async function getSuperRoleStatuses(workspaceId: string): Promise<SuperRoleStatuses> {
   return request<SuperRoleStatuses>(`/api/super-workspace/role-statuses/${workspaceId}`);
 }
@@ -304,10 +290,11 @@ export async function deleteSuperRole(id: string): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>(`/api/super-workspace/roles/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function listSuperWorkspaceRuns(limit = 30, before?: number, after?: number): Promise<SuperDisplayItemsPage> {
+export async function listSuperWorkspaceRuns(limit = 30, before?: number, after?: number, chatId?: string | null): Promise<SuperDisplayItemsPage> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (before !== undefined) params.set("before", String(before));
   if (after !== undefined) params.set("after", String(after));
+  if (chatId) params.set("chat_id", chatId);
   return request<SuperDisplayItemsPage>(`/api/super-workspace/runs?${params.toString()}`);
 }
 

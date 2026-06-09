@@ -1,70 +1,58 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { getGitStatus } from "../api/client";
-import { useFilesStore } from "../stores/files";
-import AgentSessionsPanel from "./sidebar/AgentSessionsPanel.vue";
+import { computed, ref, watch } from "vue";
+import ChatsPanel from "./sidebar/ChatsPanel.vue";
 import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
+import RolesPanel from "./sidebar/RolesPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 import { namespacedStorageKey } from "../utils/userProfile";
-import type { WorkspaceSummary } from "../types/workspaces";
+import type { AgentProvider } from "../types/agents";
+import type { SuperChatSummary, SuperRole } from "../types/superWorkspace";
 
-type SidebarTool = "files" | "git" | "terminals" | "agents";
-type WorkspaceNotice = "running" | "completed" | "failed";
-type GitIndicator = "clean" | "dirty" | "none";
+type SidebarTool = "files" | "git" | "terminals" | "chats" | "roles";
 
 const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 
 const props = defineProps<{
-  workspaceCount: number;
-  workspaces: WorkspaceSummary[];
-  activeWorkspaceId: string;
-  agentSessionRefs: string[];
+  chats?: SuperChatSummary[];
+  activeChatId?: string;
+  roles?: SuperRole[];
+  providers?: { id: AgentProvider; name: string }[];
   panelOpen: boolean;
   panelPinned: boolean;
-  workspaceNotices?: Record<string, WorkspaceNotice>;
-  workspaceHeat?: Record<string, number>;
-  switchingWorkspace?: boolean;
 }>();
 
 const emit = defineEmits<{
   "open-file": [path: string];
   "open-terminal": [id: string];
-  "open-agent-session": [ref: string];
   "open-diff": [path: string, cwd: string];
-  "switch-workspace": [id: string];
+  "open-chat": [id: string];
+  "create-chat": [];
+  "update-chat": [chat: SuperChatSummary];
+  "delete-chat": [chat: SuperChatSummary];
+  "create-role": [];
+  "update-role": [role: SuperRole];
+  "delete-role": [role: SuperRole];
   "toggle-tool-panel": [];
   "toggle-pin": [];
   "close-panel": [];
 }>();
 
 const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
+  { id: "chats", title: "Chats", icon: "bi-chat-left-text" },
+  { id: "roles", title: "Roles", icon: "bi-person-lines-fill" },
   { id: "files", title: "Files", icon: "bi-files" },
   { id: "git", title: "Changes", icon: "bi-git" },
   { id: "terminals", title: "Terminals", icon: "bi-terminal" },
-  { id: "agents", title: "Agents", icon: "bi-stars" },
 ];
-
-const fileStore = useFilesStore();
 
 function storedTool(): SidebarTool {
   const value = localStorage.getItem(namespacedStorageKey(ACTIVE_TOOL_KEY));
-  return tools.some((tool) => tool.id === value) ? (value as SidebarTool) : "files";
+  return tools.some((tool) => tool.id === value) ? (value as SidebarTool) : "chats";
 }
 
 const activeTool = ref<SidebarTool>(storedTool());
-const gitIndicator = ref<GitIndicator>("none");
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
-const workspaceItems = computed(() =>
-  props.workspaces.length
-    ? props.workspaces
-    : Array.from({ length: Math.max(1, props.workspaceCount) }, (_, index) => {
-        const id = String(index + 1);
-        return { id, name: `Traditional Workspace ${id}`, created_at: 0, updated_at: 0 };
-      }),
-);
-let gitStatusTimer: number | null = null;
-let gitStatusRequestId = 0;
 
 watch(activeTool, (tool) => {
   localStorage.setItem(namespacedStorageKey(ACTIVE_TOOL_KEY), tool);
@@ -76,67 +64,7 @@ function selectTool(tool: SidebarTool) {
     return;
   }
   activeTool.value = tool;
-  if (tool === "git") void refreshGitIndicator();
 }
-
-function selectWorkspace(id: string) {
-  if (props.activeWorkspaceId === id) {
-    return;
-  }
-  emit("switch-workspace", id);
-}
-
-function workspaceTitle(workspace: WorkspaceSummary) {
-  const notice = props.workspaceNotices?.[workspace.id];
-  if (notice === "running") return `${workspace.name}: agent run is running`;
-  if (notice === "failed") return `${workspace.name}: agent run failed`;
-  if (notice === "completed") return `${workspace.name}: agent run finished`;
-  return workspace.name;
-}
-
-function workspaceNoticeClass(id: string) {
-  const notice = props.workspaceNotices?.[id];
-  return notice ? `workspace-notice-${notice}` : "";
-}
-
-function workspaceHeatStyle(id: string) {
-  const heat = Math.min(1, Math.max(0, Number(props.workspaceHeat?.[id] ?? 0)));
-  const intensity = heat > 0 ? Math.log1p(9 * heat) / Math.log(10) : 0;
-  if (intensity <= 0.01) return {};
-  return {
-    backgroundColor: `rgb(218 54 51 / ${0.06 + intensity * 0.34})`,
-  };
-}
-
-function toolTitle(tool: { id: SidebarTool; title: string }) {
-  if (tool.id !== "git") return tool.title;
-  if (gitIndicator.value === "dirty") return `${tool.title}: uncommitted changes`;
-  if (gitIndicator.value === "clean") return `${tool.title}: clean`;
-  return tool.title;
-}
-
-async function refreshGitIndicator() {
-  const requestId = ++gitStatusRequestId;
-  try {
-    const status = await getGitStatus(fileStore.currentPath);
-    if (requestId !== gitStatusRequestId) return;
-    gitIndicator.value = status.files.length ? "dirty" : "clean";
-  } catch {
-    if (requestId !== gitStatusRequestId) return;
-    gitIndicator.value = "none";
-  }
-}
-
-watch(() => fileStore.currentPath, () => void refreshGitIndicator());
-
-onMounted(() => {
-  void refreshGitIndicator();
-  gitStatusTimer = window.setInterval(() => void refreshGitIndicator(), 5000);
-});
-
-onUnmounted(() => {
-  if (gitStatusTimer !== null) window.clearInterval(gitStatusTimer);
-});
 </script>
 
 <template>
@@ -146,34 +74,15 @@ onUnmounted(() => {
         v-for="tool in tools"
         :key="tool.id"
         class="activity-button"
-        :class="[{ active: activeTool === tool.id }, tool.id === 'git' && gitIndicator !== 'none' ? `git-indicator-${gitIndicator}` : '']"
+        :class="{ active: activeTool === tool.id }"
         type="button"
-        :title="toolTitle(tool)"
-        :aria-label="toolTitle(tool)"
+        :title="tool.title"
+        :aria-label="tool.title"
         :aria-pressed="activeTool === tool.id"
         @click="selectTool(tool.id)"
       >
         <i class="bi" :class="tool.icon"></i>
       </button>
-      <div class="workspace-buttons" aria-label="Workspaces">
-        <button
-          v-for="workspace in workspaceItems"
-          :key="workspace.id"
-          class="activity-button workspace-button"
-          :class="[
-            { active: props.activeWorkspaceId === workspace.id, 'workspace-switching': props.switchingWorkspace && props.activeWorkspaceId === workspace.id },
-            workspaceNoticeClass(workspace.id),
-          ]"
-          :style="workspaceHeatStyle(workspace.id)"
-          type="button"
-          :title="workspaceTitle(workspace)"
-          :aria-label="workspaceTitle(workspace)"
-          :aria-pressed="props.activeWorkspaceId === workspace.id"
-          @click="selectWorkspace(workspace.id)"
-        >
-          <span>{{ workspace.id }}</span>
-        </button>
-      </div>
     </nav>
 
     <section v-if="props.panelOpen" class="tool-panel" :aria-label="activeTitle">
@@ -202,7 +111,24 @@ onUnmounted(() => {
       <FilesPanel v-if="activeTool === 'files'" @open-file="emit('open-file', $event)" />
       <GitPanel v-else-if="activeTool === 'git'" @open-diff="(path, cwd) => emit('open-diff', path, cwd)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" @open-terminal="emit('open-terminal', $event)" />
-      <AgentSessionsPanel v-else :session-refs="props.agentSessionRefs" @open-agent-session="emit('open-agent-session', $event)" />
+      <ChatsPanel
+        v-else-if="activeTool === 'chats'"
+        :chats="props.chats ?? []"
+        :active-chat-id="props.activeChatId ?? ''"
+        :roles="props.roles ?? []"
+        @create-chat="emit('create-chat')"
+        @open-chat="emit('open-chat', $event)"
+        @update-chat="emit('update-chat', $event)"
+        @delete-chat="emit('delete-chat', $event)"
+      />
+      <RolesPanel
+        v-else-if="activeTool === 'roles'"
+        :roles="props.roles ?? []"
+        :providers="props.providers ?? []"
+        @create-role="emit('create-role')"
+        @update-role="emit('update-role', $event)"
+        @delete-role="emit('delete-role', $event)"
+      />
     </section>
   </div>
 </template>
@@ -267,26 +193,6 @@ onUnmounted(() => {
 .activity-button .bi {
   font-size: 16px;
   line-height: 1;
-}
-
-.activity-button.git-indicator-clean::after,
-.activity-button.git-indicator-dirty::after {
-  border: 2px solid #f3f6fa;
-  border-radius: 999px;
-  content: "";
-  height: 9px;
-  position: absolute;
-  right: 4px;
-  top: 4px;
-  width: 9px;
-}
-
-.activity-button.git-indicator-clean::after {
-  background: #2da44e;
-}
-
-.activity-button.git-indicator-dirty::after {
-  background: #f0ad00;
 }
 
 .workspace-buttons {

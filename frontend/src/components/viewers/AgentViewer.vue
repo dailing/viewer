@@ -7,7 +7,6 @@ import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useVoiceStore } from "../../stores/voice";
-import { useWorkspacesStore } from "../../stores/workspaces";
 import type { PaneToolbarAction, PaneToolbarControl } from "../../stores/paneToolbar";
 import type { AgentEvent, AgentSessionInfo, AgentSessionSnapshot, AgentSocketMessage } from "../../types/agents";
 import { agentSessionSocketUrl } from "../../api/client";
@@ -24,7 +23,6 @@ const files = useFilesStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const voice = useVoiceStore();
-const workspaces = useWorkspacesStore();
 const session = ref<AgentSessionSnapshot | null>(null);
 const promptText = ref(loadPromptDraft(props.agentRef));
 const error = ref("");
@@ -280,7 +278,6 @@ async function createSessionHere() {
   error.value = "";
   try {
     const nextSession = await agents.create(provider.value, "", session.value.cwd, selectedModel.value);
-    await workspaces.rememberActiveAgentSession(nextSession.ref);
     layout.openAgentSession(nextSession.ref);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);

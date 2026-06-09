@@ -3,19 +3,17 @@ import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
 import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
 import { useUsersStore } from "../stores/users";
-import { useWorkspacesStore } from "../stores/workspaces";
 import type { AppearanceConfig, CodexConfig, DagConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, VoiceConfig, WorkspaceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
 const users = useUsersStore();
-const workspaces = useWorkspacesStore();
 const saving = ref(false);
 const restarting = ref(false);
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
-const openSections = reactive({ server: true, users: true, appearance: true, workspace: true, codex: true, voice: true, dag: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, users: true, appearance: true, codex: true, voice: true, dag: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
@@ -295,7 +293,6 @@ async function save() {
   error.value = "";
   try {
     await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.voice, draft.workspace, draft.dag);
-    await workspaces.load();
     emit("close");
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -383,30 +380,6 @@ async function applyJson() {
               <span>Nav bar size</span>
               <input v-model.number="draft.appearance.navbar_size" class="form-range" type="range" min="22" max="56" step="1" />
               <input v-model.number="draft.appearance.navbar_size" class="form-control form-control-sm number-input" type="number" min="22" max="56" />
-            </label>
-          </div>
-        </section>
-
-        <section class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('workspace')">
-            <i class="bi" :class="openSections.workspace ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Workspace</span>
-          </button>
-          <div v-if="openSections.workspace" class="section-body">
-            <label class="setting-row">
-              <span>Workspace count</span>
-              <input v-model.number="draft.workspace.count" class="form-range" type="range" min="1" max="20" step="1" />
-              <input v-model.number="draft.workspace.count" class="form-control form-control-sm number-input" type="number" min="1" max="20" />
-            </label>
-            <label class="setting-row">
-              <span>Heat interval</span>
-              <input v-model.number="draft.workspace.heat_interval_seconds" class="form-range" type="range" min="1" max="300" step="1" />
-              <input v-model.number="draft.workspace.heat_interval_seconds" class="form-control form-control-sm number-input" type="number" min="1" max="300" step="1" />
-            </label>
-            <label class="setting-row">
-              <span>Heat step %</span>
-              <input v-model.number="draft.workspace.heat_step_percent" class="form-range" type="range" min="0.1" max="100" step="0.1" />
-              <input v-model.number="draft.workspace.heat_step_percent" class="form-control form-control-sm number-input" type="number" min="0.1" max="100" step="0.1" />
             </label>
           </div>
         </section>

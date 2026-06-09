@@ -31,6 +31,8 @@ from .users import normalize_user_id
 
 class SuperWorkspaceMessageCreate(BaseModel):
     message: str
+    chat_id: str | None = None
+    role_ids: list[str] | None = None
     parent_message_id: str | None = None
     sender_role_id: str | None = None
 
@@ -243,9 +245,15 @@ class SuperWorkspaceRuntime:
             raise HTTPException(status_code=400, detail="Message is required")
         normalized_user = normalize_user_id(user_id)
         data = super_workspace_manager.read(normalized_user)
-        role_ids, citation_ids, query = self._parse_query_prefix(message, data.roles)
+        chat = super_workspace_manager.active_chat(normalized_user, request.chat_id)
+        chat_role_ids = set(chat.member_role_ids)
+        scoped_roles = [role for role in data.roles if role.id in chat_role_ids]
+        parsed_role_ids, citation_ids, query = self._parse_query_prefix(message, data.roles)
+        role_ids = self._merge_requested_role_ids(request.role_ids or [], parsed_role_ids, data.roles)
         if not query:
             raise HTTPException(status_code=400, detail="Query is required")
+        if not role_ids and not scoped_roles:
+            raise HTTPException(status_code=400, detail="Assign at least one role to this chat before dispatching")
         try:
             run = agent_history_store.create_super_run(
                 normalized_user,
@@ -255,19 +263,23 @@ class SuperWorkspaceRuntime:
                 citation_ids=citation_ids,
                 parent_message_id=request.parent_message_id,
                 sender_role_id=request.sender_role_id,
+                chat_id=chat.id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        await self._emit_update({"type": "run-created", "user_id": normalized_user, "run_id": run.id})
+        await self._emit_update({"type": "run-created", "user_id": normalized_user, "chat_id": run.chat_id, "run_id": run.id})
         rationale = ""
         if not role_ids:
             try:
-                dispatch = await super_workspace_manager.dispatch(SuperDispatchRequest(message=query), normalized_user)
-                role_ids = self._expand_role_names(dispatch.role_ids, data.roles)
+                dispatch = await super_workspace_manager.dispatch(
+                    SuperDispatchRequest(message=query, role_ids=[role.id for role in scoped_roles]),
+                    normalized_user,
+                )
+                role_ids = self._expand_role_names(dispatch.role_ids, scoped_roles)
                 rationale = dispatch.rationale
             except HTTPException as exc:
                 failed = agent_history_store.update_super_run(run.id, normalized_user, status="failed", error=str(exc.detail))
-                await self._emit_update({"type": "run-updated", "user_id": normalized_user, "run_id": run.id})
+                await self._emit_update({"type": "run-updated", "user_id": normalized_user, "chat_id": run.chat_id, "run_id": run.id})
                 return failed
         queued = agent_history_store.update_super_run(run.id, normalized_user, status="queued", role_ids=role_ids, rationale=rationale)
         roles_by_id = {role.id: role for role in data.roles}
@@ -280,6 +292,7 @@ class SuperWorkspaceRuntime:
                 run.id,
                 SuperDriverRunCreate(
                     workspace_id=run.workspace_id,
+                    chat_id=run.chat_id,
                     role_id=role.id,
                     role_name=role.name,
                     provider=role.provider or "codex",
@@ -288,8 +301,17 @@ class SuperWorkspaceRuntime:
                     role_snapshot=role.model_dump(),
                 ),
             )
-        await self._emit_update({"type": "run-updated", "user_id": normalized_user, "run_id": run.id})
+        await self._emit_update({"type": "run-updated", "user_id": normalized_user, "chat_id": run.chat_id, "run_id": run.id})
         return agent_history_store.get_super_run(queued.id, normalized_user)
+
+    def _merge_requested_role_ids(self, requested_role_ids: list[str], parsed_role_ids: list[str], roles: list[SuperRole]) -> list[str]:
+        valid_role_ids = {role.id for role in roles}
+        merged: list[str] = []
+        for role_id in [*requested_role_ids, *parsed_role_ids]:
+            if role_id not in valid_role_ids or role_id in merged:
+                continue
+            merged.append(role_id)
+        return merged
 
     def _parse_query_prefix(self, message: str, roles: list[SuperRole]) -> tuple[list[str], list[str], str]:
         by_key: dict[str, list[SuperRole]] = {}
@@ -387,11 +409,12 @@ class SuperWorkspaceRuntime:
         active_session_id = driver.active_session_id(role)
         if active_session_id is not None:
             agent_history_store.update_driver_run_status(task.id, "queued", next_attempt_at=time.time() + 2.0)
-            await self._emit_update({"type": "run-updated", "user_id": task.user_id, "run_id": run.id})
+            await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
             return
         prompt = self.role_message_prompt(run, role)
         lineage = {
             "workspace_id": task.workspace_id,
+            "chat_id": run.chat_id,
             "query_message_id": run.message_id,
             "driver_run_id": task.id,
             "parent_message_id": task.parent_message_id or run.message_id,
@@ -402,7 +425,7 @@ class SuperWorkspaceRuntime:
         }
         agent_history_store.update_super_run(run.id, task.user_id, status="running")
         agent_history_store.update_driver_run_status(task.id, "running", agent_prompt=prompt, error="")
-        await self._emit_update({"type": "run-updated", "user_id": task.user_id, "run_id": run.id})
+        await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
         session_ref = await driver.dispatch_task(role, task.user_id, prompt, lineage)
         agent_history_store.update_driver_run_status(task.id, "running", session_ref=session_ref, agent_prompt=prompt)
         provider, session_id = driver.parse_ref(session_ref, role.provider)
@@ -411,6 +434,7 @@ class SuperWorkspaceRuntime:
             {
                 "type": "run-updated",
                 "user_id": task.user_id,
+                "chat_id": run.chat_id,
                 "run_id": run.id,
                 "status": completed.status,
                 "updated_at": time.time(),
@@ -500,6 +524,7 @@ class SuperWorkspaceRuntime:
     def role_message_prompt(self, run: SuperHistoryRun, role: SuperRole) -> str:
         lineage = {
             "workspace_id": run.workspace_id,
+            "chat_id": run.chat_id,
             "run_id": run.id,
             "message_id": run.message_id,
             "parent_message_id": run.parent_message_id,
@@ -516,9 +541,17 @@ class SuperWorkspaceRuntime:
         return (
             f"{intro}\n\n"
             f"Routing metadata:\n{json.dumps(lineage, ensure_ascii=False)}\n\n"
+            f"{self._chat_prompt_section(run)}"
             f"{cited_section}"
             f"{query_heading}\n{run.message}"
         )
+
+    def _chat_prompt_section(self, run: SuperHistoryRun) -> str:
+        chat = super_workspace_manager.chat_for_run(run.user_id, run.workspace_id, run.chat_id)
+        prompt = chat.common_prompt.strip()
+        if not prompt:
+            return ""
+        return f"Chat-level instructions:\n{prompt}\n\n"
 
     def _citation_prompt_section(self, messages: list[Any]) -> str:
         if not messages:

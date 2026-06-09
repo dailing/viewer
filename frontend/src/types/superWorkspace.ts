@@ -31,6 +31,31 @@ export type SuperWorkspaceList = {
   workspaces: SuperWorkspaceSummary[];
 };
 
+export type SuperChatSummary = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  type: "group" | "direct";
+  common_prompt: string;
+  member_role_ids: string[];
+  created_at: number;
+  updated_at: number;
+};
+
+export type SuperChatList = {
+  active_chat_id: string;
+  chats: SuperChatSummary[];
+};
+
+export type SuperChatCreate = {
+  name?: string;
+  type?: "group" | "direct";
+  common_prompt?: string;
+  member_role_ids?: string[];
+};
+
+export type SuperChatPatch = Partial<SuperChatCreate>;
+
 export type SuperRoleStatus = {
   role_id: string;
   status: "idle" | "busy" | "failed";
@@ -64,6 +89,8 @@ export type SuperDispatchResponse = {
 
 export type AgentHistoryMessage = {
   id: string;
+  workspace_id?: string | null;
+  chat_id?: string | null;
   provider: AgentProvider;
   viewer_session_id?: string | null;
   provider_session_id?: string | null;
@@ -98,6 +125,8 @@ export type AgentHistoryMessage = {
 
 export type SuperHistoryTarget = {
   id: string;
+  workspace_id: string;
+  chat_id: string;
   run_id: string;
   role_id: string;
   role_name: string;
@@ -113,6 +142,8 @@ export type SuperHistoryTarget = {
 
 export type SuperHistoryRun = {
   id: string;
+  workspace_id: string;
+  chat_id: string;
   user_id: string;
   message: string;
   query: string;
@@ -138,6 +169,8 @@ export type SuperHistoryRunsPage = {
 
 export type SuperDisplayTarget = {
   id: string;
+  workspace_id: string;
+  chat_id: string;
   role_id: string;
   role_name: string;
   provider: AgentProvider;
@@ -147,6 +180,8 @@ export type SuperDisplayTarget = {
 
 export type SuperDisplayItem = {
   id: string;
+  workspace_id: string;
+  chat_id: string;
   kind: "query" | "message";
   user_id: string;
   text: string;
@@ -181,6 +216,8 @@ export type SuperDisplayItemsPage = {
 
 export type SuperHistoryRunCreate = {
   message: string;
+  chat_id?: string | null;
+  role_ids?: string[] | null;
   parent_message_id?: string | null;
   sender_role_id?: string | null;
 };

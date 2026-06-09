@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { ref } from "vue";
 import { getGitStatus } from "../../api/client";
 import { useCodexStore } from "../../stores/codex";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
-import { useWorkspacesStore } from "../../stores/workspaces";
 import type { GitDiffFile } from "../../types/git";
 
 const emit = defineEmits<{
@@ -14,13 +13,12 @@ const emit = defineEmits<{
 const layout = useLayoutStore();
 const codex = useCodexStore();
 const fileStore = useFilesStore();
-const workspaces = useWorkspacesStore();
 const files = ref<GitDiffFile[]>([]);
 const loading = ref(false);
+const loaded = ref(false);
 const autoCommitting = ref(false);
 const error = ref("");
 const message = ref("");
-let refreshTimer: number | null = null;
 
 function setMessage(value: string) {
   message.value = value;
@@ -35,6 +33,7 @@ async function load() {
   error.value = "";
   try {
     files.value = (await getGitStatus(fileStore.currentPath)).files;
+    loaded.value = true;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
     files.value = [];
@@ -58,27 +57,14 @@ async function autoCommit() {
   autoCommitting.value = true;
   error.value = "";
   try {
-    const session = await codex.create(fileStore.codexConfig.auto_commit_prompt, fileStore.currentPath);
-    await workspaces.rememberActiveAgentSession(session.ref);
+    await codex.create(fileStore.codexConfig.auto_commit_prompt, fileStore.currentPath);
     setMessage("Auto commit Codex started");
-    await load();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     autoCommitting.value = false;
   }
 }
-
-onMounted(() => {
-  void load();
-  refreshTimer = window.setInterval(() => void load(), 15000);
-});
-
-watch(() => fileStore.currentPath, () => void load());
-
-onUnmounted(() => {
-  if (refreshTimer !== null) window.clearInterval(refreshTimer);
-});
 </script>
 
 <template>
@@ -108,6 +94,7 @@ onUnmounted(() => {
       <div class="section-title">Changes</div>
       <div v-if="error" class="panel-error">{{ error }}</div>
       <div v-else-if="loading && !files.length" class="empty-panel">Loading changes</div>
+      <div v-else-if="!loaded" class="empty-panel">Use Refresh to load changes</div>
       <div v-else-if="!files.length" class="empty-panel">No changes</div>
       <button
         v-for="file in files"

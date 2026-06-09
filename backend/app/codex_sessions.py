@@ -1305,6 +1305,7 @@ class CodexSessionManager:
         ]
         for key, option in (
             ("workspace_id", "--workspace-id"),
+            ("chat_id", "--chat-id"),
             ("query_message_id", "--query-message-id"),
             ("driver_run_id", "--driver-run-id"),
             ("parent_message_id", "--parent-message-id"),

@@ -16,6 +16,7 @@ import MarkdownViewer from "./viewers/MarkdownViewer.vue";
 import TextViewer from "./viewers/TextViewer.vue";
 import TerminalViewer from "./viewers/TerminalViewer.vue";
 import UnsupportedViewer from "./viewers/UnsupportedViewer.vue";
+import SuperWorkspaceChatPane from "./SuperWorkspaceChatPane.vue";
 
 const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }>; workspaceId: string; workspaceLoading?: boolean }>();
 const PdfViewer = defineAsyncComponent(() => import("./viewers/PdfViewer.vue"));
@@ -73,6 +74,7 @@ onUnmounted(() => {
         <div class="spinner-border spinner-border-sm" role="status" aria-label="Loading workspace pane"></div>
       </div>
       <TerminalViewer v-else-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
+      <SuperWorkspaceChatPane v-else-if="pane.chatId" :chat-id="pane.chatId" :pane-id="pane.id" />
       <AgentViewer v-else-if="paneAgentRef()" :agent-ref="paneAgentRef()!" :pane-id="pane.id" />
       <DiffViewer v-else-if="pane.diffPath" :path="pane.diffPath" :cwd="pane.diffCwd ?? ''" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">

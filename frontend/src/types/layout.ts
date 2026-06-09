@@ -6,6 +6,7 @@ export type PaneContent = {
   agentSession?: string;
   diffPath?: string;
   diffCwd?: string;
+  chatId?: string;
 };
 
 export type LayoutNode =
@@ -17,6 +18,7 @@ export type LayoutNode =
       agentSession?: string;
       diffPath?: string;
       diffCwd?: string;
+      chatId?: string;
       history?: PaneContent[];
     }
   | {

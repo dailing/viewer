@@ -16,7 +16,7 @@ DEFAULT_FRONTEND_DIST = FRONTEND_DIR / "dist"
 DEFAULT_ROOT = Path("~/Sync").expanduser()
 DEFAULT_PORT = 18989
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_LOG_DIR = Path("~/.view/logs").expanduser()
+DEFAULT_LOG_DIR = Path(os.environ.get("VIEWER_HOME", "~/.view")).expanduser() / "logs"
 PROJECT_ENV_PATH = PROJECT_ROOT / ".viewer.env"
 DEFAULT_VOICE_SERVICE_WS = "ws://127.0.0.1:8765/v1/voice/ws"
 

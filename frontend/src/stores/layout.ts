@@ -86,11 +86,12 @@ function paneContent(pane: Extract<LayoutNode, { type: "pane" }>): PaneContent {
     agentSession: ref,
     diffPath: pane.diffPath,
     diffCwd: pane.diffCwd,
+    chatId: pane.chatId,
   };
 }
 
 function hasContent(content: PaneContent | null | undefined): boolean {
-  return Boolean(content?.filePath || content?.terminalId || content?.agentSession || content?.diffPath);
+  return Boolean(content?.filePath || content?.terminalId || content?.agentSession || content?.diffPath || content?.chatId);
 }
 
 function sameContent(left: PaneContent, right: PaneContent): boolean {
@@ -99,7 +100,8 @@ function sameContent(left: PaneContent, right: PaneContent): boolean {
     (left.terminalId ?? "") === (right.terminalId ?? "") &&
     (left.agentSession ?? "") === (right.agentSession ?? "") &&
     (left.diffPath ?? "") === (right.diffPath ?? "") &&
-    (left.diffCwd ?? "") === (right.diffCwd ?? "")
+    (left.diffCwd ?? "") === (right.diffCwd ?? "") &&
+    (left.chatId ?? "") === (right.chatId ?? "")
   );
 }
 
@@ -119,6 +121,10 @@ function contentForDiff(path: string, cwd = ""): PaneContent {
   return { diffPath: path, diffCwd: cwd };
 }
 
+function contentForChat(id: string): PaneContent {
+  return { chatId: id };
+}
+
 function pushPaneHistory(pane: Extract<LayoutNode, { type: "pane" }>, nextContent: PaneContent): PaneContent[] | undefined {
   const current = paneContent(pane);
   const history = normalizeHistory(pane.history) ?? [];
@@ -136,6 +142,7 @@ function applyPaneContent(pane: Extract<LayoutNode, { type: "pane" }>, content: 
     agentSession: content.agentSession,
     diffPath: content.diffPath,
     diffCwd: content.diffCwd,
+    chatId: content.chatId,
   };
 }
 
@@ -155,6 +162,7 @@ export const useLayoutStore = defineStore("layout", {
   state: () => ({
     root: defaultLayout() as LayoutNode,
     activePaneId: "",
+    storageScope: "",
   }),
   getters: {
     activePane(state) {
@@ -217,10 +225,30 @@ export const useLayoutStore = defineStore("layout", {
       visit(state.root);
       return paths;
     },
+    openChatIds(state): string[] {
+      const ids: string[] = [];
+      const visit = (node: LayoutNode) => {
+        if (node.type === "pane") {
+          if (node.chatId) ids.push(node.chatId);
+          return;
+        }
+        visit(node.first);
+        visit(node.second);
+      };
+      visit(state.root);
+      return ids;
+    },
   },
   actions: {
-    load() {
-      const key = namespacedStorageKey(STORAGE_KEY);
+    storageKey() {
+      return this.storageScope ? `${STORAGE_KEY}.${this.storageScope}` : STORAGE_KEY;
+    },
+    setStorageScope(scope = "") {
+      this.storageScope = scope;
+    },
+    load(scope?: string) {
+      if (scope !== undefined) this.storageScope = scope;
+      const key = namespacedStorageKey(this.storageKey());
       const raw = localStorage.getItem(key);
       if (raw) {
         try {
@@ -236,7 +264,7 @@ export const useLayoutStore = defineStore("layout", {
       this.save();
     },
     save() {
-      localStorage.setItem(namespacedStorageKey(STORAGE_KEY), JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
+      localStorage.setItem(namespacedStorageKey(this.storageKey()), JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
     },
     snapshot() {
       return { root: cloneLayout(this.root), activePaneId: this.activePaneId || firstPaneId(this.root) };
@@ -293,6 +321,26 @@ export const useLayoutStore = defineStore("layout", {
       this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForDiff(path, cwd)));
       this.save();
     },
+    openChat(chatId: string) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      emitPaneBeforeNavigate(this.activePaneId);
+      this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForChat(chatId)));
+      this.save();
+    },
+    openChatInSplit(chatId: string, direction: SplitDirection) {
+      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
+      const nextPaneId = id("pane");
+      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
+        type: "split",
+        id: id("split"),
+        direction,
+        ratio: 0.5,
+        first: { ...pane },
+        second: { type: "pane", id: nextPaneId, chatId },
+      }));
+      this.activePaneId = nextPaneId;
+      this.save();
+    },
     goBack(paneId?: string) {
       const targetPaneId = paneId ?? this.activePaneId;
       if (!targetPaneId) return;
@@ -336,6 +384,7 @@ export const useLayoutStore = defineStore("layout", {
         agentSession: undefined,
         diffPath: undefined,
         diffCwd: undefined,
+        chatId: undefined,
       }));
       this.save();
     },

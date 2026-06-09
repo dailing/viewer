@@ -43,24 +43,20 @@ from .files import (
     read_config,
     read_text,
     read_text_lines,
-    read_workspaces,
     resolve_directory_link,
     resolve_markdown_link,
     resolve_path,
-    set_active_workspace,
     upload_target,
     write_config,
     write_text,
-    write_workspace_config,
-    write_workspace,
 )
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
 from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
-from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate, WorkspaceConfig, WorkspaceRoleAttachRequest, WorkspaceSnapshot
+from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate
 from .profiling import api_profiler
 from .restart import request_restart, request_stop
-from .super_workspace import SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
+from .super_workspace import SuperChatCreate, SuperChatPatch, SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
 from .super_workspace_runtime import SuperWorkspaceMessageCreate, super_workspace_runtime
 from .terminals import terminal_manager
 from .users import get_user_profile, list_user_profiles, user_home_path, user_home_relative
@@ -509,52 +505,6 @@ async def put_config(config: ConfigData):
     )
 
 
-@app.get("/api/workspaces")
-async def get_workspaces(user: str | None = None):
-    return read_workspaces(user)
-
-
-@app.get("/api/workspaces/workspaces")
-async def list_workspaces(user: str | None = None):
-    data = read_workspaces(user)
-    return {"active_workspace_id": data.active_workspace_id, "workspaces": data.workspaces}
-
-
-@app.get("/api/workspaces/config")
-async def get_workspace_config():
-    return read_config().workspace
-
-
-@app.put("/api/workspaces/config")
-async def put_workspace_config(config: WorkspaceConfig, user: str | None = None):
-    return write_workspace_config(config, user)
-
-
-@app.put("/api/workspaces/{workspace_id}")
-async def put_workspace(workspace_id: str, snapshot: WorkspaceSnapshot, user: str | None = None):
-    return write_workspace(workspace_id, snapshot, user)
-
-
-@app.post("/api/workspaces/active-workspace/{workspace_id}")
-async def activate_workspace(workspace_id: str, user: str | None = None):
-    return set_active_workspace(workspace_id, user)
-
-
-@app.get("/api/workspaces/role-statuses/{workspace_id}")
-async def workspace_role_statuses(workspace_id: str, user: str | None = None):
-    return conventional_workspace_agents.role_statuses(user, workspace_id)
-
-
-@app.post("/api/workspaces/{workspace_id}/roles")
-async def add_workspace_role_route(workspace_id: str, request: WorkspaceRoleAttachRequest, user: str | None = None):
-    return conventional_workspace_agents.attach_role(user, workspace_id, request.ref)
-
-
-@app.delete("/api/workspaces/{workspace_id}/roles/{session_ref:path}")
-async def remove_workspace_role_route(workspace_id: str, session_ref: str, user: str | None = None):
-    return conventional_workspace_agents.remove_role(user, workspace_id, session_ref)
-
-
 @app.get("/api/agent-loops")
 async def agent_loops():
     return agent_loop_manager.list()
@@ -798,6 +748,31 @@ async def super_role_statuses(workspace_id: str, user: str | None = None):
     return super_workspace_manager.role_statuses(workspace_id, user)
 
 
+@app.get("/api/super-workspace/chats")
+async def super_chats(user: str | None = None):
+    return super_workspace_manager.list_chats(user)
+
+
+@app.post("/api/super-workspace/chats")
+async def create_super_chat(request: SuperChatCreate, user: str | None = None):
+    return super_workspace_manager.create_chat(request, user)
+
+
+@app.put("/api/super-workspace/chats/{chat_id}")
+async def update_super_chat(chat_id: str, request: SuperChatPatch, user: str | None = None):
+    return super_workspace_manager.update_chat(chat_id, request, user)
+
+
+@app.delete("/api/super-workspace/chats/{chat_id}")
+async def delete_super_chat(chat_id: str, user: str | None = None):
+    return super_workspace_manager.delete_chat(chat_id, user)
+
+
+@app.post("/api/super-workspace/active-chat/{chat_id}")
+async def activate_super_chat(chat_id: str, user: str | None = None):
+    return super_workspace_manager.activate_chat(chat_id, user)
+
+
 @app.post("/api/super-workspace/roles")
 async def create_super_role(request: SuperRoleCreate, user: str | None = None):
     return super_workspace_manager.create_role(request, user)
@@ -818,9 +793,10 @@ async def super_workspace_runs(
     limit: int = Query(default=30, ge=1, le=100),
     before: float | None = None,
     after: float | None = None,
+    chat_id: str | None = None,
     user: str | None = None,
 ):
-    return agent_history_store.list_super_display_items(user, limit=limit, before=before, after=after)
+    return agent_history_store.list_super_display_items(user, limit=limit, before=before, after=after, chat_id=chat_id)
 
 
 @app.post("/api/super-workspace/messages")
@@ -847,6 +823,8 @@ async def create_super_workspace_run(request: SuperHistoryRunCreate, user: str |
     return await super_workspace_runtime.submit(
         SuperWorkspaceMessageCreate(
             message=message,
+            chat_id=request.chat_id,
+            role_ids=request.role_ids,
             parent_message_id=request.parent_message_id,
             sender_role_id=request.sender_role_id,
         ),

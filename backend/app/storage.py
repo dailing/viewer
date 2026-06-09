@@ -6,7 +6,7 @@ from loguru import logger
 
 from .config import settings
 
-VIEW_HOME = Path.home() / ".view"
+VIEW_HOME = Path(os.environ.get("VIEWER_HOME", Path.home() / ".view")).expanduser()
 USERS_DIR = VIEW_HOME / "users"
 CONFIG_PATH = VIEW_HOME / "config.json"
 WORKSPACES_PATH = VIEW_HOME / "workspaces.json"

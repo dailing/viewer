@@ -109,12 +109,12 @@ class SuperAgentDriver:
     async def _create(self, prompt: str, cwd: str, model: str | None, user_id: str, lineage: dict[str, Any]) -> dict[str, Any]:
         if self.provider == "codex":
             return await self.manager().create(prompt, cwd, model, user_id, lineage=lineage)
-        return await self.manager().create(prompt, cwd, model, user_id)
+        return await self.manager().create(prompt, cwd, model, user_id, lineage=lineage)
 
     async def _send(self, session_id: str, prompt: str, model: str | None, lineage: dict[str, Any]) -> dict[str, Any]:
         if self.provider == "codex":
             return await self.manager().send(session_id, prompt, model, lineage=lineage)
-        return await self.manager().send(session_id, prompt, model)
+        return await self.manager().send(session_id, prompt, model, lineage=lineage)
 
     def manager(self):
         raise NotImplementedError
@@ -509,8 +509,12 @@ class SuperWorkspaceRuntime:
         cited_messages = agent_history_store.cited_messages_for_query(run.user_id, run.message_id)
         cited_section = self._citation_prompt_section(cited_messages)
         query_heading = "The below is the query for this time:" if cited_section else "User message:"
+        if ":workspace:" in run.workspace_id:
+            intro = "The traditional workspace routed this message to this pane's agent session. Continue the existing session context and answer the user request."
+        else:
+            intro = "Super Workspace routed this message to your role. Apply your fixed role rules and answer only for your own responsibility."
         return (
-            "Super Workspace routed this message to your role. Apply your fixed role rules and answer only for your own responsibility.\n\n"
+            f"{intro}\n\n"
             f"Routing metadata:\n{json.dumps(lineage, ensure_ascii=False)}\n\n"
             f"{cited_section}"
             f"{query_heading}\n{run.message}"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 import uuid
 from collections.abc import Iterator
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, case, create_engine, delete, event, func, or_, select, update
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, case, create_engine, delete, event, func, not_, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -19,6 +20,8 @@ from .users import normalize_user_id
 
 DEFAULT_SUPER_WORKSPACE_ID = "default"
 DEFAULT_SUPER_WORKSPACE_NAME = "Default Super Workspace"
+CONVENTIONAL_WORKSPACE_PREFIX = "workspace:"
+CONVENTIONAL_WORKSPACE_NAME_PREFIX = "Traditional Workspace"
 DEFAULT_RUN_LIMIT = 30
 DEFAULT_MESSAGE_LIMIT = 120
 
@@ -468,17 +471,211 @@ class AgentHistoryStore:
             updated_at=now,
         )
 
+    def ensure_workspace(self, user_id: str | None, workspace_id: str, name: str) -> SuperWorkspaceRow:
+        normalized_user = normalize_user_id(user_id)
+        cleaned_id = workspace_id.strip()
+        if not cleaned_id:
+            raise ValueError("workspace_id is required")
+        now = time.time()
+        with self.session_scope() as db:
+            statement = sqlite_insert(SuperWorkspaceRow).values(
+                id=cleaned_id,
+                user_id=normalized_user,
+                name=name,
+                common_prompt="",
+                created_at=now,
+                updated_at=now,
+            )
+            db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["user_id", "id"],
+                    set_={"name": name, "updated_at": now},
+                )
+            )
+            row = db.scalar(
+                select(SuperWorkspaceRow).where(
+                    SuperWorkspaceRow.id == cleaned_id,
+                    SuperWorkspaceRow.user_id == normalized_user,
+                )
+            )
+            if row is not None:
+                return row
+        return SuperWorkspaceRow(id=cleaned_id, user_id=normalized_user, name=name, common_prompt="", created_at=now, updated_at=now)
+
     @staticmethod
     def default_workspace_id(user_id: str | None) -> str:
         return f"{normalize_user_id(user_id)}:default"
 
+    @staticmethod
+    def conventional_workspace_id(user_id: str | None, workspace_id: str) -> str:
+        return f"{normalize_user_id(user_id)}:{CONVENTIONAL_WORKSPACE_PREFIX}{workspace_id.strip()}"
+
+    def ensure_conventional_workspace(self, user_id: str | None, workspace_id: str) -> SuperWorkspaceRow:
+        cleaned_id = workspace_id.strip()
+        return self.ensure_workspace(
+            user_id,
+            self.conventional_workspace_id(user_id, cleaned_id),
+            f"{CONVENTIONAL_WORKSPACE_NAME_PREFIX} {cleaned_id}",
+        )
+
+    def upsert_conventional_role(
+        self,
+        user_id: str | None,
+        workspace_id: str,
+        *,
+        session_ref: str,
+        provider: str,
+        name: str,
+        cwd: str = "",
+        model: str | None = None,
+    ) -> SuperWorkspaceRoleRow:
+        workspace = self.ensure_conventional_workspace(user_id, workspace_id)
+        normalized_user = normalize_user_id(user_id)
+        role_id = self.conventional_role_id(workspace.id, session_ref)
+        now = time.time()
+        with self.session_scope() as db:
+            statement = sqlite_insert(SuperWorkspaceRoleRow).values(
+                id=role_id,
+                workspace_id=workspace.id,
+                user_id=normalized_user,
+                name=name or session_ref,
+                description="Traditional workspace agent session",
+                provider=provider,
+                cwd=cwd,
+                model=model,
+                session_ref=session_ref,
+                created_at=now,
+                updated_at=now,
+            )
+            db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={
+                        "name": name or session_ref,
+                        "provider": provider,
+                        "cwd": cwd,
+                        "model": model,
+                        "session_ref": session_ref,
+                        "updated_at": now,
+                    },
+                )
+            )
+            row = db.scalar(select(SuperWorkspaceRoleRow).where(SuperWorkspaceRoleRow.id == role_id))
+            if row is not None:
+                return row
+        return SuperWorkspaceRoleRow(
+            id=role_id,
+            workspace_id=workspace.id,
+            user_id=normalized_user,
+            name=name or session_ref,
+            description="Traditional workspace agent session",
+            provider=provider,
+            cwd=cwd,
+            model=model,
+            session_ref=session_ref,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def remove_conventional_role(self, user_id: str | None, workspace_id: str, session_ref: str) -> None:
+        workspace = self.ensure_conventional_workspace(user_id, workspace_id)
+        normalized_user = normalize_user_id(user_id)
+        with self.session_scope() as db:
+            db.execute(
+                delete(SuperWorkspaceRoleRow).where(
+                    SuperWorkspaceRoleRow.workspace_id == workspace.id,
+                    SuperWorkspaceRoleRow.user_id == normalized_user,
+                    SuperWorkspaceRoleRow.session_ref == session_ref,
+                )
+            )
+
+    def conventional_roles_for_workspace(self, user_id: str | None, workspace_id: str) -> list[SuperWorkspaceRoleRow]:
+        workspace = self.ensure_conventional_workspace(user_id, workspace_id)
+        normalized_user = normalize_user_id(user_id)
+        with self.read_session() as db:
+            return list(
+                db.scalars(
+                    select(SuperWorkspaceRoleRow)
+                    .where(
+                        SuperWorkspaceRoleRow.workspace_id == workspace.id,
+                        SuperWorkspaceRoleRow.user_id == normalized_user,
+                        SuperWorkspaceRoleRow.session_ref != "",
+                    )
+                    .order_by(SuperWorkspaceRoleRow.updated_at.desc(), SuperWorkspaceRoleRow.created_at.desc())
+                ).all()
+            )
+
+    def conventional_roles(self, user_id: str | None, provider: str | None = None) -> list[SuperWorkspaceRoleRow]:
+        normalized_user = normalize_user_id(user_id)
+        prefix = f"{normalized_user}:{CONVENTIONAL_WORKSPACE_PREFIX}"
+        conditions = [
+            SuperWorkspaceRoleRow.user_id == normalized_user,
+            SuperWorkspaceRoleRow.workspace_id.startswith(prefix),
+            SuperWorkspaceRoleRow.session_ref != "",
+        ]
+        if provider:
+            conditions.append(SuperWorkspaceRoleRow.provider == provider)
+        with self.read_session() as db:
+            return list(
+                db.scalars(
+                    select(SuperWorkspaceRoleRow)
+                    .where(*conditions)
+                    .order_by(SuperWorkspaceRoleRow.updated_at.desc(), SuperWorkspaceRoleRow.created_at.desc())
+                ).all()
+            )
+
+    def conventional_role_for_ref(self, user_id: str | None, session_ref: str) -> SuperWorkspaceRoleRow | None:
+        normalized_user = normalize_user_id(user_id)
+        prefix = f"{normalized_user}:{CONVENTIONAL_WORKSPACE_PREFIX}"
+        with self.read_session() as db:
+            return db.scalar(
+                select(SuperWorkspaceRoleRow)
+                .where(
+                    SuperWorkspaceRoleRow.user_id == normalized_user,
+                    SuperWorkspaceRoleRow.workspace_id.startswith(prefix),
+                    SuperWorkspaceRoleRow.session_ref == session_ref,
+                )
+                .order_by(SuperWorkspaceRoleRow.updated_at.desc())
+                .limit(1)
+            )
+
+    @staticmethod
+    def conventional_role_id(db_workspace_id: str, session_ref: str) -> str:
+        digest = hashlib.sha256(f"{db_workspace_id}:{session_ref}".encode("utf-8")).hexdigest()[:20]
+        return f"traditional-{digest}"
+
+    def conventional_workspace_summaries(self, user_id: str | None, count: int) -> list[SuperWorkspaceSummary]:
+        normalized_user = normalize_user_id(user_id)
+        summaries: list[SuperWorkspaceSummary] = []
+        for index in range(1, max(1, min(20, round(count))) + 1):
+            external_id = str(index)
+            row = self.ensure_conventional_workspace(normalized_user, external_id)
+            summaries.append(
+                SuperWorkspaceSummary(
+                    id=external_id,
+                    name=str(row.name or f"{CONVENTIONAL_WORKSPACE_NAME_PREFIX} {external_id}"),
+                    created_at=float(row.created_at),
+                    updated_at=float(row.updated_at),
+                )
+            )
+        return summaries
+
+    def conventional_role_statuses(self, user_id: str | None, workspace_id: str) -> SuperRoleStatuses:
+        db_workspace_id = self.ensure_conventional_workspace(user_id, workspace_id).id
+        statuses = self.list_super_role_statuses(user_id, db_workspace_id)
+        return statuses.model_copy(update={"workspace_id": workspace_id})
+
     def list_super_workspaces(self, user_id: str | None) -> SuperWorkspaceList:
         workspace = self.active_super_workspace(user_id)
+        conventional_prefix = f"{workspace.user_id}:{CONVENTIONAL_WORKSPACE_PREFIX}"
         with self.read_session() as db:
             rows = list(
                 db.scalars(
                     select(SuperWorkspaceRow)
-                    .where(SuperWorkspaceRow.user_id == workspace.user_id)
+                    .where(
+                        SuperWorkspaceRow.user_id == workspace.user_id,
+                        not_(SuperWorkspaceRow.id.startswith(conventional_prefix)),
+                    )
                     .order_by(SuperWorkspaceRow.created_at.asc(), SuperWorkspaceRow.id.asc())
                 ).all()
             )
@@ -653,9 +850,10 @@ class AgentHistoryStore:
         raw: dict[str, Any] | None = None,
         parent_message_id: str | None = None,
         sender_role_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.active_super_workspace(normalized_user)
+        workspace = self._workspace_for_run(normalized_user, workspace_id)
         now = time.time()
         message_id = uuid.uuid4().hex
         normalized_citation_ids = self._normalize_citation_ids(citation_ids or [])
@@ -709,6 +907,20 @@ class AgentHistoryStore:
             self._replace_citations(db, message_id, normalized_citation_ids, now)
         return self.get_super_run(message_id, normalized_user)
 
+    def _workspace_for_run(self, user_id: str, workspace_id: str | None = None) -> SuperWorkspaceRow:
+        if workspace_id:
+            with self.read_session() as db:
+                row = db.scalar(
+                    select(SuperWorkspaceRow).where(
+                        SuperWorkspaceRow.id == workspace_id,
+                        SuperWorkspaceRow.user_id == user_id,
+                    )
+                )
+                if row is None:
+                    raise KeyError(workspace_id)
+                return row
+        return self.active_super_workspace(user_id)
+
     def update_super_run(
         self,
         run_id: str,
@@ -720,7 +932,6 @@ class AgentHistoryStore:
         error: str | None = None,
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.active_super_workspace(normalized_user)
         now = time.time()
         values: dict[str, Any] = {"ingested_at": now}
         if status is not None:
@@ -736,7 +947,6 @@ class AgentHistoryStore:
                 update(SuperWorkspaceMessageRow)
                 .where(
                     SuperWorkspaceMessageRow.id == run_id,
-                    SuperWorkspaceMessageRow.workspace_id == workspace.id,
                     SuperWorkspaceMessageRow.user_id == normalized_user,
                     SuperWorkspaceMessageRow.query.is_not(None),
                     SuperWorkspaceMessageRow.query != "",
@@ -752,7 +962,7 @@ class AgentHistoryStore:
 
     def create_dispatch_task(self, user_id: str | None, query_message_id: str, request: SuperDriverRunCreate) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.active_super_workspace(normalized_user)
+        workspace = self._workspace_for_run(normalized_user, request.workspace_id)
         provider, viewer_session_id = self._parse_session_ref(request.session_ref, request.provider)
         provider_session_id = self._provider_session_id(provider, viewer_session_id)
         now = time.time()
@@ -1138,12 +1348,10 @@ class AgentHistoryStore:
 
     def get_super_run(self, run_id: str, user_id: str | None, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
-        workspace = self.active_super_workspace(normalized_user)
         with self.read_session() as db:
             row = db.scalar(
                 select(SuperWorkspaceMessageRow).where(
                     SuperWorkspaceMessageRow.id == run_id,
-                    SuperWorkspaceMessageRow.workspace_id == workspace.id,
                     SuperWorkspaceMessageRow.user_id == normalized_user,
                     SuperWorkspaceMessageRow.query.is_not(None),
                     SuperWorkspaceMessageRow.query != "",
@@ -1176,6 +1384,72 @@ class AgentHistoryStore:
             targets_by_query.setdefault(str(target.query_message_id), []).append(target)
             targets_by_id[str(target.id)] = target
         return [self._display_item_from_row(row, targets_by_query, targets_by_id) for row in rows]
+
+    def record_provider_message(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str | None,
+        provider: str,
+        viewer_session_id: str,
+        provider_session_id: str | None,
+        query_message_id: str | None,
+        driver_run_id: str | None,
+        parent_message_id: str | None,
+        sender_role_id: str | None,
+        recipient_role_id: str | None,
+        role_id: str | None,
+        event_index: int,
+        received_at: float,
+        source_path: str | None,
+        source_event_id: str,
+        source_line: int | None,
+        role: str,
+        event_type: str,
+        text: str,
+        raw: dict[str, Any],
+        patch_text: str | None = None,
+        file_changes: list[dict[str, Any]] | None = None,
+    ) -> None:
+        row_id = f"{provider}:{viewer_session_id}:{source_event_id}"
+        with self.session_scope() as db:
+            self._insert_message(
+                db,
+                {
+                    "id": row_id,
+                    "workspace_id": workspace_id,
+                    "user_id": user_id,
+                    "conversation_id": "default",
+                    "parent_message_id": parent_message_id,
+                    "sender_role_id": sender_role_id,
+                    "recipient_role_id": recipient_role_id,
+                    "role_id": role_id,
+                    "query_message_id": query_message_id,
+                    "driver_run_id": driver_run_id,
+                    "provider": provider,
+                    "viewer_session_id": viewer_session_id,
+                    "provider_session_id": provider_session_id,
+                    "event_index": event_index,
+                    "received_at": received_at,
+                    "source_path": source_path,
+                    "source_event_id": source_event_id,
+                    "source_line": source_line,
+                    "role": role,
+                    "event_type": event_type,
+                    "text": text,
+                    "query": None,
+                    "status": None,
+                    "rationale": "",
+                    "error": "",
+                    "requested_role_ids_json": "[]",
+                    "selected_role_ids_json": "[]",
+                    "patch_text": patch_text,
+                    "raw_json": self._json(raw),
+                    "occurred_at": received_at,
+                    "ingested_at": time.time(),
+                    "file_changes": file_changes or [],
+                },
+            )
 
     def _display_item_from_row(
         self,

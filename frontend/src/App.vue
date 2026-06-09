@@ -18,7 +18,7 @@ import { useWorkspacesStore } from "./stores/workspaces";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { AgentSessionInfo, AgentStatus } from "./types/agents";
 import type { LayoutNode, SplitDirection } from "./types/layout";
-import { legacyAgentRefForPane, parseAgentRef } from "./utils/agents";
+import { agentRefForPane, parseAgentRef } from "./utils/agents";
 import { namespacedStorageKey } from "./utils/userProfile";
 
 const SIDEBAR_PIN_KEY = "viewer.sidebarPinned.v1";
@@ -99,7 +99,7 @@ const activePaneTitle = computed(() => {
   const pane = layout.activePane;
   if (!pane || pane.type !== "pane") return "Empty pane";
   if (pane.terminalId) return "Terminal";
-  const paneAgent = legacyAgentRefForPane(pane);
+  const paneAgent = agentRefForPane(pane);
   if (paneAgent) {
     const session = agents.sessions.find((item) => item.ref === paneAgent);
     const parsed = parseAgentRef(paneAgent);
@@ -110,7 +110,7 @@ const activePaneTitle = computed(() => {
 });
 const activePaneHasContent = computed(() => {
   const pane = layout.activePane;
-  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || legacyAgentRefForPane(pane) || pane.diffPath));
+  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || agentRefForPane(pane) || pane.diffPath));
 });
 const activePageTitle = computed(() => {
   if (activePage.value === "workspace") return activePaneTitle.value;
@@ -162,6 +162,15 @@ const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? [])
 const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
 const hasMobilePaneToolbar = computed(() => activePaneActions.value.length > 0 || activePaneControls.value.length > 0);
 const workspaceCount = computed(() => workspaces.count);
+const workspaceSummaries = computed(() =>
+  workspaces.workspaces.length
+    ? workspaces.workspaces
+    : Array.from({ length: Math.max(1, workspaceCount.value) }, (_, index) => {
+        const id = String(index + 1);
+        return { id, name: `Traditional Workspace ${id}`, created_at: 0, updated_at: 0 };
+      }),
+);
+const workspaceIds = computed(() => workspaceSummaries.value.map((workspace) => workspace.id));
 const displayedActiveWorkspaceId = computed(() => switchingWorkspaceId.value ?? workspaces.activeWorkspaceId);
 const workspaceNotices = computed<Record<string, WorkspaceNotice>>(() => {
   const notices: Record<string, WorkspaceNotice> = {};
@@ -299,7 +308,6 @@ function currentWorkspaceSnapshot() {
     active_pane_id: snapshot.activePaneId,
     current_path: files.currentPath,
     pinned: [...files.pinned],
-    pinned_agent_session_ids: [...workspaces.activePinnedAgentSessionRefs],
     visit_times: { ...files.visitTimes },
   };
 }
@@ -319,13 +327,11 @@ async function showWorkspaceLoadingFrame() {
 }
 
 function normalizeWorkspaceId(id: string) {
-  const index = Number(id);
-  if (!Number.isInteger(index) || index < 1 || index > workspaceCount.value) return "1";
-  return String(index);
+  return workspaceIds.value.includes(id) ? id : workspaceIds.value[0] ?? "1";
 }
 
 function workspaceHeatIds() {
-  return Array.from({ length: Math.max(1, workspaceCount.value) }, (_, index) => String(index + 1));
+  return workspaceIds.value;
 }
 
 function clampHeat(value: unknown) {
@@ -526,7 +532,7 @@ function updateWorkspaceAgentNotices() {
 
 function activePaneAgentRef() {
   const pane = layout.activePane;
-  return pane?.type === "pane" ? legacyAgentRefForPane(pane) : undefined;
+  return pane?.type === "pane" ? agentRefForPane(pane) : undefined;
 }
 
 function noticePriority(notice: WorkspaceNotice | null) {
@@ -559,8 +565,7 @@ function workspaceAgentSessionRefs(workspaceId: string) {
 
 function workspaceIdsForAgentSession(ref: string) {
   const ids: string[] = [];
-  for (let index = 1; index <= workspaceCount.value; index += 1) {
-    const workspaceId = String(index);
+  for (const workspaceId of workspaceHeatIds()) {
     if (workspaceAgentSessionRefs(workspaceId).includes(ref)) ids.push(workspaceId);
   }
   return ids;
@@ -568,7 +573,7 @@ function workspaceIdsForAgentSession(ref: string) {
 
 function collectLayoutAgentSessionRefs(node: LayoutNode, refs: Set<string>) {
   if (node.type === "pane") {
-    const ref = legacyAgentRefForPane(node);
+    const ref = agentRefForPane(node);
     if (ref) refs.add(ref);
     return;
   }
@@ -841,6 +846,7 @@ onUnmounted(() => {
       <aside class="sidebar-drawer" :class="{ 'panel-open': sidebarOpen, pinned: sidebarPinned && sidebarOpen }">
         <FileSidebar
           :workspace-count="workspaceCount"
+          :workspaces="workspaceSummaries"
           :active-workspace-id="displayedActiveWorkspaceId"
           :agent-session-refs="workspaces.activeAgentSessionRefs"
           :panel-open="sidebarOpen"

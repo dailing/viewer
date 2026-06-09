@@ -5,7 +5,7 @@ import type { FileMeta, WatchEvent } from "../types/files";
 import { getMeta } from "../api/client";
 import { useLayoutStore } from "../stores/layout";
 import { fileChangeAffectsPath } from "../utils/paths";
-import { legacyAgentRefForPane } from "../utils/agents";
+import { agentRefForPane } from "../utils/agents";
 import AgentViewer from "./viewers/AgentViewer.vue";
 import CsvViewer from "./viewers/CsvViewer.vue";
 import DiffViewer from "./viewers/DiffViewer.vue";
@@ -25,7 +25,7 @@ const error = ref("");
 const version = ref(0);
 
 function paneAgentRef() {
-  return legacyAgentRefForPane(props.pane);
+  return agentRefForPane(props.pane);
 }
 
 async function load(clearMeta: boolean) {

@@ -30,10 +30,9 @@ from .agent_tasks import (
 )
 from .config import settings
 from .codex_sessions import codex_session_manager
+from .conventional_workspace import conventional_workspace_agents
 from .events import hub
 from .files import (
-    add_workspace_agent_session,
-    add_workspace_pinned_agent_session,
     content_hash,
     delete_file,
     entry_for,
@@ -48,8 +47,6 @@ from .files import (
     resolve_directory_link,
     resolve_markdown_link,
     resolve_path,
-    remove_workspace_agent_session,
-    remove_workspace_pinned_agent_session,
     set_active_workspace,
     upload_target,
     write_config,
@@ -60,7 +57,7 @@ from .files import (
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
 from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
-from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, CodexQueueMessage, CodexSessionCreate, CodexSessionMessage, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, HermesQueueMessage, HermesSessionCreate, HermesSessionMessage, TerminalCreate, WorkspaceAgentSessionRequest, WorkspaceConfig, WorkspaceSnapshot
+from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate, WorkspaceConfig, WorkspaceRoleAttachRequest, WorkspaceSnapshot
 from .profiling import api_profiler
 from .restart import request_restart, request_stop
 from .super_workspace import SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
@@ -86,11 +83,6 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 AGENT_PROVIDERS = {
     "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars"},
     "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge"},
-}
-
-AGENT_MANAGERS = {
-    "codex": codex_session_manager,
-    "hermes": hermes_session_manager,
 }
 
 NOISY_SUCCESS_PATHS = {
@@ -522,6 +514,12 @@ async def get_workspaces(user: str | None = None):
     return read_workspaces(user)
 
 
+@app.get("/api/workspaces/workspaces")
+async def list_workspaces(user: str | None = None):
+    data = read_workspaces(user)
+    return {"active_workspace_id": data.active_workspace_id, "workspaces": data.workspaces}
+
+
 @app.get("/api/workspaces/config")
 async def get_workspace_config():
     return read_config().workspace
@@ -537,29 +535,24 @@ async def put_workspace(workspace_id: str, snapshot: WorkspaceSnapshot, user: st
     return write_workspace(workspace_id, snapshot, user)
 
 
-@app.post("/api/workspaces/{workspace_id}/agent-sessions")
-async def add_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
-    return add_workspace_agent_session(workspace_id, request.ref, user)
-
-
-@app.delete("/api/workspaces/{workspace_id}/agent-sessions")
-async def remove_workspace_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
-    return remove_workspace_agent_session(workspace_id, request.ref, user)
-
-
-@app.post("/api/workspaces/{workspace_id}/pinned-agent-sessions")
-async def add_workspace_pinned_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
-    return add_workspace_pinned_agent_session(workspace_id, request.ref, user)
-
-
-@app.delete("/api/workspaces/{workspace_id}/pinned-agent-sessions")
-async def remove_workspace_pinned_agent_session_route(workspace_id: str, request: WorkspaceAgentSessionRequest, user: str | None = None):
-    return remove_workspace_pinned_agent_session(workspace_id, request.ref, user)
-
-
-@app.post("/api/workspaces/{workspace_id}/activate")
+@app.post("/api/workspaces/active-workspace/{workspace_id}")
 async def activate_workspace(workspace_id: str, user: str | None = None):
     return set_active_workspace(workspace_id, user)
+
+
+@app.get("/api/workspaces/role-statuses/{workspace_id}")
+async def workspace_role_statuses(workspace_id: str, user: str | None = None):
+    return conventional_workspace_agents.role_statuses(user, workspace_id)
+
+
+@app.post("/api/workspaces/{workspace_id}/roles")
+async def add_workspace_role_route(workspace_id: str, request: WorkspaceRoleAttachRequest, user: str | None = None):
+    return conventional_workspace_agents.attach_role(user, workspace_id, request.ref)
+
+
+@app.delete("/api/workspaces/{workspace_id}/roles/{session_ref:path}")
+async def remove_workspace_role_route(workspace_id: str, session_ref: str, user: str | None = None):
+    return conventional_workspace_agents.remove_role(user, workspace_id, session_ref)
 
 
 @app.get("/api/agent-loops")
@@ -772,10 +765,7 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
 
 
 def _agent_manager(provider: str):
-    manager = AGENT_MANAGERS.get(provider)
-    if manager:
-        return manager
-    raise HTTPException(status_code=400, detail="Unsupported agent provider")
+    return conventional_workspace_agents.manager(provider)
 
 
 @app.get("/api/agents/providers")
@@ -872,16 +862,22 @@ async def dispatch_super_workspace(request: SuperDispatchRequest, user: str | No
 @app.get("/api/agents/sessions")
 async def agent_sessions(provider: str | None = None, user: str | None = None):
     if provider:
-        return _agent_manager(provider).list(user)
+        return conventional_workspace_agents.list_sessions(provider, user)
     return {
-        provider: manager.list(user) for provider, manager in AGENT_MANAGERS.items()
+        provider: conventional_workspace_agents.list_sessions(provider, user) for provider in conventional_workspace_agents.providers
     }
 
 
 @app.post("/api/agents/sessions")
 async def create_agent_session(config: AgentSessionCreate, user: str | None = None):
     logger.info("Creating {} session cwd={}", config.provider, config.cwd or "")
-    return await _agent_manager(config.provider).create(config.prompt, config.cwd, config.model, user)
+    return await conventional_workspace_agents.create_session(
+        provider=config.provider,
+        prompt=config.prompt,
+        cwd=config.cwd,
+        model=config.model,
+        user=user,
+    )
 
 
 @app.get("/api/agents/sessions/{session_id}")
@@ -890,27 +886,15 @@ async def agent_session(session_id: str, provider: str, detail: str | None = "fo
 
 
 @app.post("/api/agents/sessions/{session_id}/messages")
-async def send_agent_message(session_id: str, message: AgentSessionMessage):
+async def send_agent_message(session_id: str, message: AgentSessionMessage, user: str | None = None):
     logger.info("Sending {} message session={}", message.provider, session_id)
-    return await _agent_manager(message.provider).send(session_id, message.prompt, message.model)
+    return await conventional_workspace_agents.dispatch_turn(message.provider, session_id, message.prompt, message.model, user)
 
 
 @app.post("/api/agents/sessions/{session_id}/queue")
-async def queue_agent_message(session_id: str, message: AgentQueueMessage):
+async def queue_agent_message(session_id: str, message: AgentQueueMessage, user: str | None = None):
     logger.info("Queueing {} message session={}", message.provider, session_id)
-    return await _agent_manager(message.provider).enqueue(session_id, message.prompt, message.model)
-
-
-@app.put("/api/agents/sessions/{session_id}/queue/{item_id}")
-async def update_agent_queue_message(session_id: str, item_id: str, message: AgentQueueMessage):
-    logger.info("Updating queued {} message session={} item={}", message.provider, session_id, item_id)
-    return await _agent_manager(message.provider).update_queue_item(session_id, item_id, message.prompt, message.model)
-
-
-@app.delete("/api/agents/sessions/{session_id}/queue/{item_id}")
-async def delete_agent_queue_message(session_id: str, item_id: str, provider: str):
-    logger.info("Deleting queued {} message session={} item={}", provider, session_id, item_id)
-    return await _agent_manager(provider).delete_queue_item(session_id, item_id)
+    return await conventional_workspace_agents.dispatch_turn(message.provider, session_id, message.prompt, message.model, user)
 
 
 @app.post("/api/agents/sessions/{session_id}/terminate")
@@ -930,11 +914,6 @@ async def agent_session_ws(websocket: WebSocket, session_id: str, provider: str,
     await _agent_manager(provider).connect(session_id, websocket, detail)
 
 
-@app.get("/api/codex/sessions")
-async def codex_sessions(user: str | None = None):
-    return codex_session_manager.list(user)
-
-
 @app.get("/api/codex/status", response_model=CodexCliStatus)
 async def codex_status():
     return codex_session_manager.cli_status()
@@ -943,103 +922,6 @@ async def codex_status():
 @app.get("/api/codex/models", response_model=CodexModelOptions)
 async def codex_models():
     return await codex_session_manager.model_options()
-
-
-@app.post("/api/codex/sessions")
-async def create_codex_session(config: CodexSessionCreate, user: str | None = None):
-    logger.info("Creating Codex session cwd={}", config.cwd or "")
-    return await codex_session_manager.create(config.prompt, config.cwd, config.model, user)
-
-
-@app.get("/api/codex/sessions/{session_id}")
-async def codex_session(session_id: str):
-    return codex_session_manager.snapshot(session_id, "full")
-
-
-@app.post("/api/codex/sessions/{session_id}/messages")
-async def send_codex_message(session_id: str, message: CodexSessionMessage):
-    logger.info("Sending Codex message session={}", session_id)
-    return await codex_session_manager.send(session_id, message.prompt, message.model)
-
-
-@app.post("/api/codex/sessions/{session_id}/queue")
-async def queue_codex_message(session_id: str, message: CodexQueueMessage):
-    logger.info("Queueing Codex message session={}", session_id)
-    return await codex_session_manager.enqueue(session_id, message.prompt, message.model)
-
-
-@app.put("/api/codex/sessions/{session_id}/queue/{item_id}")
-async def update_codex_queue_message(session_id: str, item_id: str, message: CodexQueueMessage):
-    logger.info("Updating queued Codex message session={} item={}", session_id, item_id)
-    return await codex_session_manager.update_queue_item(session_id, item_id, message.prompt, message.model)
-
-
-@app.delete("/api/codex/sessions/{session_id}/queue/{item_id}")
-async def delete_codex_queue_message(session_id: str, item_id: str):
-    logger.info("Deleting queued Codex message session={} item={}", session_id, item_id)
-    return await codex_session_manager.delete_queue_item(session_id, item_id)
-
-
-@app.post("/api/codex/sessions/{session_id}/terminate")
-async def terminate_codex_session(session_id: str):
-    logger.info("Terminating Codex session {}", session_id)
-    return await codex_session_manager.terminate(session_id)
-
-
-@app.websocket("/api/codex/sessions/{session_id}/ws")
-async def codex_session_ws(websocket: WebSocket, session_id: str):
-    await codex_session_manager.connect(session_id, websocket, "full")
-
-
-@app.get("/api/hermes/sessions")
-async def hermes_sessions(user: str | None = None):
-    return hermes_session_manager.list(user)
-
-
-@app.post("/api/hermes/sessions")
-async def create_hermes_session(config: HermesSessionCreate, user: str | None = None):
-    logger.info("Creating Hermes session cwd={}", config.cwd or "")
-    return await hermes_session_manager.create(config.prompt, config.cwd, config.model, user)
-
-
-@app.get("/api/hermes/sessions/{session_id}")
-async def hermes_session(session_id: str):
-    return hermes_session_manager.snapshot(session_id, "full")
-
-
-@app.post("/api/hermes/sessions/{session_id}/messages")
-async def send_hermes_message(session_id: str, message: HermesSessionMessage):
-    logger.info("Sending Hermes message session={}", session_id)
-    return await hermes_session_manager.send(session_id, message.prompt, message.model)
-
-
-@app.post("/api/hermes/sessions/{session_id}/queue")
-async def queue_hermes_message(session_id: str, message: HermesQueueMessage):
-    logger.info("Queueing Hermes message session={}", session_id)
-    return await hermes_session_manager.enqueue(session_id, message.prompt, message.model)
-
-
-@app.put("/api/hermes/sessions/{session_id}/queue/{item_id}")
-async def update_hermes_queue_message(session_id: str, item_id: str, message: HermesQueueMessage):
-    logger.info("Updating queued Hermes message session={} item={}", session_id, item_id)
-    return await hermes_session_manager.update_queue_item(session_id, item_id, message.prompt, message.model)
-
-
-@app.delete("/api/hermes/sessions/{session_id}/queue/{item_id}")
-async def delete_hermes_queue_message(session_id: str, item_id: str):
-    logger.info("Deleting queued Hermes message session={} item={}", session_id, item_id)
-    return await hermes_session_manager.delete_queue_item(session_id, item_id)
-
-
-@app.post("/api/hermes/sessions/{session_id}/terminate")
-async def terminate_hermes_session(session_id: str):
-    logger.info("Terminating Hermes session {}", session_id)
-    return await hermes_session_manager.terminate(session_id)
-
-
-@app.websocket("/api/hermes/sessions/{session_id}/ws")
-async def hermes_session_ws(websocket: WebSocket, session_id: str):
-    await hermes_session_manager.connect(session_id, websocket, "full")
 
 
 @app.websocket("/api/voice/ws")

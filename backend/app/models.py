@@ -145,18 +145,25 @@ class WorkspaceSnapshot(BaseModel):
     current_path: str = ""
     pinned: list[str] | None = None
     agent_session_ids: list[str] = Field(default_factory=list)
-    pinned_agent_session_ids: list[str] = Field(default_factory=list)
     visit_times: dict[str, float] = Field(default_factory=dict)
     updated_at: float | None = None
 
 
-class WorkspaceAgentSessionRequest(BaseModel):
+class WorkspaceSummary(BaseModel):
+    id: str
+    name: str
+    created_at: float
+    updated_at: float
+
+
+class WorkspaceRoleAttachRequest(BaseModel):
     ref: str
 
 
 class WorkspaceData(BaseModel):
     active_workspace_id: str = "1"
     count: int = Field(default=5, ge=1, le=20)
+    workspaces: list[WorkspaceSummary] = Field(default_factory=list)
     slots: dict[str, WorkspaceSnapshot] = Field(default_factory=dict)
 
 
@@ -308,22 +315,6 @@ class CodexSessionSnapshot(CodexSessionInfo):
     events: list[AgentEvent] = Field(default_factory=list)
 
 
-class CodexSessionCreate(BaseModel):
-    prompt: str = ""
-    cwd: str | None = None
-    model: str | None = None
-
-
-class CodexSessionMessage(BaseModel):
-    prompt: str
-    model: str | None = None
-
-
-class CodexQueueMessage(BaseModel):
-    prompt: str
-    model: str | None = None
-
-
 class HermesSessionInfo(BaseModel):
     id: str
     hermes_session_id: str | None = None
@@ -346,22 +337,6 @@ class HermesSessionInfo(BaseModel):
 class HermesSessionSnapshot(HermesSessionInfo):
     prompts: list[AgentPrompt] = Field(default_factory=list)
     events: list[AgentEvent] = Field(default_factory=list)
-
-
-class HermesSessionCreate(BaseModel):
-    prompt: str = ""
-    cwd: str | None = None
-    model: str | None = None
-
-
-class HermesSessionMessage(BaseModel):
-    prompt: str
-    model: str | None = None
-
-
-class HermesQueueMessage(BaseModel):
-    prompt: str
-    model: str | None = None
 
 
 class AgentSessionCreate(BaseModel):

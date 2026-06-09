@@ -1,7 +1,6 @@
 import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerConfig, WorkspaceConfig } from "../types/files";
 import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
-import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
-import type { HermesSessionInfo, HermesSessionSnapshot } from "../types/hermes";
+import type { CodexCliStatus, CodexModelOptions } from "../types/codex";
 import type {
   SuperDisplayItemsPage,
   SuperDispatchResponse,
@@ -201,40 +200,24 @@ export async function putWorkspace(id: string, snapshot: WorkspaceSnapshot): Pro
   });
 }
 
-export async function addWorkspaceAgentSession(id: string, ref: string): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/agent-sessions`, {
+export async function attachWorkspaceRole(id: string, ref: string): Promise<WorkspaceData> {
+  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/roles`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ref }),
   });
 }
 
-export async function removeWorkspaceAgentSession(id: string, ref: string): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/agent-sessions`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ref }),
-  });
-}
-
-export async function addWorkspacePinnedAgentSession(id: string, ref: string): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/pinned-agent-sessions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ref }),
-  });
-}
-
-export async function removeWorkspacePinnedAgentSession(id: string, ref: string): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/pinned-agent-sessions`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ref }),
-  });
+export async function removeWorkspaceRole(id: string, ref: string): Promise<WorkspaceData> {
+  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/roles/${encodeURIComponent(ref)}`, { method: "DELETE" });
 }
 
 export async function activateWorkspace(id: string): Promise<WorkspaceData> {
-  return request<WorkspaceData>(`/api/workspaces/${encodeURIComponent(id)}/activate`, { method: "POST" });
+  return request<WorkspaceData>(`/api/workspaces/active-workspace/${encodeURIComponent(id)}`, { method: "POST" });
+}
+
+export async function getWorkspaceRoleStatuses(workspaceId: string): Promise<SuperRoleStatuses> {
+  return request<SuperRoleStatuses>(`/api/workspaces/role-statuses/${encodeURIComponent(workspaceId)}`);
 }
 
 export async function restartServer(): Promise<{ status: string; pid: number }> {
@@ -378,18 +361,6 @@ export async function queueAgentMessage(provider: AgentProvider, id: string, pro
   });
 }
 
-export async function updateAgentQueuedMessage(provider: AgentProvider, id: string, itemId: string, prompt: string, model?: string): Promise<unknown> {
-  return request<unknown>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider, prompt, model }),
-  });
-}
-
-export async function deleteAgentQueuedMessage(provider: AgentProvider, id: string, itemId: string): Promise<unknown> {
-  return request<unknown>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}?provider=${encodeURIComponent(provider)}`, { method: "DELETE" });
-}
-
 export async function terminateAgentSession(provider: AgentProvider, id: string): Promise<unknown> {
   return request<unknown>(`/api/agents/sessions/${encodeURIComponent(id)}/terminate`, {
     method: "POST",
@@ -410,124 +381,12 @@ export function agentSessionSocketUrl(provider: AgentProvider, id: string, detai
   return socketUrl(`/api/agents/sessions/${encodeURIComponent(id)}/ws?provider=${encodeURIComponent(provider)}&detail=${encodeURIComponent(detail)}`);
 }
 
-export async function listCodexSessions(): Promise<CodexSessionInfo[]> {
-  return request<CodexSessionInfo[]>("/api/agents/sessions?provider=codex");
-}
-
 export async function getCodexStatus(): Promise<CodexCliStatus> {
   return request<CodexCliStatus>("/api/codex/status");
 }
 
 export async function getCodexModels(): Promise<CodexModelOptions> {
   return request<CodexModelOptions>("/api/codex/models");
-}
-
-export async function createCodexSession(prompt: string, cwd = "", model?: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>("/api/agents/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "codex", prompt, cwd, model }),
-  });
-}
-
-export async function getCodexSession(id: string): Promise<CodexSessionSnapshot> {
-  return request<CodexSessionSnapshot>(`/api/agents/sessions/${encodeURIComponent(id)}?provider=codex`);
-}
-
-export async function sendCodexMessage(id: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "codex", prompt, model }),
-  });
-}
-
-export async function queueCodexMessage(id: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "codex", prompt, model }),
-  });
-}
-
-export async function updateCodexQueuedMessage(id: string, itemId: string, prompt: string, model?: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "codex", prompt, model }),
-  });
-}
-
-export async function deleteCodexQueuedMessage(id: string, itemId: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}?provider=codex`, { method: "DELETE" });
-}
-
-export async function terminateCodexSession(id: string): Promise<CodexSessionInfo> {
-  return request<CodexSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/terminate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "codex" }),
-  });
-}
-
-export function codexSessionSocketUrl(id: string): string {
-  return agentSessionSocketUrl("codex", id);
-}
-
-export async function listHermesSessions(): Promise<HermesSessionInfo[]> {
-  return request<HermesSessionInfo[]>("/api/agents/sessions?provider=hermes");
-}
-
-export async function createHermesSession(prompt: string, cwd = "", model?: string): Promise<HermesSessionInfo> {
-  return request<HermesSessionInfo>("/api/agents/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "hermes", prompt, cwd, model }),
-  });
-}
-
-export async function getHermesSession(id: string): Promise<HermesSessionSnapshot> {
-  return request<HermesSessionSnapshot>(`/api/agents/sessions/${encodeURIComponent(id)}?provider=hermes`);
-}
-
-export async function sendHermesMessage(id: string, prompt: string, model?: string): Promise<HermesSessionInfo> {
-  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "hermes", prompt, model }),
-  });
-}
-
-export async function queueHermesMessage(id: string, prompt: string, model?: string): Promise<HermesSessionInfo> {
-  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "hermes", prompt, model }),
-  });
-}
-
-export async function updateHermesQueuedMessage(id: string, itemId: string, prompt: string, model?: string): Promise<HermesSessionInfo> {
-  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "hermes", prompt, model }),
-  });
-}
-
-export async function deleteHermesQueuedMessage(id: string, itemId: string): Promise<HermesSessionInfo> {
-  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(itemId)}?provider=hermes`, { method: "DELETE" });
-}
-
-export async function terminateHermesSession(id: string): Promise<HermesSessionInfo> {
-  return request<HermesSessionInfo>(`/api/agents/sessions/${encodeURIComponent(id)}/terminate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: "hermes" }),
-  });
-}
-
-export function hermesSessionSocketUrl(id: string): string {
-  return agentSessionSocketUrl("hermes", id);
 }
 
 export async function listAgentLoops(): Promise<AgentLoopInfo[]> {

@@ -1,14 +1,12 @@
 import { defineStore } from "pinia";
 import {
   activateWorkspace,
-  addWorkspaceAgentSession,
-  addWorkspacePinnedAgentSession,
+  attachWorkspaceRole,
   getWorkspaces,
   putWorkspace,
-  removeWorkspaceAgentSession,
-  removeWorkspacePinnedAgentSession,
+  removeWorkspaceRole,
 } from "../api/client";
-import type { WorkspaceData, WorkspaceSnapshot } from "../types/workspaces";
+import type { WorkspaceData, WorkspaceSnapshot, WorkspaceSummary } from "../types/workspaces";
 
 function uniqueIds(ids: string[]) {
   return [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
@@ -18,9 +16,9 @@ export const useWorkspacesStore = defineStore("workspaces", {
   state: () => ({
     activeWorkspaceId: "1",
     count: 5,
+    workspaces: [] as WorkspaceSummary[],
     slots: {} as Record<string, WorkspaceSnapshot>,
     activeAgentSessionRefs: [] as string[],
-    activePinnedAgentSessionRefs: [] as string[],
     loaded: false,
     switching: false,
   }),
@@ -28,6 +26,12 @@ export const useWorkspacesStore = defineStore("workspaces", {
     applyData(data: WorkspaceData, fallbackActiveId?: string, preserveActive = false) {
       this.activeWorkspaceId = preserveActive ? this.activeWorkspaceId : data.active_workspace_id || fallbackActiveId || "1";
       this.count = Math.min(20, Math.max(1, Math.round(Number(data.count || 5))));
+      this.workspaces = data.workspaces?.length
+        ? data.workspaces
+        : Array.from({ length: this.count }, (_, index) => {
+            const id = String(index + 1);
+            return { id, name: `Traditional Workspace ${id}`, created_at: 0, updated_at: 0 };
+          });
       this.slots = data.slots ?? {};
       this.loaded = true;
     },
@@ -40,48 +44,20 @@ export const useWorkspacesStore = defineStore("workspaces", {
     },
     restoreActiveAgentSessions(snapshot: WorkspaceSnapshot | null) {
       this.activeAgentSessionRefs = uniqueIds(snapshot?.agent_session_ids ?? []);
-      this.activePinnedAgentSessionRefs = uniqueIds(snapshot?.pinned_agent_session_ids ?? []);
     },
     async rememberActiveAgentSession(ref: string, workspaceId?: string) {
       const targetWorkspaceId = workspaceId ?? this.activeWorkspaceId;
       this.activeAgentSessionRefs = uniqueIds([...this.activeAgentSessionRefs, ref]);
-      const data = await addWorkspaceAgentSession(targetWorkspaceId, ref);
+      const data = await attachWorkspaceRole(targetWorkspaceId, ref);
       this.applyData(data, targetWorkspaceId, true);
       if (this.activeWorkspaceId === targetWorkspaceId) this.restoreActiveAgentSessions(this.slots[targetWorkspaceId] ?? null);
     },
     async forgetActiveAgentSession(ref: string, workspaceId?: string) {
       const targetWorkspaceId = workspaceId ?? this.activeWorkspaceId;
       this.activeAgentSessionRefs = this.activeAgentSessionRefs.filter((item) => item !== ref);
-      this.activePinnedAgentSessionRefs = this.activePinnedAgentSessionRefs.filter((item) => item !== ref);
-      const data = await removeWorkspaceAgentSession(targetWorkspaceId, ref);
+      const data = await removeWorkspaceRole(targetWorkspaceId, ref);
       this.applyData(data, targetWorkspaceId, true);
       if (this.activeWorkspaceId === targetWorkspaceId) this.restoreActiveAgentSessions(this.slots[targetWorkspaceId] ?? null);
-    },
-    async pinActiveAgentSession(ref: string, workspaceId?: string) {
-      const targetWorkspaceId = workspaceId ?? this.activeWorkspaceId;
-      this.activePinnedAgentSessionRefs = uniqueIds([...this.activePinnedAgentSessionRefs, ref]);
-      const data = await addWorkspacePinnedAgentSession(targetWorkspaceId, ref);
-      this.applyData(data, targetWorkspaceId, true);
-      if (this.activeWorkspaceId === targetWorkspaceId) this.restoreActiveAgentSessions(this.slots[targetWorkspaceId] ?? null);
-    },
-    async unpinActiveAgentSession(ref: string, workspaceId?: string) {
-      const targetWorkspaceId = workspaceId ?? this.activeWorkspaceId;
-      this.activePinnedAgentSessionRefs = this.activePinnedAgentSessionRefs.filter((item) => item !== ref);
-      const data = await removeWorkspacePinnedAgentSession(targetWorkspaceId, ref);
-      this.applyData(data, targetWorkspaceId, true);
-      if (this.activeWorkspaceId === targetWorkspaceId) this.restoreActiveAgentSessions(this.slots[targetWorkspaceId] ?? null);
-    },
-    async rememberActiveCodexSession(id: string, workspaceId?: string) {
-      await this.rememberActiveAgentSession(`codex:${id}`, workspaceId);
-    },
-    async forgetActiveCodexSession(id: string, workspaceId?: string) {
-      await this.forgetActiveAgentSession(`codex:${id}`, workspaceId);
-    },
-    async rememberActiveHermesSession(id: string, workspaceId?: string) {
-      await this.rememberActiveAgentSession(`hermes:${id}`, workspaceId);
-    },
-    async forgetActiveHermesSession(id: string, workspaceId?: string) {
-      await this.forgetActiveAgentSession(`hermes:${id}`, workspaceId);
     },
     async saveSlot(id: string, snapshot: WorkspaceSnapshot, options?: { apply?: boolean; restoreActive?: boolean }) {
       const data = await putWorkspace(id, { ...snapshot, updated_at: Date.now() / 1000 });

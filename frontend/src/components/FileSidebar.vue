@@ -7,6 +7,7 @@ import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 import { namespacedStorageKey } from "../utils/userProfile";
+import type { WorkspaceSummary } from "../types/workspaces";
 
 type SidebarTool = "files" | "git" | "terminals" | "agents";
 type WorkspaceNotice = "running" | "completed" | "failed";
@@ -16,6 +17,7 @@ const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 
 const props = defineProps<{
   workspaceCount: number;
+  workspaces: WorkspaceSummary[];
   activeWorkspaceId: string;
   agentSessionRefs: string[];
   panelOpen: boolean;
@@ -53,7 +55,14 @@ function storedTool(): SidebarTool {
 const activeTool = ref<SidebarTool>(storedTool());
 const gitIndicator = ref<GitIndicator>("none");
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
-const workspaceIds = computed(() => Array.from({ length: Math.max(1, props.workspaceCount) }, (_, index) => String(index + 1)));
+const workspaceItems = computed(() =>
+  props.workspaces.length
+    ? props.workspaces
+    : Array.from({ length: Math.max(1, props.workspaceCount) }, (_, index) => {
+        const id = String(index + 1);
+        return { id, name: `Traditional Workspace ${id}`, created_at: 0, updated_at: 0 };
+      }),
+);
 let gitStatusTimer: number | null = null;
 let gitStatusRequestId = 0;
 
@@ -77,12 +86,12 @@ function selectWorkspace(id: string) {
   emit("switch-workspace", id);
 }
 
-function workspaceTitle(id: string) {
-  const notice = props.workspaceNotices?.[id];
-  if (notice === "running") return `Workspace ${id}: agent run is running`;
-  if (notice === "failed") return `Workspace ${id}: agent run failed`;
-  if (notice === "completed") return `Workspace ${id}: agent run finished`;
-  return `Workspace ${id}`;
+function workspaceTitle(workspace: WorkspaceSummary) {
+  const notice = props.workspaceNotices?.[workspace.id];
+  if (notice === "running") return `${workspace.name}: agent run is running`;
+  if (notice === "failed") return `${workspace.name}: agent run failed`;
+  if (notice === "completed") return `${workspace.name}: agent run finished`;
+  return workspace.name;
 }
 
 function workspaceNoticeClass(id: string) {
@@ -148,18 +157,21 @@ onUnmounted(() => {
       </button>
       <div class="workspace-buttons" aria-label="Workspaces">
         <button
-          v-for="id in workspaceIds"
-          :key="id"
+          v-for="workspace in workspaceItems"
+          :key="workspace.id"
           class="activity-button workspace-button"
-          :class="[{ active: props.activeWorkspaceId === id, 'workspace-switching': props.switchingWorkspace && props.activeWorkspaceId === id }, workspaceNoticeClass(id)]"
-          :style="workspaceHeatStyle(id)"
+          :class="[
+            { active: props.activeWorkspaceId === workspace.id, 'workspace-switching': props.switchingWorkspace && props.activeWorkspaceId === workspace.id },
+            workspaceNoticeClass(workspace.id),
+          ]"
+          :style="workspaceHeatStyle(workspace.id)"
           type="button"
-          :title="workspaceTitle(id)"
-          :aria-label="workspaceTitle(id)"
-          :aria-pressed="props.activeWorkspaceId === id"
-          @click="selectWorkspace(id)"
+          :title="workspaceTitle(workspace)"
+          :aria-label="workspaceTitle(workspace)"
+          :aria-pressed="props.activeWorkspaceId === workspace.id"
+          @click="selectWorkspace(workspace.id)"
         >
-          <span>{{ id }}</span>
+          <span>{{ workspace.id }}</span>
         </button>
       </div>
     </nav>

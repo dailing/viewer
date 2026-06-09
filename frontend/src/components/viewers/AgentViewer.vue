@@ -9,7 +9,7 @@ import { usePaneToolbarStore } from "../../stores/paneToolbar";
 import { useVoiceStore } from "../../stores/voice";
 import { useWorkspacesStore } from "../../stores/workspaces";
 import type { PaneToolbarAction, PaneToolbarControl } from "../../stores/paneToolbar";
-import type { AgentEvent, AgentQueueItem, AgentSessionInfo, AgentSessionSnapshot, AgentSocketMessage } from "../../types/agents";
+import type { AgentEvent, AgentSessionInfo, AgentSessionSnapshot, AgentSocketMessage } from "../../types/agents";
 import { agentSessionSocketUrl } from "../../api/client";
 import { agentRef, parseAgentRef, toAgentSessionInfo, toAgentSessionSnapshot } from "../../utils/agents";
 import { namespacedStorageKey } from "../../utils/userProfile";
@@ -33,7 +33,6 @@ const focusMode = ref(true);
 const rawJson = ref(false);
 const stopping = ref(false);
 const creatingSession = ref(false);
-const editingQueueItemId = ref<string | null>(null);
 const previewPath = ref<string | null>(null);
 
 const AGENT_DRAFTS_KEY = "viewer.agentDrafts.v1";
@@ -47,7 +46,6 @@ const provider = computed(() => parsedRef.value?.provider ?? "");
 const providerSessionId = computed(() => parsedRef.value?.id ?? "");
 const providerInfo = computed(() => agents.providerById(provider.value));
 const isCodex = computed(() => provider.value === "codex");
-const isEditingQueue = computed(() => editingQueueItemId.value !== null);
 const isActivePane = computed(() => layout.activePaneId === props.paneId);
 const voiceContextId = computed(() => `${provider.value}:${providerSessionId.value}:prompt`);
 const codexStatusItems = computed(() => {
@@ -155,18 +153,10 @@ function applyInfo(info: AgentSessionInfo) {
   session.value.pending_approvals = info.pending_approvals ?? [];
   session.value.raw = info.raw;
   if (isActivePane.value) agents.markRead(props.agentRef);
-  if (editingQueueItemId.value && !session.value.queue.some((item) => item.id === editingQueueItemId.value)) {
-    editingQueueItemId.value = null;
-    restorePromptDraft();
-  }
 }
 
 function applySnapshot(snapshot: AgentSessionSnapshot) {
   session.value = snapshot;
-  if (editingQueueItemId.value && !snapshot.queue.some((item) => item.id === editingQueueItemId.value)) {
-    editingQueueItemId.value = null;
-    restorePromptDraft();
-  }
   agents.upsert(snapshot);
   syncProviderStore(snapshot);
   updatePaneToolbar();
@@ -242,7 +232,7 @@ function handleRefresh(event: Event) {
 
 async function queuePrompt() {
   const prompt = promptText.value.trim();
-  if (!prompt || !session.value || isEditingQueue.value) return;
+  if (!prompt || !session.value) return;
   error.value = "";
   try {
     applyInfo(await agents.queue(props.agentRef, prompt, selectedModel.value));
@@ -250,45 +240,6 @@ async function queuePrompt() {
     promptText.value = "";
     voice.clear(voiceContextId.value);
     transcript.value?.scrollToBottom(true);
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
-  }
-}
-
-function editQueuedMessage(item: AgentQueueItem) {
-  savePromptDraft(props.agentRef, promptText.value);
-  editingQueueItemId.value = item.id;
-  promptText.value = item.prompt;
-}
-
-async function saveQueuedMessage() {
-  const prompt = promptText.value.trim();
-  const itemId = editingQueueItemId.value;
-  if (!prompt || !itemId || !session.value) return;
-  error.value = "";
-  try {
-    applyInfo(await agents.updateQueued(props.agentRef, itemId, prompt, selectedModel.value));
-    editingQueueItemId.value = null;
-    restorePromptDraft();
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
-  }
-}
-
-function cancelQueuedEdit() {
-  editingQueueItemId.value = null;
-  restorePromptDraft();
-}
-
-async function deleteQueuedMessage(itemId: string) {
-  if (!session.value) return;
-  error.value = "";
-  try {
-    applyInfo(await agents.deleteQueued(props.agentRef, itemId));
-    if (editingQueueItemId.value === itemId) {
-      editingQueueItemId.value = null;
-      restorePromptDraft();
-    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -378,15 +329,14 @@ function updatePaneToolbar() {
 }
 
 watch(() => props.agentRef, (ref, previousRef) => {
-  if (previousRef && !isEditingQueue.value) savePromptDraft(previousRef, promptText.value);
+  if (previousRef) savePromptDraft(previousRef, promptText.value);
   socket?.close();
-  editingQueueItemId.value = null;
   promptText.value = loadPromptDraft(ref);
   session.value = null;
   connect();
 });
 watch(promptText, (text) => {
-  if (!isEditingQueue.value) savePromptDraft(props.agentRef, text);
+  savePromptDraft(props.agentRef, text);
 });
 watch(focusMode, updatePaneToolbar);
 watch(rawJson, updatePaneToolbar);
@@ -437,16 +387,10 @@ onUnmounted(() => {
     />
     <AgentPromptComposer
       v-model="promptText"
-      :queue="session?.queue ?? []"
-      :editing-queue-item-id="editingQueueItemId"
       :voice-context-id="voiceContextId"
       :status="session?.status"
       :stopping="stopping"
       :placeholder="`Send a message to this ${providerInfo.name} session`"
-      @edit-queued="editQueuedMessage"
-      @delete-queued="deleteQueuedMessage"
-      @save-queued="saveQueuedMessage"
-      @cancel-queued="cancelQueuedEdit"
       @queue-prompt="queuePrompt"
       @clear-prompt="clearPrompt"
       @stop-run="stopRun"

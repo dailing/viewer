@@ -12,11 +12,8 @@ export function parseAgentRef(ref: string): { provider: AgentProvider; id: strin
   return { provider: ref.slice(0, index), id: ref.slice(index + 1) };
 }
 
-export function legacyAgentRefForPane(pane: { agentSession?: string; codexSessionId?: string; hermesSessionId?: string }): string | undefined {
-  if (pane.agentSession) return pane.agentSession;
-  if (pane.codexSessionId) return agentRef("codex", pane.codexSessionId);
-  if (pane.hermesSessionId) return agentRef("hermes", pane.hermesSessionId);
-  return undefined;
+export function agentRefForPane(pane: { agentSession?: string }): string | undefined {
+  return pane.agentSession;
 }
 
 export function providerSessionId(session: Record<string, unknown>, provider: AgentProvider): string | null {

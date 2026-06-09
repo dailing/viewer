@@ -1,7 +1,6 @@
 import { defineStore } from "pinia";
 import {
   createAgentSession,
-  deleteAgentQueuedMessage,
   getAgentSession,
   listAgentProviders,
   listAgentSessions,
@@ -9,7 +8,6 @@ import {
   resolveAgentApproval,
   sendAgentMessage,
   terminateAgentSession,
-  updateAgentQueuedMessage,
 } from "../api/client";
 import type { AgentProvider, AgentProviderInfo, AgentSessionInfo, AgentSessionSnapshot } from "../types/agents";
 import type { CodexSessionInfo, CodexSessionSnapshot } from "../types/codex";
@@ -96,22 +94,6 @@ export const useAgentsStore = defineStore("agents", {
       const parsed = parseAgentRef(ref);
       if (!parsed) throw new Error("Invalid agent session reference");
       const session = await queueAgentMessage(parsed.provider, parsed.id, prompt, model);
-      const next = toAgentSessionInfo(session as CodexSessionInfo | HermesSessionInfo, parsed.provider);
-      this.upsert(next);
-      return next;
-    },
-    async updateQueued(ref: string, itemId: string, prompt: string, model?: string) {
-      const parsed = parseAgentRef(ref);
-      if (!parsed) throw new Error("Invalid agent session reference");
-      const session = await updateAgentQueuedMessage(parsed.provider, parsed.id, itemId, prompt, model);
-      const next = toAgentSessionInfo(session as CodexSessionInfo | HermesSessionInfo, parsed.provider);
-      this.upsert(next);
-      return next;
-    },
-    async deleteQueued(ref: string, itemId: string) {
-      const parsed = parseAgentRef(ref);
-      if (!parsed) throw new Error("Invalid agent session reference");
-      const session = await deleteAgentQueuedMessage(parsed.provider, parsed.id, itemId);
       const next = toAgentSessionInfo(session as CodexSessionInfo | HermesSessionInfo, parsed.provider);
       this.upsert(next);
       return next;

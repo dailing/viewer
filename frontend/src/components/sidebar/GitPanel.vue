@@ -59,7 +59,7 @@ async function autoCommit() {
   error.value = "";
   try {
     const session = await codex.create(fileStore.codexConfig.auto_commit_prompt, fileStore.currentPath);
-    await workspaces.rememberActiveCodexSession(session.id);
+    await workspaces.rememberActiveAgentSession(session.ref);
     setMessage("Auto commit Codex started");
     await load();
   } catch (err) {

@@ -1,20 +1,16 @@
 import { defineStore } from "pinia";
 import {
-  createCodexSession,
-  deleteCodexQueuedMessage,
+  createAgentSession,
   getCodexModels,
   getCodexStatus,
-  listCodexSessions,
-  queueCodexMessage,
-  sendCodexMessage,
-  terminateCodexSession,
-  updateCodexQueuedMessage,
 } from "../api/client";
+import type { AgentSessionInfo } from "../types/agents";
 import type { CodexCliStatus, CodexModelOptions, CodexSessionInfo } from "../types/codex";
+import { toAgentSessionInfo } from "../utils/agents";
 
 export const useCodexStore = defineStore("codex", {
   state: () => ({
-    sessions: [] as CodexSessionInfo[],
+    sessions: [] as AgentSessionInfo[],
     status: { available: false } as CodexCliStatus,
     models: { selected_model: "gpt-5.5", available_models: ["gpt-5.5"], source: "config" } as CodexModelOptions,
     modelManuallySelected: false,
@@ -26,8 +22,7 @@ export const useCodexStore = defineStore("codex", {
       if (this.loading) return;
       this.loading = true;
       try {
-        const [sessions, status, models] = await Promise.all([listCodexSessions(), getCodexStatus(), getCodexModels()]);
-        this.sessions = sessions;
+        const [status, models] = await Promise.all([getCodexStatus(), getCodexModels()]);
         this.applyOptions(status, models);
       } finally {
         this.loading = false;
@@ -65,36 +60,12 @@ export const useCodexStore = defineStore("codex", {
       }
     },
     async create(prompt: string, cwd = "") {
-      const session = await createCodexSession(prompt, cwd, this.models.selected_model);
-      this.upsert(session);
-      return session;
+      const session = await createAgentSession("codex", prompt, cwd, this.models.selected_model);
+      const next = toAgentSessionInfo(session as CodexSessionInfo, "codex");
+      this.upsert(next);
+      return next;
     },
-    async send(id: string, prompt: string) {
-      const session = await sendCodexMessage(id, prompt, this.models.selected_model);
-      this.upsert(session);
-      return session;
-    },
-    async queue(id: string, prompt: string) {
-      const session = await queueCodexMessage(id, prompt, this.models.selected_model);
-      this.upsert(session);
-      return session;
-    },
-    async updateQueued(id: string, itemId: string, prompt: string) {
-      const session = await updateCodexQueuedMessage(id, itemId, prompt, this.models.selected_model);
-      this.upsert(session);
-      return session;
-    },
-    async deleteQueued(id: string, itemId: string) {
-      const session = await deleteCodexQueuedMessage(id, itemId);
-      this.upsert(session);
-      return session;
-    },
-    async terminate(id: string) {
-      const session = await terminateCodexSession(id);
-      this.upsert(session);
-      return session;
-    },
-    upsert(session: CodexSessionInfo) {
+    upsert(session: AgentSessionInfo) {
       const index = this.sessions.findIndex((item) => item.id === session.id);
       if (index === -1) {
         this.sessions = [session, ...this.sessions];

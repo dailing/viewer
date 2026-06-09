@@ -74,6 +74,7 @@ class HermesSession:
     total_tokens: int | None = None
     suppress_queue_drain: bool = False
     local_approval_responses: int = 0
+    lineage: dict[str, str | None] = field(default_factory=dict)
 
     def summary(self) -> dict:
         return {
@@ -133,6 +134,7 @@ class HermesSessionManager:
                     queue=self._queue_from_meta(meta.get("queue")),
                     pending_approvals=self._approvals_from_meta(meta.get("pending_approvals")),
                     meta_path=meta_path,
+                    lineage=meta.get("lineage") if isinstance(meta.get("lineage"), dict) else {},
                 )
                 self._sync_db_events(session)
                 self.sessions[session_id] = session
@@ -210,6 +212,7 @@ class HermesSessionManager:
                 "prompts": session.prompts,
                 "queue": session.queue,
                 "pending_approvals": session.pending_approvals,
+                "lineage": session.lineage,
             },
             indent=2,
         )
@@ -381,9 +384,44 @@ class HermesSessionManager:
         if session.hermes_session_id and HERMES_STATE_DB.exists():
             self._sync_session_row(session)
         new_events = events[old_count:]
+        if new_events and session.lineage:
+            self._record_lineage_events(session, new_events, old_count)
         if new_events:
             self._write_meta(session)
         return new_events
+
+    def _record_lineage_events(self, session: HermesSession, events: list[dict], start_index: int) -> None:
+        try:
+            from .agent_history import agent_history_store
+        except Exception:
+            return
+        lineage = session.lineage
+        for offset, event in enumerate(events):
+            absolute_index = start_index + offset
+            raw = event.get("raw_preview") if isinstance(event.get("raw_preview"), dict) else {"source": "hermes"}
+            event_type = event.get("event_type")
+            agent_history_store.record_provider_message(
+                user_id=session.user_id,
+                workspace_id=lineage.get("workspace_id"),
+                provider="hermes",
+                viewer_session_id=session.id,
+                provider_session_id=session.hermes_session_id,
+                query_message_id=lineage.get("query_message_id"),
+                driver_run_id=lineage.get("driver_run_id"),
+                parent_message_id=lineage.get("parent_message_id"),
+                sender_role_id=lineage.get("sender_role_id"),
+                recipient_role_id=lineage.get("recipient_role_id"),
+                role_id=lineage.get("role_id"),
+                event_index=absolute_index,
+                received_at=float(event.get("received_at") or time.time()),
+                source_path=HERMES_STATE_DB.as_posix(),
+                source_event_id=f"hermes:{session.hermes_session_id}:{absolute_index}",
+                source_line=None,
+                role="assistant",
+                event_type=str(event_type or "operation"),
+                text=str(event.get("text") or ""),
+                raw=raw,
+            )
 
     def _sync_session_row(self, session: HermesSession) -> None:
         try:
@@ -460,7 +498,14 @@ class HermesSessionManager:
         self._sync_db_events(session)
         return session
 
-    async def create(self, prompt: str, cwd: str | None = None, model: str | None = None, user_id: str | None = None) -> dict:
+    async def create(
+        self,
+        prompt: str,
+        cwd: str | None = None,
+        model: str | None = None,
+        user_id: str | None = None,
+        lineage: dict[str, str | None] | None = None,
+    ) -> dict:
         self._ensure_loaded()
         session_id = uuid.uuid4().hex
         normalized_user_id = normalize_user_id(user_id)
@@ -478,6 +523,7 @@ class HermesSessionManager:
             status="idle",
             prompts=[{"text": cleaned_prompt, "created_at": now}] if cleaned_prompt else [],
             meta_path=self._paths(session_id),
+            lineage=dict(lineage or {}),
         )
         self.sessions[session_id] = session
         self._write_meta(session)
@@ -486,7 +532,7 @@ class HermesSessionManager:
             session.run_task = asyncio.create_task(self._run(session, cleaned_prompt))
         return session.summary()
 
-    async def send(self, session_id: str, prompt: str, model: str | None = None) -> dict:
+    async def send(self, session_id: str, prompt: str, model: str | None = None, lineage: dict[str, str | None] | None = None) -> dict:
         session = self.get(session_id)
         cleaned_prompt = prompt.strip()
         if not cleaned_prompt:
@@ -497,6 +543,8 @@ class HermesSessionManager:
         session.prompts.append({"text": cleaned_prompt, "created_at": now})
         if model:
             session.model = model
+        if lineage is not None:
+            session.lineage = dict(lineage)
         if not session.hermes_session_id:
             session.hermes_session_id = session.id
         if not session.events:

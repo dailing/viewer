@@ -422,11 +422,13 @@ def read_config() -> ConfigData:
         markdown=config.markdown,
         codex=config.codex,
         voice=config.voice,
+        super_workspace=config.super_workspace,
         users=list_user_profiles(),
         default_user=default_user_id(),
     )
     codex_raw = raw.get("codex") if isinstance(raw, dict) else None
     voice_raw = raw.get("voice") if isinstance(raw, dict) else None
+    super_workspace_raw = raw.get("super_workspace") if isinstance(raw, dict) else None
     missing_codex_defaults = not isinstance(codex_raw, dict)
     missing_voice_defaults = (
         not isinstance(voice_raw, dict)
@@ -434,10 +436,12 @@ def read_config() -> ConfigData:
         or "available_languages" not in voice_raw
         or "translation_enabled" not in voice_raw
     )
+    missing_super_workspace_defaults = not isinstance(super_workspace_raw, dict) or "chat_history_bootstrap_tokens" not in super_workspace_raw
     missing_user_defaults = "users" not in raw or "default_user" not in raw
     if isinstance(raw, dict) and (
         missing_codex_defaults
         or missing_voice_defaults
+        or missing_super_workspace_defaults
         or missing_user_defaults
     ):
         write_config(cleaned)
@@ -449,4 +453,3 @@ def write_config(config: ConfigData) -> ConfigData:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
     return config
-

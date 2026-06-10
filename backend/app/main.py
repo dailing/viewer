@@ -182,9 +182,9 @@ async def debug_log():
 
 
 @app.post("/api/admin/restart", status_code=202)
-async def restart_server():
+async def restart_server(include_worker: bool = False):
     try:
-        return request_restart()
+        return request_restart(include_worker=include_worker)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -472,6 +472,7 @@ async def put_config(config: ConfigData):
             markdown=config.markdown,
             codex=config.codex,
             voice=config.voice,
+            super_workspace=config.super_workspace,
             users=config.users or current.users,
             default_user=config.default_user or current.default_user,
         )

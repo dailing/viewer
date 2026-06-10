@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
-import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, VoiceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, SuperWorkspaceConfig, ViewerConfig, VoiceConfig } from "../types/files";
 import { parentPath as resolveParentPath } from "../utils/paths";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
@@ -52,6 +52,14 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   translation_enabled: false,
   available_target_languages: ["en", "zh", "ja", "ko", "fr", "de", "es"],
   target_language: "en",
+};
+
+export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
+  hindsight_retain_enabled: true,
+  hindsight_api_url: "",
+  hindsight_bank_prefix: "super-workspace",
+  chat_history_bootstrap_enabled: true,
+  chat_history_bootstrap_tokens: 5000,
 };
 
 function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
@@ -154,6 +162,17 @@ function normalizeAlpha(value: unknown, fallback: number): number {
   return Math.min(1, Math.max(0.15, alpha));
 }
 
+function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): SuperWorkspaceConfig {
+  const tokens = Number(config?.chat_history_bootstrap_tokens ?? DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens);
+  return {
+    hindsight_retain_enabled: config?.hindsight_retain_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_retain_enabled,
+    hindsight_api_url: config?.hindsight_api_url?.trim() ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_api_url,
+    hindsight_bank_prefix: config?.hindsight_bank_prefix?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_bank_prefix,
+    chat_history_bootstrap_enabled: config?.chat_history_bootstrap_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_enabled,
+    chat_history_bootstrap_tokens: Math.min(50000, Math.max(0, Number.isFinite(tokens) ? Math.floor(tokens) : DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens)),
+  };
+}
+
 export const useFilesStore = defineStore("files", {
   state: () => ({
     listings: {} as Record<string, DirectoryListing>,
@@ -165,6 +184,7 @@ export const useFilesStore = defineStore("files", {
     markdown: normalizeMarkdown(),
     codexConfig: normalizeCodexConfig(),
     voiceConfig: normalizeVoiceConfig(),
+    superWorkspaceConfig: normalizeSuperWorkspaceConfig(),
     loading: false,
   }),
   getters: {
@@ -195,6 +215,7 @@ export const useFilesStore = defineStore("files", {
       this.markdown = normalizeMarkdown(config.markdown);
       this.codexConfig = normalizeCodexConfig(config.codex);
       this.voiceConfig = normalizeVoiceConfig(config.voice);
+      this.superWorkspaceConfig = normalizeSuperWorkspaceConfig(config.super_workspace);
     },
     async saveConfig() {
       const config: ViewerConfig = {
@@ -202,12 +223,14 @@ export const useFilesStore = defineStore("files", {
         markdown: normalizeMarkdown(this.markdown),
         codex: normalizeCodexConfig(this.codexConfig),
         voice: normalizeVoiceConfig(this.voiceConfig),
+        super_workspace: normalizeSuperWorkspaceConfig(this.superWorkspaceConfig),
       };
       const saved = await putConfig(config);
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
       this.codexConfig = normalizeCodexConfig(saved.codex);
       this.voiceConfig = normalizeVoiceConfig(saved.voice);
+      this.superWorkspaceConfig = normalizeSuperWorkspaceConfig(saved.super_workspace);
     },
     async saveAppearance(appearance: AppearanceConfig) {
       this.appearance = normalizeAppearance(appearance);
@@ -222,11 +245,12 @@ export const useFilesStore = defineStore("files", {
       this.markdown = normalizeMarkdown(markdown);
       await this.saveConfig();
     },
-    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, voice: VoiceConfig) {
+    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, voice: VoiceConfig, superWorkspace: SuperWorkspaceConfig) {
       this.appearance = normalizeAppearance(appearance);
       this.markdown = normalizeMarkdown(markdown);
       this.codexConfig = normalizeCodexConfig(codex);
       this.voiceConfig = normalizeVoiceConfig(voice);
+      this.superWorkspaceConfig = normalizeSuperWorkspaceConfig(superWorkspace);
       await this.saveConfig();
     },
     async loadDirectory(path = "") {

@@ -102,6 +102,14 @@ class VoiceConfig(BaseModel):
     target_language: str = "en"
 
 
+class SuperWorkspaceConfig(BaseModel):
+    hindsight_retain_enabled: bool = True
+    hindsight_api_url: str = ""
+    hindsight_bank_prefix: str = "super-workspace"
+    chat_history_bootstrap_enabled: bool = True
+    chat_history_bootstrap_tokens: int = Field(default=5000, ge=0, le=50000)
+
+
 class UserProfile(BaseModel):
     id: str
     name: str = ""
@@ -113,6 +121,7 @@ class ConfigData(BaseModel):
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    super_workspace: SuperWorkspaceConfig = Field(default_factory=SuperWorkspaceConfig)
     users: list[UserProfile] = Field(default_factory=list)
     default_user: str = ""
 

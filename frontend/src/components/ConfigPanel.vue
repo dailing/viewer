@@ -1,23 +1,24 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
-import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
+import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
 import { useUsersStore } from "../stores/users";
-import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, VoiceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, VoiceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
 const users = useUsersStore();
 const saving = ref(false);
-const restarting = ref(false);
+const restarting = ref<"backend" | "all" | "">("");
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
-const openSections = reactive({ server: true, users: true, appearance: true, codex: true, voice: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, users: true, appearance: true, codex: true, superWorkspace: true, voice: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
   codex: clone(files.codexConfig) as CodexConfig,
+  superWorkspace: clone(files.superWorkspaceConfig) as SuperWorkspaceConfig,
   voice: clone(files.voiceConfig) as VoiceConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
 });
@@ -36,6 +37,7 @@ const fullConfigJson = computed(() =>
     {
       appearance: draft.appearance,
       codex: draft.codex,
+      super_workspace: draft.superWorkspace,
       voice: draft.voice,
       markdown: draft.markdown,
     },
@@ -54,6 +56,15 @@ watch(
   () => files.codexConfig,
   (codex) => {
     Object.assign(draft.codex, clone(codex));
+    jsonDraft.value = fullConfigJson.value;
+  },
+  { deep: true },
+);
+
+watch(
+  () => files.superWorkspaceConfig,
+  (superWorkspace) => {
+    Object.assign(draft.superWorkspace, clone(superWorkspace));
     jsonDraft.value = fullConfigJson.value;
   },
   { deep: true },
@@ -120,21 +131,24 @@ async function waitForServer(previousPid: number) {
     await sleep(1000);
   }
   error.value = "Restart was requested, but the server did not come back within 60 seconds.";
-  restarting.value = false;
+  restarting.value = "";
 }
 
-async function restart() {
+async function restart(includeWorker: boolean) {
   if (restarting.value) return;
-  if (!window.confirm("Restart the viewer server now?")) return;
-  restarting.value = true;
+  const message = includeWorker
+    ? "Restart the viewer server and Super Workspace worker now?"
+    : "Restart only the viewer backend server now?";
+  if (!window.confirm(message)) return;
+  restarting.value = includeWorker ? "all" : "backend";
   error.value = "";
   serverNotice.value = "";
   try {
-    const response = await restartServer();
+    const response = await restartServer(includeWorker);
     await waitForServer(response.pid);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
-    restarting.value = false;
+    restarting.value = "";
   }
 }
 
@@ -270,7 +284,7 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.voice);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.voice, draft.superWorkspace);
     emit("close");
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -284,6 +298,7 @@ async function applyJson() {
     const parsed = JSON.parse(jsonDraft.value);
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
     if (parsed.codex) Object.assign(draft.codex, parsed.codex);
+    if (parsed.super_workspace) Object.assign(draft.superWorkspace, parsed.super_workspace);
     if (parsed.voice) Object.assign(draft.voice, parsed.voice);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
     await save();
@@ -314,12 +329,17 @@ async function applyJson() {
           </button>
           <div v-if="openSections.server" class="section-body">
             <div class="server-actions">
-              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="restarting || stopping" @click="restart">
-                <span v-if="restarting" class="spinner-border spinner-border-sm"></span>
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="!!restarting || stopping" @click="restart(false)">
+                <span v-if="restarting === 'backend'" class="spinner-border spinner-border-sm"></span>
                 <i v-else class="bi bi-arrow-clockwise"></i>
-                <span>{{ restarting ? "Restarting" : "Restart server" }}</span>
+                <span>{{ restarting === "backend" ? "Restarting" : "Restart backend" }}</span>
               </button>
-              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="stopping || restarting" @click="stop">
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="!!restarting || stopping" @click="restart(true)">
+                <span v-if="restarting === 'all'" class="spinner-border spinner-border-sm"></span>
+                <i v-else class="bi bi-arrow-repeat"></i>
+                <span>{{ restarting === "all" ? "Restarting all" : "Restart all" }}</span>
+              </button>
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="stopping || !!restarting" @click="stop">
                 <span v-if="stopping" class="spinner-border spinner-border-sm"></span>
                 <i v-else class="bi bi-stop-fill"></i>
                 <span>{{ stopping ? "Stopping" : "Stop server" }}</span>
@@ -398,6 +418,58 @@ async function applyJson() {
                 v-model.trim="draft.codex.proxy"
                 class="form-control form-control-sm"
                 placeholder="http://localhost:7890"
+              />
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <button class="section-toggle" type="button" @click="sectionToggle('superWorkspace')">
+            <i class="bi" :class="openSections.superWorkspace ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+            <span>Super Workspace</span>
+          </button>
+          <div v-if="openSections.superWorkspace" class="section-body">
+            <label class="compact-field checkbox-field">
+              <span>Hindsight retain</span>
+              <input v-model="draft.superWorkspace.hindsight_retain_enabled" class="form-check-input" type="checkbox" />
+            </label>
+            <label class="compact-field">
+              <span>Hindsight API URL</span>
+              <input
+                v-model.trim="draft.superWorkspace.hindsight_api_url"
+                class="form-control form-control-sm"
+                placeholder="Use ~/.hindsight/codex.json"
+              />
+            </label>
+            <label class="compact-field">
+              <span>Memory bank prefix</span>
+              <input
+                v-model.trim="draft.superWorkspace.hindsight_bank_prefix"
+                class="form-control form-control-sm"
+                :placeholder="DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_bank_prefix"
+              />
+            </label>
+            <label class="compact-field checkbox-field">
+              <span>Chat history bootstrap</span>
+              <input v-model="draft.superWorkspace.chat_history_bootstrap_enabled" class="form-check-input" type="checkbox" />
+            </label>
+            <label class="setting-row">
+              <span>History token budget</span>
+              <input
+                v-model.number="draft.superWorkspace.chat_history_bootstrap_tokens"
+                class="form-range"
+                type="range"
+                min="0"
+                max="20000"
+                step="500"
+              />
+              <input
+                v-model.number="draft.superWorkspace.chat_history_bootstrap_tokens"
+                class="form-control form-control-sm number-input"
+                type="number"
+                min="0"
+                max="50000"
+                step="500"
               />
             </label>
           </div>

@@ -28,7 +28,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/profile`, `/api/profile`, and `/api/profile/reset`: in-process HTTP route profiler. Middleware records per-route request counts, status distribution, total/avg/min/max/p50/p95/p99 latency, and recent requests; the report also includes current process fd counts plus open SQLite-like fd paths. `/profile` serves an HTML report and `/api/profile` returns the same data as JSON.
 - `/api/debug/info`: returns debug/root/frontend/log file details.
 - `/api/debug/log`: returns current log file content.
-- `/api/admin/restart`: launches the detached process manager to stop the current PID and start a replacement server with the manager's default command.
+- `/api/admin/restart`: launches the detached process manager to stop the current PID and start a replacement server with the manager's default command. When called with `include_worker=true`, it first stops the registered Super Workspace worker and clears `WEAVER_RUN_DIR/worker.pid/json` so backend startup launches a fresh worker process.
 - `/api/admin/stop`: launches the detached process manager to stop the current backend PID.
 - `/api/debug/client-log`: receives frontend errors and writes them through Loguru.
 - `/api/tree`: calls `list_directory()` under the active user's profile home.
@@ -181,8 +181,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/codex_background_runner.py`
 
 - Detached Codex driver process used by `codex_sessions.py` to keep Codex runs and history ingestion alive when the viewer service restarts.
-- Starts the Codex child process, writes atomic `state.json` updates with driver pid, Codex child pid, discovered Codex session id, matched rollout path, rollout line count, status, exit code, timestamps, command, and cwd.
-- Captures Codex stdout/stderr to run-local files, discovers the Codex session id from stdout JSON, matches the canonical `~/.codex/sessions/**/rollout-*.jsonl`, tails new rollout lines, converts visible raw Codex events into the fixed AgentEvent IR, and writes provider message rows plus file changes directly to `~/.view/agent-history.sqlite3`.
+- Starts the Codex child process, writes atomic `state.json` updates with driver pid, Codex child pid, per-invocation viewer run id, discovered Codex session id, matched rollout path, rollout line count, status, exit code, timestamps, command, and cwd.
+- Captures Codex stdout/stderr to run-local files, discovers the Codex session id from stdout JSON, matches the canonical `~/.codex/sessions/**/rollout-*.jsonl`, tails new rollout lines, converts visible raw Codex events into the fixed AgentEvent IR, and writes provider message rows plus file changes directly to `~/.view/agent-history.sqlite3`. When resuming an existing Codex session, the detached runner receives the prior Codex session id before launching Codex and initializes `rollout_line_count` to the existing rollout file length so old provider events are not re-attributed to the new Super Workspace dispatch task; each resume still gets a fresh viewer run id and `driver_run_id`.
+- When a Codex provider row is a frontend-visible assistant final message (`message:assistant`), it also calls `super_workspace_memory.retain_visible_message()` so chat-level Hindsight memory sees the same message the frontend displays.
 - Backend server restart does not stop this driver. While the backend is down, the driver continues running Codex, monitoring rollout JSONL, and writing DB rows; after restart, `codex_sessions.py` reads `state.json` to recover the driver pid, Codex pid, Codex session id, and rollout path.
 
 `backend/app/hermes_sessions.py`
@@ -232,9 +233,15 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Defines `SuperWorkspaceMessageCreate` for new user/role-originated query messages. The payload carries optional structured `role_ids` for manual dispatch plus optional `parent_message_id` and `sender_role_id` lineage fields so a later role-to-role request can be tied back to the message that produced it.
 - `SuperWorkspaceRuntime.submit()` parses leading `@Role ` query prefixes against all roles in the active Super Workspace, merges them with structured `role_ids`, persists the query message without the dispatch prefix, auto-dispatches through `SuperWorkspaceManager.dispatch()` using only the active chat's member roles when no explicit targets are supplied, marks the run queued, and writes one queued `super_workspace_driver_runs` dispatch-task row per concrete role id. Role mention keys are derived from role names using ASCII variable-name characters so frontend insertion and backend parsing agree.
 - The backend runtime does not run the dispatch loop in-process. On startup it ensures a separate `super_workspace_worker.py` process is alive, with PID/state registered in `WEAVER_RUN_DIR`; startup refuses a live `worker.pid`, warning-logs and overwrites stale pid files, and direct worker invocation applies the same guard. The worker claims queued dispatch-task rows with a lease, skips concrete role ids that already have claimed/running tasks, and requeues tasks when that role id's current provider session is still running. Claimed tasks move through `claimed`, `running`, and terminal `completed`/`failed` states, and the parent query status is summarized from its target task statuses. The worker sends lightweight HTTP notifications to `/internal/super-workspace/notify` so the backend SSE stream can prompt frontend refreshes.
-- `SuperAgentDriver` is the provider-driver base. It checks the current chat+role backing session from `super_workspace_chat_role_sessions`, creates a clean provider session when missing/stale/cwd-or-model-mismatched/context usage is at least 70%, and starts the first role turn with common prompt plus fixed role rules plus the routed query. Later tasks resume the existing chat+role provider session with only the routed query. It does not use the provider session queue for Super Workspace dispatch; queueing is represented by DB task rows.
+- `SuperAgentDriver` is the provider-driver base. It checks the current chat+role backing session from `super_workspace_chat_role_sessions`, creates a clean provider session when missing/stale/cwd-or-model-mismatched/context usage is at least 70%, and starts the first role turn with common prompt plus fixed role rules plus optional recent visible chat history plus the routed query. Later tasks resume the existing chat+role provider session with only the routed query. It does not use the provider session queue for Super Workspace dispatch; queueing is represented by DB task rows.
 - `CodexSuperDriver` and `HermesSuperDriver` adapt the base driver to the existing provider managers. They reuse the existing detached Codex runner / Hermes run implementation for now while moving Super Workspace dispatch ownership out of the frontend.
 - `SuperWorkspaceEventHub` streams lightweight run-created/run-updated notifications through `/api/super-workspace/events`; the history DB remains the source for actual messages, and the frontend uses the display item `updated_at` cursor with `/api/super-workspace/runs?after=...` to fetch changed flat items instead of reloading the newest page after every event.
+
+`backend/app/super_workspace_memory.py`
+
+- Hindsight integration for Super Workspace chat-level memory. It reads `VIEWER_HINDSIGHT_API_URL` / `VIEWER_HINDSIGHT_API_TOKEN`, falling back to `~/.hindsight/codex.json`, and writes visible chat messages to Hindsight with short timeouts so memory failures do not block dispatch.
+- Memory banks are chat-scoped only: `{prefix}::{user_id}::{workspace_id}::chat::{chat_id}`. The prefix defaults to `super-workspace` and is configurable in `~/.view/config.json` `super_workspace.hindsight_bank_prefix`.
+- `retain_visible_message()` posts one visible query/final-answer message as an async Hindsight memory item with metadata and tags. It does not recall or inject Hindsight long-term memories into provider sessions.
 
 `backend/app/agent_history.py`
 
@@ -243,10 +250,11 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Schema migrations that alter existing Super Workspace tables first create a timestamped SQLite backup beside the DB, e.g. `agent-history.sqlite3.backup-YYYYMMDDHHMMSS`. The chat+role session migration moves old `super_workspace_roles.session_ref` values into `super_workspace_chat_role_sessions` using the user's active chat in that workspace, then drops the obsolete role column.
 - Defines `super_workspaces`, `super_workspace_user_state`, `super_workspace_roles`, `super_workspace_chats`, `super_workspace_chat_pins`, `super_workspace_chat_role_sessions`, `super_workspace_messages`, `super_workspace_driver_runs`, `super_workspace_message_file_changes`, `super_workspace_message_citations`, and `super_workspace_driver_checkpoints`. `super_workspaces` stores workspace id/name/common prompt, `super_workspace_user_state` stores each user's active workspace/chat ids, `super_workspace_roles` stores fixed role prompts/settings per workspace, `super_workspace_chats` stores chat metadata and membership, `super_workspace_chat_pins` stores the pinned chat shortcuts, and `super_workspace_chat_role_sessions` stores the current reusable provider session for each `(user, workspace, chat, role, provider)` plus cwd/model and latest context usage. `super_workspace_messages` stores one intermediate-representation row per indexed message/event with scalar IR fields mapped directly to columns: `workspace_id`, `event_index`, `received_at`, `event_type`, `text`, `query`, and `patch_text`, plus provider/session/source path/line metadata, source-derived `occurred_at`, role, full provider `raw_json`, query/dispatch status, and driver-run association. `super_workspace_driver_runs` is the Super Workspace dispatch-task table: each row binds one workspace query message to one target role, stores the role snapshot, provider/session refs, routed prompt, context usage snapshot, parent/sender/recipient lineage, claim lease fields, attempt metadata, task status, and timestamps. `super_workspace_message_file_changes` stores the IR `file_changes[]` array as child rows with `path`, `change_type`, and `diff` columns instead of embedding it as JSON. `super_workspace_message_citations` stores ordered message-to-message citation edges where `source_message_id` is the query message and `cited_message_id` is a referenced Super Workspace message. `raw_preview` is not stored as an IR JSON blob because it is derivable from `raw_json`.
 - Super Workspace lineage is stored directly on messages: messages carry `parent_message_id`, `sender_role_id`, and `recipient_role_id`; provider output rows associated with a driver run also carry `query_message_id` and `driver_run_id`. Current UI presents non-empty `query` messages as runs, but the persisted shape can evolve into a query/message graph without a separate query table.
-- `create_super_run()` records each Super Workspace user query as a `super_workspace_messages` row with explicit `workspace_id`, empty display `text`, non-empty `query`, selected role ids stored on that same row so direct and auto dispatch can return selected ids before driver runs exist, and ordered citation edges written to `super_workspace_message_citations`.
+- `create_super_run()` records each Super Workspace user query as a `super_workspace_messages` row with explicit `workspace_id`, empty display `text`, non-empty `query`, selected role ids stored on that same row so direct and auto dispatch can return selected ids before driver runs exist, ordered citation edges written to `super_workspace_message_citations`, and a background Hindsight retain for that visible chat-level query when enabled.
 - `record_super_target()` creates a queued dispatch-task row before any provider session is started. The worker later fills `session_ref`, `viewer_session_id`, `agent_prompt`, and context usage fields when it claims and starts the task; it also upserts the chat+role session state row.
 - `claim_next_dispatch_task()` leases one queued task whose concrete chat+role pair has no claimed/running task, making session serialization DB-backed rather than process-memory-backed. Stale claimed leases are returned to queued, while running tasks keep that chat+role session occupied until the worker marks them completed/failed. The same role may run independently in different chats because session state is keyed by chat+role.
 - `list_super_runs()` / `get_super_run()` return DB-only lazy pages of non-empty-query messages with dispatch-task targets. Provider message rows are selected by explicit `workspace_id` / `driver_run_id` lineage only. Reads do not reopen Codex rollout JSONL, Hermes state, or infer message ownership from prompt/time windows.
+- `visible_chat_history_context()` walks backward through the current chat's frontend-visible messages, meaning query rows plus assistant `message:assistant` rows, and builds an oldest-to-newest prompt block capped by the rough token budget in `super_workspace.chat_history_bootstrap_tokens`.
 - Provider message rows are inserted by the active provider driver process/watcher as provider output arrives. For Codex, that writer is the detached `codex_background_runner.py` driver, not the backend server. Super Workspace dispatch passes query, dispatch-task, parent, sender, and recipient ids into the Codex runner so every newly ingested Codex prompt/output row is directly linked to its dispatch task. `AgentHistoryStore` does not expose runtime-side resync helpers that reopen Codex rollout JSONL or Hermes state as a fallback; if a role response is visible in provider output but absent from this DB, the fault is in the driver ingestion path.
 
 `backend/app/logging.py`
@@ -260,8 +268,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/restart.py`
 
 - Thin admin bridge from FastAPI to the detached process manager.
-- `_run_manager(command)`: starts `scripts/manage_viewer.py` in a new session with the current backend PID and a short delay so the HTTP response can flush before the server is signaled.
-- `request_restart()`: asks the manager to stop the current backend PID and start the default managed server command.
+- `_terminate_worker()`: stops the registered Super Workspace worker process and clears its process-registry files before a full restart.
+- `_run_manager(command, include_worker=False)`: starts `scripts/manage_viewer.py` in a new session with the current backend PID and a short delay so the HTTP response can flush before the server is signaled; optionally stops the Super Workspace worker first.
+- `request_restart(include_worker=False)`: asks the manager to stop the current backend PID and start the default managed server command; `include_worker=True` makes the replacement backend spawn a fresh worker on startup.
 - `request_stop()`: asks the manager to stop the current backend PID without starting a replacement.
 
 `backend/app/__init__.py`
@@ -310,10 +319,10 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Chat pane for a single `chatId`; loads flat display feed pages from `/api/super-workspace/runs?chat_id=...`, subscribes to `/api/super-workspace/events`, and incrementally refreshes changed runs.
 - The composer creates a persisted run through `/api/super-workspace/runs`. It sends structured `role_ids` from `stores/superChatDispatch.ts` when a manual target chip is selected in the Chats side panel, and still supports typed leading `@Role` mentions plus `@msg-{message_id}` citation tokens.
-- The composer auto-collapses to a bottom-right keyboard button when empty and unfocused, can be expanded with voice focus for mobile input, and has a pin action beside Clear to keep it open across focus loss.
+- The composer auto-collapses to a bottom-right keyboard button when empty and unfocused, can be expanded with voice focus for mobile input, and has a pin action beside Clear to keep it open across focus loss. The pin-open preference is owned by `stores/superChatComposer.ts`, keyed by `chatId`, and persisted in user-namespaced `localStorage` so reopening the same chat restores input-vs-reading mode.
 - Role response headers are metadata rows: they show the role label, session id, context usage when available, and the cite action.
 - Visible user messages and final role responses have small cite buttons that insert `@msg-{message_id}` into the leading composer prefix. Backend `super_workspace_runtime.py` parses citation tokens, writes citation edges and queued dispatch-task rows, and leaves execution to the independent Super Workspace worker process.
-- The page renders flat display items directly: user query items show dispatch state and target chips, assistant `message:assistant` items show the target role label and Markdown-rendered message text, while reasoning/tool/thinking rows stay hidden at the display-feed query layer.
+- The page renders flat display items directly: user query items show dispatch state and target chips, adjacent assistant `message:assistant` items from the same concrete role and `parent_message_id` are grouped into one response bubble anchored at the first visible message, and reasoning/tool/thinking rows stay hidden at the display-feed query layer.
 
 `frontend/src/components/DirectoryPicker.vue`
 
@@ -387,10 +396,11 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Full-page configuration UI opened from the top bar Settings button.
 - Edits `~/.view/config.json` through the existing `/api/config` endpoint.
-- Sections: Server, User Profile, Appearance, Codex Models, Voice, Markdown, Syntax Highlighting, and raw JSON.
-- Server section has confirmed restart and stop buttons. Restart calls `/api/admin/restart`, polls `/api/health` until the PID changes, then reloads the page. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
+- Sections: Server, User Profile, Appearance, Codex Models, Super Workspace, Voice, Markdown, Syntax Highlighting, and raw JSON.
+- Server section has confirmed backend-only restart, backend+worker restart, and stop buttons. Both restart buttons call `/api/admin/restart`, with the full restart adding `include_worker=true`; the page polls `/api/health` until the PID changes, then reloads. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
 - Appearance currently controls nav bar size, which also drives icon/button size via CSS variables.
 - Codex Models controls the default Codex model, the available model list used by Super Workspace Codex roles, and the optional Codex subprocess proxy.
+- Super Workspace controls chat-level Hindsight retain, optional Hindsight API URL override, chat memory bank prefix, and new-session visible chat-history bootstrap with a rough token budget.
 - Voice controls voice enablement, the persisted Whisper model option list, selected model, language code, translation toggle, and target language used by `/api/voice/ws`.
 - Markdown config stores an active theme plus a theme list. The editor can duplicate/reset themes and edit heading/body/paragraph/code font sizes, colors, weights, link/code/border colors, and Highlight.js token colors.
 
@@ -511,7 +521,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `request<T>()`: JSON request with error text on non-2xx.
 - File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
 - Git APIs: `getGitStatus()`, `getGitDiff()`, `stageGitPath()`, `revertGitPath()`, `commitGit()`, and `pushGit()`.
-- Admin APIs: `restartServer()` and `stopServer()`.
+- Admin APIs: `restartServer(includeWorker?)` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
 - Agent provider metadata API: `listAgentProviders()`.
 - Super Workspace APIs: `listSuperWorkspaces()`, `activateSuperWorkspace()`, `getSuperWorkspace()`, `updateSuperWorkspace()`, role CRUD helpers, `listSuperWorkspaceRuns()`, `createSuperWorkspaceRun()`, and the raw `dispatchSuperWorkspace()` wrapper cover workspace activation, role storage, persisted query history, and LLM routing. Normal role-message delivery is owned by the backend Super Workspace runtime, not by frontend shared agent session helpers.
@@ -524,7 +534,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/stores/files.ts`
 
-- Pinia store for directory listings, current path, expanded dirs, pinned paths, visit timestamps, appearance config, Markdown theme config, Codex config, voice config, and loading state. Appearance, Markdown themes, Codex config, voice config, and profile definitions are persisted in `~/.view/config.json`.
+- Pinia store for directory listings, current path, expanded dirs, pinned paths, visit timestamps, appearance config, Markdown theme config, Codex config, Super Workspace config, voice config, and loading state. Appearance, Markdown themes, Codex config, Super Workspace config, voice config, and profile definitions are persisted in `~/.view/config.json`.
 - Getters: `rootEntries`, `currentEntries`, `parentPath`, `activeMarkdownTheme`.
 - Actions: `loadConfig()`, `saveConfig()`, `saveAppearance()`, `saveMarkdown()`, `saveViewerConfig()`, `saveFullViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
@@ -536,6 +546,10 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Actions: `load()`, `save()`, `snapshot()`, `restore()`, `reset()`, `setActive()`, `openFile()`, `openFileInSplit()`, `openTerminal()`, `openDiff()`, `openChat()`, `openChatInSplit()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, and `clearTerminal()`.
 - `openFileInSplit(path, direction)` creates a new split beside the active pane, opens a file in the new pane, and makes that pane active. It is used by floating local-file previews.
 - Persists to `localStorage` key `viewer.layout.v1`.
+
+`frontend/src/stores/superChatComposer.ts`
+
+- Pinia store for per-chat Super Workspace composer UI preferences. Currently persists the composer pin-open state by `chatId` in user-namespaced `localStorage` so all panes showing the same chat share the same input visibility mode.
 
 `frontend/src/stores/paneToolbar.ts`
 

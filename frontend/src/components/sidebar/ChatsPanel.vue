@@ -20,22 +20,12 @@ const emit = defineEmits<{
 
 const layout = useLayoutStore();
 const dispatchSelection = useSuperChatDispatchStore();
-const editingChatId = ref("");
 const settingsChatId = ref("");
 const selectedSettingsChat = computed(() => props.chats.find((chat) => chat.id === settingsChatId.value) ?? null);
 const rolesById = computed(() => new Map(props.roles.map((role) => [role.id, role])));
 const focusedChatId = computed(() => (layout.activePane?.type === "pane" ? layout.activePane.chatId ?? "" : ""));
 
-function beginEdit(chat: SuperChatSummary) {
-  if (chat.type === "direct") {
-    settingsChatId.value = chat.id;
-    return;
-  }
-  editingChatId.value = chat.id;
-}
-
 function save(chat: SuperChatSummary) {
-  editingChatId.value = "";
   normalizeDirectChat(chat);
   emit("update-chat", chat);
 }
@@ -112,24 +102,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
         <div class="sidebar-row" :class="{ active: chat.id === props.activeChatId || layout.openChatIds.includes(chat.id) }">
           <button class="sidebar-row-main" type="button" @click="emit('open-chat', chat.id)">
             <i class="bi" :class="chat.type === 'direct' ? 'bi-person' : 'bi-chat-left-text'"></i>
-            <input
-              v-if="editingChatId === chat.id && chat.type !== 'direct'"
-              v-model="chat.name"
-              class="chat-name-input"
-              @click.stop
-              @keydown.enter.prevent="save(chat)"
-              @blur="save(chat)"
-            />
-            <span v-else class="sidebar-row-name" @dblclick.stop="beginEdit(chat)">{{ chat.name }}</span>
-          </button>
-          <button
-            v-if="chat.type !== 'direct'"
-            class="btn btn-sm icon-button sidebar-row-action"
-            type="button"
-            title="Rename chat"
-            @click="beginEdit(chat)"
-          >
-            <i class="bi bi-pencil"></i>
+            <span class="sidebar-row-name">{{ chat.name }}</span>
           </button>
           <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Chat settings" @click="toggleSettings(chat)">
             <i class="bi bi-sliders"></i>
@@ -308,15 +281,6 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.chat-name-input {
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  flex: 1 1 auto;
-  font-size: 12px;
-  min-width: 0;
-  padding: 2px 5px;
 }
 
 .sidebar-row-action {

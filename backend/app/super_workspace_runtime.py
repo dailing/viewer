@@ -110,9 +110,15 @@ class SuperAgentDriver:
                     return {"session_ref": state.session_ref, "rotation_reason": ""}
                 except HTTPException:
                     raise
-                except Exception:
-                    logger.warning("Super Workspace chat role session stale; creating replacement role={} session_ref={}", role.id, state.session_ref)
-        first_prompt = f"{self.initial_prompt(role, user_id)}\n\n{prompt}"
+                except Exception as exc:
+                    logger.warning(
+                        "Super Workspace chat role session stale; creating replacement role={} session_ref={} reason={}",
+                        role.id,
+                        state.session_ref,
+                        exc,
+                    )
+        history_prompt = self.chat_history_prompt(user_id, lineage)
+        first_prompt = f"{self.initial_prompt(role, user_id)}\n\n{history_prompt}{prompt}"
         session = await self._create(first_prompt, effective_cwd, role.model, user_id, lineage)
         session_ref = f"{self.provider}:{session['id']}"
         reason = "new_each_run" if role.session_policy == "new_each_run" else "new_session"
@@ -122,7 +128,9 @@ class SuperAgentDriver:
 
     def _snapshot_matches(self, snapshot: dict[str, Any], role: SuperRole, effective_cwd: str) -> bool:
         snapshot_model = snapshot.get("model")
-        if (role.model or None) != (str(snapshot_model).strip() if snapshot_model else None):
+        expected_model = (role.model or "").strip()
+        actual_model = str(snapshot_model).strip() if snapshot_model else ""
+        if expected_model and expected_model != actual_model:
             return False
         expected = (effective_cwd or "").strip()
         if not expected:
@@ -172,6 +180,27 @@ class SuperAgentDriver:
             "If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks."
         )
         return f"{common}\n\n{role_prompt}" if common else role_prompt
+
+    def chat_history_prompt(self, user_id: str, lineage: dict[str, Any]) -> str:
+        try:
+            from .files import read_config
+
+            config = read_config().super_workspace
+            if not config.chat_history_bootstrap_enabled or config.chat_history_bootstrap_tokens <= 0:
+                return ""
+            history = agent_history_store.visible_chat_history_context(
+                user_id,
+                str(lineage.get("workspace_id") or ""),
+                str(lineage.get("chat_id") or ""),
+                str(lineage.get("query_message_id") or ""),
+                int(config.chat_history_bootstrap_tokens),
+            )
+            if not history:
+                return ""
+            return f"{history}\n\nCurrent routed message follows:\n\n"
+        except Exception as exc:
+            logger.warning("Failed to build Super Workspace chat history prompt user={} reason={}", user_id, exc)
+            return ""
 
     @staticmethod
     def parse_ref(session_ref: str, fallback_provider: str) -> tuple[str, str]:

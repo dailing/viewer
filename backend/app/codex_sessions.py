@@ -279,6 +279,16 @@ class CodexSessionManager:
             run_dir / "prompt.txt",
         )
 
+    def _prepare_new_background_run(self, session: CodexSession, started_at: float) -> None:
+        session.run_id = None
+        session.run_started_at = started_at
+        session.run_state_path = None
+        session.run_stdout_path = None
+        session.run_stderr_path = None
+        session.run_prompt_path = None
+        session.pid = None
+        session.codex_pid = None
+
     def _read_run_state(self, session: CodexSession) -> dict:
         if session.run_state_path is None or not session.run_state_path.exists():
             return {}
@@ -964,6 +974,7 @@ class CodexSessionManager:
             session.title = self._title_for(prompt)
         session.status = "running"
         session.exit_code = None
+        self._prepare_new_background_run(session, now)
         session.updated_at = now
         self._write_meta(session)
         await self._broadcast(session, {"type": "status", "session": session.summary()})
@@ -988,6 +999,7 @@ class CodexSessionManager:
             session.title = self._title_for(prompt)
         session.status = "running"
         session.exit_code = None
+        self._prepare_new_background_run(session, now)
         session.updated_at = now
         session.suppress_queue_drain = False
         self._write_meta(session)
@@ -1274,10 +1286,10 @@ class CodexSessionManager:
         session.pid = None
         session.codex_pid = None
         self._write_meta(session)
-        runner = Path(__file__).with_name("codex_background_runner.py")
         runner_command = [
             sys.executable,
-            runner.as_posix(),
+            "-m",
+            "backend.app.codex_background_runner",
             "--state",
             state_path.as_posix(),
             "--stdout",
@@ -1296,7 +1308,11 @@ class CodexSessionManager:
             session.id,
             "--user-id",
             session.user_id,
+            "--run-id",
+            run_id,
         ]
+        if resume and session.codex_session_id:
+            runner_command.extend(["--codex-session-id", session.codex_session_id])
         for key, option in (
             ("workspace_id", "--workspace-id"),
             ("chat_id", "--chat-id"),
@@ -1334,6 +1350,7 @@ class CodexSessionManager:
                     slot["pid"],
                     slot["pid_path"],
                 )
+        project_root = Path(__file__).resolve().parents[2]
         logger.info("Starting background Codex session {} resume={} cwd={} run_dir={}", session.id, resume, session.cwd, state_path.parent)
         try:
             process = subprocess.Popen(
@@ -1341,7 +1358,7 @@ class CodexSessionManager:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                cwd=session.cwd,
+                cwd=project_root,
                 env=self._codex_env(),
                 start_new_session=True,
             )

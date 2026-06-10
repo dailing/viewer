@@ -9,13 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-try:
-    from .process_registry import driver_process_name, process_slot_state, write_process_state
-except ImportError:
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from backend.app.process_registry import driver_process_name, process_slot_state, write_process_state
+from backend.app.process_registry import driver_process_name, process_slot_state, write_process_state
+from backend.app.super_workspace_memory import retain_visible_message
 
 
 CODEX_ROLLOUT_ROOT = Path.home() / ".codex" / "sessions"
@@ -130,6 +125,14 @@ def find_rollout_for_session(codex_session_id: str | None) -> Path | None:
         if rollout_session_id(path) == codex_session_id:
             return path
     return None
+
+
+def count_rollout_lines(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return sum(1 for _line in handle)
+    except OSError:
+        return 0
 
 
 def display_event_type(raw: dict) -> str:
@@ -459,14 +462,14 @@ def insert_provider_message_row(
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', '[]', '[]', ?, ?, ?, ?)
         ON CONFLICT(provider, viewer_session_id, source_event_id) DO UPDATE SET
-          workspace_id=excluded.workspace_id,
+          workspace_id=coalesce(super_workspace_messages.workspace_id, excluded.workspace_id),
           user_id=excluded.user_id,
-          parent_message_id=excluded.parent_message_id,
-          sender_role_id=excluded.sender_role_id,
-          recipient_role_id=excluded.recipient_role_id,
-          role_id=excluded.role_id,
-          query_message_id=excluded.query_message_id,
-          driver_run_id=excluded.driver_run_id,
+          parent_message_id=coalesce(super_workspace_messages.parent_message_id, excluded.parent_message_id),
+          sender_role_id=coalesce(super_workspace_messages.sender_role_id, excluded.sender_role_id),
+          recipient_role_id=coalesce(super_workspace_messages.recipient_role_id, excluded.recipient_role_id),
+          role_id=coalesce(super_workspace_messages.role_id, excluded.role_id),
+          query_message_id=coalesce(super_workspace_messages.query_message_id, excluded.query_message_id),
+          driver_run_id=coalesce(super_workspace_messages.driver_run_id, excluded.driver_run_id),
           provider_session_id=excluded.provider_session_id,
           event_index=excluded.event_index,
           received_at=excluded.received_at,
@@ -523,6 +526,21 @@ def insert_provider_message_row(
             VALUES (?, ?, ?, ?, ?)
             """,
             (row_id, position, path, change_type, diff),
+        )
+    if role == "assistant" and event_type == "message:assistant" and text.strip():
+        retain_visible_message(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            chat_id=chat_id,
+            message_id=row_id,
+            role=role,
+            text=text,
+            occurred_at=received_at,
+            provider=provider,
+            event_type=event_type,
+            role_id=role_id,
+            sender_role_id=sender_role_id,
+            recipient_role_id=recipient_role_id,
         )
 
 
@@ -591,6 +609,7 @@ def read_new_rollout_events(path: Path, line_count: int) -> tuple[list[tuple[int
 def write_rollout_events(db_path: Path, state: dict, rollout_path: Path, new_events: list[tuple[int, dict]]) -> None:
     if not new_events:
         return
+    started_at = float(state.get("started_at") or 0)
     assistant_response_texts = {
         normalize_message_text(text_from_value(raw))
         for _line_number, raw in new_events
@@ -601,6 +620,9 @@ def write_rollout_events(db_path: Path, state: dict, rollout_path: Path, new_eve
     for line_number, raw in new_events:
         compact = compact_event(raw, line_number, assistant_response_texts)
         if compact is None:
+            continue
+        received_at = float(compact["received_at"])
+        if started_at and received_at < started_at:
             continue
         source_event_id = raw_identifier(raw) or f"{rollout_path.as_posix()}:{line_number + 1}"
         rows.append(
@@ -618,7 +640,7 @@ def write_rollout_events(db_path: Path, state: dict, rollout_path: Path, new_eve
                 "recipient_role_id": state.get("recipient_role_id") if isinstance(state.get("recipient_role_id"), str) else None,
                 "role_id": state.get("role_id") if isinstance(state.get("role_id"), str) else None,
                 "event_index": line_number,
-                "received_at": float(compact["received_at"]),
+                "received_at": received_at,
                 "source_path": rollout_path.as_posix(),
                 "source_event_id": source_event_id,
                 "source_line": line_number + 1,
@@ -673,6 +695,8 @@ def main() -> int:
     parser.add_argument("--history-db", required=True)
     parser.add_argument("--viewer-session-id", required=True)
     parser.add_argument("--user-id", required=True)
+    parser.add_argument("--run-id")
+    parser.add_argument("--codex-session-id")
     parser.add_argument("--workspace-id")
     parser.add_argument("--chat-id")
     parser.add_argument("--query-message-id")
@@ -708,7 +732,8 @@ def main() -> int:
     state = {
         "runner_pid": os.getpid(),
         "codex_pid": None,
-        "codex_session_id": None,
+        "run_id": args.run_id,
+        "codex_session_id": args.codex_session_id,
         "rollout_path": None,
         "rollout_line_count": 0,
         "viewer_session_id": args.viewer_session_id,
@@ -744,6 +769,13 @@ def main() -> int:
                     f"pid_file={slot['pid_path']} stale_pid={slot['pid']}\n"
                 )
     write_state(state_path, state)
+    if args.codex_session_id:
+        rollout_path = find_rollout_for_session(args.codex_session_id)
+        if rollout_path is not None:
+            state["rollout_path"] = rollout_path.as_posix()
+            state["rollout_line_count"] = count_rollout_lines(rollout_path)
+            state["updated_at"] = time.time()
+            write_state(state_path, state)
     if registry_name:
         write_process_state(
             registry_name,

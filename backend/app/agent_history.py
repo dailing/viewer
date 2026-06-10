@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -16,6 +17,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 from sqlalchemy.pool import NullPool
 
 from .storage import AGENT_HISTORY_DB_PATH
+from .super_workspace_memory import retain_visible_message_background
 from .users import normalize_user_id
 
 DEFAULT_SUPER_WORKSPACE_ID = "default"
@@ -24,6 +26,20 @@ DEFAULT_RUN_LIMIT = 30
 DEFAULT_MESSAGE_LIMIT = 120
 ROLE_SESSION_POLICIES = {"reuse", "new_each_run"}
 DEFAULT_CONTEXT_RECYCLE_PERCENT = 70.0
+TOKENISH_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+
+
+def rough_token_count(value: str) -> int:
+    return len(TOKENISH_RE.findall(value))
+
+
+def trim_to_rough_tokens(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    matches = list(TOKENISH_RE.finditer(value))
+    if len(matches) <= limit:
+        return value
+    return value[: matches[limit - 1].end()].rstrip()
 
 
 def normalize_relative_cwd(value: Any) -> str:
@@ -1488,6 +1504,19 @@ class AgentHistoryStore:
                 },
             )
             self._replace_citations(db, message_id, normalized_citation_ids, now)
+        retain_visible_message_background(
+            user_id=normalized_user,
+            workspace_id=workspace.id,
+            chat_id=chat.id,
+            message_id=message_id,
+            role="user" if not sender_role_id else "assistant",
+            text=message,
+            occurred_at=now,
+            provider="super_workspace",
+            event_type="message:query",
+            role_id=sender_role_id or "user",
+            sender_role_id=sender_role_id,
+        )
         return self.get_super_run(message_id, normalized_user)
 
     def _chat_for_run(self, user_id: str, workspace_id: str, chat_id: str) -> SuperWorkspaceChatRow:
@@ -1780,7 +1809,12 @@ class AgentHistoryStore:
             )
         )
         if after is not None:
-            changed_driver_runs = select(SuperWorkspaceDriverRunRow.query_message_id).where(
+            changed_query_driver_runs = select(SuperWorkspaceDriverRunRow.query_message_id).where(
+                SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                SuperWorkspaceDriverRunRow.workspace_id == workspace.id,
+                SuperWorkspaceDriverRunRow.updated_at > after,
+            )
+            changed_message_driver_runs = select(SuperWorkspaceDriverRunRow.id).where(
                 SuperWorkspaceDriverRunRow.user_id == normalized_user,
                 SuperWorkspaceDriverRunRow.workspace_id == workspace.id,
                 SuperWorkspaceDriverRunRow.updated_at > after,
@@ -1788,7 +1822,8 @@ class AgentHistoryStore:
             statement = statement.where(
                 or_(
                     SuperWorkspaceMessageRow.ingested_at > after,
-                    SuperWorkspaceMessageRow.id.in_(changed_driver_runs),
+                    SuperWorkspaceMessageRow.id.in_(changed_query_driver_runs),
+                    SuperWorkspaceMessageRow.driver_run_id.in_(changed_message_driver_runs),
                 )
             )
         elif before is not None:
@@ -1843,7 +1878,12 @@ class AgentHistoryStore:
             or_(query_condition, assistant_condition),
         )
         if after is not None:
-            changed_driver_runs = select(SuperWorkspaceDriverRunRow.query_message_id).where(
+            changed_query_driver_runs = select(SuperWorkspaceDriverRunRow.query_message_id).where(
+                SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                SuperWorkspaceDriverRunRow.workspace_id == workspace.id,
+                SuperWorkspaceDriverRunRow.updated_at > after,
+            )
+            changed_message_driver_runs = select(SuperWorkspaceDriverRunRow.id).where(
                 SuperWorkspaceDriverRunRow.user_id == normalized_user,
                 SuperWorkspaceDriverRunRow.workspace_id == workspace.id,
                 SuperWorkspaceDriverRunRow.updated_at > after,
@@ -1851,7 +1891,8 @@ class AgentHistoryStore:
             statement = statement.where(
                 or_(
                     SuperWorkspaceMessageRow.ingested_at > after,
-                    SuperWorkspaceMessageRow.id.in_(changed_driver_runs),
+                    SuperWorkspaceMessageRow.id.in_(changed_query_driver_runs),
+                    SuperWorkspaceMessageRow.driver_run_id.in_(changed_message_driver_runs),
                 )
             )
         elif before is not None:
@@ -1872,6 +1913,80 @@ class AgentHistoryStore:
             next_before=items[-1].created_at if has_more and items else None,
             next_after=next_after,
         )
+
+    def visible_chat_history_context(
+        self,
+        user_id: str,
+        workspace_id: str,
+        chat_id: str,
+        before_message_id: str | None,
+        token_budget: int,
+    ) -> str:
+        if token_budget <= 0:
+            return ""
+        before_time = time.time()
+        normalized_user = normalize_user_id(user_id)
+        with self.read_session() as db:
+            if before_message_id:
+                current = db.scalar(
+                    select(SuperWorkspaceMessageRow).where(
+                        SuperWorkspaceMessageRow.id == before_message_id,
+                        SuperWorkspaceMessageRow.user_id == normalized_user,
+                    )
+                )
+                if current is not None:
+                    before_time = float(current.occurred_at)
+            query_condition = and_(
+                SuperWorkspaceMessageRow.query.is_not(None),
+                SuperWorkspaceMessageRow.query != "",
+            )
+            assistant_condition = and_(
+                SuperWorkspaceMessageRow.role == "assistant",
+                SuperWorkspaceMessageRow.event_type == "message:assistant",
+                SuperWorkspaceMessageRow.text != "",
+            )
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceMessageRow)
+                    .where(
+                        SuperWorkspaceMessageRow.user_id == normalized_user,
+                        SuperWorkspaceMessageRow.workspace_id == workspace_id,
+                        SuperWorkspaceMessageRow.conversation_id == chat_id,
+                        SuperWorkspaceMessageRow.occurred_at < before_time,
+                        or_(query_condition, assistant_condition),
+                    )
+                    .order_by(SuperWorkspaceMessageRow.occurred_at.desc(), SuperWorkspaceMessageRow.id.desc())
+                    .limit(200)
+                ).all()
+            )
+        blocks: list[str] = []
+        used = 0
+        for row in rows:
+            content = str(row.query or row.text or "").strip()
+            if not content:
+                continue
+            role = str(row.role or "assistant")
+            metadata = (
+                f"Message ID: {row.id}\n"
+                f"Role: {role}\n"
+                f"Event type: {row.event_type}\n"
+                f"Occurred at: {float(row.occurred_at):.3f}"
+            )
+            block = f"{metadata}\n\n{content}"
+            count = rough_token_count(block)
+            remaining = token_budget - used
+            if count > remaining:
+                if not blocks and remaining > 0:
+                    block = trim_to_rough_tokens(block, remaining)
+                    if block:
+                        blocks.append(block)
+                break
+            blocks.append(block)
+            used += count
+        if not blocks:
+            return ""
+        ordered = list(reversed(blocks))
+        return "Recent visible chat history before the current message:\n\n" + "\n\n---\n\n".join(ordered)
 
     def get_super_run(self, run_id: str, user_id: str | None, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
@@ -1977,6 +2092,21 @@ class AgentHistoryStore:
                     "file_changes": file_changes or [],
                 },
             )
+        if role == "assistant" and event_type == "message:assistant" and text.strip():
+            retain_visible_message_background(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=str(raw.get("chat_id") or raw.get("conversation_id") or ""),
+                message_id=row_id,
+                role=role,
+                text=text,
+                occurred_at=received_at,
+                provider=provider,
+                event_type=event_type,
+                role_id=role_id,
+                sender_role_id=sender_role_id,
+                recipient_role_id=recipient_role_id,
+            )
 
     def _display_item_from_row(
         self,
@@ -1992,6 +2122,8 @@ class AgentHistoryStore:
         updated_at = float(row.ingested_at)
         if is_query and dispatch_targets:
             updated_at = max(updated_at, *(float(item.updated_at) for item in targets_by_query.get(str(row.id), [])))
+        elif target is not None:
+            updated_at = max(updated_at, float(target.updated_at))
         text_value = str(row.query or "") if is_query else str(row.text or "")
         return SuperDisplayItem(
             id=str(row.id),

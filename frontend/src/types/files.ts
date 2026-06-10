@@ -99,6 +99,14 @@ export interface VoiceConfig {
   target_language: string;
 }
 
+export interface SuperWorkspaceConfig {
+  hindsight_retain_enabled: boolean;
+  hindsight_api_url: string;
+  hindsight_bank_prefix: string;
+  chat_history_bootstrap_enabled: boolean;
+  chat_history_bootstrap_tokens: number;
+}
+
 export interface UserProfile {
   id: string;
   name: string;
@@ -111,6 +119,7 @@ export interface ViewerConfig {
   markdown: MarkdownConfig;
   codex?: CodexConfig;
   voice?: VoiceConfig;
+  super_workspace?: SuperWorkspaceConfig;
   users?: UserProfile[];
   default_user?: string;
 }

@@ -174,8 +174,9 @@ export async function putConfig(config: ViewerConfig): Promise<ViewerConfig> {
   });
 }
 
-export async function restartServer(): Promise<{ status: string; pid: number }> {
-  return request<{ status: string; pid: number }>("/api/admin/restart", { method: "POST" });
+export async function restartServer(includeWorker = false): Promise<{ status: string; pid: number }> {
+  const query = includeWorker ? "?include_worker=true" : "";
+  return request<{ status: string; pid: number }>(`/api/admin/restart${query}`, { method: "POST" });
 }
 
 export async function stopServer(): Promise<{ status: string; pid: number }> {

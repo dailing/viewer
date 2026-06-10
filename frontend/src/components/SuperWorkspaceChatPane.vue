@@ -10,6 +10,7 @@ import { connectSuperWorkspaceEvents } from "../api/events";
 import { useAgentsStore } from "../stores/agents";
 import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
+import { useSuperChatComposerStore } from "../stores/superChatComposer";
 import { useSuperChatDispatchStore } from "../stores/superChatDispatch";
 import type { SuperDisplayItem, SuperDisplayTarget, SuperHistoryRun, SuperRole } from "../types/superWorkspace";
 import { renderMarkdown } from "../utils/markdownRender";
@@ -21,6 +22,7 @@ const props = defineProps<{ chatId: string; paneId: string }>();
 const agents = useAgentsStore();
 const files = useFilesStore();
 const layout = useLayoutStore();
+const composerState = useSuperChatComposerStore();
 const dispatchSelection = useSuperChatDispatchStore();
 const roles = ref<SuperRole[]>([]);
 const items = ref<SuperDisplayItem[]>([]);
@@ -29,7 +31,6 @@ const composerShellRef = ref<HTMLElement | null>(null);
 const composerTextareaRef = ref<InstanceType<typeof VoiceTextarea> | null>(null);
 const composer = ref("");
 const composerExpanded = ref(false);
-const composerPinned = ref(false);
 const selectedComposerMentionToken = ref("");
 const error = ref("");
 const busy = ref(false);
@@ -41,8 +42,9 @@ const runsAfterCursor = ref(0);
 const composerMentionItems = computed(() => buildComposerMentionItems(composer.value));
 const selectedDispatchRoleId = computed(() => dispatchSelection.selectedRoleId(props.chatId));
 const selectedDispatchRole = computed(() => roles.value.find((role) => role.id === selectedDispatchRoleId.value) ?? null);
-const displayItems = computed<SuperThreadItem[]>(() => mergeConsecutiveRoleMessages([...items.value].reverse()));
+const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByParent([...items.value].reverse()));
 const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value);
+const composerPinned = computed(() => composerState.isPinned(props.chatId));
 const composerCollapsed = computed(() => !composerPinned.value && !composerExpanded.value && !composer.value.trim());
 let fallbackTimer: number | null = null;
 let refreshTimer: number | null = null;
@@ -134,8 +136,8 @@ function expandComposer() {
 }
 
 function toggleComposerPinned() {
-  composerPinned.value = !composerPinned.value;
-  if (composerPinned.value) composerExpanded.value = true;
+  const pinned = composerState.togglePinned(props.chatId);
+  if (pinned) composerExpanded.value = true;
 }
 
 function handleComposerFocusOut(event: FocusEvent) {
@@ -173,30 +175,52 @@ function addMessageCitation(messageId: string) {
   expandComposer();
 }
 
-function mergeConsecutiveRoleMessages(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
+function mergeMessagesByParent(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
   const merged: SuperThreadItem[] = [];
+  let lastMergeKey = "";
   for (const item of orderedItems) {
-    const last = merged[merged.length - 1];
-    if (last && last.kind === "message" && item.kind === "message" && roleMessageMergeKey(last) === roleMessageMergeKey(item)) {
-      const ids = [...(last.merged_message_ids ?? [last.message_id])];
-      if (!ids.includes(item.message_id)) ids.push(item.message_id);
-      merged[merged.length - 1] = {
-        ...last,
-        id: `${last.id}:${item.id}`,
-        text: [last.text.trimEnd(), item.text.trimStart()].filter(Boolean).join("\n\n"),
-        updated_at: Math.max(last.updated_at, item.updated_at),
-        message_id: item.message_id,
-        merged_message_ids: ids,
-      };
-    } else {
+    const key = messageParentRoleKey(item);
+    if (!key) {
       merged.push({ ...item, merged_message_ids: item.kind === "message" ? [item.message_id] : undefined });
+      lastMergeKey = "";
+      continue;
     }
+
+    const index = merged.length - 1;
+    if (key !== lastMergeKey || index < 0) {
+      merged.push({ ...item, merged_message_ids: [item.message_id] });
+      lastMergeKey = key;
+      continue;
+    }
+    merged[index] = appendMergedRunMessage(merged[index], item);
   }
   return merged;
 }
 
-function roleMessageMergeKey(item: Pick<SuperDisplayItem, "role_id" | "role_name" | "provider" | "session_ref" | "viewer_session_id">) {
-  return `${item.role_id || item.role_name}:${item.provider}:${item.session_ref || item.viewer_session_id}`;
+function messageParentRoleKey(item: SuperDisplayItem) {
+  if (item.kind !== "message" || !item.parent_message_id) return "";
+  const roleKey = item.role_id || item.recipient_role_id || item.sender_role_id || item.role_name;
+  return roleKey ? `${roleKey}:${item.parent_message_id}` : "";
+}
+
+function appendMergedRunMessage(base: SuperThreadItem, item: SuperDisplayItem): SuperThreadItem {
+  const ids = [...(base.merged_message_ids ?? [base.message_id])];
+  if (!ids.includes(item.message_id)) ids.push(item.message_id);
+  return {
+    ...base,
+    id: `${base.id}:${item.id}`,
+    text: [base.text.trimEnd(), item.text.trimStart()].filter(Boolean).join("\n\n"),
+    updated_at: Math.max(base.updated_at, item.updated_at),
+    message_id: item.message_id,
+    viewer_session_id: item.viewer_session_id,
+    provider_session_id: item.provider_session_id,
+    session_ref: item.session_ref,
+    model_context_window: item.model_context_window,
+    total_tokens: item.total_tokens,
+    context_used_percent: item.context_used_percent,
+    target_status: item.target_status,
+    merged_message_ids: ids,
+  };
 }
 
 function handleComposerMentionClick(token: string) {

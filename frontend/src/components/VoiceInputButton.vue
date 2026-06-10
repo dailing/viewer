@@ -7,6 +7,7 @@ const props = defineProps<{ contextId: string }>();
 const emit = defineEmits<{ start: [] }>();
 
 const error = ref("");
+const voiceButton = ref<HTMLButtonElement | null>(null);
 const voice = useVoiceStore();
 const applyingStoreText = ref(false);
 const state = computed(() => voice.context(props.contextId));
@@ -57,6 +58,10 @@ function toggleLanguageModelRefine() {
   voice.toggleLanguageModelRefine();
 }
 
+function focusVoiceButton() {
+  voiceButton.value?.focus();
+}
+
 watch(
   () => state.value.text,
   (text) => {
@@ -76,12 +81,13 @@ watch(
   { immediate: true },
 );
 
-defineExpose({ stop: () => voice.stop(props.contextId) });
+defineExpose({ focus: focusVoiceButton, stop: () => voice.stop(props.contextId) });
 </script>
 
 <template>
   <div class="voice-input-control">
     <button
+      ref="voiceButton"
       class="btn btn-sm voice-action-button voice-input-button"
       :class="buttonClass"
       type="button"

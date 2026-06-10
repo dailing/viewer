@@ -8,9 +8,9 @@ from fastapi import HTTPException
 from loguru import logger
 
 from .config import settings
-from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, TextLineWindow, WorkspaceConfig, WorkspaceData, WorkspaceSnapshot, WorkspaceSummary
-from .storage import AGENT_TASK_LOG_DIR, CONFIG_PATH, migrate_legacy_state
-from .users import default_user_id, list_user_profiles, user_home_path, user_workspaces_path
+from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, TextLineWindow
+from .storage import CONFIG_PATH, migrate_legacy_state
+from .users import default_user_id, list_user_profiles, user_home_path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
@@ -53,8 +53,6 @@ MAX_TEXT_LINE_COUNT = 500
 MAX_LINE_INDEX_CACHE_ENTRIES = 8
 _line_index_cache: dict[tuple[str, int, int], list[int]] = {}
 TEXT_FILENAMES = {".env"}
-AGENT_TASK_FILE_PREFIX = "__agent_task_files__"
-
 
 def normalize_relative(path: str | None) -> str:
     raw = (path or "").replace("\\", "/").strip("/")
@@ -68,16 +66,6 @@ def served_root(user_id: str | None = None) -> Path:
     return user_home_path(user_id) if user_id else settings.root_resolved
 
 
-def _resolve_agent_task_file_path(rel: str) -> Path | None:
-    parts = rel.split("/")
-    if len(parts) < 3 or parts[0] != AGENT_TASK_FILE_PREFIX or parts[2] != "workspace":
-        return None
-    task_id = parts[1]
-    if not task_id.startswith("task_"):
-        raise HTTPException(status_code=400, detail="Invalid task file path")
-    return AGENT_TASK_LOG_DIR / task_id / "workspace" / "/".join(parts[3:])
-
-
 def resolve_path(path: str | None, user_id: str | None = None) -> Path:
     raw = (path or "").strip()
     if raw:
@@ -85,9 +73,6 @@ def resolve_path(path: str | None, user_id: str | None = None) -> Path:
         if raw_path.is_absolute():
             return raw_path
     rel = normalize_relative(path)
-    task_file = _resolve_agent_task_file_path(rel)
-    if task_file is not None:
-        return task_file
     return served_root(user_id).joinpath(rel)
 
 
@@ -424,11 +409,7 @@ def config_path() -> Path:
 def read_config() -> ConfigData:
     path = config_path()
     if not path.exists():
-        config = ConfigData(
-            workspace=WorkspaceConfig(count=5),
-            users=list_user_profiles(),
-            default_user=default_user_id(),
-        )
+        config = ConfigData(users=list_user_profiles(), default_user=default_user_id())
         write_config(config)
         return config
     try:
@@ -441,30 +422,22 @@ def read_config() -> ConfigData:
         markdown=config.markdown,
         codex=config.codex,
         voice=config.voice,
-        dag=config.dag,
-        workspace=config.workspace,
         users=list_user_profiles(),
         default_user=default_user_id(),
     )
     codex_raw = raw.get("codex") if isinstance(raw, dict) else None
     voice_raw = raw.get("voice") if isinstance(raw, dict) else None
-    dag_raw = raw.get("dag") if isinstance(raw, dict) else None
-    workspace_raw = raw.get("workspace") if isinstance(raw, dict) else None
-    missing_codex_defaults = not isinstance(codex_raw, dict) or "auto_commit_prompt" not in codex_raw
+    missing_codex_defaults = not isinstance(codex_raw, dict)
     missing_voice_defaults = (
         not isinstance(voice_raw, dict)
         or "available_models" not in voice_raw
         or "available_languages" not in voice_raw
         or "translation_enabled" not in voice_raw
     )
-    missing_dag_defaults = not isinstance(dag_raw, dict) or "base_url" not in dag_raw
-    missing_workspace_defaults = not isinstance(workspace_raw, dict) or "heat_interval_seconds" not in workspace_raw or "heat_step_percent" not in workspace_raw
     missing_user_defaults = "users" not in raw or "default_user" not in raw
     if isinstance(raw, dict) and (
         missing_codex_defaults
         or missing_voice_defaults
-        or missing_dag_defaults
-        or missing_workspace_defaults
         or missing_user_defaults
     ):
         write_config(cleaned)
@@ -477,134 +450,3 @@ def write_config(config: ConfigData) -> ConfigData:
     path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
     return config
 
-
-def write_workspace_config(config: WorkspaceConfig, user_id: str | None = None) -> WorkspaceData:
-    current = read_config()
-    current.workspace = config
-    write_config(current)
-    data = read_workspaces(user_id)
-    data.count = config.count
-    return data
-
-
-def workspaces_path(user_id: str | None = None) -> Path:
-    migrate_legacy_state()
-    return user_workspaces_path(user_id)
-
-
-def read_workspaces(user_id: str | None = None) -> WorkspaceData:
-    path = workspaces_path(user_id)
-    if not path.exists():
-        data = write_workspaces(WorkspaceData(count=configured_workspace_count()), user_id)
-        data.count = configured_workspace_count()
-        populate_workspace_summaries_from_db(data, user_id)
-        populate_workspace_agent_refs_from_db(data, user_id)
-        return data
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        data = WorkspaceData.model_validate(raw)
-    except Exception:
-        logger.warning("Ignoring invalid workspace state file {}", path)
-        data = WorkspaceData()
-        data.count = configured_workspace_count()
-        populate_workspace_summaries_from_db(data, user_id)
-        populate_workspace_agent_refs_from_db(data, user_id)
-        return data
-    data.count = configured_workspace_count()
-    populate_workspace_summaries_from_db(data, user_id)
-    populate_workspace_agent_refs_from_db(data, user_id)
-    return data
-
-
-def write_workspaces(data: WorkspaceData, user_id: str | None = None) -> WorkspaceData:
-    path = workspaces_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    persisted = data.model_copy(deep=True)
-    for snapshot in persisted.slots.values():
-        snapshot.agent_session_ids = []
-    path.write_text(persisted.model_dump_json(indent=2, exclude={"count", "workspaces"}), encoding="utf-8")
-    return data
-
-
-def populate_workspace_summaries_from_db(data: WorkspaceData, user_id: str | None = None) -> None:
-    try:
-        from .agent_history import agent_history_store
-    except Exception:
-        return
-    data.workspaces = [
-        WorkspaceSummary.model_validate(summary.model_dump())
-        for summary in agent_history_store.conventional_workspace_summaries(user_id, configured_workspace_count())
-    ]
-
-
-def populate_workspace_agent_refs_from_db(data: WorkspaceData, user_id: str | None = None) -> None:
-    try:
-        from .agent_history import agent_history_store
-    except Exception:
-        return
-    for index in range(1, max(int(data.count or 0), configured_workspace_count()) + 1):
-        workspace_id = str(index)
-        roles = agent_history_store.conventional_roles_for_workspace(user_id, workspace_id)
-        refs = _unique_nonempty_strings([str(role.session_ref or "") for role in roles])
-        snapshot = data.slots.get(workspace_id)
-        if snapshot is None:
-            if not refs:
-                continue
-            snapshot = WorkspaceSnapshot(layout={"type": "pane", "id": f"pane-workspace-{workspace_id}"})
-        data.slots[workspace_id] = snapshot.model_copy(update={"agent_session_ids": refs})
-
-
-def _unique_nonempty_strings(items: list[str]) -> list[str]:
-    return list(dict.fromkeys(item.strip() for item in items if item.strip()))
-
-
-def write_workspace(workspace_id: str, snapshot: WorkspaceSnapshot, user_id: str | None = None) -> WorkspaceData:
-    cleaned_id = workspace_id.strip()
-    if not cleaned_id:
-        raise HTTPException(status_code=400, detail="Workspace id is required")
-    current_path = normalize_relative(snapshot.current_path)
-    pinned = []
-    seen = set()
-    for item in snapshot.pinned or []:
-        cleaned = normalize_relative(item)
-        if cleaned not in seen:
-            pinned.append(cleaned)
-            seen.add(cleaned)
-    visit_times = {}
-    for path, visited_at in snapshot.visit_times.items():
-        cleaned = normalize_relative(path)
-        visit_times[cleaned] = visited_at
-    data = read_workspaces(user_id)
-    data.active_workspace_id = cleaned_id
-    data.slots[cleaned_id] = WorkspaceSnapshot(
-        layout=snapshot.layout,
-        active_pane_id=snapshot.active_pane_id,
-        current_path=current_path,
-        pinned=pinned,
-        visit_times=visit_times,
-        updated_at=snapshot.updated_at,
-    )
-    return write_workspaces(data, user_id)
-
-
-def set_active_workspace(workspace_id: str, user_id: str | None = None) -> WorkspaceData:
-    cleaned_id = workspace_id.strip()
-    if not cleaned_id:
-        raise HTTPException(status_code=400, detail="Workspace id is required")
-    data = read_workspaces(user_id)
-    data.active_workspace_id = cleaned_id
-    return write_workspaces(data, user_id)
-
-
-def configured_workspace_count() -> int:
-    if CONFIG_PATH.exists():
-        try:
-            raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            raw = None
-        if isinstance(raw, dict):
-            workspace = raw.get("workspace")
-            count = workspace.get("count") if isinstance(workspace, dict) else None
-            if isinstance(count, (int, float)):
-                return max(1, min(20, round(count)))
-    return 5

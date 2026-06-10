@@ -84,21 +84,11 @@ class MarkdownConfig(BaseModel):
     themes: list[MarkdownTheme] = Field(default_factory=lambda: [MarkdownTheme()])
 
 
-DEFAULT_AUTO_COMMIT_PROMPT = """Review the Git changes in the current directory only.
-
-Summarize the changes briefly, stage the relevant files in this directory, create a concise commit message, and commit them.
-
-If a remote/tracking branch is configured, push the commit after it succeeds.
-
-Do not amend, rebase, reset, or rewrite history. If there are no changes, unrelated changes outside this directory, or anything unsafe or unclear, stop and explain instead of committing."""
-
-
 class CodexConfig(BaseModel):
     available_models: list[str] = Field(default_factory=lambda: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"])
     default_model: str = "gpt-5.5"
     proxy: str = ""
     muted_message_alpha: float = Field(default=0.56, ge=0.15, le=1.0)
-    auto_commit_prompt: str = DEFAULT_AUTO_COMMIT_PROMPT
 
 
 class VoiceConfig(BaseModel):
@@ -112,16 +102,6 @@ class VoiceConfig(BaseModel):
     target_language: str = "en"
 
 
-class DagConfig(BaseModel):
-    base_url: str = ""
-
-
-class WorkspaceConfig(BaseModel):
-    count: int = Field(default=5, ge=1, le=20)
-    heat_interval_seconds: float = Field(default=10.0, ge=1.0, le=300.0)
-    heat_step_percent: float = Field(default=5.0, ge=0.1, le=100.0)
-
-
 class UserProfile(BaseModel):
     id: str
     name: str = ""
@@ -133,38 +113,8 @@ class ConfigData(BaseModel):
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
-    dag: DagConfig = Field(default_factory=DagConfig)
-    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     users: list[UserProfile] = Field(default_factory=list)
     default_user: str = ""
-
-
-class WorkspaceSnapshot(BaseModel):
-    layout: dict
-    active_pane_id: str | None = None
-    current_path: str = ""
-    pinned: list[str] | None = None
-    agent_session_ids: list[str] = Field(default_factory=list)
-    visit_times: dict[str, float] = Field(default_factory=dict)
-    updated_at: float | None = None
-
-
-class WorkspaceSummary(BaseModel):
-    id: str
-    name: str
-    created_at: float
-    updated_at: float
-
-
-class WorkspaceRoleAttachRequest(BaseModel):
-    ref: str
-
-
-class WorkspaceData(BaseModel):
-    active_workspace_id: str = "1"
-    count: int = Field(default=5, ge=1, le=20)
-    workspaces: list[WorkspaceSummary] = Field(default_factory=list)
-    slots: dict[str, WorkspaceSnapshot] = Field(default_factory=dict)
 
 
 class WatchEvent(BaseModel):
@@ -337,149 +287,6 @@ class HermesSessionInfo(BaseModel):
 class HermesSessionSnapshot(HermesSessionInfo):
     prompts: list[AgentPrompt] = Field(default_factory=list)
     events: list[AgentEvent] = Field(default_factory=list)
-
-
-class AgentSessionCreate(BaseModel):
-    provider: str
-    prompt: str = ""
-    cwd: str | None = None
-    model: str | None = None
-
-
-class AgentSessionMessage(BaseModel):
-    provider: str
-    prompt: str
-    model: str | None = None
-
-
-class AgentQueueMessage(BaseModel):
-    provider: str
-    prompt: str
-    model: str | None = None
-
-
-class AgentProviderRequest(BaseModel):
-    provider: str
-
-
-class AgentApprovalDecision(BaseModel):
-    provider: str
-    choice: Literal["once", "session", "always", "deny", "approve", "allow"]
-    all: bool = False
-
-
-class CodexCliStatus(BaseModel):
-    available: bool = False
-    session_id: str | None = None
-    rollout_path: str | None = None
-    updated_at: float | None = None
-    cwd: str | None = None
-    model: str | None = None
-    model_context_window: int | None = None
-    context_used_percent: float | None = None
-    total_tokens: int | None = None
-    plan_type: str | None = None
-    primary_used_percent: float | None = None
-    primary_remaining_percent: float | None = None
-    primary_window_minutes: int | None = None
-    secondary_used_percent: float | None = None
-    secondary_remaining_percent: float | None = None
-    secondary_window_minutes: int | None = None
-
-
-class CodexModelOptions(BaseModel):
-    selected_model: str
-    available_models: list[str] = Field(default_factory=list)
-    source: str = "config"
-
-
-class AgentLoopSchedule(BaseModel):
-    type: Literal["manual", "once", "interval", "daily", "multi_daily"] = "manual"
-    at_local: str | None = None
-    start_at_local: str | None = None
-    every_minutes: int = Field(default=30, ge=1)
-    time_local: str = "09:00"
-    times_local: list[str] = Field(default_factory=list)
-
-
-class AgentLoopRunConfig(BaseModel):
-    max_runs: int | None = Field(default=None, ge=1)
-    max_consecutive_failures: int | None = Field(default=3, ge=1)
-    skip_if_previous_running: bool = True
-
-
-class AgentLoopSessionConfig(BaseModel):
-    policy: Literal["new_each_run", "reuse", "reuse_until_context", "reuse_with_limits"] = "reuse_until_context"
-    max_context_percent: float = Field(default=70, ge=1, le=100)
-    reset_after_runs: int | None = Field(default=None, ge=1)
-    reset_on_failure: bool = False
-
-
-class AgentLoopStopConfig(BaseModel):
-    final_message_regex: str | None = None
-
-
-class AgentLoopDefinition(BaseModel):
-    id: str
-    name: str
-    enabled: bool = True
-    agent: Literal["codex"] = "codex"
-    model: str | None = None
-    cwd: str = ""
-    timezone: str = "Asia/Shanghai"
-    schedule: AgentLoopSchedule = Field(default_factory=AgentLoopSchedule)
-    run: AgentLoopRunConfig = Field(default_factory=AgentLoopRunConfig)
-    session: AgentLoopSessionConfig = Field(default_factory=AgentLoopSessionConfig)
-    stop: AgentLoopStopConfig = Field(default_factory=AgentLoopStopConfig)
-    prompt: str = ""
-
-
-class AgentLoopRuntime(BaseModel):
-    paused: bool = False
-    stopped: bool = False
-    stop_reason: str | None = None
-    current_session_id: str | None = None
-    current_run_id: str | None = None
-    current_trigger: str | None = None
-    run_count: int = 0
-    session_run_count: int = 0
-    consecutive_failures: int = 0
-    last_run_at: float | None = None
-    next_run_at: float | None = None
-    last_status: str | None = None
-    last_error: str | None = None
-
-
-class AgentLoopInfo(BaseModel):
-    definition: AgentLoopDefinition
-    runtime: AgentLoopRuntime = Field(default_factory=AgentLoopRuntime)
-    path: str
-    parse_error: str | None = None
-
-
-class AgentLoopRunRecord(BaseModel):
-    run_id: str
-    task_id: str
-    task_name: str
-    codex_session_id: str | None = None
-    trigger: str = "schedule"
-    model: str | None = None
-    cwd: str = ""
-    started_at: float
-    finished_at: float | None = None
-    status: str = "running"
-    exit_code: int | None = None
-    error: str | None = None
-    prompt: str = ""
-    session_snapshot: CodexSessionSnapshot | None = None
-
-
-class AgentLoopCreate(BaseModel):
-    name: str = "New Loop Task"
-
-
-class AgentLoopRunRequest(BaseModel):
-    trigger: str = "manual"
 
 
 class ClientLog(BaseModel):

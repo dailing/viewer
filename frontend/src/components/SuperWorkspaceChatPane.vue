@@ -11,9 +11,7 @@ import { useAgentsStore } from "../stores/agents";
 import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
 import { useSuperChatDispatchStore } from "../stores/superChatDispatch";
-import type { AgentSessionSnapshot } from "../types/agents";
 import type { SuperDisplayItem, SuperDisplayTarget, SuperHistoryRun, SuperRole } from "../types/superWorkspace";
-import { parseAgentRef } from "../utils/agents";
 import { renderMarkdown } from "../utils/markdownRender";
 import VoiceTextarea from "./VoiceTextarea.vue";
 
@@ -25,10 +23,12 @@ const files = useFilesStore();
 const layout = useLayoutStore();
 const dispatchSelection = useSuperChatDispatchStore();
 const roles = ref<SuperRole[]>([]);
-const snapshots = ref<Record<string, AgentSessionSnapshot>>({});
 const items = ref<SuperDisplayItem[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
+const composerShellRef = ref<HTMLElement | null>(null);
+const composerTextareaRef = ref<InstanceType<typeof VoiceTextarea> | null>(null);
 const composer = ref("");
+const composerExpanded = ref(false);
 const selectedComposerMentionToken = ref("");
 const error = ref("");
 const busy = ref(false);
@@ -81,22 +81,6 @@ watch([selectedDispatchRoleId, roles], ([roleId]) => {
 async function loadRoles() {
   const data = await getSuperWorkspace();
   roles.value = data.roles;
-  await refreshSnapshots();
-}
-
-async function refreshSnapshots() {
-  const next = { ...snapshots.value };
-  await Promise.all(
-    roles.value.map(async (role) => {
-      if (!role.session_ref || !parseAgentRef(role.session_ref)) return;
-      try {
-        next[role.session_ref] = await agents.snapshot(role.session_ref, "focus");
-      } catch {
-        delete next[role.session_ref];
-      }
-    }),
-  );
-  snapshots.value = next;
 }
 
 function scheduleRefreshLiveState(delayMs: number) {
@@ -117,6 +101,7 @@ async function dispatchMessage() {
   busy.value = true;
   error.value = "";
   composer.value = "";
+  composerExpanded.value = false;
   try {
     const run = await createSuperWorkspaceRun({
       message,
@@ -141,6 +126,21 @@ function handleComposerKeydown(event: KeyboardEvent) {
   void dispatchMessage();
 }
 
+function expandComposer() {
+  composerExpanded.value = true;
+  void nextTick(() => composerTextareaRef.value?.focusVoice());
+}
+
+function handleComposerFocusOut(event: FocusEvent) {
+  const nextTarget = event.relatedTarget instanceof Node ? event.relatedTarget : null;
+  if (nextTarget && composerShellRef.value?.contains(nextTarget)) return;
+  window.setTimeout(() => {
+    const active = document.activeElement;
+    if (active && composerShellRef.value?.contains(active)) return;
+    if (!composer.value.trim()) composerExpanded.value = false;
+  }, 0);
+}
+
 function handleExternalRoleMention(event: Event) {
   const detail = (event as CustomEvent<{ roleId?: string }>).detail;
   if (!detail?.roleId || layout.activePaneId !== props.paneId) return;
@@ -153,6 +153,7 @@ function addRoleMention(role: SuperRole) {
   if (leadingMentionTokens(composer.value).includes(token)) return;
   const position = leadingMentionPrefixEnd(composer.value);
   composer.value = `${composer.value.slice(0, position)}${token} ${composer.value.slice(position)}`;
+  expandComposer();
 }
 
 function addMessageCitation(messageId: string) {
@@ -160,6 +161,7 @@ function addMessageCitation(messageId: string) {
   if (leadingMentionTokens(composer.value).includes(token)) return;
   const position = leadingMentionPrefixEnd(composer.value);
   composer.value = `${composer.value.slice(0, position)}${token} ${composer.value.slice(position)}`;
+  expandComposer();
 }
 
 function mergeConsecutiveRoleMessages(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
@@ -253,7 +255,7 @@ function roleMentionKey(role: SuperRole) {
 }
 
 function itemBaseDirectory(item: SuperDisplayItem) {
-  return snapshots.value[item.session_ref]?.cwd_relative ?? "";
+  return typeof item.raw?.cwd_relative === "string" ? item.raw.cwd_relative : "";
 }
 
 function itemHtml(item: SuperDisplayItem) {
@@ -458,7 +460,17 @@ async function scrollThreadToBottom() {
       <div v-if="historyLoading && !items.length" class="super-empty-thread">Loading history</div>
     </section>
 
-    <div class="super-composer">
+    <div ref="composerShellRef" class="super-composer" :class="{ collapsed: !composerExpanded && !composer.trim() }" @focusout="handleComposerFocusOut">
+      <button
+        v-if="!composerExpanded && !composer.trim()"
+        class="super-composer-toggle"
+        type="button"
+        title="Open message input"
+        aria-label="Open message input"
+        @click="expandComposer"
+      >
+        <i class="bi bi-keyboard"></i>
+      </button>
       <div class="super-composer-card">
         <div v-if="composerMentionItems.length" class="super-composer-mentions" aria-label="Composer mentions">
           <button
@@ -477,11 +489,15 @@ async function scrollThreadToBottom() {
           </button>
         </div>
         <VoiceTextarea
+          ref="composerTextareaRef"
           v-model="composer"
           :context-id="`super-workspace:${chatId}:composer`"
           placeholder="Message chat"
           :rows="2"
           min-height="58px"
+          max-height="50cqh"
+          :auto-grow="true"
+          @focus="composerExpanded = true"
           @keydown="handleComposerKeydown"
         >
           <template #actions>
@@ -499,10 +515,12 @@ async function scrollThreadToBottom() {
 <style scoped>
 .super-chat-pane {
   background: #f6f7f9;
+  container-type: size;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  position: relative;
 }
 
 .super-thread {
@@ -547,19 +565,31 @@ async function scrollThreadToBottom() {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px 14px;
+  width: 100%;
 }
 
 .super-user-message {
-  margin-left: auto;
-  max-width: min(760px, 88%);
+  background: #eaf3ff;
+  border-color: #cfe0f7;
 }
 
 .super-role-response {
-  max-width: min(920px, 96%);
+  background: #ffffff;
 }
 
 .super-message-text {
   white-space: pre-wrap;
+}
+
+.super-response-body {
+  --markdown-render-body-size: 13px;
+  --markdown-render-h1-size: 20px;
+  --markdown-render-h2-size: 17px;
+  --markdown-render-h3-size: 15px;
+  --markdown-render-h4-size: 14px;
+  --markdown-render-paragraph-line-height: 1.48;
+  --markdown-render-paragraph-size: 13px;
+  --markdown-render-pre-padding: 8px;
 }
 
 .super-response-role-label {
@@ -602,7 +632,18 @@ async function scrollThreadToBottom() {
 
 .super-composer {
   flex: 0 0 auto;
+  min-width: 0;
   padding: 10px clamp(14px, 3vw, 34px) 14px;
+  width: 100%;
+  z-index: 5;
+}
+
+.super-composer.collapsed {
+  bottom: max(14px, env(safe-area-inset-bottom));
+  padding: 0;
+  position: absolute;
+  right: clamp(14px, 3vw, 34px);
+  width: auto;
 }
 
 .super-composer-card {
@@ -610,6 +651,36 @@ async function scrollThreadToBottom() {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px;
+  width: 100%;
+}
+
+.super-composer.collapsed .super-composer-card {
+  display: none;
+}
+
+.super-composer-toggle {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgb(15 23 42 / 0.16);
+  color: #34507a;
+  display: inline-flex;
+  height: 42px;
+  justify-content: center;
+  padding: 0;
+  width: 42px;
+}
+
+.super-composer-toggle:hover {
+  background: #edf4ff;
+  border-color: #b7cef6;
+  color: #174ea6;
+}
+
+.super-composer-toggle .bi {
+  font-size: 18px;
+  line-height: 1;
 }
 
 .super-composer-mentions {
@@ -638,5 +709,77 @@ async function scrollThreadToBottom() {
   color: var(--text-muted);
   padding: 24px;
   text-align: center;
+}
+
+@media (max-width: 767.98px) {
+  .super-thread {
+    gap: 8px;
+    padding: 6px;
+  }
+
+  .super-run {
+    gap: 4px;
+  }
+
+  .super-message-top {
+    font-size: 10.5px;
+    gap: 6px;
+  }
+
+  .super-response-body {
+    --markdown-render-body-size: 12.5px;
+    --markdown-render-h1-size: 17px;
+    --markdown-render-h2-size: 15px;
+    --markdown-render-h3-size: 13.5px;
+    --markdown-render-h4-size: 13px;
+    --markdown-render-paragraph-line-height: 1.42;
+    --markdown-render-paragraph-size: 12.5px;
+    --markdown-render-pre-padding: 6px;
+  }
+
+  .super-route-line,
+  .super-composer-mentions {
+    gap: 4px;
+  }
+
+  .super-user-message,
+  .super-role-response {
+    border-radius: 7px;
+    font-size: 12.5px;
+    line-height: 1.45;
+    padding: 7px 8px;
+  }
+
+  .super-response-role-label {
+    font-size: 11.5px;
+  }
+
+  .super-cite-button {
+    padding: 2px 5px;
+  }
+
+  .super-route-chip {
+    padding: 2px 5px;
+  }
+
+  .super-composer {
+    padding: 6px;
+  }
+
+  .super-composer.collapsed {
+    bottom: max(6px, env(safe-area-inset-bottom));
+    right: 6px;
+  }
+
+  .super-composer-card {
+    border-radius: 7px;
+    padding: 6px;
+  }
+
+  .super-empty-thread,
+  .super-history-boundary {
+    font-size: 12px;
+    padding: 12px 8px;
+  }
 }
 </style>

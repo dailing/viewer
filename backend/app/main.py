@@ -11,26 +11,9 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from .agent_loops import agent_loop_manager
 from .agent_history import SuperHistoryRunCreate, agent_history_store
-from .agent_tasks import (
-    AgentTaskCompleteUpdate,
-    AgentTaskCreate,
-    AgentTaskDependencyPatch,
-    AgentTaskDispatchRequest,
-    AgentTaskManagerRequest,
-    AgentTaskPatch,
-    AgentTaskPlanUpdate,
-    AgentTaskProcessUpdate,
-    AgentTaskResetRequest,
-    AgentTaskSettingsUpdate,
-    AgentTaskScopedManagerRequest,
-    AgentTaskStatusUpdate,
-    agent_task_manager,
-)
 from .config import settings
 from .codex_sessions import codex_session_manager
-from .conventional_workspace import conventional_workspace_agents
 from .events import hub
 from .files import (
     content_hash,
@@ -53,7 +36,7 @@ from .files import (
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
 from .hermes_sessions import hermes_session_manager
 from .logging import current_log_path, ensure_logging
-from .models import AgentApprovalDecision, AgentLoopCreate, AgentLoopDefinition, AgentLoopRunRequest, AgentProviderRequest, AgentQueueMessage, AgentSessionCreate, AgentSessionMessage, ClientLog, CodexCliStatus, CodexModelOptions, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate
+from .models import ClientLog, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate
 from .profiling import api_profiler
 from .restart import request_restart, request_stop
 from .super_workspace import SuperChatCreate, SuperChatPatch, SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
@@ -82,8 +65,6 @@ AGENT_PROVIDERS = {
 }
 
 NOISY_SUCCESS_PATHS = {
-    "/api/agents/sessions",
-    "/api/codex/models",
     "/api/git/status",
     "/api/super-workspace/runs",
     "/api/terminals",
@@ -130,10 +111,6 @@ async def startup() -> None:
     )
     watch_stop_event = asyncio.Event()
     watch_task = asyncio.create_task(watch_root(watch_stop_event))
-    await codex_session_manager.resume_pending_queues()
-    await hermes_session_manager.resume_pending_queues()
-    await agent_loop_manager.start()
-    await agent_task_manager.start()
     await super_workspace_runtime.start()
 
 
@@ -145,8 +122,6 @@ async def shutdown() -> None:
     if watch_task:
         watch_task.cancel()
     await super_workspace_runtime.shutdown()
-    await agent_task_manager.shutdown()
-    await agent_loop_manager.shutdown()
     await terminal_manager.shutdown()
     await codex_session_manager.shutdown()
     await hermes_session_manager.shutdown()
@@ -497,182 +472,10 @@ async def put_config(config: ConfigData):
             markdown=config.markdown,
             codex=config.codex,
             voice=config.voice,
-            dag=config.dag,
-            workspace=config.workspace,
             users=config.users or current.users,
             default_user=config.default_user or current.default_user,
         )
     )
-
-
-@app.get("/api/agent-loops")
-async def agent_loops():
-    return agent_loop_manager.list()
-
-
-@app.post("/api/agent-loops")
-async def create_agent_loop(config: AgentLoopCreate):
-    return agent_loop_manager.create(config)
-
-
-@app.post("/api/agent-loops/reload")
-async def reload_agent_loops():
-    return agent_loop_manager.reload()
-
-
-@app.get("/api/agent-loops/{task_id}")
-async def agent_loop(task_id: str):
-    return agent_loop_manager.get(task_id)
-
-
-@app.put("/api/agent-loops/{task_id}")
-async def update_agent_loop(task_id: str, definition: AgentLoopDefinition):
-    return agent_loop_manager.update(task_id, definition)
-
-
-@app.delete("/api/agent-loops/{task_id}")
-async def delete_agent_loop(task_id: str):
-    return agent_loop_manager.delete(task_id)
-
-
-@app.post("/api/agent-loops/{task_id}/run")
-async def run_agent_loop(task_id: str, request: AgentLoopRunRequest | None = None):
-    return await agent_loop_manager.run_now(task_id, request.trigger if request else "manual")
-
-
-@app.post("/api/agent-loops/{task_id}/pause")
-async def pause_agent_loop(task_id: str):
-    return agent_loop_manager.pause(task_id, True)
-
-
-@app.post("/api/agent-loops/{task_id}/resume")
-async def resume_agent_loop(task_id: str):
-    return agent_loop_manager.pause(task_id, False)
-
-
-@app.post("/api/agent-loops/{task_id}/reset-session")
-async def reset_agent_loop_session(task_id: str):
-    return agent_loop_manager.reset_session(task_id)
-
-
-@app.get("/api/agent-loops/{task_id}/runs")
-async def agent_loop_runs(task_id: str):
-    return agent_loop_manager.runs(task_id)
-
-
-@app.get("/api/agent-loops/{task_id}/runs/{run_id}")
-async def agent_loop_run_detail(task_id: str, run_id: str):
-    return agent_loop_manager.run_detail(task_id, run_id)
-
-
-@app.get("/api/agent-tasks")
-async def agent_tasks(group_id: str | None = None, status: str | None = None, user: str | None = None):
-    return agent_task_manager.list(user, group_id, status)
-
-
-@app.get("/api/agent-tasks/groups")
-async def agent_task_groups(user: str | None = None):
-    return agent_task_manager.groups(user)
-
-
-@app.get("/api/agent-tasks/settings")
-async def agent_task_settings(group_id: str = "default", user: str | None = None):
-    return agent_task_manager.settings(user, group_id)
-
-
-@app.put("/api/agent-tasks/settings")
-async def update_agent_task_settings(update: AgentTaskSettingsUpdate, user: str | None = None):
-    return agent_task_manager.update_settings(update, user)
-
-
-@app.get("/api/agent-tasks/plan")
-async def agent_task_plan(group_id: str = "default", user: str | None = None):
-    return agent_task_manager.plan(user, group_id)
-
-
-@app.put("/api/agent-tasks/plan")
-async def update_agent_task_plan(update: AgentTaskPlanUpdate, user: str | None = None):
-    return agent_task_manager.update_plan(update, user)
-
-
-@app.post("/api/agent-tasks/manager")
-async def request_agent_task_manager(request: AgentTaskManagerRequest, user: str | None = None):
-    return await agent_task_manager.request_manager(request, user)
-
-
-@app.post("/api/agent-tasks/dispatch-ready")
-async def dispatch_ready_agent_tasks(group_id: str | None = None, limit: int = Query(default=1, ge=1, le=10), force: bool = False, user: str | None = None):
-    return await agent_task_manager.dispatch_ready(user, group_id, limit, force)
-
-
-@app.post("/api/agent-tasks")
-async def create_agent_task(task: AgentTaskCreate, user: str | None = None):
-    return agent_task_manager.create(task, user)
-
-
-@app.get("/api/agent-tasks/{task_id}")
-async def get_agent_task(task_id: str, user: str | None = None):
-    return agent_task_manager.get(task_id, user)
-
-
-@app.delete("/api/agent-tasks/{task_id}")
-async def delete_agent_task(task_id: str, user: str | None = None):
-    return agent_task_manager.delete(task_id, user)
-
-
-@app.post("/api/agent-tasks/{task_id}/reset")
-async def reset_agent_task(task_id: str, request: AgentTaskResetRequest, user: str | None = None):
-    return await agent_task_manager.reset(task_id, request, user)
-
-
-@app.get("/api/agent-tasks/{task_id}/context")
-async def get_agent_task_context(task_id: str, user: str | None = None):
-    return agent_task_manager.context(task_id, user)
-
-
-@app.get("/api/agent-tasks/{task_id}/files")
-async def get_agent_task_files(task_id: str, limit: int = Query(default=200, ge=1, le=1000), user: str | None = None):
-    return agent_task_manager.files(task_id, user, limit)
-
-
-@app.get("/api/agent-tasks/{task_id}/events")
-async def get_agent_task_events(task_id: str, limit: int = Query(default=100, ge=1, le=500), user: str | None = None):
-    return agent_task_manager.events(task_id, user, limit)
-
-
-@app.patch("/api/agent-tasks/{task_id}")
-async def patch_agent_task(task_id: str, patch: AgentTaskPatch, user: str | None = None):
-    return agent_task_manager.patch(task_id, patch, user)
-
-
-@app.post("/api/agent-tasks/{task_id}/dependencies")
-async def patch_agent_task_dependencies(task_id: str, patch: AgentTaskDependencyPatch, user: str | None = None):
-    return agent_task_manager.patch_dependencies(task_id, patch, user)
-
-
-@app.post("/api/agent-tasks/{task_id}/status")
-async def update_agent_task_status(task_id: str, update: AgentTaskStatusUpdate, user: str | None = None):
-    return agent_task_manager.update_status(task_id, update, user)
-
-
-@app.post("/api/agent-tasks/{task_id}/process")
-async def set_agent_task_process(task_id: str, update: AgentTaskProcessUpdate, user: str | None = None):
-    return agent_task_manager.set_process(task_id, update, user)
-
-
-@app.post("/api/agent-tasks/{task_id}/manager-request")
-async def request_agent_task_manager_for_task(task_id: str, request: AgentTaskScopedManagerRequest, user: str | None = None):
-    return await agent_task_manager.request_manager_for_task(task_id, request, user)
-
-
-@app.post("/api/agent-tasks/{task_id}/complete")
-async def complete_agent_task(task_id: str, update: AgentTaskCompleteUpdate, user: str | None = None):
-    return agent_task_manager.complete(task_id, update, user)
-
-
-@app.post("/api/agent-tasks/{task_id}/dispatch")
-async def dispatch_agent_task(task_id: str, request: AgentTaskDispatchRequest | None = None, user: str | None = None):
-    return await agent_task_manager.dispatch(task_id, request, user)
 
 
 @app.get("/api/events")
@@ -712,10 +515,6 @@ async def delete_terminal(terminal_id: str):
 @app.websocket("/api/terminals/{terminal_id}/ws")
 async def terminal_ws(websocket: WebSocket, terminal_id: str):
     await terminal_manager.connect(terminal_id, websocket)
-
-
-def _agent_manager(provider: str):
-    return conventional_workspace_agents.manager(provider)
 
 
 @app.get("/api/agents/providers")
@@ -835,71 +634,6 @@ async def create_super_workspace_run(request: SuperHistoryRunCreate, user: str |
 @app.post("/api/super-workspace/dispatch")
 async def dispatch_super_workspace(request: SuperDispatchRequest, user: str | None = None):
     return await super_workspace_manager.dispatch(request, user)
-
-
-@app.get("/api/agents/sessions")
-async def agent_sessions(provider: str | None = None, user: str | None = None):
-    if provider:
-        return conventional_workspace_agents.list_sessions(provider, user)
-    return {
-        provider: conventional_workspace_agents.list_sessions(provider, user) for provider in conventional_workspace_agents.providers
-    }
-
-
-@app.post("/api/agents/sessions")
-async def create_agent_session(config: AgentSessionCreate, user: str | None = None):
-    logger.info("Creating {} session cwd={}", config.provider, config.cwd or "")
-    return await conventional_workspace_agents.create_session(
-        provider=config.provider,
-        prompt=config.prompt,
-        cwd=config.cwd,
-        model=config.model,
-        user=user,
-    )
-
-
-@app.get("/api/agents/sessions/{session_id}")
-async def agent_session(session_id: str, provider: str, detail: str | None = "focus"):
-    return _agent_manager(provider).snapshot(session_id, detail)
-
-
-@app.post("/api/agents/sessions/{session_id}/messages")
-async def send_agent_message(session_id: str, message: AgentSessionMessage, user: str | None = None):
-    logger.info("Sending {} message session={}", message.provider, session_id)
-    return await conventional_workspace_agents.dispatch_turn(message.provider, session_id, message.prompt, message.model, user)
-
-
-@app.post("/api/agents/sessions/{session_id}/queue")
-async def queue_agent_message(session_id: str, message: AgentQueueMessage, user: str | None = None):
-    logger.info("Queueing {} message session={}", message.provider, session_id)
-    return await conventional_workspace_agents.dispatch_turn(message.provider, session_id, message.prompt, message.model, user)
-
-
-@app.post("/api/agents/sessions/{session_id}/terminate")
-async def terminate_agent_session(session_id: str, message: AgentProviderRequest):
-    logger.info("Terminating {} session {}", message.provider, session_id)
-    return await _agent_manager(message.provider).terminate(session_id)
-
-
-@app.post("/api/agents/sessions/{session_id}/approvals/{approval_id}")
-async def resolve_agent_approval(session_id: str, approval_id: str, message: AgentApprovalDecision):
-    logger.info("Resolving {} approval session={} approval={} choice={}", message.provider, session_id, approval_id, message.choice)
-    return await _agent_manager(message.provider).resolve_approval(session_id, approval_id, message.choice, message.all)
-
-
-@app.websocket("/api/agents/sessions/{session_id}/ws")
-async def agent_session_ws(websocket: WebSocket, session_id: str, provider: str, detail: str | None = "focus"):
-    await _agent_manager(provider).connect(session_id, websocket, detail)
-
-
-@app.get("/api/codex/status", response_model=CodexCliStatus)
-async def codex_status():
-    return codex_session_manager.cli_status()
-
-
-@app.get("/api/codex/models", response_model=CodexModelOptions)
-async def codex_models():
-    return await codex_session_manager.model_options()
 
 
 @app.websocket("/api/voice/ws")

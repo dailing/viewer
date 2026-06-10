@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import time
 import uuid
 from collections.abc import Iterator
@@ -10,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, case, create_engine, delete, event, func, not_, or_, select, update
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, case, create_engine, delete, event, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -20,10 +19,23 @@ from .users import normalize_user_id
 
 DEFAULT_SUPER_WORKSPACE_ID = "default"
 DEFAULT_SUPER_WORKSPACE_NAME = "Default Super Workspace"
-CONVENTIONAL_WORKSPACE_PREFIX = "workspace:"
-CONVENTIONAL_WORKSPACE_NAME_PREFIX = "Traditional Workspace"
 DEFAULT_RUN_LIMIT = 30
 DEFAULT_MESSAGE_LIMIT = 120
+ROLE_SESSION_POLICIES = {"reuse", "new_each_run"}
+
+
+def normalize_relative_cwd(value: Any) -> str:
+    cwd = str(value or "").strip()
+    if not cwd:
+        return ""
+    if cwd.startswith("/"):
+        raise ValueError("cwd must be relative to the profile home")
+    if "\\" in cwd:
+        raise ValueError("cwd must use forward slashes")
+    parts = [part for part in cwd.split("/") if part]
+    if any(part == ".." for part in parts):
+        raise ValueError("cwd cannot contain .. path segments")
+    return "/".join(parts)
 
 
 class SuperHistoryRunCreate(BaseModel):
@@ -225,6 +237,7 @@ class SuperChatSummary(BaseModel):
     workspace_id: str
     name: str
     type: str = "group"
+    cwd: str = ""
     common_prompt: str = ""
     member_role_ids: list[str] = Field(default_factory=list)
     created_at: float
@@ -287,6 +300,7 @@ class SuperWorkspaceChatRow(AgentHistoryBase):
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     type: Mapped[str] = mapped_column(String, nullable=False, default="group")
+    cwd: Mapped[str] = mapped_column(Text, nullable=False, default="")
     common_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     member_role_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
@@ -308,6 +322,7 @@ class SuperWorkspaceRoleRow(AgentHistoryBase):
     cwd: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model: Mapped[str | None] = mapped_column(String)
     session_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
+    session_policy: Mapped[str] = mapped_column(String, nullable=False, default="reuse")
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
@@ -483,8 +498,13 @@ class AgentHistoryStore:
             if "active_chat_id" not in columns:
                 connection.exec_driver_sql("ALTER TABLE super_workspace_user_state ADD COLUMN active_chat_id VARCHAR NOT NULL DEFAULT ''")
             chat_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(super_workspace_chats)").all()}
+            if "cwd" not in chat_columns:
+                connection.exec_driver_sql("ALTER TABLE super_workspace_chats ADD COLUMN cwd TEXT NOT NULL DEFAULT ''")
             if "member_role_ids_json" not in chat_columns:
                 connection.exec_driver_sql("ALTER TABLE super_workspace_chats ADD COLUMN member_role_ids_json TEXT NOT NULL DEFAULT '[]'")
+            role_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(super_workspace_roles)").all()}
+            if "session_policy" not in role_columns:
+                connection.exec_driver_sql("ALTER TABLE super_workspace_roles ADD COLUMN session_policy VARCHAR NOT NULL DEFAULT 'reuse'")
         for index in SuperWorkspaceDriverRunRow.__table__.indexes:
             index.create(self.engine, checkfirst=True)
 
@@ -564,176 +584,13 @@ class AgentHistoryStore:
     def default_workspace_id(user_id: str | None) -> str:
         return f"{normalize_user_id(user_id)}:default"
 
-    @staticmethod
-    def conventional_workspace_id(user_id: str | None, workspace_id: str) -> str:
-        return f"{normalize_user_id(user_id)}:{CONVENTIONAL_WORKSPACE_PREFIX}{workspace_id.strip()}"
-
-    def ensure_conventional_workspace(self, user_id: str | None, workspace_id: str) -> SuperWorkspaceRow:
-        cleaned_id = workspace_id.strip()
-        return self.ensure_workspace(
-            user_id,
-            self.conventional_workspace_id(user_id, cleaned_id),
-            f"{CONVENTIONAL_WORKSPACE_NAME_PREFIX} {cleaned_id}",
-        )
-
-    def upsert_conventional_role(
-        self,
-        user_id: str | None,
-        workspace_id: str,
-        *,
-        session_ref: str,
-        provider: str,
-        name: str,
-        cwd: str = "",
-        model: str | None = None,
-    ) -> SuperWorkspaceRoleRow:
-        workspace = self.ensure_conventional_workspace(user_id, workspace_id)
-        normalized_user = normalize_user_id(user_id)
-        role_id = self.conventional_role_id(workspace.id, session_ref)
-        now = time.time()
-        with self.session_scope() as db:
-            statement = sqlite_insert(SuperWorkspaceRoleRow).values(
-                id=role_id,
-                workspace_id=workspace.id,
-                user_id=normalized_user,
-                name=name or session_ref,
-                description="Traditional workspace agent session",
-                provider=provider,
-                cwd=cwd,
-                model=model,
-                session_ref=session_ref,
-                created_at=now,
-                updated_at=now,
-            )
-            db.execute(
-                statement.on_conflict_do_update(
-                    index_elements=["id"],
-                    set_={
-                        "name": name or session_ref,
-                        "provider": provider,
-                        "cwd": cwd,
-                        "model": model,
-                        "session_ref": session_ref,
-                        "updated_at": now,
-                    },
-                )
-            )
-            row = db.scalar(select(SuperWorkspaceRoleRow).where(SuperWorkspaceRoleRow.id == role_id))
-            if row is not None:
-                return row
-        return SuperWorkspaceRoleRow(
-            id=role_id,
-            workspace_id=workspace.id,
-            user_id=normalized_user,
-            name=name or session_ref,
-            description="Traditional workspace agent session",
-            provider=provider,
-            cwd=cwd,
-            model=model,
-            session_ref=session_ref,
-            created_at=now,
-            updated_at=now,
-        )
-
-    def remove_conventional_role(self, user_id: str | None, workspace_id: str, session_ref: str) -> None:
-        workspace = self.ensure_conventional_workspace(user_id, workspace_id)
-        normalized_user = normalize_user_id(user_id)
-        with self.session_scope() as db:
-            db.execute(
-                delete(SuperWorkspaceRoleRow).where(
-                    SuperWorkspaceRoleRow.workspace_id == workspace.id,
-                    SuperWorkspaceRoleRow.user_id == normalized_user,
-                    SuperWorkspaceRoleRow.session_ref == session_ref,
-                )
-            )
-
-    def conventional_roles_for_workspace(self, user_id: str | None, workspace_id: str) -> list[SuperWorkspaceRoleRow]:
-        workspace = self.ensure_conventional_workspace(user_id, workspace_id)
-        normalized_user = normalize_user_id(user_id)
-        with self.read_session() as db:
-            return list(
-                db.scalars(
-                    select(SuperWorkspaceRoleRow)
-                    .where(
-                        SuperWorkspaceRoleRow.workspace_id == workspace.id,
-                        SuperWorkspaceRoleRow.user_id == normalized_user,
-                        SuperWorkspaceRoleRow.session_ref != "",
-                    )
-                    .order_by(SuperWorkspaceRoleRow.updated_at.desc(), SuperWorkspaceRoleRow.created_at.desc())
-                ).all()
-            )
-
-    def conventional_roles(self, user_id: str | None, provider: str | None = None) -> list[SuperWorkspaceRoleRow]:
-        normalized_user = normalize_user_id(user_id)
-        prefix = f"{normalized_user}:{CONVENTIONAL_WORKSPACE_PREFIX}"
-        conditions = [
-            SuperWorkspaceRoleRow.user_id == normalized_user,
-            SuperWorkspaceRoleRow.workspace_id.startswith(prefix),
-            SuperWorkspaceRoleRow.session_ref != "",
-        ]
-        if provider:
-            conditions.append(SuperWorkspaceRoleRow.provider == provider)
-        with self.read_session() as db:
-            return list(
-                db.scalars(
-                    select(SuperWorkspaceRoleRow)
-                    .where(*conditions)
-                    .order_by(SuperWorkspaceRoleRow.updated_at.desc(), SuperWorkspaceRoleRow.created_at.desc())
-                ).all()
-            )
-
-    def conventional_role_for_ref(self, user_id: str | None, session_ref: str) -> SuperWorkspaceRoleRow | None:
-        normalized_user = normalize_user_id(user_id)
-        prefix = f"{normalized_user}:{CONVENTIONAL_WORKSPACE_PREFIX}"
-        with self.read_session() as db:
-            return db.scalar(
-                select(SuperWorkspaceRoleRow)
-                .where(
-                    SuperWorkspaceRoleRow.user_id == normalized_user,
-                    SuperWorkspaceRoleRow.workspace_id.startswith(prefix),
-                    SuperWorkspaceRoleRow.session_ref == session_ref,
-                )
-                .order_by(SuperWorkspaceRoleRow.updated_at.desc())
-                .limit(1)
-            )
-
-    @staticmethod
-    def conventional_role_id(db_workspace_id: str, session_ref: str) -> str:
-        digest = hashlib.sha256(f"{db_workspace_id}:{session_ref}".encode("utf-8")).hexdigest()[:20]
-        return f"traditional-{digest}"
-
-    def conventional_workspace_summaries(self, user_id: str | None, count: int) -> list[SuperWorkspaceSummary]:
-        normalized_user = normalize_user_id(user_id)
-        summaries: list[SuperWorkspaceSummary] = []
-        for index in range(1, max(1, min(20, round(count))) + 1):
-            external_id = str(index)
-            row = self.ensure_conventional_workspace(normalized_user, external_id)
-            summaries.append(
-                SuperWorkspaceSummary(
-                    id=external_id,
-                    name=str(row.name or f"{CONVENTIONAL_WORKSPACE_NAME_PREFIX} {external_id}"),
-                    created_at=float(row.created_at),
-                    updated_at=float(row.updated_at),
-                )
-            )
-        return summaries
-
-    def conventional_role_statuses(self, user_id: str | None, workspace_id: str) -> SuperRoleStatuses:
-        db_workspace_id = self.ensure_conventional_workspace(user_id, workspace_id).id
-        statuses = self.list_super_role_statuses(user_id, db_workspace_id)
-        return statuses.model_copy(update={"workspace_id": workspace_id})
-
     def list_super_workspaces(self, user_id: str | None) -> SuperWorkspaceList:
         workspace = self.active_super_workspace(user_id)
-        conventional_prefix = f"{workspace.user_id}:{CONVENTIONAL_WORKSPACE_PREFIX}"
         with self.read_session() as db:
             rows = list(
                 db.scalars(
                     select(SuperWorkspaceRow)
-                    .where(
-                        SuperWorkspaceRow.user_id == workspace.user_id,
-                        not_(SuperWorkspaceRow.id.startswith(conventional_prefix)),
-                    )
+                    .where(SuperWorkspaceRow.user_id == workspace.user_id)
                     .order_by(SuperWorkspaceRow.created_at.asc(), SuperWorkspaceRow.id.asc())
                 ).all()
             )
@@ -755,7 +612,7 @@ class AgentHistoryStore:
         normalized_user = workspace.user_id
         with self.read_session() as db:
             state = db.scalar(select(SuperWorkspaceUserStateRow).where(SuperWorkspaceUserStateRow.user_id == normalized_user))
-            active_chat_id = state.active_chat_id.strip() if state is not None else ""
+            active_chat_id = state.active_chat_id.strip() if state is not None and state.active_workspace_id == workspace.id else ""
             if not active_chat_id:
                 raise KeyError("No active chat")
             row = db.scalar(
@@ -768,6 +625,11 @@ class AgentHistoryStore:
             if row is None:
                 raise KeyError(active_chat_id)
             return row
+
+    def _chat_for_super_run(self, user_id: str, workspace_id: str, chat_id: str | None) -> SuperWorkspaceChatRow:
+        if chat_id:
+            return self._chat_for_run(user_id, workspace_id, chat_id)
+        return self.active_super_chat(user_id, workspace_id)
 
     def list_super_chats(self, user_id: str | None, workspace_id: str | None = None) -> SuperChatList:
         workspace = self._workspace_for_run(normalize_user_id(user_id), workspace_id)
@@ -802,6 +664,7 @@ class AgentHistoryStore:
                     workspace_id=str(row.workspace_id),
                     name=self._display_chat_name(row, role_names),
                     type=str(row.type or "group"),
+                    cwd=str(row.cwd or ""),
                     common_prompt=str(row.common_prompt or ""),
                     member_role_ids=[value for value in self._parse_json(row.member_role_ids_json, []) if isinstance(value, str)],
                     created_at=float(row.created_at),
@@ -817,6 +680,7 @@ class AgentHistoryStore:
         *,
         name: str,
         chat_type: str = "group",
+        cwd: str = "",
         common_prompt: str = "",
         member_role_ids: list[str] | None = None,
         workspace_id: str | None = None,
@@ -839,6 +703,7 @@ class AgentHistoryStore:
                     user_id=workspace.user_id,
                     name=normalized_name,
                     type=normalized_type,
+                    cwd=normalize_relative_cwd(cwd),
                     common_prompt=common_prompt.strip(),
                     member_role_ids_json=self._json(normalized_role_ids),
                     created_at=now,
@@ -885,6 +750,8 @@ class AgentHistoryStore:
                 row.name = normalized_name
                 row.type = normalized_type
                 row.member_role_ids_json = self._json(normalized_role_ids)
+                if "cwd" in values:
+                    row.cwd = normalize_relative_cwd(values["cwd"])
                 if "common_prompt" in values:
                     row.common_prompt = str(values["common_prompt"] or "").strip()
                 row.updated_at = time.time()
@@ -1098,9 +965,11 @@ class AgentHistoryStore:
         provider: str = "codex",
         cwd: str = "",
         model: str | None = None,
+        session_policy: str = "reuse",
     ) -> None:
         workspace = self.active_super_workspace(user_id)
         now = time.time()
+        normalized_policy = session_policy if session_policy in ROLE_SESSION_POLICIES else "reuse"
         with self.session_scope() as db:
             db.add(
                 SuperWorkspaceRoleRow(
@@ -1110,9 +979,10 @@ class AgentHistoryStore:
                     name=name,
                     description=description,
                     provider=provider,
-                    cwd=cwd,
+                    cwd=normalize_relative_cwd(cwd),
                     model=model,
                     session_ref="",
+                    session_policy=normalized_policy,
                     created_at=now,
                     updated_at=now,
                 )
@@ -1123,6 +993,10 @@ class AgentHistoryStore:
         cleaned = {key: value for key, value in values.items() if value is not None}
         if not cleaned:
             return
+        if "session_policy" in cleaned and cleaned["session_policy"] not in ROLE_SESSION_POLICIES:
+            cleaned["session_policy"] = "reuse"
+        if "cwd" in cleaned:
+            cleaned["cwd"] = normalize_relative_cwd(cleaned["cwd"])
         cleaned["updated_at"] = time.time()
         with self.session_scope() as db:
             db.execute(
@@ -1162,7 +1036,7 @@ class AgentHistoryStore:
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
         workspace = self._workspace_for_run(normalized_user, workspace_id)
-        chat = self.active_super_chat(normalized_user, workspace.id) if not chat_id else self._chat_for_run(normalized_user, workspace.id, chat_id)
+        chat = self._chat_for_super_run(normalized_user, workspace.id, chat_id)
         now = time.time()
         message_id = uuid.uuid4().hex
         normalized_citation_ids = self._normalize_citation_ids(citation_ids or [])

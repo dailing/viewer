@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { useLayoutStore } from "../../stores/layout";
 import { useSuperChatDispatchStore } from "../../stores/superChatDispatch";
 import type { SuperChatSummary, SuperRole } from "../../types/superWorkspace";
+import DirectoryPicker from "../DirectoryPicker.vue";
 
 const props = defineProps<{
   chats: SuperChatSummary[];
@@ -178,6 +179,10 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
           <option value="group">Group</option>
           <option value="direct">Direct</option>
         </select>
+      </label>
+      <label class="field">
+        <span>Working Directory</span>
+        <DirectoryPicker v-model="selectedSettingsChat.cwd" empty-label="Profile home" clear-title="Leave chat cwd empty" />
       </label>
       <label class="field">
         <span>Chat Prompt</span>

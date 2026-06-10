@@ -86,7 +86,6 @@ export interface CodexConfig {
   default_model: string;
   proxy: string;
   muted_message_alpha: number;
-  auto_commit_prompt: string;
 }
 
 export interface VoiceConfig {
@@ -98,16 +97,6 @@ export interface VoiceConfig {
   translation_enabled: boolean;
   available_target_languages: string[];
   target_language: string;
-}
-
-export interface DagConfig {
-  base_url: string;
-}
-
-export interface WorkspaceConfig {
-  count: number;
-  heat_interval_seconds: number;
-  heat_step_percent: number;
 }
 
 export interface UserProfile {
@@ -122,8 +111,6 @@ export interface ViewerConfig {
   markdown: MarkdownConfig;
   codex?: CodexConfig;
   voice?: VoiceConfig;
-  dag?: DagConfig;
-  workspace?: WorkspaceConfig;
   users?: UserProfile[];
   default_user?: string;
 }

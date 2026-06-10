@@ -25,6 +25,7 @@ class SuperRole(BaseModel):
     cwd: str = ""
     model: str | None = None
     session_ref: str = ""
+    session_policy: str = "reuse"
     created_at: float
     updated_at: float
 
@@ -35,6 +36,7 @@ class SuperRoleCreate(BaseModel):
     provider: str = "codex"
     cwd: str = ""
     model: str | None = None
+    session_policy: str = "reuse"
 
 
 class SuperRolePatch(BaseModel):
@@ -44,6 +46,7 @@ class SuperRolePatch(BaseModel):
     cwd: str | None = None
     model: str | None = None
     session_ref: str | None = None
+    session_policy: str | None = None
 
 
 class SuperWorkspaceData(BaseModel):
@@ -60,6 +63,7 @@ class SuperWorkspacePatch(BaseModel):
 class SuperChatCreate(BaseModel):
     name: str = "New Chat"
     type: str = "group"
+    cwd: str = ""
     common_prompt: str = ""
     member_role_ids: list[str] = Field(default_factory=list)
 
@@ -67,6 +71,7 @@ class SuperChatCreate(BaseModel):
 class SuperChatPatch(BaseModel):
     name: str | None = None
     type: str | None = None
+    cwd: str | None = None
     common_prompt: str | None = None
     member_role_ids: list[str] | None = None
 
@@ -137,6 +142,7 @@ class SuperWorkspaceManager:
                 chat_type=request.type,
                 common_prompt=request.common_prompt,
                 member_role_ids=request.member_role_ids,
+                cwd=request.cwd,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -178,6 +184,7 @@ class SuperWorkspaceManager:
                     cwd=role.cwd,
                     model=role.model,
                     session_ref=role.session_ref,
+                    session_policy=role.session_policy,
                     created_at=role.created_at,
                     updated_at=role.updated_at,
                 )
@@ -195,14 +202,18 @@ class SuperWorkspaceManager:
         return self.read(user_id)
 
     def create_role(self, request: SuperRoleCreate, user_id: str | None = None) -> SuperWorkspaceData:
-        agent_history_store.create_super_workspace_role(
-            user_id,
-            name=(request.name or "New Role").strip()[:120] or "New Role",
-            description=request.description.strip(),
-            provider=(request.provider or "codex").strip() or "codex",
-            cwd=request.cwd.strip(),
-            model=request.model.strip() if request.model else None,
-        )
+        try:
+            agent_history_store.create_super_workspace_role(
+                user_id,
+                name=(request.name or "New Role").strip()[:120] or "New Role",
+                description=request.description.strip(),
+                provider=(request.provider or "codex").strip() or "codex",
+                cwd=request.cwd.strip(),
+                model=request.model.strip() if request.model else None,
+                session_policy=request.session_policy,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return self.read(user_id)
 
     def update_role(self, role_id: str, patch: SuperRolePatch, user_id: str | None = None) -> SuperWorkspaceData:
@@ -217,18 +228,22 @@ class SuperWorkspaceManager:
             if key == "provider":
                 value = str(value or "codex")
             setattr(role, key, value)
-        agent_history_store.update_super_workspace_role(
-            user_id,
-            role_id,
-            {
-                "name": role.name,
-                "description": role.description,
-                "provider": role.provider,
-                "cwd": role.cwd,
-                "model": role.model,
-                "session_ref": role.session_ref,
-            },
-        )
+        try:
+            agent_history_store.update_super_workspace_role(
+                user_id,
+                role_id,
+                {
+                    "name": role.name,
+                    "description": role.description,
+                    "provider": role.provider,
+                    "cwd": role.cwd,
+                    "model": role.model,
+                    "session_ref": role.session_ref,
+                    "session_policy": role.session_policy,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return self.read(user_id)
 
     def delete_role(self, role_id: str, user_id: str | None = None) -> SuperWorkspaceData:

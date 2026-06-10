@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { getGitStatus } from "../../api/client";
-import { useCodexStore } from "../../stores/codex";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import type { GitDiffFile } from "../../types/git";
@@ -11,21 +10,11 @@ const emit = defineEmits<{
 }>();
 
 const layout = useLayoutStore();
-const codex = useCodexStore();
 const fileStore = useFilesStore();
 const files = ref<GitDiffFile[]>([]);
 const loading = ref(false);
 const loaded = ref(false);
-const autoCommitting = ref(false);
 const error = ref("");
-const message = ref("");
-
-function setMessage(value: string) {
-  message.value = value;
-  window.setTimeout(() => {
-    if (message.value === value) message.value = "";
-  }, 2600);
-}
 
 async function load() {
   if (loading.value) return;
@@ -52,42 +41,15 @@ function statusTitle(file: GitDiffFile) {
   return `Open diff for ${file.path}`;
 }
 
-async function autoCommit() {
-  if (autoCommitting.value) return;
-  autoCommitting.value = true;
-  error.value = "";
-  try {
-    await codex.create(fileStore.codexConfig.auto_commit_prompt, fileStore.currentPath);
-    setMessage("Auto commit Codex started");
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    autoCommitting.value = false;
-  }
-}
 </script>
 
 <template>
   <div class="sidebar-panel">
     <div class="sidebar-section">
-      <div class="panel-command-grid">
-        <button
-          class="btn btn-sm btn-outline-primary panel-command"
-          type="button"
-          :class="{ active: autoCommitting }"
-          :disabled="autoCommitting"
-          title="Start Codex auto commit for the current directory"
-          @click="autoCommit"
-        >
-          <i class="bi" :class="autoCommitting ? 'bi-hourglass-split' : 'bi-magic'"></i>
-          <span>{{ autoCommitting ? "Auto..." : "Auto" }}</span>
-        </button>
-        <button class="btn btn-sm btn-outline-secondary panel-command" type="button" title="Refresh changes" @click="load">
-          <i class="bi bi-arrow-clockwise"></i>
-          <span>Refresh</span>
-        </button>
-      </div>
-      <div v-if="message" class="panel-message">{{ message }}</div>
+      <button class="btn btn-sm btn-outline-secondary panel-command" type="button" title="Refresh changes" @click="load">
+        <i class="bi bi-arrow-clockwise"></i>
+        <span>Refresh</span>
+      </button>
     </div>
 
     <div class="sidebar-section list-section">
@@ -155,15 +117,8 @@ async function autoCommit() {
   width: 100%;
 }
 
-.panel-command-grid {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: 1fr 1fr;
-}
-
 .empty-panel,
-.panel-error,
-.panel-message {
+.panel-error {
   color: var(--text-muted);
   font-size: 12px;
   padding: 4px 6px;
@@ -171,10 +126,6 @@ async function autoCommit() {
 
 .panel-error {
   color: #a33;
-}
-
-.panel-message {
-  padding: 8px 2px 0;
 }
 
 .change-row {

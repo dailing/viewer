@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
 import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
 import { useUsersStore } from "../stores/users";
-import type { AppearanceConfig, CodexConfig, DagConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, VoiceConfig, WorkspaceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, VoiceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
@@ -13,14 +13,12 @@ const restarting = ref(false);
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
-const openSections = reactive({ server: true, users: true, appearance: true, codex: true, voice: true, dag: true, markdown: true, syntax: false, json: false });
+const openSections = reactive({ server: true, users: true, appearance: true, codex: true, voice: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
-  workspace: clone(files.workspaceConfig) as WorkspaceConfig,
   codex: clone(files.codexConfig) as CodexConfig,
   voice: clone(files.voiceConfig) as VoiceConfig,
-  dag: clone(files.dagConfig) as DagConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
 });
 
@@ -37,10 +35,8 @@ const fullConfigJson = computed(() =>
   JSON.stringify(
     {
       appearance: draft.appearance,
-      workspace: draft.workspace,
       codex: draft.codex,
       voice: draft.voice,
-      dag: draft.dag,
       markdown: draft.markdown,
     },
     null,
@@ -67,24 +63,6 @@ watch(
   () => files.voiceConfig,
   (voice) => {
     Object.assign(draft.voice, clone(voice));
-    jsonDraft.value = fullConfigJson.value;
-  },
-  { deep: true },
-);
-
-watch(
-  () => files.dagConfig,
-  (dag) => {
-    Object.assign(draft.dag, clone(dag));
-    jsonDraft.value = fullConfigJson.value;
-  },
-  { deep: true },
-);
-
-watch(
-  () => files.workspaceConfig,
-  (workspace) => {
-    Object.assign(draft.workspace, clone(workspace));
     jsonDraft.value = fullConfigJson.value;
   },
   { deep: true },
@@ -292,7 +270,7 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.voice, draft.workspace, draft.dag);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.voice);
     emit("close");
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -305,10 +283,8 @@ async function applyJson() {
   try {
     const parsed = JSON.parse(jsonDraft.value);
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
-    if (parsed.workspace) Object.assign(draft.workspace, parsed.workspace);
     if (parsed.codex) Object.assign(draft.codex, parsed.codex);
     if (parsed.voice) Object.assign(draft.voice, parsed.voice);
-    if (parsed.dag) Object.assign(draft.dag, parsed.dag);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
     await save();
   } catch (err) {
@@ -424,14 +400,6 @@ async function applyJson() {
                 placeholder="http://localhost:7890"
               />
             </label>
-            <label class="compact-field model-list-field">
-              <span>Auto commit prompt</span>
-              <textarea
-                v-model="draft.codex.auto_commit_prompt"
-                class="form-control form-control-sm model-list"
-                spellcheck="false"
-              ></textarea>
-            </label>
           </div>
         </section>
 
@@ -496,23 +464,6 @@ async function applyJson() {
             <datalist id="voice-target-language-options">
               <option v-for="language in draft.voice.available_target_languages" :key="language" :value="language"></option>
             </datalist>
-          </div>
-        </section>
-
-        <section class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('dag')">
-            <i class="bi" :class="openSections.dag ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Task DAG</span>
-          </button>
-          <div v-if="openSections.dag" class="section-body">
-            <label class="compact-field">
-              <span>API base URL</span>
-              <input
-                v-model.trim="draft.dag.base_url"
-                class="form-control form-control-sm"
-                placeholder="http://127.0.0.1:8000"
-              />
-            </label>
           </div>
         </section>
 
@@ -645,6 +596,7 @@ async function applyJson() {
   height: 100%;
   margin: 0 auto;
   max-width: 100vw;
+  min-width: 0;
   width: min(960px, 100vw);
 }
 
@@ -713,6 +665,7 @@ async function applyJson() {
 .server-actions {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -737,6 +690,13 @@ async function applyJson() {
 .compact-field {
   grid-template-columns: 120px 1fr;
   margin-top: 10px;
+}
+
+.setting-row > *,
+.compact-field > *,
+.theme-toolbar > *,
+.style-card > * {
+  min-width: 0;
 }
 
 .checkbox-field {
@@ -828,9 +788,64 @@ async function applyJson() {
 }
 
 @media (max-width: 640px) {
+  .config-header,
+  .config-footer {
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .config-header h2 {
+    font-size: 14px;
+  }
+
+  .config-footer {
+    flex-wrap: wrap;
+  }
+
+  .config-error {
+    flex: 1 0 100%;
+  }
+
+  .section-toggle {
+    padding: 9px 10px;
+  }
+
+  .section-body {
+    padding: 0 10px 10px;
+  }
+
   .setting-row,
   .compact-field {
     grid-template-columns: 1fr;
+  }
+
+  .setting-row {
+    align-items: stretch;
+  }
+
+  .number-input,
+  .setting-row .form-control,
+  .setting-row .form-select,
+  .compact-field .form-control,
+  .compact-field .form-select {
+    width: 100%;
+  }
+
+  .theme-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .style-card {
+    grid-template-columns: 1fr;
+  }
+
+  .color-grid label {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .form-control-color {
+    width: 100%;
   }
 }
 </style>

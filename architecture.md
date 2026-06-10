@@ -4,20 +4,17 @@ This document is the working project map for future agents. Read it before chang
 
 ## Purpose
 
-Local Live File Viewer is a private-network file browser and preview app. A FastAPI backend serves files from the active user's configured profile home, watches configured profile homes, exposes file, Git, terminal, and Codex APIs, and serves the built Vue frontend. The app has soft user profiles: each browser chooses a profile, API calls carry `user`, and workspace/sidebar/session lists are scoped to that profile while all processes still run as the same trusted OS user with access to the served root. The Vue app provides a sidebar file browser, Git diff panel, recursive split panes, file viewers, live refresh on filesystem changes, and browser-local layout persistence.
+Local Live File Viewer is a private-network file browser and preview app. A FastAPI backend serves files from the active user's configured profile home, watches configured profile homes, exposes file, Git, terminal, voice, and Super Workspace APIs, and serves the built Vue frontend. The app has soft user profiles: each browser chooses a profile, API calls carry `user`, and sidebar/layout state is scoped to that profile while all processes still run as the same trusted OS user with access to the served root. The Vue app provides a Super Workspace shell with chats, roles, files, Git diff panel, terminals, recursive split panes, file viewers, live refresh on filesystem changes, and browser-local layout persistence.
 
 ## Runtime Flow
 
 1. `run.py` loads project-local `.viewer.env` without overriding existing process variables, parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
-2. `backend/app/main.py` creates the FastAPI app, installs CORS, gzip compression, and request logging middleware, starts `watch_root()`, the agent-loop scheduler, and the Agent Task DAG monitor on startup, stops watcher, task monitor, loops, terminals, and agent sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
+2. `backend/app/main.py` creates the FastAPI app, installs CORS, gzip compression, and request logging middleware, starts `watch_root()` and the Super Workspace worker on startup, stops watcher and terminal sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
-4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading app state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/draft keys are namespaced by user. The app then loads file tree/config/terminal/agent state, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The normal page is the Super Workspace split-pane shell; the top bar has no Super Workspace switch button and only opens utility pages such as settings, loop tasks, and the Agent Task DAG board. The outer app shell and document root suppress top-level overscroll/scroll chaining, while pane-level scroll containers keep their own contained momentum scrolling.
-5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer and oversized Markdown/CSV/text files to the virtualized large text viewer. The app top bar exposes a global active-pane refresh action that dispatches `viewer:pane-refresh`; file panes clear visible content before refetching metadata and incrementing their pane `version`, diff panes clear and reload their Git diff directly, and terminal/agent panes clear stale content before reconnecting to fetch a fresh snapshot. Viewers fetch raw/text content and reload when their `version` prop changes; image and PDF panes include the pane version in raw-file URLs so manual refreshes can bypass browser cache even when the content hash is unchanged. Markdown panes render embedded images with browser lazy loading, track simple relative local image dependencies client-side, use a pane-level version cache key for raw-file URLs, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. PDF panes configure the PDF.js worker explicitly, preload document metadata from `/api/file/raw` for the page count, and render individual pages lazily from the same cache-busted raw URL as page placeholders approach the scroll viewport. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
+4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading app state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/draft keys are namespaced by user. The app then loads file tree/config/terminal state, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The normal page is the Super Workspace split-pane shell; the top bar opens only utility pages such as settings. The outer app shell and document root suppress top-level overscroll/scroll chaining, while pane-level scroll containers keep their own contained momentum scrolling.
+5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer and oversized Markdown/CSV/text files to the virtualized large text viewer. The app top bar exposes a global active-pane refresh action that dispatches `viewer:pane-refresh`; file panes clear visible content before refetching metadata and incrementing their pane `version`, diff panes clear and reload their Git diff directly, and terminal panes reconnect through their own viewer. Viewers fetch raw/text content and reload when their `version` prop changes; image and PDF panes include the pane version in raw-file URLs so manual refreshes can bypass browser cache even when the content hash is unchanged. Markdown panes render embedded images with browser lazy loading, track simple relative local image dependencies client-side, use a pane-level version cache key for raw-file URLs, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. PDF panes configure the PDF.js worker explicitly, preload document metadata from `/api/file/raw` for the page count, and render individual pages lazily from the same cache-busted raw URL as page placeholders approach the scroll viewport. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
-7. Codex panes use shared agent REST routes and WebSocket `/api/agents/sessions/{id}/ws?provider=codex` for structured JSONL event updates rendered by the frontend rather than through terminal emulation. New Codex sessions may be created idle with no prompt; the first pane message is represented as a conventional-workspace query in `~/.view/agent-history.sqlite3` and dispatched through the same `super_workspace_driver_runs` worker/driver path used by Super Workspace roles. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Raw rollout events stay server-side; REST/WebSocket snapshots send compact display events, and the shared agent API defaults to `detail=focus` so focus-mode panes receive assistant messages without tool output/file-change payloads until the frontend requests `detail=full`.
-8. Hermes panes mirror the Codex pane lifecycle shape through shared agent REST routes and WebSocket `/api/agents/sessions/{id}/ws?provider=hermes`, but the provider backend talks to the local Hermes API server at `VIEWER_HERMES_BASE_URL` / `http://127.0.0.1:8642` and reads canonical session history directly from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`. Viewer-local Hermes metadata lives under `~/.view/logs/hermes-sessions/`; the SQLite `sessions` and `messages` rows are compacted into the same frontend event shape used by Codex panes. When Hermes is driven through Super Workspace or conventional workspace dispatch, the manager stores the run lineage in metadata and writes newly synced Hermes events into `super_workspace_messages`.
-9. Loop tasks are Markdown files in `~/.view/loops/*.md` with generated YAML frontmatter plus a prompt body. `backend/app/agent_loops.py` runs an asyncio scheduler that creates/resumes Codex sessions through `codex_session_manager`, writes state to `~/.view/agent-loops.json`, and writes run logs under `~/.view/logs/agent-loops/`.
-10. Agent Task DAG tasks live in `~/.view/agent-tasks.sqlite3` and are handled by `backend/app/agent_tasks.py`. The task monitor promotes dependency-satisfied tasks to `ready`, dispatches ready tasks when a group is in auto mode, tracks `waiting_process` task PIDs, and resumes the attached agent session when a recorded process exits. Logs and artifacts should be written under `~/.view/logs/agent-tasks/{task_id}/`.
+7. Codex and Hermes provider sessions are internal runtime primitives for Super Workspace roles. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Hermes talks to the local Hermes API server at `VIEWER_HERMES_BASE_URL` / `http://127.0.0.1:8642` and reads canonical session history directly from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`. Provider driver output is written into `super_workspace_messages`; the frontend does not expose low-level provider session panes or `/api/agents/sessions`.
 
 ## Backend Structure
 
@@ -41,27 +38,20 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `/api/file/content`: calls `read_text()` under the active user's profile home.
 - `/api/file/text-lines`: calls `read_text_lines()` under the active user's profile home for virtualized large text previews.
 - `/api/file/content` PUT: saves UTF-8 text to an existing file under the active user's profile home and returns updated metadata.
-- `/api/file/raw`: streams a file via inline `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving. The file APIs also accept the internal `__agent_task_files__/{task_id}/workspace/...` virtual path prefix so Task DAG workspace outputs remain previewable even when `~/.view/logs/agent-tasks/...` is outside the active user's served root.
+- `/api/file/raw`: streams a file via inline `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
 - `/api/file/site/{path:path}` and `/api/file/site?path=...`: serve files as a static-site namespace for HTML preview iframes. The query form preserves absolute filesystem paths for outside-root files and symlink targets. HTML responses inject a `<base>` tag for relative assets and rewrite root-relative HTML/CSS asset URLs to the same `/api/file/site/` prefix; CSS responses rewrite root-relative `url(...)` and `@import` references; other files are returned through inline `FileResponse` so SVG/PDF/image assets render in-browser instead of downloading. Missing `generated/assets/...` requests fall back by searching upward for the nearest existing generated asset directory, which keeps static docs with page-relative generated-asset links working in the iframe preview. Cache headers are `no-cache` so local edits show after pane refreshes.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation, plus a stat-based `content_hash`/version when the target exists as a file. Markdown image rendering no longer calls this for every image during initial render; the frontend resolves simple relative image dependencies locally and lets `/api/file/raw?base=...` resolve actual image requests lazily.
 - `/api/file/resolve-directory-link`: resolves a local link target against a served-root-relative directory, used by Codex session transcript links whose paths are relative to the session cwd.
 - `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at the active user's profile home.
 - `/api/users`: returns configured soft user profiles from `~/.view/config.json`; the bootstrapped profiles are `dailing` and `maomao`. Profile `home` values may be `~`-expanded, absolute, or relative to the OS home directory and define that user's file viewer root, not just a default directory.
-- `/api/config` GET/PUT: reads and writes nav appearance, Codex model options, voice model/language/translation options, Task DAG API base URL, Markdown theme config, user profiles, and default user in `~/.view/config.json`. Normal settings saves preserve existing user profiles unless the JSON payload explicitly changes them. Super Workspace layout/sidebar/draft state is browser-local and user-namespaced.
+- `/api/config` GET/PUT: reads and writes nav appearance, Codex model options, voice model/language/translation options, Markdown theme config, user profiles, and default user in `~/.view/config.json`. Normal settings saves preserve existing user profiles unless the JSON payload explicitly changes them. Super Workspace layout/sidebar/draft state is browser-local and user-namespaced.
 - The old `/api/workspaces` pane-workspace route group is not mounted in this branch. The Super Workspace split-pane shell is the only normal workspace surface; files, diffs, terminals, and chat panes live inside that shell.
-- `/api/agent-loops` routes: list/create/update/delete loop task Markdown definitions, reload files, pause/resume, run now, reset the retained Codex session, and read run history/details.
-- `/api/agent-tasks` routes: persistent Agent Task DAG CRUD and scheduling APIs backed by `~/.view/agent-tasks.sqlite3`. Routes list tasks by `group_id`/status, list group summaries, create/delete tasks, clear or retry a task plus all downstream dependents, read task context, list task artifact/workspace files with served-root preview paths, patch mutable not-yet-running tasks, patch dependencies with cycle checks, record long-running process PIDs, complete tasks with artifacts/results, manually dispatch a task to Codex/Hermes, dispatch ready tasks, and read/update per-group manual/auto scheduler settings.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
 - `/api/terminals`: lists or creates terminal sessions for the `user` query profile; POST accepts an optional relative `cwd`. When `cwd` is omitted, the terminal starts in the profile home directory.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
 - `/api/agents/providers`: returns registered agent providers with frontend display metadata such as name and Bootstrap icon.
-- `/api/super-workspace` routes: per-user Super Workspace common prompt, workspace list/activation, role storage, persisted message/query history, role status summaries, and LLM dispatch. Super Workspaces and roles live in `~/.view/agent-history.sqlite3`: workspaces are rows in `super_workspaces`, each user's active Super Workspace is stored in `super_workspace_user_state.active_workspace_id`, the first/default workspace is named `Default Super Workspace` with user-scoped id `{user}:default`, and roles are rows in `super_workspace_roles` with stable role id, non-unique display name, fixed rules/description, provider, cwd, model, and current backing agent session ref. GET `/api/super-workspace/workspaces` returns that user's workspace list plus active workspace id; POST `/api/super-workspace/active-workspace/{workspace_id}` switches the active Super Workspace; GET `/api/super-workspace/role-statuses/{workspace_id}` returns one simplified role status per role in that workspace (`idle`, `busy`, or `failed`) by summarizing `super_workspace_driver_runs`: any `queued`/`claimed`/`running` target makes the role `busy`, otherwise the latest target is checked and only latest `failed` maps to `failed`. The agent-history SQLite engine uses `NullPool`, WAL mode, `synchronous=NORMAL`, and a 30-second busy timeout so independent backend, worker, and provider-driver processes wait briefly for the single SQLite writer instead of immediately failing on transient write locks. GET `/api/super-workspace/runs` is a display-oriented flat feed backed by the same DB for the active Super Workspace; it returns `items[]` ordered by message time where each item is either a user query row or one assistant `message:assistant` provider row, with explicit `workspace_id` plus query/target/role metadata attached for chips, citations, and future filters. The list route is a DB read and does not touch provider rollout/state files. It accepts `before=<created_at>` for older flat items and `after=<updated_at>` for SSE-driven incremental reads, returning changed/new display items plus `next_after` for the next request. POST `/api/super-workspace/runs` and `/api/super-workspace/messages` create a query message in the active Super Workspace, accept optional structured `role_ids` for manual dispatch, parse leading `@Role`/`@msg-...` prefix tokens, decide the target role ids when no explicit targets are supplied, and write one queued DB dispatch task per role id; the HTTP request does not start Codex/Hermes directly. A message can have both display `text` and an outbound `query`; a user query is represented as `role_id=user`, empty `text`, and non-empty `query`. Query text may start with one or more contiguous `@...` prefix tokens. Tokens matching role mention keys, such as `@Writer`, select explicit dispatch targets; tokens matching `@msg-{message_id}` or `@message-{message_id}` create message citation edges in `super_workspace_message_citations`; any later `@` in the query body is ordinary text. When a cited query is dispatched, `role_message_prompt()` prepends focus-mode cited message content before the current user query. On backend startup, the Super Workspace runtime ensures an independent `python -m backend.app.super_workspace_worker` process is running and registered under `WEAVER_RUN_DIR/worker.pid`. The worker process claims queued dispatch tasks only when the concrete target role id is idle within the same workspace, creates/resumes that role id's provider session, starts the detached provider driver, and updates task/query status from queued to running to completed/failed. Claiming is split into short DB operations: expired leases are reset quickly, candidates are read outside the write transaction, and each candidate is claimed with a conditional update; if a write still hits `database is locked`, the worker waits and retries instead of exiting or marking the target failed. Multiple roles with the same display name can run concurrently because serialization is per workspace role id, not per name. Provider output rows are written only by the provider driver process/watcher with `workspace_id` plus query/dispatch/parent lineage fields; the Codex driver compacts rollout events outside the DB transaction and writes each polling batch through one SQLite connection/transaction instead of opening one write transaction per event. The runtime and history read APIs do not perform fallback resyncs from Codex rollout JSONL or Hermes state, so missing DB messages remain visible as driver ingestion faults. `/api/super-workspace/events` streams lightweight Super Workspace SSE notifications for changed query messages; independent workers notify the backend through `/internal/super-workspace/notify`, and `SuperWorkspacePage.vue` calls `/api/super-workspace/runs?after=...` plus `/api/super-workspace/role-statuses/{workspace_id}` on events with a 30-second incremental fallback fetch. The Super Workspace page scrolls to the newest message on initial history load, preserves bottom stickiness for live updates, auto-loads older messages when its message scroller reaches the top and shows a "No more messages" divider when history is exhausted, merges consecutive assistant display items from the same role in the frontend display layer while preserving atomic DB rows and citation ids, and resolves internal Markdown links in role replies relative to that role session's `cwd_relative` through `/api/file/resolve-directory-link`. `/api/super-workspace/dispatch` remains as the raw role-router endpoint and sends the user message plus candidate role descriptions to an OpenAI-compatible chat-completions endpoint expecting JSON role ids. Dispatch defaults to DeepSeek direct API model `deepseek-v4-flash`, reads `VIEWER_SUPER_DISPATCH_API_KEY` / `DEEPSEEK_API_KEY` from the process environment or the project-local ignored `.viewer.env`, and can be overridden with `VIEWER_SUPER_DISPATCH_MODEL` or `VIEWER_SUPER_DISPATCH_URL`.
-- Super Workspace chats add a scoped conversation layer inside each Super Workspace. Chats are persisted in `super_workspace_chats`, the active chat id is stored on `super_workspace_user_state`, and message rows use the existing `super_workspace_messages.conversation_id` as `chat_id`. Chats are user-created only: no default chat is seeded, an empty active chat id is valid, and dispatch requires an explicit existing chat. Each chat stores `member_role_ids_json` plus a chat-level `common_prompt`; auto-routing inside a chat only considers assigned member roles, so an empty member list cannot auto-route, while structured `role_ids` and explicit leading `@Role` mentions may target roles directly. Direct chats store exactly one member role and their display name follows that role name. `/api/super-workspace/chats` lists/creates/updates/deletes group or direct chats, `/api/super-workspace/active-chat/{chat_id}` switches the active chat, and `/api/super-workspace/runs` accepts `chat_id` for pane-local feed loading; when no active/explicit chat exists, the runs API returns an empty page instead of creating or selecting a chat. Provider lineage carries `chat_id` through Codex detached drivers and Hermes session metadata so role output rows stay in the originating chat. Chat `common_prompt` is prepended to role prompts as chat-level scoped instructions. The Super Workspace frontend is the only normal workspace shell: `FileSidebar.vue` has a Super Workspace mode with Chats, Roles, Files, Changes, and Terminals tools, and the main area is the existing recursive split-pane workspace. `ChatsPanel.vue` owns chat CRUD plus per-chat settings for name, type, prompt, and role membership; direct chat role membership is a single-select control and group membership is multi-select. When a chat pane is the active focused pane and the Chats side panel is open, `ChatsPanel.vue` expands that chat's member roles as send-icon manual dispatch chips backed by `stores/superChatDispatch.ts`; closing or unfocusing the panel collapses the chip list. `RolesPanel.vue` owns global role CRUD/editing. `LayoutNode` panes can contain `chatId`, `ViewerPane.vue` renders `SuperWorkspaceChatPane.vue` for chat panes, and the layout store saves this Super Workspace layout in user-namespaced localStorage.
-- `/api/agents/sessions`: shared agent session API for direct provider panes. It is still backed by `backend/app/conventional_workspace.py` internally, but the old numbered workspace UI and `/api/workspaces` route group have been removed from the app surface. When `cwd` is omitted, Codex/Hermes start in the profile home directory.
-- `/api/agents/sessions/{session_id}` routes: shared snapshot, send, DB-backed dispatch append, terminate, and WebSocket connect. Non-WebSocket mutating requests carry `provider` in the JSON body; GET/WebSocket use a `provider` query parameter because they have no request JSON body. Snapshot and WebSocket routes accept `detail=focus|full`; focus is the default and filters event payloads down to assistant messages, while full includes tool calls/results, file changes, patch text, and raw previews.
-- `/api/agents/sessions/{session_id}/approvals/{approval_id}` resolves a provider-normalized pending approval with choices such as `once`, `session`, `always`, or `deny`. Agent snapshots expose `pending_approvals` so the shared frontend transcript can render approve/deny controls without provider-specific UI.
-- `/api/codex/status`: returns the latest global Codex CLI rate-limit status parsed from recent `~/.codex/sessions/**/rollout-*.jsonl` `token_count` events by timestamp; pane-level context usage comes from each session's matched rollout file.
-- `/api/codex/models`: returns selected and available models for Codex session creation from `~/.view/config.json` codex defaults only.
+- `/api/super-workspace` routes: per-user Super Workspace common prompt, workspace list/activation, role storage, persisted message/query history, role status summaries, and LLM dispatch. Super Workspaces and roles live in `~/.view/agent-history.sqlite3`: workspaces are rows in `super_workspaces`, each user's active Super Workspace is stored in `super_workspace_user_state.active_workspace_id`, the first/default workspace is named `Default Super Workspace` with user-scoped id `{user}:default`, and roles are rows in `super_workspace_roles` with stable role id, non-unique display name, fixed rules/description, provider, cwd, model, current backing agent session ref, and `session_policy` (`reuse` by default, or `new_each_run`). GET `/api/super-workspace/workspaces` returns that user's workspace list plus active workspace id; POST `/api/super-workspace/active-workspace/{workspace_id}` switches the active Super Workspace; GET `/api/super-workspace/role-statuses/{workspace_id}` returns one simplified role status per role in that workspace (`idle`, `busy`, or `failed`) by summarizing `super_workspace_driver_runs`. GET `/api/super-workspace/runs` is a display-oriented flat feed backed by the same DB for the active Super Workspace; it returns user query rows and assistant provider rows and accepts `before=<created_at>` for older items plus `after=<updated_at>` for SSE-driven incremental reads. POST `/api/super-workspace/runs` and `/api/super-workspace/messages` create a query message, accept optional structured `role_ids`, parse leading `@Role`/`@msg-...` prefix tokens, and write one queued DB dispatch task per role id; the HTTP request does not start Codex/Hermes directly. On backend startup, the Super Workspace runtime ensures an independent `python -m backend.app.super_workspace_worker` process is running and registered under `WEAVER_RUN_DIR/worker.pid`. The worker claims queued dispatch tasks only when the concrete target role id is idle within the same workspace, resolves provider cwd as `role.cwd`, then `chat.cwd`, then the profile home, creates/resumes that role id's provider session according to `session_policy`, starts the detached provider driver, and updates task/query status from queued to running to completed/failed. Provider output rows are written only by the provider driver process/watcher with `workspace_id` plus query/dispatch/parent lineage fields. `/api/super-workspace/events` streams lightweight Super Workspace SSE notifications for changed query messages, and `SuperWorkspacePage.vue` refreshes runs plus role statuses on events with a 30-second fallback fetch. `/api/super-workspace/dispatch` remains as the raw role-router endpoint and sends the user message plus candidate role descriptions to an OpenAI-compatible chat-completions endpoint expecting JSON role ids.
+- Super Workspace chats add a scoped conversation layer inside each Super Workspace. Chats are persisted in `super_workspace_chats`, the active chat id is stored on `super_workspace_user_state`, and message rows use the existing `super_workspace_messages.conversation_id` as `chat_id`. Chats are user-created only: no default chat is seeded, an empty active chat id is valid, and dispatch requires an explicit existing chat. Each chat stores `member_role_ids_json`, `cwd`, and a chat-level `common_prompt`; auto-routing inside a chat only considers assigned member roles, so an empty member list cannot auto-route, while structured `role_ids` and explicit leading `@Role` mentions may target roles directly. Direct chats store exactly one member role and their display name follows that role name. `/api/super-workspace/chats` lists/creates/updates/deletes group or direct chats; `/api/super-workspace/active-chat/{chat_id}` switches the active chat, and `/api/super-workspace/runs` accepts `chat_id` for pane-local feed loading; when no active/explicit chat exists, the runs API returns an empty page instead of creating or selecting a chat. Provider lineage carries `chat_id` through Codex detached drivers and Hermes session metadata so role output rows stay in the originating chat. Chat `common_prompt` is prepended to role prompts as chat-level scoped instructions. The Super Workspace frontend is the only normal workspace shell: `FileSidebar.vue` has a Super Workspace mode with Chats, Roles, Files, Changes, and Terminals tools, and the main area is the existing recursive split-pane workspace. `GitPanel.vue` only lists and opens Git diffs; Auto Commit is modeled as a normal Super Workspace role/chat workflow. `ChatsPanel.vue` owns chat CRUD plus per-chat settings for name, type, cwd, prompt, and role membership; direct chat role membership is a single-select control and group membership is multi-select. When a chat pane is the active focused pane and the Chats side panel is open, `ChatsPanel.vue` expands that chat's member roles as send-icon manual dispatch chips backed by `stores/superChatDispatch.ts`; closing or unfocusing the panel collapses the chip list. `RolesPanel.vue` owns global role CRUD/editing, including role cwd, model, session ref, and session management policy. `LayoutNode` panes can contain `chatId`, `ViewerPane.vue` renders `SuperWorkspaceChatPane.vue` for chat panes, and the layout store saves this Super Workspace layout in user-namespaced localStorage.
 - `/api/voice/ws`: optional voice-input WebSocket endpoint. The browser streams encoded audio chunks while recording. `VIEWER_VOICE_SERVICE_WS` defaults to `ws://127.0.0.1:8765/v1/voice/ws`, so the backend acts as a gateway, sends browser `ready` after connecting upstream, forwards `start`, binary chunks, and `stop` to the standalone voice transaction service, then forwards service `processing` / `partial` / `committed` / `final` / `error` messages back to the browser. If the service URL is explicitly cleared, the backend saves the chunks and runs a single full-file `faster-whisper` transcription after `stop`; a configured upstream ASR WebSocket still bypasses the in-process path.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
 
@@ -77,8 +67,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/storage.py`
 
 - Central viewer-local storage paths under `VIEWER_HOME` when set, otherwise `~/.view`. This allows isolated test state such as `VIEWER_HOME=~/.viewer_test` while reusing the same code and Python environment.
-- Defines `USERS_DIR` for per-profile state under `~/.view/users/{user}/`.
-- Defines `CONFIG_PATH`, legacy `WORKSPACES_PATH`, `LOOPS_DIR`, `LOOP_STATE_PATH`, `LOG_DIR`, `CODEX_LOG_DIR`, `HERMES_LOG_DIR`, `TERMINAL_LOG_DIR`, `AGENT_LOOP_LOG_DIR`, `CODEX_RUN_DIR`, `HERMES_RUN_DIR`, and `WEAVER_RUN_DIR`.
+- Defines `CONFIG_PATH`, `LOG_DIR`, `CODEX_LOG_DIR`, `HERMES_LOG_DIR`, `TERMINAL_LOG_DIR`, `CODEX_RUN_DIR`, `HERMES_RUN_DIR`, and `WEAVER_RUN_DIR`.
 - `CODEX_RUN_DIR` defaults to `/tmp/viewer_run/codex` and can be overridden with `VIEWER_CODEX_RUN_DIR`; it stores detached Codex runner state outside the viewer service process.
 - `WEAVER_RUN_DIR` defaults to `/tmp/viewer_run/weaver` and can be overridden with `VIEWER_WEAVER_RUN_DIR`; it stores lightweight PID/state registry files for the Super Workspace worker and provider driver processes. Worker files use `worker.pid/json`; Codex driver files use readable names such as `driver.{role_name}.{role_id}.{dispatch_task_id}.pid/json`. Worker and driver startup paths check the matching pid file before spawning: a live pid blocks duplicate startup with an error log, a stale/dead pid is warning-logged and overwritten, and a missing pid file is created normally.
 - `HERMES_LOG_DIR` stores viewer-local Hermes metadata while canonical messages are read from `~/.hermes/state.db`; `HERMES_RUN_DIR` is reserved for Hermes detached-run state if the provider implementation later needs local runner files.
@@ -86,8 +75,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `backend/app/users.py`
 
-- Soft user profile helpers. Loads `users` and `default_user` from `~/.view/config.json`, validates user ids, normalizes profile homes, supports absolute homes, `~`-expanded homes, and paths relative to the OS home directory, bootstraps `dailing` and `maomao` when no profiles are configured, and derives per-user workspace state paths. The profile home is the user's file viewer root.
-- `user_workspaces_path(user_id)`: returns `~/.view/users/{user}/workspaces.json`; legacy workspace files are not copied implicitly.
+- Soft user profile helpers. Loads `users` and `default_user` from `~/.view/config.json`, validates user ids, normalizes profile homes, supports absolute homes, `~`-expanded homes, and paths relative to the OS home directory, and bootstraps `dailing` and `maomao` when no profiles are configured. The profile home is the user's file viewer root.
 
 `backend/app/files.py`
 
@@ -111,54 +99,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `read_text_lines(path, start_line, count)`: validates text-style preview files, builds/caches newline byte offsets by path/mtime/size, and returns a bounded UTF-8 line window for frontend virtual scrolling.
 - `config_path()`: returns `~/.view/config.json` and triggers one-way legacy copy from root-local `.viewer.config.json` when needed.
-- `read_config()` / `write_config(config)`: load and save nav appearance, Codex model options, Task DAG API base URL, Markdown theme config, user profiles, and default user. Old workspace-state keys in config are ignored rather than migrated.
-- Legacy workspace helper functions remain in `files.py` only for internal provider-pane compatibility; they are no longer exposed through `/api/workspaces` or used by the normal frontend shell.
-
-`backend/app/conventional_workspace.py`
-
-- Thin adapter from traditional pane workspaces to the Super Workspace driver queue. It owns provider/session ref validation, conventional role attach/remove/list/status helpers, active traditional workspace lookup, idle provider session creation, and pane-message dispatch.
-- Traditional pane messages are represented as conventional role runs in `super_workspace_driver_runs` with `raw.type=traditional_workspace_query_message`; provider execution still flows through `SuperWorkspaceRuntime` and the shared Codex/Hermes managers. The runtime prompt uses traditional-workspace wording for `{user}:workspace:{slot}` workspace ids while preserving the same routing metadata and lineage fields used by Super Workspace.
-
-`backend/app/agent_loops.py`
-
-- Markdown-backed Codex loop task scheduler.
-- Parses generated YAML frontmatter from `~/.view/loops/*.md`; the Markdown body is the Codex prompt.
-- Supports schedule types `manual`, `once`, `interval`, `daily`, and `multi_daily`; local task times use `Asia/Shanghai` / UTC+8 by default.
-- Supports Codex session policies `new_each_run`, `reuse`, `reuse_until_context`, and `reuse_with_limits`.
-- Persists runtime state in `~/.view/agent-loops.json`, including current session id, current run id, run counts, consecutive failures, next run time, stopped/paused state, and last error.
-- Writes per-task run history and detailed run snapshots under `~/.view/logs/agent-loops/{task_id}/`.
-- Reuses `codex_session_manager` for actual Codex creation/resume and uses compact Codex snapshots for log display.
-
-`backend/app/agent_tasks.py`
-
-- SQLite-backed Agent Task DAG runtime stored at `~/.view/agent-tasks.sqlite3`, accessed through SQLAlchemy ORM mapped rows and per-operation sessions in `AgentTaskManager`. The SQLite engine uses `NullPool` so request-scoped sessions close their DB connection instead of keeping idle pooled file descriptors.
-- Defines task API models locally so the feature stays isolated from the legacy loop scheduler.
-- Supports statuses `draft`, `backlog`, `ready`, `claimed`, `running`, `waiting_process`, `review`, `done`, `failed`, `blocked`, and `cancelled`.
-- Uses a two-role operating model. A Codex manager/planner owns each group-level goal, plan, context, constraints, DAG mutations, rescheduling, retries, and shared/common code changes. Executor agents run one task at a time, can create/modify scripts/files/outputs inside their task-local workspace, should not edit shared project code or mutate the DAG unless explicitly instructed, and request manager review when the plan, dependencies, or common code need to change.
-- Keeps `parent_id`/`root_id` for task-tree display separate from `depends_on`, which is the scheduler DAG dependency list.
-- Allows plan patches only for `draft`, `backlog`, `ready`, and `blocked` tasks. Running/waiting/completed tasks are execution history and should be replaced or followed up instead of rewritten.
-- Validates dependency existence, group isolation, and cycles before writing dependency changes.
-- `recompute_ready()` promotes dependency-satisfied backlog/blocked tasks to `ready` and blocks tasks whose dependencies are unfinished or failed.
-- Per-group settings store manual/auto dispatch settings plus `goal`, `plan`, `context`, `constraints_json`, `project_root`, and the reusable `manager_session_id`. `project_root` is the group-level Codex/Hermes starting directory used when a task has no explicit workspace override.
-- `/api/agent-tasks/plan` reads/writes group-level plan context and `/api/agent-tasks/manager` creates or resumes the group's Codex manager session. The first manager request creates the session with the full manager bootstrap prompt and current DAG/task context; later requests reuse that session and send only the user/request prompt so the transcript is not polluted with repeated bootstrap context.
-- `dispatch()` first creates an idle Codex/Hermes executor session, records the real `agent_session_id`, then sends a task-specific prompt containing the group goal/plan/constraints, task contract, dependency artifact paths, and a worker-only Task API contract with absolute URLs based on `dag.base_url`. Running, waiting, and terminal tasks are rejected for dispatch even when force is requested, which prevents duplicate sessions from stale ready rows or repeated clicks.
-- `dispatch()` also creates `~/.view/logs/agent-tasks/{task_id}/workspace/`, records it in `runtime.task_workspace`, and adds it as a `task_workspace` artifact so executors have an isolated write area.
-- `/api/agent-tasks/{task_id}/reset` accepts `action=clear|retry`, finds the selected task plus every direct/indirect downstream task that depends on it, rejects the operation if any affected task is active, deletes each affected `~/.view/logs/agent-tasks/{task_id}/` directory, clears runtime/artifacts/result/session state, resets status to backlog/ready/blocked through `recompute_ready()`, and dispatches the selected task when `action=retry` and dependencies are satisfied.
-- `set_process()` records a long-running external PID and moves the task to `waiting_process`.
-- `/api/agent-tasks/{task_id}/manager-request` is the executor shortcut for sending task-scoped requests to the group manager session.
-- `/api/agent-tasks/{task_id}/complete` expects `result` to contain `summary`, `metrics`, `failure_reason`, `next_suggestions`, and `user_decision_needed`, but also accepts legacy/top-level `summary`, `metrics`, and related fields and folds them into `result`. If `agent_session_id` is supplied, it must match the task's active session before completion is accepted.
-- Manager prompts include a manager Task API contract with concrete request shapes for listing tasks, reading context, creating tasks, patching mutable task fields, patching dependencies, updating the global plan, clearing/retrying downstream task state, and completing reviewed tasks. Worker prompts include only the APIs workers should use: read context, manager request, register process, and complete. Both prompt types state the configured API base URL and instruct agents not to infer host or port from memory.
-- The monitor loop checks waiting-process PIDs, moves exited tasks to `review`, asks the group manager to inspect logs/results and reschedule, and auto-dispatches one ready task per auto-mode group on each tick.
-- `events` table records task mutations with before/after JSON and reasons for auditability.
-- `frontend/src/components/AgentTasksPage.vue` opens new groups through a modal dialog that captures group id, goal, context, and project root. The last opened group is saved in user-namespaced browser storage and used as the default group the next time the page opens.
-
-`docs/agent_tasks.md`
-
-- User-facing design and API documentation for the Agent Task DAG system.
-
-`skills/agent-task-dag/SKILL.md`
-
-- Portable Codex-facing instructions for operating the Agent Task DAG HTTP API when this project is published or reused.
+- `read_config()` / `write_config(config)`: load and save nav appearance, Codex model options, voice settings, Markdown theme config, user profiles, and default user. Old workspace-state keys in config are ignored rather than migrated.
 
 `backend/app/events.py`
 
@@ -224,7 +165,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Codex snapshots include the shared `pending_approvals` field, currently empty because Codex runs are still launched with approvals bypassed. The manager exposes the shared approval-resolution method so a future non-YOLO Codex runner can plug into the same frontend controls.
 - Detached driver state: each run writes `state.json`, `stdout.jsonl`, `stderr.log`, and `prompt.txt` under `CODEX_RUN_DIR/{viewer_session_id}/{run_id}/`. The viewer metadata stores those paths plus the detached driver pid and Codex child pid. On startup, running sessions are reattached by reading this state and checking whether the driver pid is still alive.
 - `enqueue()`, `update_queue_item()`, and `delete_queue_item()`: manage pending prompts in session metadata. Appending to the queue starts the drain loop immediately when the session is not running.
-- `_start_next_queued(session)`: pops the next queued prompt, appends it to normal prompts, broadcasts a snapshot, and starts a Codex run. `_run()` calls it after each completed subprocess unless the current run was terminated by the user. `resume_pending_queues()` runs on backend startup so persisted queued work resumes without a browser connection.
+- `_start_next_queued(session)`: pops the next queued prompt, appends it to normal prompts, broadcasts a snapshot, and starts a Codex run. Queueing is no longer exposed through HTTP routes; normal Super Workspace dispatch queueing is represented by DB rows in `super_workspace_driver_runs`.
 - Codex subprocess proxying is controlled by `~/.view/config.json` `codex.proxy`; when non-empty it sets `https_proxy`, `HTTPS_PROXY`, `http_proxy`, and `HTTP_PROXY` for Codex runs, and when empty those variables are removed from the Codex subprocess environment. The default is no proxy.
 - Rendered Codex events are read from the canonical `~/.codex/sessions/**/rollout-*.jsonl` file matched by Codex session id. Viewer-local metadata/prompts and the matched `rollout_path` are stored in `~/.view/logs/codex-sessions/{viewer_session_id}.json`; stderr goes to `{viewer_session_id}.stderr.log`.
 - API snapshots and WebSocket event messages compact raw rollout entries into a transport/display shape before sending them to the frontend. Full raw events remain in memory/on disk for status parsing; compact events carry `event_type`, rendered `text`, `file_changes`, `patch_text`, and a bounded `raw_preview`. The detached Codex driver process also performs the same visible-event compaction while tailing rollout JSONL and writes provider message rows to `~/.view/agent-history.sqlite3`; this detached driver is the Codex provider-message ingestion path, not the Super Workspace runtime or backend watcher.
@@ -233,7 +174,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Active Codex runs are monitored by polling detached runner state and matched rollout JSONL files, then broadcasting newly parsed events. The service can recreate this monitor after restart because stdout, state, and canonical rollout files are persisted outside process memory.
 - Codex session status is updated from rollout turn-finish events and detached runner exit state: `task_complete` / `turn.completed` mark the viewer session `exited`, `turn_aborted` / `turn.failed` mark it `failed`, and runner `state.json` records the final process exit code when available.
 - Codex live-refresh debugging uses Loguru in `codex_sessions.py`: background runner start/detach/finish, rollout matching, and turn-finish status changes log at info level; rollout unavailability, synced event counts, per-event broadcasts, and stale WebSocket clients log at debug level.
-- `connect(session_id, websocket)`: sends snapshots and broadcasts live event/status/deleted messages to Codex panes.
+- `connect(session_id, websocket)`: legacy manager helper for WebSocket snapshots; the current frontend does not expose low-level Codex panes.
 - `terminate(session_id)`: stops the active detached runner process group for a session and broadcasts updated status.
 - `codex_session_manager`: singleton used by routes.
 
@@ -273,17 +214,16 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/models.py`
 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, `TerminalSnapshot`, `ClientLog`.
-- `ConfigData` stores global appearance, Markdown, Codex defaults, voice settings, and Task DAG defaults. Legacy workspace config models still exist for old state compatibility but are not exposed in the current frontend settings page.
-- Agent schemas: shared `AgentPrompt`, compact `AgentEvent`, `AgentFileChange`, and `AgentQueueItem` describe the normalized intermediate representation used across providers. `AgentEvent.event_type` is typed by the backend `AgentEventType` enum and is a fixed backend IR, not a provider-native event name. Current fixed event types are `message:assistant`, `reasoning`, `tool_call`, `tool_result`, `custom_tool_call`, `exec_command_begin`, `exec_command_end`, `function_call`, `function_call_output`, `custom_tool_call_output`, `view_image_tool_call`, `patch_apply_end`, and fallback `operation` for logged-but-unclassified visible events. Agent drivers are responsible for converting provider-native logs into `AgentEventType` values before snapshots or WebSocket events reach the frontend. Frontend transcript code should only depend on this fixed IR; adding a new agent provider should require backend driver conversion work, not new frontend event-name handling, unless a genuinely new shared IR event type is introduced. Codex schemas expose `CodexSessionInfo`, `CodexSessionSnapshot`, `CodexCliStatus`, and `CodexModelOptions`; session creation/send/queue uses shared agent schemas and routes. `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible, and running sessions expose background `pid`, `codex_pid`, `run_id`, and `run_started_at` fields when available. Hermes schemas reuse the shared agent prompt/event/queue shape, with Hermes-specific ids and DB path in `HermesSessionInfo`.
-- `CodexConfig` stores Codex model options, muted operation-message alpha, the Diff viewer auto-commit prompt, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Codex runs unless the user manually selects a different model in the pane toolbar. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
-- `DagConfig.base_url` stores the Viewer API origin injected into Agent Task manager/executor prompts; when empty, the backend falls back to `http://127.0.0.1:{VIEWER_PORT}` during prompt generation.
+- `ConfigData` stores global appearance, Markdown, Codex defaults, voice settings, user profiles, and default user.
+- Agent schemas: shared `AgentPrompt`, compact `AgentEvent`, `AgentFileChange`, and `AgentQueueItem` describe the normalized intermediate representation used across providers. `AgentEvent.event_type` is typed by the backend `AgentEventType` enum and is a fixed backend IR, not a provider-native event name. Current fixed event types are `message:assistant`, `reasoning`, `tool_call`, `tool_result`, `custom_tool_call`, `exec_command_begin`, `exec_command_end`, `function_call`, `function_call_output`, `custom_tool_call_output`, `view_image_tool_call`, `patch_apply_end`, and fallback `operation` for logged-but-unclassified visible events. Agent drivers are responsible for converting provider-native logs into `AgentEventType` values before writing Super Workspace history. Codex schemas expose `CodexSessionInfo` and `CodexSessionSnapshot`; `CodexSessionInfo.cwd_relative` mirrors the absolute `cwd` relative to the served root when possible, and running sessions expose background `pid`, `codex_pid`, `run_id`, and `run_started_at` fields when available. Hermes schemas reuse the shared agent prompt/event/queue shape, with Hermes-specific ids and DB path in `HermesSessionInfo`.
+- `CodexConfig` stores Codex model options, muted operation-message alpha, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Super Workspace Codex runs unless a role specifies a model. The built-in default model is `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
 `backend/app/super_workspace.py`
 
 - Per-user Super Workspace role/workspace manager backed by `super_workspaces`, `super_workspace_user_state`, and `super_workspace_roles` rows in `~/.view/agent-history.sqlite3`. The first/default workspace is named `Default Super Workspace` and uses user-scoped id `{user}:default`; `super_workspace_user_state` records the active workspace id for each user.
 - Exposes workspace list/activation helpers and role status summaries. Role status is deliberately simplified for frontend role displays: `queued`, `claimed`, and `running` driver-run rows map to `busy`; when no busy row exists, only the latest driver-run row can make the role `failed`; all other cases are `idle`.
-- Defines local API models for `SuperWorkspaceData`, `SuperRole`, workspace/role update payloads, and dispatch responses so the feature stays isolated from workspace slots and the Agent Task DAG.
+- Defines local API models for `SuperWorkspaceData`, `SuperRole`, workspace/role update payloads, and dispatch responses so the feature stays isolated from removed legacy workspace/session APIs.
 - `SuperWorkspaceManager.read()` / `write()` / `update()` / create/update/delete role methods persist the common prompt, fixed role rules, and current backing `provider:session_id` ref.
 - `dispatch()` reads role descriptions, calls an OpenAI-compatible chat-completions endpoint with JSON response format, validates returned role ids against the candidate roles, and returns the selected ids/rationale. It intentionally only routes messages; the backend runtime owns creating/resuming the actual role agent sessions for normal Super Workspace dispatch.
 
@@ -299,7 +239,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `backend/app/agent_history.py`
 
-- SQLite-backed agent history index stored at `~/.view/agent-history.sqlite3`. It is currently used by Super Workspace history only; normal workspace panes and agent panes still use the existing session snapshot APIs.
+- SQLite-backed agent history index stored at `~/.view/agent-history.sqlite3`. It is the history source for Super Workspace chats.
 - The viewer-owned history DB is accessed through SQLAlchemy ORM mapped rows and per-operation sessions in `AgentHistoryStore`; its SQLite engine uses `NullPool` so each session closes its DB connection after use. Hermes `~/.hermes/state.db` remains an external read-only SQLite source.
 - Defines `super_workspaces`, `super_workspace_user_state`, `super_workspace_roles`, `super_workspace_messages`, `super_workspace_driver_runs`, `super_workspace_message_file_changes`, `super_workspace_message_citations`, and `super_workspace_driver_checkpoints`. `super_workspaces` stores workspace id/name/common prompt, `super_workspace_user_state` stores each user's active workspace id, and `super_workspace_roles` stores fixed role prompts/settings per workspace. `super_workspace_messages` stores one intermediate-representation row per indexed message/event with scalar IR fields mapped directly to columns: `workspace_id`, `event_index`, `received_at`, `event_type`, `text`, `query`, and `patch_text`, plus provider/session/source path/line metadata, source-derived `occurred_at`, role, full provider `raw_json`, query/dispatch status, and driver-run association. `super_workspace_driver_runs` is the Super Workspace dispatch-task table: each row binds one workspace query message to one target role, stores the role snapshot, provider/session refs, routed prompt, parent/sender/recipient lineage, claim lease fields, attempt metadata, task status, and timestamps. `super_workspace_message_file_changes` stores the IR `file_changes[]` array as child rows with `path`, `change_type`, and `diff` columns instead of embedding it as JSON. `super_workspace_message_citations` stores ordered message-to-message citation edges where `source_message_id` is the query message and `cited_message_id` is a referenced Super Workspace message. `raw_preview` is not stored as an IR JSON blob because it is derivable from `raw_json`.
 - Super Workspace lineage is stored directly on messages: messages carry `parent_message_id`, `sender_role_id`, and `recipient_role_id`; provider output rows associated with a driver run also carry `query_message_id` and `driver_run_id`. Current UI presents non-empty `query` messages as runs, but the persisted shape can evolve into a query/message graph without a separate query table.
@@ -308,22 +248,6 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `claim_next_dispatch_task()` leases one queued task whose concrete role id has no claimed/running task, making role serialization DB-backed rather than process-memory-backed. Stale claimed leases are returned to queued, while running tasks keep the role id occupied until the worker marks them completed/failed. Roles with the same display name but different ids are independent and may run in parallel.
 - `list_super_runs()` / `get_super_run()` return DB-only lazy pages of non-empty-query messages with dispatch-task targets. Provider message rows are selected by explicit `workspace_id` / `driver_run_id` lineage. Reads do not reopen Codex rollout JSONL or Hermes state.
 - Provider message rows are inserted by the active provider driver process/watcher as provider output arrives. For Codex, that writer is the detached `codex_background_runner.py` driver, not the backend server. Super Workspace dispatch passes query, dispatch-task, parent, sender, and recipient ids into the Codex runner so every newly ingested Codex prompt/output row is directly linked to its dispatch task. `AgentHistoryStore` does not expose runtime-side resync helpers that reopen Codex rollout JSONL or Hermes state as a fallback; if a role response is visible in provider output but absent from this DB, the fault is in the driver ingestion path.
-
-`frontend/src/components/AgentTasksPage.vue`
-
-- Full-page Agent Task DAG board opened from the top bar beside Loop Tasks.
-- Loads task groups and goals, selects tasks by `group_id`, shows manual/auto scheduler mode, exposes "Run Ready" for approved one-at-a-time debugging, renders status columns plus a simple parent/child tree, and edits/deletes the selected task's title, workspace, description, instruction, dependencies, runtime, artifacts, and result summary.
-- The plan panel renders the group goal/plan/context/constraints through the shared Markdown renderer by default and can switch into an edit mode for modifying the underlying fields.
-- The selected task toolbar includes `Retry` and `Clear`, both with browser confirmation. Both actions include every downstream task that depends on the selected task; `Clear` removes stored runtime/output state and `Retry` clears the same state before dispatching the selected task when it is ready.
-- Includes a manager prompt box that sends planning/debug/rescheduling requests to the reusable Codex manager session. Manager and per-task agent sessions open in an overlay that embeds the full `AgentViewer.vue`, so the DAG page uses the same session transcript, prompt composer, focus/full detail switching, queue, and local-link preview behavior as normal workspace panes.
-
-`frontend/src/stores/agentTasks.ts`
-
-- Pinia wrapper around the Agent Task DAG REST API. Tracks selected group/task, task list, selected task context, per-group settings, dispatch actions, and dependency patches.
-
-`frontend/src/types/agentTasks.ts`
-
-- TypeScript mirror of the Agent Task DAG transport shapes: task status, execution, runtime, artifacts, result, policy, settings, context, and mutation payloads.
 
 `backend/app/logging.py`
 
@@ -358,9 +282,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/App.vue`
 
-- Root shell: top bar, profile selection, full-page settings, full-page loop tasks, full-page Agent Task DAG, and the Super Workspace split-pane shell as the normal page.
+- Root shell: top bar, profile selection, full-page settings, and the Super Workspace split-pane shell as the normal page.
 - Defaults directly to Super Workspace. The top bar has no Super Workspace button and no old pane-workspace button.
-- Loads config, the root file listing, terminal lists, Codex model options, and agent provider/session state before mounting the Super Workspace page.
+- Loads config, the root file listing, and terminal lists before mounting the Super Workspace page.
 - Applies appearance and active Markdown theme settings from `stores/files.ts` as CSS variables on the app shell, including nav height/icon size and Markdown/syntax colors.
 - Connects SSE with `connectEvents()`.
 - Refreshes affected file listings on change events.
@@ -387,12 +311,12 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Chat pane for a single `chatId`; loads flat display feed pages from `/api/super-workspace/runs?chat_id=...`, subscribes to `/api/super-workspace/events`, and incrementally refreshes changed runs.
 - The composer creates a persisted run through `/api/super-workspace/runs`. It sends structured `role_ids` from `stores/superChatDispatch.ts` when a manual target chip is selected in the Chats side panel, and still supports typed leading `@Role` mentions plus `@msg-{message_id}` citation tokens.
 - Visible user messages and final role responses have small cite buttons that insert `@msg-{message_id}` into the leading composer prefix. Backend `super_workspace_runtime.py` parses citation tokens, writes citation edges and queued dispatch-task rows, and leaves execution to the independent Super Workspace worker process.
-- The page renders flat display items directly: user query items show dispatch state and target chips, assistant `message:assistant` items show the target role label and Markdown-rendered message text, while reasoning/tool/thinking rows stay hidden at the display-feed query layer. Focus snapshots from the shared agent API are still used for link base directories, not as the primary role lifecycle source.
+- The page renders flat display items directly: user query items show dispatch state and target chips, assistant `message:assistant` items show the target role label and Markdown-rendered message text, while reasoning/tool/thinking rows stay hidden at the display-feed query layer.
 
 `frontend/src/components/DirectoryPicker.vue`
 
-- Reusable stepped directory selector backed by `/api/tree`.
-- Displays one select per path level starting at the active profile root, loads child directories for each selected parent, and emits the selected served-root-relative directory string for cwd-style fields.
+- Reusable cwd autocomplete backed by `/api/tree`.
+- Shows one path input plus a current-level directory dropdown. The dropdown loads only the current parent directory, filters directories by the typed path segment prefix, selects only directories, and appends a trailing slash in the input after selection so the user can continue typing the next path segment. The emitted cwd remains a served-root-relative path without leading or trailing slash; absolute paths and `..` segments are rejected. Empty cwd labels are supplied by callers because role empty cwd means inherit chat/default, while chat empty cwd means profile home.
 
 `frontend/src/components/viewers/CsvViewer.vue`
 
@@ -426,7 +350,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `load(clearMeta)`: refreshes metadata for current file.
 - Accepts a workspace-level loading flag so workspace switches can render every pane as a lightweight spinner before viewer components mount and start their backend fetches.
 - `handleChange(event)`: reloads metadata when this pane's file changed, or when the pane file's parent directory changes (covers delete/recreate and atomic-save workflows).
-- Chooses `TerminalViewer`, unified `AgentViewer`, `DiffViewer`, `ImageViewer`, `LargeTextViewer`, `MarkdownViewer`, `HtmlViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
+- Chooses `TerminalViewer`, `SuperWorkspaceChatPane`, `DiffViewer`, `ImageViewer`, `LargeTextViewer`, `MarkdownViewer`, `HtmlViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
 - Adds a transparent activation shield over inactive HTML iframe previews so iframe pointer handling cannot leave the wrong pane active before sidebar actions replace the active pane.
 
 `frontend/src/components/FileSidebar.vue`
@@ -457,28 +381,16 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Binary files are displayed with a `bin` chip but disabled so they cannot be opened in the diff viewer.
 - Clicking a text change emits `open-diff` with the current Files directory so the active pane becomes a diff pane scoped to that directory.
 
-`frontend/src/components/sidebar/AgentSessionsPanel.vue`
-
-- Unified Agents tool panel. Fetches provider metadata from the backend-backed `stores/agents.ts`, shows a provider dropdown for new sessions, creates the selected agent in the current sidebar directory, filters the global agent session list to refs remembered by the active workspace, and opens rows through `layout.openAgentSession(ref)`. Rows render provider icons, active row state, voice pending/ready row state, running status dots, unread completion/failure indicators, error display, and remove-from-workspace action from one shared appearance layer.
-
 `frontend/src/components/ConfigPanel.vue`
 
 - Full-page configuration UI opened from the top bar Settings button.
 - Edits `~/.view/config.json` through the existing `/api/config` endpoint.
-- Sections: Server, User Profile, Appearance, Workspace, Codex Models, Voice, Task DAG, Markdown, Syntax Highlighting, and raw JSON.
+- Sections: Server, User Profile, Appearance, Codex Models, Voice, Markdown, Syntax Highlighting, and raw JSON.
 - Server section has confirmed restart and stop buttons. Restart calls `/api/admin/restart`, polls `/api/health` until the PID changes, then reloads the page. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
 - Appearance currently controls nav bar size, which also drives icon/button size via CSS variables.
-- Codex Models controls the default Codex model, the available model list used by `/api/codex/models` and the Codex pane toolbar, and the optional Codex subprocess proxy.
+- Codex Models controls the default Codex model, the available model list used by Super Workspace Codex roles, and the optional Codex subprocess proxy.
 - Voice controls voice enablement, the persisted Whisper model option list, selected model, language code, translation toggle, and target language used by `/api/voice/ws`.
 - Markdown config stores an active theme plus a theme list. The editor can duplicate/reset themes and edit heading/body/paragraph/code font sizes, colors, weights, link/code/border colors, and Highlight.js token colors.
-
-`frontend/src/components/LoopTasksPage.vue`
-
-- Full-page Loop Tasks UI opened from the top bar Loop Tasks button.
-- Left panel lists loop task names, current state, last status, and next run time.
-- Right panel has an Edit/Logs segmented switch.
-- Edit mode exposes generated YAML frontmatter as form controls: enabled, Codex model, working directory, UTC+8 timezone display, schedule type/time fields, run limits, session policy/reset fields, stop regex, and Markdown prompt body.
-- Logs mode lists run records as collapsible panels. Expanding a run loads the backend detail JSON and renders the stored compact Codex session snapshot with prompt, event text, patch text, and file changes.
 
 `frontend/src/components/FileTree.vue`
 
@@ -507,7 +419,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Diff preview pane backed by `/api/git/diff`.
 - Renders unified diffs with Highlight.js `diff` highlighting, word-level diff mode, and side-by-side split diff mode.
-- Registers Diff-specific top-bar actions through `stores/paneToolbar.ts`: view mode switches, auto commit, refresh, stage file, stage all, revert file, commit, and push. Auto commit creates a Codex session in the diff directory using `codex.auto_commit_prompt`, remembers it in the active workspace's Codex session list, and lets the session handle summarize/commit/push.
+- Registers Diff-specific top-bar actions through `stores/paneToolbar.ts`: view mode switches, refresh, stage file, stage all, revert file, commit, and push.
 - Binary diffs render a disabled-state message instead of diff text.
 
 `frontend/src/components/viewers/HtmlViewer.vue`
@@ -572,32 +484,14 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `load()`: starts connection.
 - `endTerminal()`: calls terminal terminate API.
 
-`frontend/src/components/viewers/AgentViewer.vue`
-
-- Unified structured agent session pane connected to `/api/agents/sessions/{id}/ws?provider={provider}&detail={focus|full}`.
-- Accepts one `agentRef` (`provider:session_id`), receives the initial snapshot and live JSON events/status over WebSocket, and uses REST snapshots only for explicit refresh/fallback. Focus mode connects with `detail=focus`; showing operation details or raw JSON reconnects with `detail=full`.
-- Uses `AgentSessionTranscript.vue` for shared prompt/event rendering, status, provider session id, cwd, local transcript links, inline patch/file-change details, wrapped word-level highlights inside paired added/deleted diff lines, derived post-change result snippets below diffs, and raw JSON preview.
-- Local links in rendered transcript Markdown are resolved relative to `session.cwd_relative` through `/api/file/resolve-directory-link` and open in the floating `LocalFilePreview` dialog before the user chooses active-pane or split navigation.
-- Registers provider-aware top-bar controls through `stores/paneToolbar.ts`: refresh, create another same-provider session in the same working directory, focus composer, raw JSON toggle, token/context chips, and Codex model/rate-limit controls when the provider is Codex.
-- Sends follow-up prompts and server-backed queue operations through the generic `/api/agents/sessions/*` REST APIs. Queue rows can be clicked into `AgentPromptComposer.vue` for edit/save/cancel/delete, and queued work drains server-side even after the browser closes.
-- Persists unqueued composer drafts per provider/session ref in browser `localStorage` under `viewer.agentDrafts.v1`, restores them after pane/workspace remounts, and clears the draft after a queue request succeeds.
-
-`frontend/src/components/AgentPromptComposer.vue`
-
-- Shared Codex/Hermes prompt composer with the Codex input styling and behavior: server-backed queue list, queued-message edit/save/cancel/delete controls, microphone transcription through `VoiceTextarea.vue`, queue, clear, and stop actions. Parent viewers own persistence and API calls through emitted events.
-
 `frontend/src/components/VoiceTextarea.vue`
 
 - Reusable textarea plus voice-input action bar. It owns only textarea binding, `VoiceInputButton.vue`, optional Clear, keyboard event forwarding, and an `actions` slot for caller-specific buttons such as Queue/Stop, Save/Delete, or Dispatch.
 - The voice state still lives in `stores/voice.ts`; callers must provide a stable `contextId` so recording/transcription state stays scoped to the right prompt or role editor.
 
-`frontend/src/components/AgentSessionTranscript.vue`
-
-- Shared Codex/Hermes transcript display layer. Owns agent content appearance and behavior: session metadata, idle/running/error rows, prompt/event timeline ordering, Markdown rendering, Mermaid rendering, local link click emission, focus-mode muted operation filtering through an exact `AgentEvent.event_type` display map, raw JSON preview, file-change/patch diffs, word-level diff highlighting, derived result snippets, and scroll-to-bottom helpers exposed to parent viewers. Because drivers normalize provider-native events into the fixed backend `AgentEvent` IR, this component should not contain provider-specific event-name parsing. Unknown frontend event types are posted to `/api/debug/client-log` with bounded previews because they indicate the backend emitted an unregistered shared IR type.
-
 `frontend/src/stores/voice.ts`
 
-- Browser voice job store keyed by input context ids such as `codex:{session_id}:prompt` and `terminal:{terminal_id}:paste`.
+- Browser voice job store keyed by input context ids such as `super-workspace:{chat_id}:composer` and `terminal:{terminal_id}:paste`.
 - Owns `MediaRecorder`, microphone stream, voice WebSocket lifecycle, chunk sending, `ready` / `processing` / `partial` / `committed` / `final` / `error` handling, the persisted default-on `11M` language-model-refine toggle, and context text/status state. `partial` and `final` replace the current voice transcript suffix from the recording's base text because voice-service sends full accumulated text.
 - Voice jobs survive component unmounts after recording has stopped, so users can switch sessions while final transcription is processing and return to the same pending/ready draft.
 - Context statuses drive sidebar indicators: processing/recording contexts show as pending, completed but unsent voice text shows as ready.
@@ -617,10 +511,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Git APIs: `getGitStatus()`, `getGitDiff()`, `stageGitPath()`, `revertGitPath()`, `commitGit()`, and `pushGit()`.
 - Admin APIs: `restartServer()` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
-- Agent APIs: `listAgentProviders()`, `listAgentSessions(provider)`, `createAgentSession(provider, prompt, cwd, model)`, `getAgentSession(provider, id, detail)`, `sendAgentMessage(provider, id, prompt, model)`, `queueAgentMessage(provider, id, prompt, model)`, `terminateAgentSession(provider, id)`, `resolveAgentApproval(...)`, and `agentSessionSocketUrl(provider, id, detail)`.
+- Agent provider metadata API: `listAgentProviders()`.
 - Super Workspace APIs: `listSuperWorkspaces()`, `activateSuperWorkspace()`, `getSuperWorkspace()`, `updateSuperWorkspace()`, `getSuperRoleStatuses()`, role CRUD helpers, `listSuperWorkspaceRuns()`, `createSuperWorkspaceRun()`, and the raw `dispatchSuperWorkspace()` wrapper cover workspace activation, role storage/status, persisted query history, and LLM routing. Normal role-message delivery is owned by the backend Super Workspace runtime, not by frontend shared agent session helpers.
 - `frontend/src/api/client.ts` appends the active user id from `viewer.activeUser.v1` to REST and WebSocket API URLs; `frontend/src/api/events.ts` does the same for the SSE stream.
-- Agent loop APIs: `listAgentLoops()`, `createAgentLoop()`, `reloadAgentLoops()`, `updateAgentLoop()`, `deleteAgentLoop()`, `runAgentLoop()`, `pauseAgentLoop()`, `resumeAgentLoop()`, `resetAgentLoopSession()`, `listAgentLoopRuns()`, and `getAgentLoopRun()`.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 
 `frontend/src/api/events.ts`
@@ -629,7 +522,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/stores/files.ts`
 
-- Pinia store for directory listings, current path, expanded dirs, pinned paths, visit timestamps, appearance config, Markdown theme config, Codex config, voice config, Task DAG config, and loading state. Appearance, Markdown themes, Codex config, voice config, DAG config, and profile definitions are persisted in `~/.view/config.json`.
+- Pinia store for directory listings, current path, expanded dirs, pinned paths, visit timestamps, appearance config, Markdown theme config, Codex config, voice config, and loading state. Appearance, Markdown themes, Codex config, voice config, and profile definitions are persisted in `~/.view/config.json`.
 - Getters: `rootEntries`, `currentEntries`, `parentPath`, `activeMarkdownTheme`.
 - Actions: `loadConfig()`, `saveConfig()`, `saveAppearance()`, `saveMarkdown()`, `saveViewerConfig()`, `saveFullViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
@@ -637,19 +530,10 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Pinia store for recursive split layout and active pane.
 - Helpers: `id()`, `defaultLayout()`, `findPane()`, `mapNode()`, `firstPaneId()`, `mapAllPanes()`, `removePane()`.
-- Getters: `activePane`, `openPaths`, `openTerminalIds`, `openCodexSessionIds`, `openHermesSessionIds`, `openDiffPaths`.
-- Actions: `load()`, `save()`, `snapshot()`, `restore()`, `reset()`, `setActive()`, `openFile()`, `openTerminal()`, `openCodexSession()`, `openHermesSession()`, `openDiff()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, `clearTerminal()`, `clearCodexSession()`, `clearHermesSession()`.
+- Getters: `activePane`, `openPaths`, `openTerminalIds`, `openDiffPaths`, and `openChatIds`.
+- Actions: `load()`, `save()`, `snapshot()`, `restore()`, `reset()`, `setActive()`, `openFile()`, `openFileInSplit()`, `openTerminal()`, `openDiff()`, `openChat()`, `openChatInSplit()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, and `clearTerminal()`.
 - `openFileInSplit(path, direction)` creates a new split beside the active pane, opens a file in the new pane, and makes that pane active. It is used by floating local-file previews.
 - Persists to `localStorage` key `viewer.layout.v1`.
-
-`frontend/src/stores/codex.ts`
-
-- Pinia store for Codex global status, model options, and the Git auto-commit helper's Codex session creation. Agent transcript lifecycle is otherwise owned by `stores/agents.ts`.
-
-`frontend/src/stores/agentLoops.ts`
-
-- Pinia store for loop task summaries, selected task id, run summaries, and loaded run details.
-- Actions wrap `/api/agent-loops` endpoints: load/reload/create/save/delete, run now, pause/resume, reset session, load runs, and load one run detail.
 
 `frontend/src/stores/paneToolbar.ts`
 
@@ -672,31 +556,19 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/types/layout.ts`
 
-- Recursive `LayoutNode` union and `SplitDirection`; pane nodes may hold `filePath`, `terminalId`, `agentSession`, `diffPath`, or `diffCwd`.
+- Recursive `LayoutNode` union and `SplitDirection`; pane nodes may hold `filePath`, `terminalId`, `diffPath`/`diffCwd`, or `chatId`.
 
 `frontend/src/types/terminals.ts`
 
 - TypeScript mirror of terminal schemas: `TerminalStatus`, `TerminalInfo`, `TerminalSnapshot`.
 
-`frontend/src/types/codex.ts`
-
-- TypeScript mirror of Codex schemas: `CodexStatus`, `CodexSessionInfo`, `CodexSessionSnapshot`, and Codex-specific status/model fields. Shared prompt/event/file-change/queue item shapes live in `types/agents.ts` as `AgentPrompt`, `AgentEvent`, `AgentFileChange`, and `AgentQueueItem`.
-
 `frontend/src/types/agents.ts`
 
-- Shared agent provider/session types plus normalized `AgentPrompt`, `AgentEvent`, `AgentFileChange`, and `AgentQueueItem` shapes used by Codex, Hermes, and the shared agent transcript UI.
-
-`frontend/src/types/hermes.ts`
-
-- TypeScript mirror of Hermes schemas: `HermesStatus`, `HermesSessionInfo`, and `HermesSessionSnapshot`; it reuses the shared agent prompt/event/queue item shapes for normalized transcript display.
+- Shared agent provider metadata types used by Super Workspace role/provider selectors.
 
 `frontend/src/types/superWorkspace.ts`
 
 - TypeScript mirror of Super Workspace storage, workspace list/activation, role status, persisted run history, and dispatch response shapes: common prompt, `SuperRole`, `SuperWorkspaceSummary`, `SuperRoleStatus`, workspace/role create/patch payloads, `AgentHistoryMessage`, `SuperHistoryRun`, `SuperHistoryTarget`, paginated run responses, and selected route ids/rationale.
-
-`frontend/src/types/agentLoops.ts`
-
-- TypeScript mirror of agent loop schemas: task definition, schedule/run/session/stop config, runtime state, task info, and run record/detail.
 
 `frontend/src/utils/scrollMemory.ts`
 
@@ -840,13 +712,10 @@ Backend Pydantic models in `backend/app/models.py` should match frontend interfa
 - `FileMeta` <-> `FileMeta`
 - `ConfigData` <-> `ViewerConfig`
 - `AppearanceConfig` <-> `AppearanceConfig`
-- `WorkspaceData` / `WorkspaceSnapshot` <-> matching workspace TypeScript interfaces.
-- `WorkspaceData` / `WorkspaceSnapshot` <-> `WorkspaceData` / `WorkspaceSnapshot`
 - `MarkdownConfig` / `MarkdownTheme` <-> `MarkdownConfig` / `MarkdownTheme`
 - `WatchEvent` <-> `WatchEvent`
 - `TerminalInfo` <-> `TerminalInfo` including PTY rows/cols and shared layout lock state.
 - `TerminalSnapshot` <-> `TerminalSnapshot` including PTY rows/cols and shared layout lock state.
-- `AgentLoopDefinition` / `AgentLoopInfo` / `AgentLoopRunRecord` <-> matching loop task TypeScript interfaces.
 
 If a backend field changes, update the matching frontend type and all consumers.
 
@@ -854,21 +723,16 @@ If a backend field changes, update the matching frontend type and all consumers.
 
 - `~/.view/config.json`: appearance, Codex model options, voice model/language/translation options, Markdown themes, user profiles, and default user, managed by `/api/config` and `/api/users`. On first use, missing config is copied from served-root `.viewer.config.json` if present; old workspace-state keys in config are ignored rather than migrated.
 - `~/.view/agent-history.sqlite3`: shared agent history index used first by Super Workspace and managed through SQLAlchemy ORM sessions with `NullPool` connection handling. It stores Super Workspace definitions, roles, user messages/runs/targets plus provider driver-written intermediate message rows with full raw JSON, structured IR columns (`workspace_id`, `event_index`, `received_at`, `event_type`, `text`, `patch_text`, and `file_changes` child rows), provider/session/source path/line metadata, and source-derived timestamps. Runtime read/status paths do not resync or reparse provider source files as a fallback.
-- `~/.view/agent-tasks.sqlite3`: Agent Task DAG persistence managed through SQLAlchemy ORM sessions with `NullPool` connection handling. It stores tasks, dependency/runtime/artifact/result JSON payloads, group-level scheduler/manager settings, and audit events with before/after JSON.
-- `~/.view/loops/*.md`: Markdown loop task definitions with generated YAML frontmatter and prompt body.
-- `~/.view/agent-loops.json`: scheduler runtime state for loop tasks.
 - `localStorage viewer.activeUser.v1`: selected soft user profile id.
 - `localStorage viewer.layout.v1.{user}` and `viewer.layout.v1.{user}.super-workspace`: split tree, active pane, and open pane content ids, with the Super Workspace scope used by the normal app shell.
 - `localStorage viewer.superSidebarPinned.v1.{user}` and `viewer.superSidebarWidth.v1.{user}`: Super Workspace sidebar state.
 - `localStorage viewer.sidebarActiveTool.v1.{user}`: selected Super Workspace sidebar tool.
 - `localStorage viewer.scrollPositions.v1.{user}`: per-path scroll positions.
-- `localStorage viewer.agentDrafts.v1.{user}`: unsent agent prompt drafts.
 - `~/.view/logs/viewer-*.log`: timestamped runtime logs from `run.py`.
 - `~/.view/logs/codex-sessions/*.jsonl`: obsolete viewer-local Codex stdout caches from older versions; rendering now reads canonical rollout JSONL files under `~/.codex/sessions/`.
 - `~/.view/logs/codex-sessions/*.stderr.log`: stderr from Codex subprocesses.
 - `~/.view/logs/codex-sessions/*.json`: viewer-local Codex session metadata including prompts, discovered Codex thread id, selected model, status, and matched rollout path.
 - `~/.view/logs/terminals/*.log`: terminal replay logs.
-- `~/.view/logs/agent-loops/{task_id}/runs.jsonl` and `{run_id}.json`: loop run summaries and detailed compact Codex snapshots.
 
 ## Common Fault Locations
 
@@ -880,9 +744,8 @@ If a backend field changes, update the matching frontend type and all consumers.
 - Terminal creation fails: `settings.terminal_shell`, `TerminalManager.create()`, shell availability, PTY permissions.
 - Terminal output glitches: `TerminalViewer.vue` snapshot/output version logic and `TerminalManager._read_output()`.
 - Terminal resize issues: `TerminalViewer.vue resize()` and `TerminalManager.resize()`.
-- Codex session creation/resume fails: check `codex` availability on PATH, `backend/app/codex_sessions.py` command construction, `~/.view/logs/codex-sessions/*.stderr.log`, and whether a `thread_id` was captured from raw JSON.
-- Agent pane rendering looks incomplete: inspect `AgentSessionTranscript.vue` extraction/rendering and use `AgentViewer.vue` raw JSON toggle to compare against the provider's raw session log.
-- Loop task does not run: check `~/.view/loops/*.md` frontmatter parse errors in the Loop Tasks page, `backend/app/agent_loops.py`, `~/.view/agent-loops.json`, and `~/.view/logs/agent-loops/{task_id}/`.
+- Super Workspace role dispatch fails: check `backend/app/super_workspace_runtime.py`, `backend/app/super_workspace_worker.py`, provider manager logs, `~/.view/agent-history.sqlite3`, and detached driver state under `WEAVER_RUN_DIR`.
+- Codex role run fails: check `codex` availability on PATH, `backend/app/codex_sessions.py` command construction, `~/.view/logs/codex-sessions/*.stderr.log`, and whether a `thread_id` was captured from raw JSON.
 - Frontend runtime errors: browser console, `/api/debug/client-log`, `backend/app/logging.py`, `~/.view/logs/`.
 - Production frontend missing: build `frontend/dist` or set `VIEWER_FRONTEND_DIST`.
 

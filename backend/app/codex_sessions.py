@@ -255,9 +255,13 @@ class CodexSessionManager:
             },
             indent=2,
         )
-        tmp_path = session.meta_path.with_suffix(f"{session.meta_path.suffix}.tmp")
-        tmp_path.write_text(payload, encoding="utf-8")
-        tmp_path.replace(session.meta_path)
+        tmp_path = session.meta_path.with_suffix(f"{session.meta_path.suffix}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            tmp_path.replace(session.meta_path)
+        finally:
+            with suppress(FileNotFoundError):
+                tmp_path.unlink()
 
     def _append_stderr(self, session: CodexSession, line: str) -> None:
         if session.stderr_path is None:
@@ -1049,16 +1053,6 @@ class CodexSessionManager:
             if session.run_task:
                 with suppress(asyncio.CancelledError):
                     await session.run_task
-
-    async def resume_pending_queues(self) -> None:
-        self._ensure_loaded()
-        for session in list(self.sessions.values()):
-            self._sync_background_run_state(session)
-            if self._background_run_active(session) and session.run_task is None:
-                session.run_task = asyncio.create_task(self._monitor_background_run(session))
-                continue
-            if session.status != "running" and session.queue:
-                await self._start_next_queued(session)
 
     def cli_status(self) -> dict:
         rollouts = self._recent_rollouts()

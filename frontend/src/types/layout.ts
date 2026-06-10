@@ -3,7 +3,6 @@ export type SplitDirection = "horizontal" | "vertical";
 export type PaneContent = {
   filePath?: string;
   terminalId?: string;
-  agentSession?: string;
   diffPath?: string;
   diffCwd?: string;
   chatId?: string;
@@ -15,7 +14,6 @@ export type LayoutNode =
       id: string;
       filePath?: string;
       terminalId?: string;
-      agentSession?: string;
       diffPath?: string;
       diffCwd?: string;
       chatId?: string;

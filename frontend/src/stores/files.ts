@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
-import type { AppearanceConfig, CodexConfig, DagConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, VoiceConfig, WorkspaceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, ViewerConfig, VoiceConfig } from "../types/files";
 import { parentPath as resolveParentPath } from "../utils/paths";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
@@ -41,13 +41,6 @@ export const DEFAULT_CODEX_CONFIG: CodexConfig = {
   default_model: "gpt-5.5",
   proxy: "",
   muted_message_alpha: 0.56,
-  auto_commit_prompt: `Review the Git changes in the current directory only.
-
-Summarize the changes briefly, stage the relevant files in this directory, create a concise commit message, and commit them.
-
-If a remote/tracking branch is configured, push the commit after it succeeds.
-
-Do not amend, rebase, reset, or rewrite history. If there are no changes, unrelated changes outside this directory, or anything unsafe or unclear, stop and explain instead of committing.`,
 };
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
@@ -59,16 +52,6 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   translation_enabled: false,
   available_target_languages: ["en", "zh", "ja", "ko", "fr", "de", "es"],
   target_language: "en",
-};
-
-export const DEFAULT_DAG_CONFIG: DagConfig = {
-  base_url: "",
-};
-
-export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfig = {
-  count: 5,
-  heat_interval_seconds: 10,
-  heat_step_percent: 5,
 };
 
 function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
@@ -128,7 +111,6 @@ function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
     default_model: defaultModel,
     proxy: config?.proxy?.trim() ?? DEFAULT_CODEX_CONFIG.proxy,
     muted_message_alpha: normalizeAlpha(config?.muted_message_alpha, DEFAULT_CODEX_CONFIG.muted_message_alpha),
-    auto_commit_prompt: config?.auto_commit_prompt?.trim() || DEFAULT_CODEX_CONFIG.auto_commit_prompt,
   };
 }
 
@@ -166,27 +148,10 @@ function normalizeVoiceConfig(config?: Partial<VoiceConfig>): VoiceConfig {
   };
 }
 
-function normalizeDagConfig(config?: Partial<DagConfig>): DagConfig {
-  return {
-    base_url: config?.base_url?.trim() ?? DEFAULT_DAG_CONFIG.base_url,
-  };
-}
-
 function normalizeAlpha(value: unknown, fallback: number): number {
   const alpha = Number(value ?? fallback);
   if (!Number.isFinite(alpha)) return fallback;
   return Math.min(1, Math.max(0.15, alpha));
-}
-
-function normalizeWorkspaceConfig(config?: Partial<WorkspaceConfig>): WorkspaceConfig {
-  const count = Number(config?.count ?? DEFAULT_WORKSPACE_CONFIG.count);
-  const interval = Number(config?.heat_interval_seconds ?? DEFAULT_WORKSPACE_CONFIG.heat_interval_seconds);
-  const step = Number(config?.heat_step_percent ?? DEFAULT_WORKSPACE_CONFIG.heat_step_percent);
-  return {
-    count: Math.min(20, Math.max(1, Math.round(Number.isFinite(count) ? count : DEFAULT_WORKSPACE_CONFIG.count))),
-    heat_interval_seconds: Math.min(300, Math.max(1, Number.isFinite(interval) ? interval : DEFAULT_WORKSPACE_CONFIG.heat_interval_seconds)),
-    heat_step_percent: Math.min(100, Math.max(0.1, Number.isFinite(step) ? step : DEFAULT_WORKSPACE_CONFIG.heat_step_percent)),
-  };
 }
 
 export const useFilesStore = defineStore("files", {
@@ -200,8 +165,6 @@ export const useFilesStore = defineStore("files", {
     markdown: normalizeMarkdown(),
     codexConfig: normalizeCodexConfig(),
     voiceConfig: normalizeVoiceConfig(),
-    dagConfig: normalizeDagConfig(),
-    workspaceConfig: normalizeWorkspaceConfig(),
     loading: false,
   }),
   getters: {
@@ -232,8 +195,6 @@ export const useFilesStore = defineStore("files", {
       this.markdown = normalizeMarkdown(config.markdown);
       this.codexConfig = normalizeCodexConfig(config.codex);
       this.voiceConfig = normalizeVoiceConfig(config.voice);
-      this.dagConfig = normalizeDagConfig(config.dag);
-      this.workspaceConfig = normalizeWorkspaceConfig(config.workspace);
     },
     async saveConfig() {
       const config: ViewerConfig = {
@@ -241,16 +202,12 @@ export const useFilesStore = defineStore("files", {
         markdown: normalizeMarkdown(this.markdown),
         codex: normalizeCodexConfig(this.codexConfig),
         voice: normalizeVoiceConfig(this.voiceConfig),
-        dag: normalizeDagConfig(this.dagConfig),
-        workspace: normalizeWorkspaceConfig(this.workspaceConfig),
       };
       const saved = await putConfig(config);
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
       this.codexConfig = normalizeCodexConfig(saved.codex);
       this.voiceConfig = normalizeVoiceConfig(saved.voice);
-      this.dagConfig = normalizeDagConfig(saved.dag);
-      this.workspaceConfig = normalizeWorkspaceConfig(saved.workspace);
     },
     async saveAppearance(appearance: AppearanceConfig) {
       this.appearance = normalizeAppearance(appearance);
@@ -265,13 +222,11 @@ export const useFilesStore = defineStore("files", {
       this.markdown = normalizeMarkdown(markdown);
       await this.saveConfig();
     },
-    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, voice: VoiceConfig, workspace: WorkspaceConfig, dag: DagConfig) {
+    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, voice: VoiceConfig) {
       this.appearance = normalizeAppearance(appearance);
       this.markdown = normalizeMarkdown(markdown);
       this.codexConfig = normalizeCodexConfig(codex);
       this.voiceConfig = normalizeVoiceConfig(voice);
-      this.workspaceConfig = normalizeWorkspaceConfig(workspace);
-      this.dagConfig = normalizeDagConfig(dag);
       await this.saveConfig();
     },
     async loadDirectory(path = "") {

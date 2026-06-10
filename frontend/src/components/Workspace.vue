@@ -19,4 +19,10 @@ const layout = useLayoutStore();
   min-width: 0;
   padding: 8px;
 }
+
+@media (max-width: 767.98px) {
+  .workspace {
+    padding: 3px;
+  }
+}
 </style>

@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 from .config import settings
 from .models import UserProfile
-from .storage import CONFIG_PATH, USERS_DIR, ensure_view_home, migrate_legacy_state
+from .storage import CONFIG_PATH, migrate_legacy_state
 
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 INITIAL_USER_PROFILES = [
@@ -88,20 +88,6 @@ def user_home_path(user_id: str | None) -> Path:
     if path.is_absolute():
         return path.resolve()
     return Path.home().joinpath(_normalize_relative_home(raw)).resolve()
-
-
-def user_state_dir(user_id: str | None) -> Path:
-    profile = get_user_profile(user_id)
-    path = USERS_DIR / profile.id
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def user_workspaces_path(user_id: str | None) -> Path:
-    ensure_view_home()
-    profile = get_user_profile(user_id)
-    path = user_state_dir(profile.id) / "workspaces.json"
-    return path
 
 
 def _normalize_home(value: str | None) -> str:

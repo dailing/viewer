@@ -5,8 +5,6 @@ import type { FileMeta, WatchEvent } from "../types/files";
 import { getMeta } from "../api/client";
 import { useLayoutStore } from "../stores/layout";
 import { fileChangeAffectsPath } from "../utils/paths";
-import { agentRefForPane } from "../utils/agents";
-import AgentViewer from "./viewers/AgentViewer.vue";
 import CsvViewer from "./viewers/CsvViewer.vue";
 import DiffViewer from "./viewers/DiffViewer.vue";
 import HtmlViewer from "./viewers/HtmlViewer.vue";
@@ -25,15 +23,11 @@ const meta = ref<FileMeta | null>(null);
 const error = ref("");
 const version = ref(0);
 
-function paneAgentRef() {
-  return agentRefForPane(props.pane);
-}
-
 async function load(clearMeta: boolean) {
   error.value = "";
   if (clearMeta) meta.value = null;
   if (props.workspaceLoading) return;
-  if (!props.pane.filePath || props.pane.terminalId || paneAgentRef()) return;
+  if (!props.pane.filePath || props.pane.terminalId) return;
   try {
     meta.value = await getMeta(props.pane.filePath);
     version.value += 1;
@@ -56,7 +50,7 @@ function isCsvPath(path: string): boolean {
   return path.toLowerCase().endsWith(".csv");
 }
 
-watch(() => [props.pane.filePath, props.pane.terminalId, paneAgentRef(), props.workspaceLoading], () => load(true), { immediate: true });
+watch(() => [props.pane.filePath, props.pane.terminalId, props.workspaceLoading], () => load(true), { immediate: true });
 onMounted(() => {
   window.addEventListener("viewer:file-changed", handleChange);
   window.addEventListener("viewer:pane-refresh", handleRefresh);
@@ -75,7 +69,6 @@ onUnmounted(() => {
       </div>
       <TerminalViewer v-else-if="pane.terminalId" :id="pane.terminalId" :pane-id="pane.id" />
       <SuperWorkspaceChatPane v-else-if="pane.chatId" :chat-id="pane.chatId" :pane-id="pane.id" />
-      <AgentViewer v-else-if="paneAgentRef()" :agent-ref="paneAgentRef()!" :pane-id="pane.id" />
       <DiffViewer v-else-if="pane.diffPath" :path="pane.diffPath" :cwd="pane.diffCwd ?? ''" :pane-id="pane.id" />
       <div v-else-if="!pane.filePath" class="empty-state">
         <i class="bi bi-folder2-open"></i>

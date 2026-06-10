@@ -35,27 +35,44 @@ const roles = ref<SuperRole[]>([]);
 const sidebarOpen = ref(true);
 const sidebarPinned = ref(true);
 const sidebarWidth = ref(320);
+const isMobile = ref(false);
 const loading = ref(false);
 const error = ref("");
 const bodyShellStyle = computed(() => ({ "--sidebar-width": `${sidebarWidth.value}px` }));
+const effectiveSidebarPinned = computed(() => sidebarPinned.value && sidebarOpen.value && !isMobile.value);
+
+let mobileQuery: MediaQueryList | null = null;
 
 onMounted(async () => {
   layout.load("super-workspace");
+  mobileQuery = window.matchMedia("(max-width: 767.98px)");
+  isMobile.value = mobileQuery.matches;
+  mobileQuery.addEventListener("change", handleViewportChange);
   sidebarPinned.value = localStorage.getItem(namespacedStorageKey(SIDEBAR_PIN_KEY)) !== "false";
-  sidebarOpen.value = sidebarPinned.value;
+  sidebarOpen.value = sidebarPinned.value && !isMobile.value;
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(namespacedStorageKey(SIDEBAR_WIDTH_KEY))) || sidebarWidth.value);
   await agents.loadProviders();
   await loadState();
 });
 
 onUnmounted(() => {
+  mobileQuery?.removeEventListener("change", handleViewportChange);
   layout.setStorageScope("");
 });
 
 watch(sidebarPinned, (pinned) => {
   localStorage.setItem(namespacedStorageKey(SIDEBAR_PIN_KEY), String(pinned));
-  if (pinned) sidebarOpen.value = true;
+  if (pinned && !isMobile.value) sidebarOpen.value = true;
 });
+
+function handleViewportChange(event: MediaQueryListEvent) {
+  isMobile.value = event.matches;
+  if (event.matches) {
+    sidebarOpen.value = false;
+    return;
+  }
+  if (sidebarPinned.value) sidebarOpen.value = true;
+}
 
 async function loadState() {
   loading.value = true;
@@ -104,6 +121,7 @@ async function saveChat(chat: SuperChatSummary) {
     const data = await updateSuperChat(chat.id, {
       name: chat.name,
       type: chat.type,
+      cwd: chat.cwd,
       common_prompt: chat.common_prompt,
       member_role_ids: chat.member_role_ids,
     });
@@ -134,6 +152,7 @@ async function saveRole(role: SuperRole) {
       cwd: role.cwd,
       model: role.model ?? null,
       session_ref: role.session_ref,
+      session_policy: role.session_policy,
     });
     roles.value = data.roles;
   } catch (err) {
@@ -227,16 +246,16 @@ function startSidebarResize(event: PointerEvent) {
 </script>
 
 <template>
-  <div class="super-workspace-shell" :class="{ 'sidebar-pinned': sidebarPinned && sidebarOpen }" :style="bodyShellStyle">
-    <div v-if="sidebarOpen && !sidebarPinned" class="sidebar-backdrop" @click="sidebarOpen = false"></div>
-    <aside class="sidebar-drawer" :class="{ 'panel-open': sidebarOpen, pinned: sidebarPinned && sidebarOpen }">
+  <div class="super-workspace-shell" :class="{ 'sidebar-pinned': effectiveSidebarPinned }" :style="bodyShellStyle">
+    <div v-if="sidebarOpen && !effectiveSidebarPinned" class="sidebar-backdrop" @click="sidebarOpen = false"></div>
+    <aside class="sidebar-drawer" :class="{ 'panel-open': sidebarOpen, pinned: effectiveSidebarPinned }">
       <FileSidebar
         :chats="chats"
         :active-chat-id="activeChatId"
         :roles="roles"
         :providers="agents.providers"
         :panel-open="sidebarOpen"
-        :panel-pinned="sidebarPinned"
+        :panel-pinned="effectiveSidebarPinned"
         @open-file="openFile"
         @open-terminal="openTerminal"
         @open-diff="openDiff"
@@ -253,7 +272,7 @@ function startSidebarResize(event: PointerEvent) {
       />
     </aside>
     <div
-      v-if="sidebarPinned && sidebarOpen"
+      v-if="effectiveSidebarPinned"
       class="sidebar-resizer"
       role="separator"
       title="Drag to resize"

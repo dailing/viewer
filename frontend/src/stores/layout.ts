@@ -1,6 +1,5 @@
 import { defineStore } from "pinia";
 import type { LayoutNode, PaneContent, SplitDirection } from "../types/layout";
-import { agentRefForPane } from "../utils/agents";
 import { namespacedStorageKey } from "../utils/userProfile";
 
 const STORAGE_KEY = "viewer.layout.v1";
@@ -37,7 +36,8 @@ function cloneLayout(node: LayoutNode): LayoutNode {
 
 function normalizeLayoutNode(node: LayoutNode): LayoutNode {
   if (node.type === "pane") {
-    return { ...node, history: normalizeHistory(node.history) };
+    const { filePath, terminalId, diffPath, diffCwd, chatId, history } = node;
+    return { type: "pane", id: node.id, filePath, terminalId, diffPath, diffCwd, chatId, history: normalizeHistory(history) };
   }
   return { ...node, first: normalizeLayoutNode(node.first), second: normalizeLayoutNode(node.second) };
 }
@@ -79,11 +79,9 @@ function removePane(node: LayoutNode, paneId: string): { node: LayoutNode; remov
 }
 
 function paneContent(pane: Extract<LayoutNode, { type: "pane" }>): PaneContent {
-  const ref = agentRefForPane(pane);
   return {
     filePath: pane.filePath,
     terminalId: pane.terminalId,
-    agentSession: ref,
     diffPath: pane.diffPath,
     diffCwd: pane.diffCwd,
     chatId: pane.chatId,
@@ -91,14 +89,13 @@ function paneContent(pane: Extract<LayoutNode, { type: "pane" }>): PaneContent {
 }
 
 function hasContent(content: PaneContent | null | undefined): boolean {
-  return Boolean(content?.filePath || content?.terminalId || content?.agentSession || content?.diffPath || content?.chatId);
+  return Boolean(content?.filePath || content?.terminalId || content?.diffPath || content?.chatId);
 }
 
 function sameContent(left: PaneContent, right: PaneContent): boolean {
   return (
     (left.filePath ?? "") === (right.filePath ?? "") &&
     (left.terminalId ?? "") === (right.terminalId ?? "") &&
-    (left.agentSession ?? "") === (right.agentSession ?? "") &&
     (left.diffPath ?? "") === (right.diffPath ?? "") &&
     (left.diffCwd ?? "") === (right.diffCwd ?? "") &&
     (left.chatId ?? "") === (right.chatId ?? "")
@@ -111,10 +108,6 @@ function contentForFile(path: string): PaneContent {
 
 function contentForTerminal(id: string): PaneContent {
   return { terminalId: id };
-}
-
-function contentForAgent(ref: string): PaneContent {
-  return { agentSession: ref };
 }
 
 function contentForDiff(path: string, cwd = ""): PaneContent {
@@ -139,7 +132,6 @@ function applyPaneContent(pane: Extract<LayoutNode, { type: "pane" }>, content: 
     ...pane,
     filePath: content.filePath,
     terminalId: content.terminalId,
-    agentSession: content.agentSession,
     diffPath: content.diffPath,
     diffCwd: content.diffCwd,
     chatId: content.chatId,
@@ -197,20 +189,6 @@ export const useLayoutStore = defineStore("layout", {
       };
       visit(state.root);
       return ids;
-    },
-    openAgentSessionRefs(state): string[] {
-      const refs: string[] = [];
-      const visit = (node: LayoutNode) => {
-        if (node.type === "pane") {
-          const ref = agentRefForPane(node);
-          if (ref) refs.push(ref);
-          return;
-        }
-        visit(node.first);
-        visit(node.second);
-      };
-      visit(state.root);
-      return refs;
     },
     openDiffPaths(state): string[] {
       const paths: string[] = [];
@@ -309,12 +287,6 @@ export const useLayoutStore = defineStore("layout", {
       this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForTerminal(id)));
       this.save();
     },
-    openAgentSession(ref: string) {
-      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
-      emitPaneBeforeNavigate(this.activePaneId);
-      this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForAgent(ref)));
-      this.save();
-    },
     openDiff(path: string, cwd = "") {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
       emitPaneBeforeNavigate(this.activePaneId);
@@ -381,7 +353,6 @@ export const useLayoutStore = defineStore("layout", {
         ...pane,
         filePath: undefined,
         terminalId: undefined,
-        agentSession: undefined,
         diffPath: undefined,
         diffCwd: undefined,
         chatId: undefined,
@@ -401,10 +372,6 @@ export const useLayoutStore = defineStore("layout", {
     },
     clearTerminal(id: string) {
       this.root = mapAllPanes(this.root, (pane) => (pane.terminalId === id ? { ...pane, terminalId: undefined } : pane));
-      this.save();
-    },
-    clearAgentSession(ref: string) {
-      this.root = mapAllPanes(this.root, (pane) => (agentRefForPane(pane) === ref ? { ...pane, agentSession: undefined } : pane));
       this.save();
     },
   },

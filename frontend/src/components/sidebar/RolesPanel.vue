@@ -72,11 +72,18 @@ function selectRole(role: SuperRole) {
       </label>
       <label class="field">
         <span>Working Directory</span>
-        <DirectoryPicker v-model="selectedRole.cwd" />
+        <DirectoryPicker v-model="selectedRole.cwd" empty-label="Inherit chat cwd" clear-title="Leave role cwd empty" />
       </label>
       <label class="field">
         <span>Model</span>
         <input v-model="selectedRole.model" class="form-control form-control-sm" placeholder="Provider default" />
+      </label>
+      <label class="field">
+        <span>Session Management</span>
+        <select v-model="selectedRole.session_policy" class="form-select form-select-sm">
+          <option value="reuse">Reuse session</option>
+          <option value="new_each_run">New session each run</option>
+        </select>
       </label>
       <label class="field">
         <span>Session Ref</span>

@@ -100,4 +100,26 @@ function startDrag(event: PointerEvent) {
 .split-resizer:hover::before {
   background: #4f6f96;
 }
+
+@media (max-width: 767.98px) {
+  .split-resizer {
+    flex-basis: 4px;
+  }
+
+  .split-node.horizontal > .split-resizer {
+    min-height: 4px;
+  }
+
+  .split-node:not(.horizontal) > .split-resizer {
+    min-width: 4px;
+  }
+
+  .split-resizer::before {
+    inset: 0 1px;
+  }
+
+  .split-node.horizontal > .split-resizer::before {
+    inset: 1px 0;
+  }
+}
 </style>

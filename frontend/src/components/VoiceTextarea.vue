@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import VoiceInputButton from "./VoiceInputButton.vue";
 
 const props = withDefaults(
@@ -11,6 +11,8 @@ const props = withDefaults(
     clearable?: boolean;
     monospace?: boolean;
     minHeight?: string;
+    maxHeight?: string;
+    autoGrow?: boolean;
     trailingActions?: boolean;
   }>(),
   {
@@ -19,6 +21,8 @@ const props = withDefaults(
     clearable: true,
     monospace: true,
     minHeight: "92px",
+    maxHeight: "50vh",
+    autoGrow: false,
     trailingActions: false,
   },
 );
@@ -26,17 +30,25 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   clear: [];
+  focus: [event: FocusEvent];
+  blur: [event: FocusEvent];
   keydown: [event: KeyboardEvent];
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const voiceInput = ref<InstanceType<typeof VoiceInputButton> | null>(null);
 const text = computed({
   get: () => props.modelValue,
   set: (value: string) => emit("update:modelValue", value),
 });
 const canClear = computed(() => Boolean(props.modelValue));
-const style = computed(() => ({ "--voice-textarea-min-height": props.minHeight }));
+const style = computed(() => ({ "--voice-textarea-min-height": props.minHeight, "--voice-textarea-max-height": props.maxHeight }));
 const hasTrailingActions = computed(() => props.clearable || props.trailingActions);
+
+watch(
+  () => props.modelValue,
+  () => resizeTextarea(),
+);
 
 function clearText() {
   if (!canClear.value) return;
@@ -49,7 +61,21 @@ function focusTextarea() {
   void nextTick(() => textarea.value?.focus());
 }
 
-defineExpose({ focus: focusTextarea });
+function focusVoiceInput() {
+  void nextTick(() => voiceInput.value?.focus());
+}
+
+function resizeTextarea() {
+  if (!props.autoGrow) return;
+  void nextTick(() => {
+    const element = textarea.value;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  });
+}
+
+defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
 </script>
 
 <template>
@@ -60,11 +86,14 @@ defineExpose({ focus: focusTextarea });
       :rows="rows"
       :placeholder="placeholder"
       :class="{ monospace }"
+      @blur="emit('blur', $event)"
+      @focus="emit('focus', $event)"
+      @input="resizeTextarea"
       @keydown="emit('keydown', $event)"
     ></textarea>
     <div class="voice-textarea-actions">
       <div class="voice-textarea-actions-main">
-        <VoiceInputButton v-model="text" :context-id="contextId" />
+        <VoiceInputButton ref="voiceInput" v-model="text" :context-id="contextId" />
         <slot name="actions"></slot>
       </div>
       <div v-if="hasTrailingActions" class="voice-textarea-actions-trailing">
@@ -97,8 +126,10 @@ defineExpose({ focus: focusTextarea });
   border-radius: 6px;
   font-size: 14px;
   line-height: 1.35;
+  max-height: var(--voice-textarea-max-height);
   min-height: var(--voice-textarea-min-height);
   outline: none;
+  overflow: auto;
   padding: 8px;
   resize: vertical;
   width: 100%;

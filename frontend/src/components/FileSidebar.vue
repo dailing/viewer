@@ -151,8 +151,10 @@ function selectTool(tool: SidebarTool) {
   flex: 0 0 42px;
   flex-direction: column;
   gap: 4px;
+  min-width: 42px;
   padding: 6px 4px;
   position: relative;
+  width: 42px;
   z-index: 2;
 }
 
@@ -163,6 +165,7 @@ function selectTool(tool: SidebarTool) {
   border-radius: 6px;
   color: #5f6f86;
   display: inline-flex;
+  flex: 0 0 34px;
   height: 34px;
   justify-content: center;
   padding: 0;

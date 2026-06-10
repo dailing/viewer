@@ -195,7 +195,7 @@ class ApiProfiler:
                 target = os.readlink(os.path.join(fd_dir, name))
             except OSError:
                 continue
-            if "sqlite" in target or "agent-history" in target or "agent-tasks" in target or "state.db" in target:
+            if "sqlite" in target or "agent-history" in target or "state.db" in target:
                 sqlite_like.append(target)
         sqlite_like.sort()
         return {

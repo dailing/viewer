@@ -8,6 +8,7 @@ export type SuperRole = {
   cwd: string;
   model?: string | null;
   session_ref: string;
+  session_policy: "reuse" | "new_each_run";
   created_at: number;
   updated_at: number;
 };
@@ -36,6 +37,7 @@ export type SuperChatSummary = {
   workspace_id: string;
   name: string;
   type: "group" | "direct";
+  cwd: string;
   common_prompt: string;
   member_role_ids: string[];
   created_at: number;
@@ -50,6 +52,7 @@ export type SuperChatList = {
 export type SuperChatCreate = {
   name?: string;
   type?: "group" | "direct";
+  cwd?: string;
   common_prompt?: string;
   member_role_ids?: string[];
 };
@@ -77,6 +80,7 @@ export type SuperRoleCreate = {
   provider?: AgentProvider;
   cwd?: string;
   model?: string | null;
+  session_policy?: "reuse" | "new_each_run";
 };
 
 export type SuperRolePatch = Partial<Omit<SuperRole, "id" | "created_at" | "updated_at">>;

@@ -1,12 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import AgentTasksPage from "./components/AgentTasksPage.vue";
 import ConfigPanel from "./components/ConfigPanel.vue";
-import LoopTasksPage from "./components/LoopTasksPage.vue";
 import SuperWorkspacePage from "./components/SuperWorkspacePage.vue";
 import { connectEvents } from "./api/events";
-import { useAgentsStore } from "./stores/agents";
-import { useCodexStore } from "./stores/codex";
 import { useFilesStore } from "./stores/files";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
@@ -14,11 +10,8 @@ import { useTerminalsStore } from "./stores/terminals";
 import { useUsersStore } from "./stores/users";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { SplitDirection } from "./types/layout";
-import { agentRefForPane, parseAgentRef } from "./utils/agents";
 
 const files = useFilesStore();
-const agents = useAgentsStore();
-const codex = useCodexStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
@@ -26,7 +19,7 @@ const users = useUsersStore();
 
 const appReady = ref(false);
 const selectingUser = ref(false);
-const activePage = ref<"super" | "settings" | "loops" | "tasks">("super");
+const activePage = ref<"super" | "settings">("super");
 const mobileToolbarOpen = ref(false);
 
 const appStyle = computed(() => {
@@ -83,24 +76,16 @@ const activePaneTitle = computed(() => {
   if (!pane || pane.type !== "pane") return "Empty pane";
   if (pane.chatId) return "Chat";
   if (pane.terminalId) return "Terminal";
-  const paneAgent = agentRefForPane(pane);
-  if (paneAgent) {
-    const session = agents.sessions.find((item) => item.ref === paneAgent);
-    const parsed = parseAgentRef(paneAgent);
-    return session?.title ?? (parsed ? agents.providerById(parsed.provider).name : "Agent");
-  }
   if (pane.diffPath) return `Diff: ${pane.diffPath}`;
   return pane.filePath || "Empty pane";
 });
 const activePaneHasContent = computed(() => {
   const pane = layout.activePane;
-  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || agentRefForPane(pane) || pane.diffPath || pane.chatId));
+  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || pane.diffPath || pane.chatId));
 });
 const paneToolbarVisible = computed(() => activePage.value === "super");
 const activePageTitle = computed(() => {
   if (activePage.value === "settings") return "Settings";
-  if (activePage.value === "loops") return "Loop Tasks";
-  if (activePage.value === "tasks") return "Task DAG";
   return activePaneTitle.value;
 });
 const globalPaneActions = computed<PaneToolbarAction[]>(() => {
@@ -148,8 +133,6 @@ const hasMobilePaneToolbar = computed(() => activePaneActions.value.length > 0 |
 
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
-let codexRefresh: number | null = null;
-let agentRefresh: number | null = null;
 
 onMounted(async () => {
   await users.load();
@@ -164,19 +147,13 @@ async function initializeApp() {
   appReady.value = false;
   files.currentPath = "";
   await files.loadConfig();
-  await Promise.all([files.loadDirectory(""), terminals.load(), codex.loadOptions(), agents.load()]);
+  await Promise.all([files.loadDirectory(""), terminals.load()]);
   source = connectEvents(async (event) => {
     await files.refreshAffected(event.path, event.is_dir);
     window.dispatchEvent(new CustomEvent("viewer:file-changed", { detail: event }));
   });
   terminalRefresh = window.setInterval(() => {
     void terminals.load();
-  }, 15000);
-  codexRefresh = window.setInterval(() => {
-    void codex.loadOptions();
-  }, 30000);
-  agentRefresh = window.setInterval(() => {
-    void agents.load();
   }, 15000);
   appReady.value = true;
 }
@@ -236,8 +213,6 @@ function refreshActivePane() {
 onUnmounted(() => {
   source?.close();
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
-  if (codexRefresh !== null) window.clearInterval(codexRefresh);
-  if (agentRefresh !== null) window.clearInterval(agentRefresh);
 });
 </script>
 
@@ -267,24 +242,6 @@ onUnmounted(() => {
         @click="activePage = activePage === 'settings' ? 'super' : 'settings'"
       >
         <i class="bi bi-gear"></i>
-      </button>
-      <button
-        class="btn btn-outline-secondary icon-button"
-        :class="{ active: activePage === 'loops' }"
-        type="button"
-        title="Loop Tasks"
-        @click="activePage = activePage === 'loops' ? 'super' : 'loops'"
-      >
-        <i class="bi bi-clock-history"></i>
-      </button>
-      <button
-        class="btn btn-outline-secondary icon-button"
-        :class="{ active: activePage === 'tasks' }"
-        type="button"
-        title="Task DAG"
-        @click="activePage = activePage === 'tasks' ? 'super' : 'tasks'"
-      >
-        <i class="bi bi-diagram-3"></i>
       </button>
       <div class="active-pane-title" :title="activePageTitle">
         {{ activePageTitle }}
@@ -386,12 +343,6 @@ onUnmounted(() => {
 
     <main v-if="activePage === 'settings'" class="top-level-page">
       <ConfigPanel @close="activePage = 'super'" />
-    </main>
-    <main v-else-if="activePage === 'loops'" class="top-level-page">
-      <LoopTasksPage />
-    </main>
-    <main v-else-if="activePage === 'tasks'" class="top-level-page task-dag-top-page">
-      <AgentTasksPage />
     </main>
     <main v-else class="top-level-page">
       <SuperWorkspacePage />

@@ -927,17 +927,6 @@ class HermesSessionManager:
     async def _remove_client(self, session: HermesSession, client: WebSocketClient) -> None:
         await remove_client(session.clients, client)
 
-    async def resume_pending_queues(self) -> None:
-        self._ensure_loaded()
-        for session in list(self.sessions.values()):
-            if session.status == "running":
-                if session.hermes_run_id:
-                    self._start_approval_stream(session, session.hermes_run_id)
-                session.run_task = asyncio.create_task(self._monitor_run(session))
-                continue
-            if session.queue:
-                await self._start_next_queued(session)
-
     async def shutdown(self) -> None:
         for session in list(self.sessions.values()):
             if session.run_task:

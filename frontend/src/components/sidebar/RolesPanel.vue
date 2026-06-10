@@ -85,10 +85,6 @@ function selectRole(role: SuperRole) {
           <option value="new_each_run">New session each run</option>
         </select>
       </label>
-      <label class="field">
-        <span>Session Ref</span>
-        <input v-model="selectedRole.session_ref" class="form-control form-control-sm" placeholder="provider:id" />
-      </label>
       <div class="editor-actions">
         <button class="btn btn-sm btn-primary" type="submit">
           <i class="bi bi-save"></i>

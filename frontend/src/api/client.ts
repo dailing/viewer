@@ -10,7 +10,6 @@ import type {
   SuperHistoryRunCreate,
   SuperRoleCreate,
   SuperRolePatch,
-  SuperRoleStatuses,
   SuperWorkspaceData,
   SuperWorkspaceList,
   SuperWorkspacePatch,
@@ -261,10 +260,6 @@ export async function deleteSuperChat(id: string): Promise<SuperChatList> {
 
 export async function activateSuperChat(id: string): Promise<SuperChatList> {
   return request<SuperChatList>(`/api/super-workspace/active-chat/${encodeURIComponent(id)}`, { method: "POST" });
-}
-
-export async function getSuperRoleStatuses(workspaceId: string): Promise<SuperRoleStatuses> {
-  return request<SuperRoleStatuses>(`/api/super-workspace/role-statuses/${workspaceId}`);
 }
 
 export async function createSuperRole(role: SuperRoleCreate): Promise<SuperWorkspaceData> {

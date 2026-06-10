@@ -121,6 +121,7 @@ async function saveChat(chat: SuperChatSummary) {
     const data = await updateSuperChat(chat.id, {
       name: chat.name,
       type: chat.type,
+      pinned: chat.pinned,
       cwd: chat.cwd,
       common_prompt: chat.common_prompt,
       member_role_ids: chat.member_role_ids,
@@ -151,7 +152,6 @@ async function saveRole(role: SuperRole) {
       provider: role.provider,
       cwd: role.cwd,
       model: role.model ?? null,
-      session_ref: role.session_ref,
       session_policy: role.session_policy,
     });
     roles.value = data.roles;

@@ -20,12 +20,12 @@ from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy.exc import OperationalError
 
-from .agent_history import SuperDispatchTask, SuperDriverRunCreate, SuperHistoryRun, agent_history_store
+from .agent_history import DEFAULT_CONTEXT_RECYCLE_PERCENT, SuperChatRoleSessionState, SuperDispatchTask, SuperDriverRunCreate, SuperHistoryRun, agent_history_store
 from .codex_sessions import codex_session_manager
 from .hermes_sessions import hermes_session_manager
 from .process_registry import process_slot_state, write_process_state
 from .storage import LOG_DIR
-from .super_workspace import SuperDispatchRequest, SuperRole, SuperRolePatch, super_workspace_manager
+from .super_workspace import SuperDispatchRequest, SuperRole, super_workspace_manager
 from .users import normalize_user_id
 
 
@@ -71,24 +71,32 @@ class SuperWorkspaceEventHub:
 class SuperAgentDriver:
     provider = ""
 
-    def active_session_id(self, role: SuperRole, effective_cwd: str) -> str | None:
+    def active_session_id(self, role: SuperRole, state: SuperChatRoleSessionState | None, effective_cwd: str) -> str | None:
         if role.session_policy == "new_each_run":
             return None
-        if role.session_ref:
-            provider, session_id = self.parse_ref(role.session_ref, role.provider)
-            if provider == self.provider and session_id:
-                try:
-                    snapshot = self.manager().snapshot(session_id, "focus")
-                    if snapshot.get("status") == "running" and self._snapshot_matches(snapshot, role, effective_cwd):
-                        return session_id
-                    return None
-                except Exception:
-                    return None
+        if state is None or not state.session_ref:
+            return None
+        provider, session_id = self.parse_ref(state.session_ref, role.provider)
+        if provider == self.provider and session_id:
+            try:
+                snapshot = self.manager().snapshot(session_id, "focus")
+                if snapshot.get("status") == "running" and self._snapshot_matches(snapshot, role, effective_cwd):
+                    return session_id
+            except Exception:
+                return None
         return None
 
-    async def dispatch_task(self, role: SuperRole, user_id: str, prompt: str, lineage: dict[str, Any], effective_cwd: str) -> str:
-        if role.session_policy != "new_each_run" and role.session_ref:
-            provider, session_id = self.parse_ref(role.session_ref, role.provider)
+    async def dispatch_task(
+        self,
+        role: SuperRole,
+        state: SuperChatRoleSessionState | None,
+        user_id: str,
+        prompt: str,
+        lineage: dict[str, Any],
+        effective_cwd: str,
+    ) -> dict[str, Any]:
+        if role.session_policy != "new_each_run" and state is not None and state.session_ref:
+            provider, session_id = self.parse_ref(state.session_ref, role.provider)
             if provider == self.provider and session_id:
                 try:
                     snapshot = self.manager().snapshot(session_id, "focus")
@@ -96,21 +104,21 @@ class SuperAgentDriver:
                         raise HTTPException(status_code=409, detail="Role session is already running")
                     if not self._snapshot_matches(snapshot, role, effective_cwd):
                         raise ValueError("Session cwd/model changed")
+                    if self._snapshot_context_used_percent(snapshot, state) >= DEFAULT_CONTEXT_RECYCLE_PERCENT:
+                        raise ValueError("Session context threshold reached")
                     await self._send(session_id, prompt, role.model, lineage)
-                    return role.session_ref
+                    return {"session_ref": state.session_ref, "rotation_reason": ""}
                 except HTTPException:
                     raise
                 except Exception:
-                    logger.warning("Super Workspace role {} has stale session_ref {}; creating a replacement", role.id, role.session_ref)
+                    logger.warning("Super Workspace chat role session stale; creating replacement role={} session_ref={}", role.id, state.session_ref)
         first_prompt = f"{self.initial_prompt(role, user_id)}\n\n{prompt}"
         session = await self._create(first_prompt, effective_cwd, role.model, user_id, lineage)
         session_ref = f"{self.provider}:{session['id']}"
-        try:
-            super_workspace_manager.update_role(role.id, SuperRolePatch(session_ref=session_ref), user_id)
-        except HTTPException:
-            logger.warning("Super Workspace role {} disappeared before session_ref could be saved", role.id)
-        role.session_ref = session_ref
-        return session_ref
+        reason = "new_each_run" if role.session_policy == "new_each_run" else "new_session"
+        if state is not None and state.session_ref and state.context_used_percent is not None and state.context_used_percent >= DEFAULT_CONTEXT_RECYCLE_PERCENT:
+            reason = "context_threshold"
+        return {"session_ref": session_ref, "rotation_reason": reason}
 
     def _snapshot_matches(self, snapshot: dict[str, Any], role: SuperRole, effective_cwd: str) -> bool:
         snapshot_model = snapshot.get("model")
@@ -122,6 +130,23 @@ class SuperAgentDriver:
         snapshot_cwd = str(snapshot.get("cwd") or "").strip()
         snapshot_cwd_relative = str(snapshot.get("cwd_relative") or "").strip()
         return expected in {snapshot_cwd, snapshot_cwd_relative}
+
+    @staticmethod
+    def _snapshot_context_used_percent(snapshot: dict[str, Any], state: SuperChatRoleSessionState | None) -> float:
+        value = snapshot.get("context_used_percent")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return float(state.context_used_percent) if state is not None and state.context_used_percent is not None else 0.0
+
+    @staticmethod
+    def usage_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+        provider_session_id = snapshot.get("codex_session_id") or snapshot.get("hermes_session_id")
+        return {
+            "provider_session_id": provider_session_id if isinstance(provider_session_id, str) and provider_session_id else None,
+            "model_context_window": snapshot.get("model_context_window") if isinstance(snapshot.get("model_context_window"), int) else None,
+            "total_tokens": snapshot.get("total_tokens") if isinstance(snapshot.get("total_tokens"), int) else None,
+            "context_used_percent": float(snapshot["context_used_percent"]) if isinstance(snapshot.get("context_used_percent"), (int, float)) else None,
+        }
 
     async def _create(self, prompt: str, cwd: str, model: str | None, user_id: str, lineage: dict[str, Any]) -> dict[str, Any]:
         if self.provider == "codex":
@@ -423,7 +448,8 @@ class SuperWorkspaceRuntime:
             return
         chat = super_workspace_manager.chat_for_run(task.user_id, task.workspace_id, run.chat_id)
         effective_cwd = (role.cwd or "").strip() or (chat.cwd or "").strip()
-        active_session_id = driver.active_session_id(role, effective_cwd)
+        session_state = agent_history_store.get_chat_role_session(task.user_id, task.workspace_id, run.chat_id, role.id, role.provider or "codex")
+        active_session_id = driver.active_session_id(role, session_state, effective_cwd)
         if active_session_id is not None:
             agent_history_store.update_driver_run_status(task.id, "queued", next_attempt_at=time.time() + 2.0)
             await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
@@ -444,10 +470,29 @@ class SuperWorkspaceRuntime:
         agent_history_store.update_super_run(run.id, task.user_id, status="running")
         agent_history_store.update_driver_run_status(task.id, "running", agent_prompt=prompt, error="")
         await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
-        session_ref = await driver.dispatch_task(role, task.user_id, prompt, lineage, effective_cwd)
-        agent_history_store.update_driver_run_status(task.id, "running", session_ref=session_ref, agent_prompt=prompt)
+        dispatch_result = await driver.dispatch_task(role, session_state, task.user_id, prompt, lineage, effective_cwd)
+        session_ref = str(dispatch_result["session_ref"])
+        rotation_reason = str(dispatch_result.get("rotation_reason") or "")
         provider, session_id = driver.parse_ref(session_ref, role.provider)
-        completed = await self._wait_for_session(driver, session_id, task.user_id, run.id, task.id)
+        snapshot = driver.manager().snapshot(session_id, "focus")
+        usage = driver.usage_from_snapshot(snapshot)
+        agent_history_store.upsert_chat_role_session(
+            task.user_id,
+            workspace_id=task.workspace_id,
+            chat_id=run.chat_id,
+            role_id=role.id,
+            provider=provider,
+            session_ref=session_ref,
+            cwd=effective_cwd,
+            model=role.model,
+            session_policy=role.session_policy,
+            driver_run_id=task.id,
+            message_id=run.message_id,
+            rotation_reason=rotation_reason,
+            **usage,
+        )
+        agent_history_store.update_driver_run_status(task.id, "running", session_ref=session_ref, agent_prompt=prompt, **usage)
+        completed = await self._wait_for_session(driver, session_id, task.user_id, run.id, task.id, task.workspace_id, run.chat_id, role, effective_cwd, session_ref)
         await self._emit_update(
             {
                 "type": "run-updated",
@@ -464,7 +509,7 @@ class SuperWorkspaceRuntime:
         current = next((candidate for candidate in data.roles if candidate.id == task.role_id), None)
         raw = dict(task.role_snapshot)
         if current is not None:
-            raw["session_ref"] = current.session_ref or raw.get("session_ref") or ""
+            raw.update(current.model_dump())
         raw.setdefault("id", task.role_id)
         raw.setdefault("name", task.role_name)
         raw.setdefault("provider", task.provider or "codex")
@@ -477,15 +522,42 @@ class SuperWorkspaceRuntime:
         raw.setdefault("updated_at", now)
         return SuperRole.model_validate(raw)
 
-    async def _wait_for_session(self, driver: SuperAgentDriver, session_id: str, user_id: str, run_id: str, driver_run_id: str) -> SuperHistoryRun:
+    async def _wait_for_session(
+        self,
+        driver: SuperAgentDriver,
+        session_id: str,
+        user_id: str,
+        run_id: str,
+        driver_run_id: str,
+        workspace_id: str,
+        chat_id: str,
+        role: SuperRole,
+        effective_cwd: str,
+        session_ref: str,
+    ) -> SuperHistoryRun:
         manager = driver.manager()
         provider = driver.provider
         while not self._stop.is_set():
             snapshot = manager.snapshot(session_id, "focus")
             queue = snapshot.get("queue") if isinstance(snapshot.get("queue"), list) else []
             status = str(snapshot.get("status") or "")
+            usage = driver.usage_from_snapshot(snapshot)
             if driver_run_id:
-                agent_history_store.update_driver_run_status(driver_run_id, "running")
+                agent_history_store.update_driver_run_status(driver_run_id, "running", **usage)
+                agent_history_store.upsert_chat_role_session(
+                    user_id,
+                    workspace_id=workspace_id,
+                    chat_id=chat_id,
+                    role_id=role.id,
+                    provider=provider,
+                    session_ref=session_ref,
+                    cwd=effective_cwd,
+                    model=role.model,
+                    session_policy=role.session_policy,
+                    driver_run_id=driver_run_id,
+                    message_id=run_id,
+                    **usage,
+                )
             await self._emit_update(
                 {
                     "type": "run-updated",
@@ -500,13 +572,13 @@ class SuperWorkspaceRuntime:
             if status not in {"running"} and not queue:
                 if status == "failed":
                     if driver_run_id and self._driver_has_final_response(run_id, user_id, driver_run_id):
-                        agent_history_store.update_driver_run_status(driver_run_id, "completed")
+                        agent_history_store.update_driver_run_status(driver_run_id, "completed", **usage)
                         return self._summarize_run_status(run_id, user_id)
                     if driver_run_id:
-                        agent_history_store.update_driver_run_status(driver_run_id, "failed")
+                        agent_history_store.update_driver_run_status(driver_run_id, "failed", **usage)
                     return self._summarize_run_status(run_id, user_id, fallback_error="Role session failed")
                 if driver_run_id:
-                    agent_history_store.update_driver_run_status(driver_run_id, "completed")
+                    agent_history_store.update_driver_run_status(driver_run_id, "completed", **usage)
                 return self._summarize_run_status(run_id, user_id)
             await asyncio.sleep(1.0)
         return agent_history_store.update_super_run(run_id, user_id, status="running")

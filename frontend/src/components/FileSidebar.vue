@@ -5,6 +5,7 @@ import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
 import RolesPanel from "./sidebar/RolesPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
+import { useLayoutStore } from "../stores/layout";
 import { namespacedStorageKey } from "../utils/userProfile";
 import type { AgentProvider } from "../types/agents";
 import type { SuperChatSummary, SuperRole } from "../types/superWorkspace";
@@ -46,6 +47,8 @@ const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
   { id: "terminals", title: "Terminals", icon: "bi-terminal" },
 ];
 
+const layout = useLayoutStore();
+
 function storedTool(): SidebarTool {
   const value = localStorage.getItem(namespacedStorageKey(ACTIVE_TOOL_KEY));
   return tools.some((tool) => tool.id === value) ? (value as SidebarTool) : "chats";
@@ -53,6 +56,7 @@ function storedTool(): SidebarTool {
 
 const activeTool = ref<SidebarTool>(storedTool());
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
+const pinnedChats = computed(() => (props.chats ?? []).filter((chat) => chat.pinned));
 
 watch(activeTool, (tool) => {
   localStorage.setItem(namespacedStorageKey(ACTIVE_TOOL_KEY), tool);
@@ -64,6 +68,10 @@ function selectTool(tool: SidebarTool) {
     return;
   }
   activeTool.value = tool;
+}
+
+function chatInitial(chat: SuperChatSummary) {
+  return (chat.name.trim()[0] ?? "#").toUpperCase();
 }
 </script>
 
@@ -83,6 +91,20 @@ function selectTool(tool: SidebarTool) {
       >
         <i class="bi" :class="tool.icon"></i>
       </button>
+      <div v-if="pinnedChats.length" class="workspace-buttons" aria-label="Pinned chats">
+        <button
+          v-for="chat in pinnedChats"
+          :key="chat.id"
+          class="activity-button workspace-button"
+          :class="{ active: props.activeChatId === chat.id || layout.openChatIds.includes(chat.id) }"
+          type="button"
+          :title="chat.name"
+          :aria-label="`Open ${chat.name}`"
+          @click="emit('open-chat', chat.id)"
+        >
+          <span>{{ chatInitial(chat) }}</span>
+        </button>
+      </div>
     </nav>
 
     <section v-if="props.panelOpen" class="tool-panel" :aria-label="activeTitle">

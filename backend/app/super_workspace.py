@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, SuperRoleStatuses, SuperWorkspaceList, agent_history_store
+from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, SuperWorkspaceList, agent_history_store
 
 
 DEFAULT_DISPATCH_MODEL = "deepseek-v4-flash"
@@ -24,7 +24,6 @@ class SuperRole(BaseModel):
     provider: str = "codex"
     cwd: str = ""
     model: str | None = None
-    session_ref: str = ""
     session_policy: str = "reuse"
     created_at: float
     updated_at: float
@@ -45,7 +44,6 @@ class SuperRolePatch(BaseModel):
     provider: str | None = None
     cwd: str | None = None
     model: str | None = None
-    session_ref: str | None = None
     session_policy: str | None = None
 
 
@@ -63,6 +61,7 @@ class SuperWorkspacePatch(BaseModel):
 class SuperChatCreate(BaseModel):
     name: str = "New Chat"
     type: str = "group"
+    pinned: bool = False
     cwd: str = ""
     common_prompt: str = ""
     member_role_ids: list[str] = Field(default_factory=list)
@@ -71,6 +70,7 @@ class SuperChatCreate(BaseModel):
 class SuperChatPatch(BaseModel):
     name: str | None = None
     type: str | None = None
+    pinned: bool | None = None
     cwd: str | None = None
     common_prompt: str | None = None
     member_role_ids: list[str] | None = None
@@ -94,12 +94,6 @@ class SuperWorkspaceManager:
     def activate_workspace(self, workspace_id: str, user_id: str | None = None) -> SuperWorkspaceList:
         try:
             return agent_history_store.activate_super_workspace(user_id, workspace_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Super Workspace not found") from exc
-
-    def role_statuses(self, workspace_id: str, user_id: str | None = None) -> SuperRoleStatuses:
-        try:
-            return agent_history_store.list_super_role_statuses(user_id, workspace_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Super Workspace not found") from exc
 
@@ -140,6 +134,7 @@ class SuperWorkspaceManager:
                 user_id,
                 name=request.name,
                 chat_type=request.type,
+                pinned=request.pinned,
                 common_prompt=request.common_prompt,
                 member_role_ids=request.member_role_ids,
                 cwd=request.cwd,
@@ -183,7 +178,6 @@ class SuperWorkspaceManager:
                     provider=role.provider,
                     cwd=role.cwd,
                     model=role.model,
-                    session_ref=role.session_ref,
                     session_policy=role.session_policy,
                     created_at=role.created_at,
                     updated_at=role.updated_at,
@@ -238,7 +232,6 @@ class SuperWorkspaceManager:
                     "provider": role.provider,
                     "cwd": role.cwd,
                     "model": role.model,
-                    "session_ref": role.session_ref,
                     "session_policy": role.session_policy,
                 },
             )

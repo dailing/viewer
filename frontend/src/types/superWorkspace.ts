@@ -7,7 +7,6 @@ export type SuperRole = {
   provider: AgentProvider;
   cwd: string;
   model?: string | null;
-  session_ref: string;
   session_policy: "reuse" | "new_each_run";
   created_at: number;
   updated_at: number;
@@ -37,6 +36,7 @@ export type SuperChatSummary = {
   workspace_id: string;
   name: string;
   type: "group" | "direct";
+  pinned: boolean;
   cwd: string;
   common_prompt: string;
   member_role_ids: string[];
@@ -52,23 +52,13 @@ export type SuperChatList = {
 export type SuperChatCreate = {
   name?: string;
   type?: "group" | "direct";
+  pinned?: boolean;
   cwd?: string;
   common_prompt?: string;
   member_role_ids?: string[];
 };
 
 export type SuperChatPatch = Partial<SuperChatCreate>;
-
-export type SuperRoleStatus = {
-  role_id: string;
-  status: "idle" | "busy" | "failed";
-  updated_at?: number | null;
-};
-
-export type SuperRoleStatuses = {
-  workspace_id: string;
-  items: SuperRoleStatus[];
-};
 
 export type SuperWorkspacePatch = {
   common_prompt?: string;
@@ -136,9 +126,13 @@ export type SuperHistoryTarget = {
   role_name: string;
   provider: AgentProvider;
   viewer_session_id: string;
+  provider_session_id?: string | null;
   session_ref: string;
   agent_prompt: string;
   status: string;
+  model_context_window?: number | null;
+  total_tokens?: number | null;
+  context_used_percent?: number | null;
   created_at: number;
   updated_at: number;
   messages: AgentHistoryMessage[];
@@ -178,8 +172,13 @@ export type SuperDisplayTarget = {
   role_id: string;
   role_name: string;
   provider: AgentProvider;
+  viewer_session_id: string;
+  provider_session_id?: string | null;
   session_ref: string;
   status: string;
+  model_context_window?: number | null;
+  total_tokens?: number | null;
+  context_used_percent?: number | null;
 };
 
 export type SuperDisplayItem = {
@@ -202,7 +201,12 @@ export type SuperDisplayItem = {
   recipient_role_id?: string | null;
   role_id?: string | null;
   role_name: string;
+  viewer_session_id: string;
+  provider_session_id?: string | null;
   session_ref: string;
+  model_context_window?: number | null;
+  total_tokens?: number | null;
+  context_used_percent?: number | null;
   target_status: string;
   run_status: string;
   error: string;

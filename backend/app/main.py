@@ -542,11 +542,6 @@ async def activate_super_workspace(workspace_id: str, user: str | None = None):
     return super_workspace_manager.activate_workspace(workspace_id, user)
 
 
-@app.get("/api/super-workspace/role-statuses/{workspace_id}")
-async def super_role_statuses(workspace_id: str, user: str | None = None):
-    return super_workspace_manager.role_statuses(workspace_id, user)
-
-
 @app.get("/api/super-workspace/chats")
 async def super_chats(user: str | None = None):
     return super_workspace_manager.list_chats(user)

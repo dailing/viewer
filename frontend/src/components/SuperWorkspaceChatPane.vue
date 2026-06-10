@@ -29,6 +29,7 @@ const composerShellRef = ref<HTMLElement | null>(null);
 const composerTextareaRef = ref<InstanceType<typeof VoiceTextarea> | null>(null);
 const composer = ref("");
 const composerExpanded = ref(false);
+const composerPinned = ref(false);
 const selectedComposerMentionToken = ref("");
 const error = ref("");
 const busy = ref(false);
@@ -42,6 +43,7 @@ const selectedDispatchRoleId = computed(() => dispatchSelection.selectedRoleId(p
 const selectedDispatchRole = computed(() => roles.value.find((role) => role.id === selectedDispatchRoleId.value) ?? null);
 const displayItems = computed<SuperThreadItem[]>(() => mergeConsecutiveRoleMessages([...items.value].reverse()));
 const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value);
+const composerCollapsed = computed(() => !composerPinned.value && !composerExpanded.value && !composer.value.trim());
 let fallbackTimer: number | null = null;
 let refreshTimer: number | null = null;
 let superWorkspaceEvents: EventSource | null = null;
@@ -101,7 +103,7 @@ async function dispatchMessage() {
   busy.value = true;
   error.value = "";
   composer.value = "";
-  composerExpanded.value = false;
+  if (!composerPinned.value) composerExpanded.value = false;
   try {
     const run = await createSuperWorkspaceRun({
       message,
@@ -131,10 +133,17 @@ function expandComposer() {
   void nextTick(() => composerTextareaRef.value?.focusVoice());
 }
 
+function toggleComposerPinned() {
+  composerPinned.value = !composerPinned.value;
+  if (composerPinned.value) composerExpanded.value = true;
+}
+
 function handleComposerFocusOut(event: FocusEvent) {
+  if (composerPinned.value) return;
   const nextTarget = event.relatedTarget instanceof Node ? event.relatedTarget : null;
   if (nextTarget && composerShellRef.value?.contains(nextTarget)) return;
   window.setTimeout(() => {
+    if (composerPinned.value) return;
     const active = document.activeElement;
     if (active && composerShellRef.value?.contains(active)) return;
     if (!composer.value.trim()) composerExpanded.value = false;
@@ -186,8 +195,8 @@ function mergeConsecutiveRoleMessages(orderedItems: SuperDisplayItem[]): SuperTh
   return merged;
 }
 
-function roleMessageMergeKey(item: Pick<SuperDisplayItem, "role_id" | "role_name" | "provider" | "session_ref">) {
-  return item.role_id || `${item.provider}:${item.session_ref}:${item.role_name}`;
+function roleMessageMergeKey(item: Pick<SuperDisplayItem, "role_id" | "role_name" | "provider" | "session_ref" | "viewer_session_id">) {
+  return `${item.role_id || item.role_name}:${item.provider}:${item.session_ref || item.viewer_session_id}`;
 }
 
 function handleComposerMentionClick(token: string) {
@@ -279,6 +288,19 @@ async function openItemLink(event: MouseEvent, item: SuperDisplayItem) {
 
 function itemIcon(item: SuperDisplayItem) {
   return agents.providerById(item.provider || "codex").icon;
+}
+
+function shortSessionId(item: Pick<SuperDisplayItem, "provider_session_id" | "viewer_session_id" | "session_ref">) {
+  const value = item.provider_session_id || item.viewer_session_id || item.session_ref;
+  if (!value) return "";
+  const raw = value.includes(":") ? value.split(":").pop() || value : value;
+  return raw.length > 10 ? raw.slice(0, 10) : raw;
+}
+
+function contextUsageLabel(item: Pick<SuperDisplayItem, "context_used_percent" | "total_tokens">) {
+  if (typeof item.context_used_percent === "number") return `${item.context_used_percent.toFixed(1)}% ctx`;
+  if (typeof item.total_tokens === "number") return `${item.total_tokens.toLocaleString()} tokens`;
+  return "";
 }
 
 function targetIcon(target: SuperDisplayTarget) {
@@ -374,7 +396,12 @@ function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
     recipient_role_id: null,
     role_id: run.sender_role_id ?? "user",
     role_name: "",
+    viewer_session_id: "",
+    provider_session_id: null,
     session_ref: "",
+    model_context_window: null,
+    total_tokens: null,
+    context_used_percent: null,
     target_status: "",
     run_status: run.status,
     error: run.error,
@@ -386,8 +413,13 @@ function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
       role_id: target.role_id,
       role_name: target.role_name,
       provider: target.provider,
+      viewer_session_id: target.viewer_session_id,
+      provider_session_id: target.provider_session_id ?? null,
       session_ref: target.session_ref,
       status: target.status,
+      model_context_window: target.model_context_window ?? null,
+      total_tokens: target.total_tokens ?? null,
+      context_used_percent: target.context_used_percent ?? null,
     })),
     raw: {},
   };
@@ -442,9 +474,17 @@ async function scrollThreadToBottom() {
         </div>
         <div v-else class="super-role-turn">
           <div class="super-message-top">
-            <div class="super-response-role-label">
-              <i class="bi" :class="itemIcon(item)"></i>
-              {{ item.role_name }}
+            <div class="super-response-meta">
+              <span class="super-response-role-label">
+                <i class="bi" :class="itemIcon(item)"></i>
+                {{ item.role_name }}
+              </span>
+              <span v-if="shortSessionId(item)" class="super-meta-chip" :title="item.session_ref || item.viewer_session_id">
+                session {{ shortSessionId(item) }}
+              </span>
+              <span v-if="contextUsageLabel(item)" class="super-meta-chip">
+                {{ contextUsageLabel(item) }}
+              </span>
             </div>
             <button class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
               <i class="bi bi-link-45deg"></i>
@@ -460,9 +500,9 @@ async function scrollThreadToBottom() {
       <div v-if="historyLoading && !items.length" class="super-empty-thread">Loading history</div>
     </section>
 
-    <div ref="composerShellRef" class="super-composer" :class="{ collapsed: !composerExpanded && !composer.trim() }" @focusout="handleComposerFocusOut">
+    <div ref="composerShellRef" class="super-composer" :class="{ collapsed: composerCollapsed }" @focusout="handleComposerFocusOut">
       <button
-        v-if="!composerExpanded && !composer.trim()"
+        v-if="composerCollapsed"
         class="super-composer-toggle"
         type="button"
         title="Open message input"
@@ -505,6 +545,19 @@ async function scrollThreadToBottom() {
               <i class="bi bi-send"></i>
             </button>
           </template>
+          <template #trailing-actions-after>
+            <button
+              class="btn btn-sm btn-outline-secondary voice-action-button super-pin-button"
+              :class="{ active: composerPinned }"
+              type="button"
+              :title="composerPinned ? 'Unpin input' : 'Pin input open'"
+              :aria-label="composerPinned ? 'Unpin input' : 'Pin input open'"
+              :aria-pressed="composerPinned"
+              @click="toggleComposerPinned"
+            >
+              <i class="bi" :class="composerPinned ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i>
+            </button>
+          </template>
         </VoiceTextarea>
         <div v-if="error" class="super-error">{{ error }}</div>
       </div>
@@ -541,6 +594,7 @@ async function scrollThreadToBottom() {
 
 .super-message-top,
 .super-route-line,
+.super-response-meta,
 .super-composer-mentions,
 .super-composer-mention {
   align-items: center;
@@ -554,6 +608,7 @@ async function scrollThreadToBottom() {
 }
 
 .super-route-line,
+.super-response-meta,
 .super-composer-mentions {
   flex-wrap: wrap;
   gap: 6px;
@@ -594,8 +649,21 @@ async function scrollThreadToBottom() {
 
 .super-response-role-label {
   color: var(--text);
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
   font-size: 13px;
   font-weight: 700;
+}
+
+.super-meta-chip {
+  background: #f4f6f8;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 2px 6px;
 }
 
 .super-cite-button,
@@ -681,6 +749,12 @@ async function scrollThreadToBottom() {
 .super-composer-toggle .bi {
   font-size: 18px;
   line-height: 1;
+}
+
+.super-pin-button.active {
+  background: #e8f1ff;
+  border-color: #8db7ff;
+  color: #174ea6;
 }
 
 .super-composer-mentions {

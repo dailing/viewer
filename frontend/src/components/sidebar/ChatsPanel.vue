@@ -134,9 +134,6 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
           <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Chat settings" @click="toggleSettings(chat)">
             <i class="bi bi-sliders"></i>
           </button>
-          <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Delete chat" @click="emit('delete-chat', chat)">
-            <i class="bi bi-x"></i>
-          </button>
         </div>
         <div v-if="focusedChatId === chat.id" class="dispatch-role-list" aria-label="Manual dispatch role">
           <div v-if="!chatMemberRoles(chat).length" class="dispatch-role-empty">No roles in chat</div>
@@ -180,6 +177,10 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
           <option value="direct">Direct</option>
         </select>
       </label>
+      <label class="setting-check">
+        <input v-model="selectedSettingsChat.pinned" class="form-check-input" type="checkbox" @change="save(selectedSettingsChat)" />
+        <span>Pinned</span>
+      </label>
       <label class="field">
         <span>Working Directory</span>
         <DirectoryPicker v-model="selectedSettingsChat.cwd" empty-label="Profile home" clear-title="Leave chat cwd empty" />
@@ -202,10 +203,16 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
           <span>{{ role.name }}</span>
         </label>
       </div>
-      <button class="btn btn-sm btn-primary settings-save" type="submit">
-        <i class="bi bi-save"></i>
-        <span>Save Settings</span>
-      </button>
+      <div class="settings-actions">
+        <button class="btn btn-sm btn-outline-danger settings-delete" type="button" @click="emit('delete-chat', selectedSettingsChat)">
+          <i class="bi bi-trash"></i>
+          <span>Delete Chat</span>
+        </button>
+        <button class="btn btn-sm btn-primary settings-save" type="submit">
+          <i class="bi bi-save"></i>
+          <span>Save Settings</span>
+        </button>
+      </div>
     </form>
   </div>
 </template>
@@ -398,6 +405,18 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
   min-height: 28px;
 }
 
+.setting-check {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+  min-height: 28px;
+}
+
+.setting-check span {
+  color: #1f2937;
+  font-size: 12px;
+}
+
 .role-check span {
   flex: 1 1 auto;
   min-width: 0;
@@ -406,10 +425,20 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
   white-space: nowrap;
 }
 
+.settings-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-delete,
 .settings-save {
   align-items: center;
   display: inline-flex;
   gap: 7px;
   justify-content: center;
+}
+
+.settings-save {
+  flex: 1 1 auto;
 }
 </style>

@@ -109,6 +109,7 @@ defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
         >
           <i class="bi bi-eraser"></i>
         </button>
+        <slot name="trailing-actions-after"></slot>
       </div>
     </div>
   </div>

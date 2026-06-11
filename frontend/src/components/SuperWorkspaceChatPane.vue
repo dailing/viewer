@@ -45,7 +45,7 @@ const runsAfterCursor = ref(0);
 const composerMentionItems = computed(() => buildComposerMentionItems(composer.value));
 const selectedDispatchRoleId = computed(() => dispatchSelection.selectedRoleId(props.chatId));
 const selectedDispatchRole = computed(() => roles.value.find((role) => role.id === selectedDispatchRoleId.value) ?? null);
-const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByParent([...items.value].reverse()));
+const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByDriverRun([...items.value].reverse()));
 const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value);
 const composerPinned = computed(() => composerState.isPinned(props.chatId));
 const composerCollapsed = computed(() => !composerPinned.value && !composerExpanded.value && !composer.value.trim());
@@ -177,32 +177,30 @@ function addMessageCitation(messageId: string) {
   expandComposer();
 }
 
-function mergeMessagesByParent(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
+function mergeMessagesByDriverRun(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
   const merged: SuperThreadItem[] = [];
-  let lastMergeKey = "";
+  const runIndexes = new Map<string, number>();
   for (const item of orderedItems) {
-    const key = messageParentRoleKey(item);
+    const key = messageDriverRunKey(item);
     if (!key) {
       merged.push({ ...item, merged_message_ids: item.kind === "message" ? [item.message_id] : undefined });
-      lastMergeKey = "";
       continue;
     }
 
-    const index = merged.length - 1;
-    if (key !== lastMergeKey || index < 0) {
+    const existingIndex = runIndexes.get(key);
+    if (existingIndex === undefined) {
+      runIndexes.set(key, merged.length);
       merged.push({ ...item, merged_message_ids: [item.message_id] });
-      lastMergeKey = key;
       continue;
     }
-    merged[index] = appendMergedRunMessage(merged[index], item);
+    merged[existingIndex] = appendMergedRunMessage(merged[existingIndex], item);
   }
   return merged;
 }
 
-function messageParentRoleKey(item: SuperDisplayItem) {
-  if (item.kind !== "message" || !item.parent_message_id) return "";
-  const roleKey = item.role_id || item.recipient_role_id || item.sender_role_id || item.role_name;
-  return roleKey ? `${roleKey}:${item.parent_message_id}` : "";
+function messageDriverRunKey(item: SuperDisplayItem) {
+  if (item.kind !== "message" || !item.driver_run_id) return "";
+  return item.driver_run_id;
 }
 
 function appendMergedRunMessage(base: SuperThreadItem, item: SuperDisplayItem): SuperThreadItem {

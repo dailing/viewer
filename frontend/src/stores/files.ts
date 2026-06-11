@@ -2,6 +2,9 @@ import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
 import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, SuperWorkspaceConfig, ViewerConfig, VoiceConfig } from "../types/files";
 import { parentPath as resolveParentPath } from "../utils/paths";
+import { namespacedStorageKey } from "../utils/userProfile";
+
+const PINNED_FILES_KEY = "viewer.pinnedFiles.v1";
 
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   name: "Default",
@@ -173,12 +176,34 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
   };
 }
 
+function readPinnedFiles(): string[] {
+  try {
+    const raw = localStorage.getItem(namespacedStorageKey(PINNED_FILES_KEY));
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    return parsed
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .filter((item) => {
+        if (seen.has(item)) return false;
+        seen.add(item);
+        return true;
+      });
+  } catch {
+    return [];
+  }
+}
+
+function writePinnedFiles(paths: string[]) {
+  localStorage.setItem(namespacedStorageKey(PINNED_FILES_KEY), JSON.stringify(paths));
+}
+
 export const useFilesStore = defineStore("files", {
   state: () => ({
     listings: {} as Record<string, DirectoryListing>,
     currentPath: "",
     expanded: new Set<string>(),
-    pinned: [] as string[],
+    pinned: readPinnedFiles(),
     visitTimes: {} as Record<string, number>,
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
@@ -294,6 +319,7 @@ export const useFilesStore = defineStore("files", {
     async deletePath(path: string) {
       await deleteFile(path);
       this.pinned = this.pinned.filter((item) => item !== path);
+      writePinnedFiles(this.pinned);
       const parent = resolveParentPath(path);
       await this.loadDirectory(parent);
       if (this.currentPath !== parent && this.listings[this.currentPath]) await this.loadDirectory(this.currentPath);
@@ -304,6 +330,7 @@ export const useFilesStore = defineStore("files", {
       } else {
         this.pinned = [path, ...this.pinned];
       }
+      writePinnedFiles(this.pinned);
     },
   },
 });

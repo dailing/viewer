@@ -64,6 +64,14 @@ async function closeTerminal(id: string) {
           <span class="sidebar-row-name">{{ terminal.title }}</span>
         </button>
         <span class="state-pill" :class="terminal.status">{{ terminal.status }}</span>
+        <button
+          class="btn btn-sm icon-button sidebar-row-action"
+          type="button"
+          :title="terminals.isPinned(terminal.id) ? 'Unpin terminal' : 'Pin terminal'"
+          @click="terminals.togglePin(terminal.id)"
+        >
+          <i class="bi" :class="terminals.isPinned(terminal.id) ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i>
+        </button>
         <button class="btn btn-sm icon-button sidebar-row-action" type="button" title="Close terminal" @click="closeTerminal(terminal.id)">
           <i class="bi bi-x"></i>
         </button>

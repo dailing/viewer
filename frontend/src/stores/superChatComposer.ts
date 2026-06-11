@@ -51,7 +51,7 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
     isPinned:
       (state) =>
       (chatId: string): boolean =>
-        Boolean(chatId && state.pinnedByChatId[chatId]),
+        chatId ? state.pinnedByChatId[chatId] ?? true : true,
     draft:
       (state) =>
       (chatId: string): string =>
@@ -60,13 +60,7 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
   actions: {
     setPinned(chatId: string, pinned: boolean) {
       if (!chatId) return;
-      if (pinned) {
-        this.pinnedByChatId = { ...this.pinnedByChatId, [chatId]: true };
-      } else {
-        const next = { ...this.pinnedByChatId };
-        delete next[chatId];
-        this.pinnedByChatId = next;
-      }
+      this.pinnedByChatId = { ...this.pinnedByChatId, [chatId]: pinned };
       writePins(this.pinnedByChatId);
     },
     togglePinned(chatId: string): boolean {

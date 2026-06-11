@@ -5,7 +5,9 @@ import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
 import RolesPanel from "./sidebar/RolesPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
+import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
+import { useTerminalsStore } from "../stores/terminals";
 import { namespacedStorageKey } from "../utils/userProfile";
 import type { AgentProvider } from "../types/agents";
 import type { SuperChatSummary, SuperRole } from "../types/superWorkspace";
@@ -47,7 +49,9 @@ const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
   { id: "terminals", title: "Terminals", icon: "bi-terminal" },
 ];
 
+const files = useFilesStore();
 const layout = useLayoutStore();
+const terminals = useTerminalsStore();
 
 function storedTool(): SidebarTool {
   const value = localStorage.getItem(namespacedStorageKey(ACTIVE_TOOL_KEY));
@@ -57,6 +61,8 @@ function storedTool(): SidebarTool {
 const activeTool = ref<SidebarTool>(storedTool());
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
 const pinnedChats = computed(() => (props.chats ?? []).filter((chat) => chat.pinned));
+const pinnedFiles = computed(() => files.pinned);
+const pinnedTerminals = computed(() => terminals.pinnedTerminals);
 
 watch(activeTool, (tool) => {
   localStorage.setItem(namespacedStorageKey(ACTIVE_TOOL_KEY), tool);
@@ -72,6 +78,19 @@ function selectTool(tool: SidebarTool) {
 
 function chatInitial(chat: SuperChatSummary) {
   return (chat.name.trim()[0] ?? "#").toUpperCase();
+}
+
+function fileLabel(path: string) {
+  const parts = path.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "/";
+}
+
+async function openPinnedFile(path: string) {
+  try {
+    await files.enterDirectory(path);
+  } catch {
+    emit("open-file", path);
+  }
 }
 </script>
 
@@ -91,10 +110,36 @@ function chatInitial(chat: SuperChatSummary) {
       >
         <i class="bi" :class="tool.icon"></i>
       </button>
-      <div v-if="pinnedChats.length" class="workspace-buttons" aria-label="Pinned chats">
+      <div v-if="pinnedFiles.length || pinnedTerminals.length || pinnedChats.length" class="workspace-buttons" aria-label="Pinned shortcuts">
+        <button
+          v-for="path in pinnedFiles"
+          :key="`file:${path}`"
+          class="activity-button workspace-button shortcut-button"
+          :class="{ active: layout.openPaths.includes(path) }"
+          type="button"
+          :title="path"
+          :aria-label="`Open ${path}`"
+          @click="openPinnedFile(path)"
+        >
+          <i class="bi bi-file-earmark"></i>
+          <span class="shortcut-label">{{ fileLabel(path) }}</span>
+        </button>
+        <button
+          v-for="terminal in pinnedTerminals"
+          :key="`terminal:${terminal.id}`"
+          class="activity-button workspace-button shortcut-button"
+          :class="{ active: layout.openTerminalIds.includes(terminal.id) }"
+          type="button"
+          :title="terminal.title"
+          :aria-label="`Open ${terminal.title}`"
+          @click="emit('open-terminal', terminal.id)"
+        >
+          <i class="bi" :class="terminal.status === 'running' ? 'bi-terminal-fill' : 'bi-terminal'"></i>
+          <span class="shortcut-label">{{ terminal.title }}</span>
+        </button>
         <button
           v-for="chat in pinnedChats"
-          :key="chat.id"
+          :key="`chat:${chat.id}`"
           class="activity-button workspace-button"
           :class="{ active: props.activeChatId === chat.id || layout.openChatIds.includes(chat.id) }"
           type="button"
@@ -232,6 +277,26 @@ function chatInitial(chat: SuperChatSummary) {
 .workspace-button {
   font-size: 12px;
   font-weight: 700;
+}
+
+.shortcut-button {
+  flex-direction: column;
+  gap: 0;
+}
+
+.shortcut-button .bi {
+  font-size: 13px;
+}
+
+.shortcut-label {
+  display: block;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  max-width: 28px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workspace-button.workspace-switching {

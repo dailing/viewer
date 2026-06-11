@@ -258,12 +258,15 @@ def is_assistant_response_item(raw: dict) -> bool:
     return raw.get("type") == "response_item" and payload is not None and payload.get("type") == "message" and payload.get("role") == "assistant"
 
 
+def is_agent_message_event(raw: dict) -> bool:
+    payload = payload_of(raw)
+    return raw.get("type") == "event_msg" and payload is not None and payload.get("type") == "agent_message"
+
+
 def is_duplicate_agent_message(raw: dict, text: str, assistant_response_texts: set[str]) -> bool:
     payload = payload_of(raw)
     return (
-        raw.get("type") == "event_msg"
-        and payload is not None
-        and payload.get("type") == "agent_message"
+        is_agent_message_event(raw)
         and normalize_message_text(text) in assistant_response_texts
     )
 
@@ -307,6 +310,8 @@ def extract_patch_input(raw: dict) -> str | None:
 
 
 def compact_event(raw: dict, index: int, assistant_response_texts: set[str]) -> dict | None:
+    if is_agent_message_event(raw):
+        return None
     event_type = display_event_type(raw)
     if event_type in HIDDEN_DISPLAY_EVENT_TYPES:
         return None

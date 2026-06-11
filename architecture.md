@@ -319,7 +319,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Chat pane for a single `chatId`; loads flat display feed pages from `/api/super-workspace/runs?chat_id=...`, subscribes to `/api/super-workspace/events`, and incrementally refreshes changed runs.
 - The composer creates a persisted run through `/api/super-workspace/runs`. It sends structured `role_ids` from `stores/superChatDispatch.ts` when a manual target chip is selected in the Chats side panel, and still supports typed leading `@Role` mentions plus `@msg-{message_id}` citation tokens.
-- The composer auto-collapses to a bottom-right keyboard button when empty and unfocused, can be expanded with voice focus for mobile input, and has a pin action beside Clear to keep it open across focus loss. The pin-open preference is owned by `stores/superChatComposer.ts`, keyed by `chatId`, and persisted in user-namespaced `localStorage` so reopening the same chat restores input-vs-reading mode.
+- The composer auto-collapses to a bottom-right keyboard button when empty and unfocused, can be expanded with voice focus for mobile input, and has a pin action beside Clear to keep it open across focus loss. The pin-open preference and unsent input draft are owned by `stores/superChatComposer.ts`, keyed by `chatId`, and persisted in user-namespaced `localStorage` so reopening the same chat restores input-vs-reading mode and draft text.
 - Role response headers are metadata rows: they show the role label, session id, context usage when available, and the cite action.
 - Visible user messages and final role responses have small cite buttons that insert `@msg-{message_id}` into the leading composer prefix. Backend `super_workspace_runtime.py` parses citation tokens, writes citation edges and queued dispatch-task rows, and leaves execution to the independent Super Workspace worker process.
 - The page renders flat display items directly: user query items show dispatch state and target chips, adjacent assistant `message:assistant` items from the same concrete role and `parent_message_id` are grouped into one response bubble anchored at the first visible message, and reasoning/tool/thinking rows stay hidden at the display-feed query layer.
@@ -504,7 +504,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/stores/voice.ts`
 
 - Browser voice job store keyed by input context ids such as `super-workspace:{chat_id}:composer` and `terminal:{terminal_id}:paste`.
-- Owns `MediaRecorder`, microphone stream, voice WebSocket lifecycle, chunk sending, `ready` / `processing` / `partial` / `committed` / `final` / `error` handling, the persisted default-on `11M` language-model-refine toggle, and context text/status state. `partial` and `final` replace the current voice transcript suffix from the recording's base text because voice-service sends full accumulated text.
+- Owns `MediaRecorder`, microphone stream, voice WebSocket lifecycle, chunk sending, `ready` / `processing` / `partial` / `committed` / `final` / `error` handling, the persisted default-on `11M` language-model-refine toggle, and context text/status state.
+- Each recording creates a distinct runtime job/WebSocket and a context-local ordered transcript segment. This lets a user stop one recording, immediately start another in the same input while the first is still in LLM refine, and have async partial/final results update their own segment without overwriting later recordings.
 - Voice jobs survive component unmounts after recording has stopped, so users can switch sessions while final transcription is processing and return to the same pending/ready draft.
 - Context statuses drive sidebar indicators: processing/recording contexts show as pending, completed but unsent voice text shows as ready.
 
@@ -549,7 +550,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/stores/superChatComposer.ts`
 
-- Pinia store for per-chat Super Workspace composer UI preferences. Currently persists the composer pin-open state by `chatId` in user-namespaced `localStorage` so all panes showing the same chat share the same input visibility mode.
+- Pinia store for per-chat Super Workspace composer UI preferences. Persists the composer pin-open state and unsent input draft by `chatId` in user-namespaced `localStorage` so all panes showing the same chat share the same input visibility mode and draft text.
 
 `frontend/src/stores/paneToolbar.ts`
 

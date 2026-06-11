@@ -1872,6 +1872,7 @@ class AgentHistoryStore:
             SuperWorkspaceMessageRow.role == "assistant",
             SuperWorkspaceMessageRow.event_type == "message:assistant",
             SuperWorkspaceMessageRow.text != "",
+            ~self._agent_message_event_condition(),
         )
         statement = select(SuperWorkspaceMessageRow).where(
             SuperWorkspaceMessageRow.user_id == normalized_user,
@@ -1944,6 +1945,7 @@ class AgentHistoryStore:
                 SuperWorkspaceMessageRow.role == "assistant",
                 SuperWorkspaceMessageRow.event_type == "message:assistant",
                 SuperWorkspaceMessageRow.text != "",
+                ~self._agent_message_event_condition(),
             )
             rows = list(
                 db.scalars(
@@ -2025,7 +2027,28 @@ class AgentHistoryStore:
         for target in target_rows:
             targets_by_query.setdefault(str(target.query_message_id), []).append(target)
             targets_by_id[str(target.id)] = target
-        return [self._display_item_from_row(row, targets_by_query, targets_by_id) for row in rows]
+        return [
+            self._display_item_from_row(row, targets_by_query, targets_by_id)
+            for row in rows
+            if not self._is_agent_message_event_row(row)
+        ]
+
+    @staticmethod
+    def _agent_message_event_condition():
+        return and_(
+            SuperWorkspaceMessageRow.raw_json.like('%"type":"event_msg"%'),
+            SuperWorkspaceMessageRow.raw_json.like('%"payload":{"type":"agent_message"%'),
+        )
+
+    def _is_agent_message_event_row(self, row: SuperWorkspaceMessageRow) -> bool:
+        raw = self._parse_json(row.raw_json, {})
+        payload = raw.get("payload") if isinstance(raw, dict) else None
+        return (
+            isinstance(raw, dict)
+            and raw.get("type") == "event_msg"
+            and isinstance(payload, dict)
+            and payload.get("type") == "agent_message"
+        )
 
     def record_provider_message(
         self,

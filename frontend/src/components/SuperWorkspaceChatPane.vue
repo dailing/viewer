@@ -29,7 +29,10 @@ const items = ref<SuperDisplayItem[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
 const composerShellRef = ref<HTMLElement | null>(null);
 const composerTextareaRef = ref<InstanceType<typeof VoiceTextarea> | null>(null);
-const composer = ref("");
+const composer = computed({
+  get: () => composerState.draft(props.chatId),
+  set: (value: string) => composerState.setDraft(props.chatId, value),
+});
 const composerExpanded = ref(false);
 const selectedComposerMentionToken = ref("");
 const error = ref("");
@@ -70,7 +73,6 @@ onUnmounted(() => {
 });
 
 watch(() => props.chatId, async () => {
-  composer.value = "";
   selectedComposerMentionToken.value = "";
   items.value = [];
   nextBefore.value = null;
@@ -104,7 +106,7 @@ async function dispatchMessage() {
   if (!message || busy.value) return;
   busy.value = true;
   error.value = "";
-  composer.value = "";
+  composerState.clearDraft(props.chatId);
   if (!composerPinned.value) composerExpanded.value = false;
   try {
     const run = await createSuperWorkspaceRun({

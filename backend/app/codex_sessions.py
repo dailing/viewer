@@ -610,12 +610,13 @@ class CodexSessionManager:
         payload = self._payload_of(raw)
         return raw.get("type") == "response_item" and payload is not None and payload.get("type") == "message" and payload.get("role") == "assistant"
 
-    def _is_duplicate_agent_message(self, raw: dict, text: str, assistant_response_texts: set[str]) -> bool:
+    def _is_agent_message_event(self, raw: dict) -> bool:
         payload = self._payload_of(raw)
+        return raw.get("type") == "event_msg" and payload is not None and payload.get("type") == "agent_message"
+
+    def _is_duplicate_agent_message(self, raw: dict, text: str, assistant_response_texts: set[str]) -> bool:
         return (
-            raw.get("type") == "event_msg"
-            and payload is not None
-            and payload.get("type") == "agent_message"
+            self._is_agent_message_event(raw)
             and self._normalize_message_text(text) in assistant_response_texts
         )
 
@@ -674,6 +675,8 @@ class CodexSessionManager:
     def _compact_event(self, event: dict, assistant_response_texts: set[str]) -> dict | None:
         raw = event.get("raw")
         if not isinstance(raw, dict):
+            return None
+        if self._is_agent_message_event(raw):
             return None
         display_event_type = self._display_event_type(raw)
         if display_event_type in HIDDEN_DISPLAY_EVENT_TYPES:

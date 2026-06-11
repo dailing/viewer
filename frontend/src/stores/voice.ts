@@ -13,16 +13,28 @@ export type VoiceContextState = {
 
 type VoiceMessage = { type: "ready" | "processing" | "partial" | "committed" | "final" | "error"; text?: string; message?: string };
 type VoiceRuntimeJob = {
+  id: string;
+  contextId: string;
   socket: WebSocket;
   recorder: MediaRecorder | null;
   stream: MediaStream | null;
   ready: boolean;
-  baseText: string;
+  segmentId: string;
   selectedMimeType: string;
   pendingChunkSends: Promise<void>[];
 };
+type VoiceSegment = {
+  id: string;
+  text: string;
+};
+type VoiceComposition = {
+  baseText: string;
+  segments: VoiceSegment[];
+};
 
 const runtimeJobs = new Map<string, VoiceRuntimeJob>();
+const compositions = new Map<string, VoiceComposition>();
+let voiceJobCounter = 0;
 const LANGUAGE_MODEL_REFINE_STORAGE_KEY = "viewer.voice.languageModelRefine";
 
 function defaultState(text = ""): VoiceContextState {
@@ -39,6 +51,24 @@ function appendTranscription(baseText: string, transcript: string): string {
   if (!cleanTranscript) return baseText;
   const separator = baseText && !/\s$/.test(baseText) ? " " : "";
   return `${baseText}${separator}${cleanTranscript}`;
+}
+
+function contextHasRuntimeJobs(contextId: string): boolean {
+  for (const job of runtimeJobs.values()) {
+    if (job.contextId === contextId) return true;
+  }
+  return false;
+}
+
+function activeRecordingJobForContext(contextId: string): VoiceRuntimeJob | null {
+  for (const job of runtimeJobs.values()) {
+    if (job.contextId === contextId && job.recorder) return job;
+  }
+  return null;
+}
+
+function composeVoiceText(composition: VoiceComposition): string {
+  return composition.segments.reduce((text, segment) => appendTranscription(text, segment.text), composition.baseText);
 }
 
 async function waitForSocketClose(socket: WebSocket, timeoutMs = 12000): Promise<void> {
@@ -68,6 +98,7 @@ export const useVoiceStore = defineStore("voice", {
   state: () => ({
     contexts: {} as Record<string, VoiceContextState>,
     activeRecordingContextId: "",
+    activeRecordingJobId: "",
     languageModelRefine: loadLanguageModelRefine(),
   }),
   getters: {
@@ -95,6 +126,7 @@ export const useVoiceStore = defineStore("voice", {
     syncText(id: string, text: string) {
       const current = this.ensure(id, text);
       if (current.text === text) return;
+      if (!contextHasRuntimeJobs(id)) compositions.delete(id);
       this.setContext(id, { text });
     },
     markRead(id: string) {
@@ -102,6 +134,7 @@ export const useVoiceStore = defineStore("voice", {
       this.setContext(id, { unread: false });
     },
     clear(id: string) {
+      compositions.delete(id);
       this.setContext(id, defaultState(""));
     },
     setLanguageModelRefine(enabled: boolean) {
@@ -116,17 +149,20 @@ export const useVoiceStore = defineStore("voice", {
       this.setLanguageModelRefine(!this.languageModelRefine);
     },
     async start(id: string, baseText: string) {
-      if (this.activeRecordingContextId && this.activeRecordingContextId !== id) {
+      if (this.activeRecordingContextId) {
         throw new Error("Another voice recording is active.");
       }
-      if (runtimeJobs.has(id)) return;
       if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
         this.setContext(id, { status: "error", error: "Voice recording is not supported in this browser." });
         return;
       }
 
-      this.setContext(id, { status: "connecting", text: baseText, error: "", unread: false });
+      const jobId = `${id}:${Date.now()}:${++voiceJobCounter}`;
+      const composition = this.prepareComposition(id, baseText);
+      composition.segments.push({ id: jobId, text: "" });
+      this.setContext(id, { status: "connecting", text: composeVoiceText(composition), error: "", unread: false });
       this.activeRecordingContextId = id;
+      this.activeRecordingJobId = jobId;
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -141,15 +177,17 @@ export const useVoiceStore = defineStore("voice", {
         const socket = new WebSocket(voiceSocketUrl());
         socket.binaryType = "arraybuffer";
         const job: VoiceRuntimeJob = {
+          id: jobId,
+          contextId: id,
           socket,
           recorder,
           stream,
           ready: false,
-          baseText,
+          segmentId: jobId,
           selectedMimeType,
           pendingChunkSends: [],
         };
-        runtimeJobs.set(id, job);
+        runtimeJobs.set(jobId, job);
 
         const sendVoiceChunk = async (blob: Blob) => {
           if (!job.ready || blob.size <= 0 || socket.readyState !== WebSocket.OPEN) return;
@@ -180,25 +218,28 @@ export const useVoiceStore = defineStore("voice", {
             this.setContext(id, { status: "processing", error: "" });
           } else if (message.type === "partial" || message.type === "committed") {
             const nextStatus = this.activeRecordingContextId === id ? "recording" : "processing";
-            this.setContext(id, { status: nextStatus, text: appendTranscription(job.baseText, message.text ?? ""), error: "", unread: false });
+            this.setContext(id, { status: nextStatus, text: this.updateSegmentText(job, message.text ?? ""), error: "", unread: false });
           } else if (message.type === "final") {
-            const nextStatus = this.activeRecordingContextId === id ? "recording" : "ready";
-            this.setContext(id, { status: nextStatus, text: appendTranscription(job.baseText, message.text ?? ""), error: "", unread: true });
-            this.cleanupRuntime(id, job);
+            const text = this.updateSegmentText(job, message.text ?? "");
+            this.cleanupRuntime(job.id, job);
+            const nextStatus = this.activeRecordingContextId === id ? "recording" : contextHasRuntimeJobs(id) ? "processing" : "ready";
+            this.setContext(id, { status: nextStatus, text, error: "", unread: true });
           } else if (message.type === "error") {
             this.setContext(id, { status: "error", error: message.message ?? "Voice input failed." });
-            void this.stop(id, false);
+            void this.stopJob(job, false);
           }
         });
         socket.addEventListener("close", () => {
-          if (runtimeJobs.get(id) === job && this.contexts[id]?.status !== "ready" && this.contexts[id]?.status !== "error") {
-            this.setContext(id, { status: "idle" });
+          if (runtimeJobs.get(job.id) === job && this.contexts[id]?.status !== "ready" && this.contexts[id]?.status !== "error") {
+            this.cleanupRuntime(job.id, job);
+            this.setContext(id, { status: contextHasRuntimeJobs(id) ? "processing" : this.contexts[id]?.text.trim() ? "ready" : "idle" });
+          } else {
+            this.cleanupRuntime(job.id, job);
           }
-          this.cleanupRuntime(id, job);
         });
         socket.addEventListener("error", () => {
           this.setContext(id, { status: "error", error: "Voice input connection failed." });
-          void this.stop(id, false);
+          void this.stopJob(job, false);
         });
 
         recorder.addEventListener("dataavailable", (event) => {
@@ -214,11 +255,18 @@ export const useVoiceStore = defineStore("voice", {
       }
     },
     async stop(id: string, graceful = true) {
-      const job = runtimeJobs.get(id);
+      const job = activeRecordingJobForContext(id);
       if (!job) {
-        if (this.activeRecordingContextId === id) this.activeRecordingContextId = "";
+        if (this.activeRecordingContextId === id) {
+          this.activeRecordingContextId = "";
+          this.activeRecordingJobId = "";
+        }
         return;
       }
+      await this.stopJob(job, graceful);
+    },
+    async stopJob(job: VoiceRuntimeJob, graceful = true) {
+      const id = job.contextId;
       const socket = job.socket;
       try {
         if (graceful && job.recorder) {
@@ -229,11 +277,14 @@ export const useVoiceStore = defineStore("voice", {
         }
         job.stream?.getTracks().forEach((track) => track.stop());
         job.stream = null;
-        if (this.activeRecordingContextId === id) this.activeRecordingContextId = "";
+        job.recorder = null;
+        if (this.activeRecordingJobId === job.id) {
+          this.activeRecordingContextId = "";
+          this.activeRecordingJobId = "";
+        }
         if (graceful && socket.readyState === WebSocket.OPEN) {
           this.setContext(id, { status: "processing" });
           socket.send(JSON.stringify({ type: "stop" }));
-          runtimeJobs.delete(id);
           await waitForSocketClose(socket, 120000);
         } else {
           socket.close();
@@ -243,15 +294,36 @@ export const useVoiceStore = defineStore("voice", {
         if (!graceful && this.contexts[id]?.status !== "error") {
           this.setContext(id, { status: "idle" });
         }
-        this.cleanupRuntime(id, job);
+        this.cleanupRuntime(job.id, job);
       }
     },
-    cleanupRuntime(id: string, expectedJob?: VoiceRuntimeJob) {
-      const job = runtimeJobs.get(id);
+    prepareComposition(id: string, baseText: string): VoiceComposition {
+      if (!contextHasRuntimeJobs(id)) {
+        const composition = { baseText, segments: [] };
+        compositions.set(id, composition);
+        return composition;
+      }
+      const existing = compositions.get(id);
+      if (existing) return existing;
+      const composition = { baseText, segments: [] };
+      compositions.set(id, composition);
+      return composition;
+    },
+    updateSegmentText(job: VoiceRuntimeJob, transcript: string): string {
+      const composition = compositions.get(job.contextId) ?? this.prepareComposition(job.contextId, this.contexts[job.contextId]?.text ?? "");
+      const segment = composition.segments.find((item) => item.id === job.segmentId);
+      if (segment) segment.text = transcript;
+      return composeVoiceText(composition);
+    },
+    cleanupRuntime(jobId: string, expectedJob?: VoiceRuntimeJob) {
+      const job = runtimeJobs.get(jobId);
       if (expectedJob && job && job !== expectedJob) return;
       job?.stream?.getTracks().forEach((track) => track.stop());
-      if (!expectedJob || job === expectedJob) runtimeJobs.delete(id);
-      if (this.activeRecordingContextId === id && (!expectedJob || job === expectedJob)) this.activeRecordingContextId = "";
+      if (!expectedJob || job === expectedJob) runtimeJobs.delete(jobId);
+      if (job && this.activeRecordingJobId === job.id && (!expectedJob || job === expectedJob)) {
+        this.activeRecordingContextId = "";
+        this.activeRecordingJobId = "";
+      }
     },
   },
 });

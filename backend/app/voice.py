@@ -263,7 +263,12 @@ async def _connect_voice_service(websocket: WebSocket, cfg: VoiceRuntimeConfig) 
 
         async def client_to_service() -> None:
             while True:
-                message = await websocket.receive()
+                try:
+                    message = await websocket.receive()
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+                if message.get("type") == "websocket.disconnect":
+                    return
                 if "bytes" in message and message["bytes"] is not None:
                     await service.send(message["bytes"])
                     continue
@@ -548,7 +553,12 @@ async def connect_voice(websocket: WebSocket) -> None:
 
             async def client_to_upstream() -> None:
                 while True:
-                    message = await websocket.receive()
+                    try:
+                        message = await websocket.receive()
+                    except (WebSocketDisconnect, RuntimeError):
+                        return
+                    if message.get("type") == "websocket.disconnect":
+                        return
                     if "bytes" in message and message["bytes"] is not None:
                         chunk = message["bytes"]
                         capture.write(chunk)

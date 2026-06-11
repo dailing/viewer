@@ -1,11 +1,12 @@
 import { defineStore } from "pinia";
 import { namespacedStorageKey } from "../utils/userProfile";
 
-const STORAGE_KEY = "viewer.superChatComposerPins.v1";
+const PIN_STORAGE_KEY = "viewer.superChatComposerPins.v1";
+const DRAFT_STORAGE_KEY = "viewer.superChatComposerDrafts.v1";
 
 function readPins(): Record<string, boolean> {
   try {
-    const raw = localStorage.getItem(namespacedStorageKey(STORAGE_KEY));
+    const raw = localStorage.getItem(namespacedStorageKey(PIN_STORAGE_KEY));
     const parsed = raw ? JSON.parse(raw) : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const pins: Record<string, boolean> = {};
@@ -19,18 +20,42 @@ function readPins(): Record<string, boolean> {
 }
 
 function writePins(value: Record<string, boolean>) {
-  localStorage.setItem(namespacedStorageKey(STORAGE_KEY), JSON.stringify(value));
+  localStorage.setItem(namespacedStorageKey(PIN_STORAGE_KEY), JSON.stringify(value));
+}
+
+function readDrafts(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(namespacedStorageKey(DRAFT_STORAGE_KEY));
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const drafts: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (key && typeof value === "string") drafts[key] = value;
+    }
+    return drafts;
+  } catch {
+    return {};
+  }
+}
+
+function writeDrafts(value: Record<string, string>) {
+  localStorage.setItem(namespacedStorageKey(DRAFT_STORAGE_KEY), JSON.stringify(value));
 }
 
 export const useSuperChatComposerStore = defineStore("superChatComposer", {
   state: () => ({
     pinnedByChatId: readPins(),
+    draftByChatId: readDrafts(),
   }),
   getters: {
     isPinned:
       (state) =>
       (chatId: string): boolean =>
         Boolean(chatId && state.pinnedByChatId[chatId]),
+    draft:
+      (state) =>
+      (chatId: string): string =>
+        chatId ? state.draftByChatId[chatId] ?? "" : "",
   },
   actions: {
     setPinned(chatId: string, pinned: boolean) {
@@ -48,6 +73,20 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
       const pinned = !this.isPinned(chatId);
       this.setPinned(chatId, pinned);
       return pinned;
+    },
+    setDraft(chatId: string, draft: string) {
+      if (!chatId) return;
+      if (draft) {
+        this.draftByChatId = { ...this.draftByChatId, [chatId]: draft };
+      } else {
+        const next = { ...this.draftByChatId };
+        delete next[chatId];
+        this.draftByChatId = next;
+      }
+      writeDrafts(this.draftByChatId);
+    },
+    clearDraft(chatId: string) {
+      this.setDraft(chatId, "");
     },
   },
 });

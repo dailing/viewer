@@ -300,6 +300,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Dispatches every filesystem SSE as `viewer:file-changed`; individual panes filter these events against their own file path or viewer-specific dependency set.
 - Polls terminal list every 15 seconds with overlap guarded in `stores/terminals.ts`.
 - Renders active pane toolbar metadata, actions, and generic controls from `stores/paneToolbar.ts` in the top bar while Super Workspace is active, plus global pane split actions.
+- Renders the global voice/input status control from `stores/inputSessions.ts` in the top bar. When a voice input is recording or processing, the top bar can finish the current voice job from any pane; registered Super Workspace chat contexts auto-submit to their original chat after voice/LLM final text is ready, while generic contexts only receive their final text.
 - On phone-width screens, active-pane toolbar actions and controls collapse behind a top-bar overflow menu while global pane actions remain inline.
 - Top-bar ownership rule: cross-viewer pane actions such as split belong in `App.vue`; view-specific icons/controls/status belong in the owning viewer and must be registered through `stores/paneToolbar.ts`, not hard-coded in `App.vue`. The global SSE connection dot is intentionally not rendered.
 - The global pane toolbar in `App.vue` owns pane-level navigation actions such as Go Back, Split, and Close. `stores/layout.ts` keeps each pane's local content history so a pane can return from a linked file, sidebar-opened file, diff, terminal, or agent session to its previous content.
@@ -312,14 +313,15 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Default full-page Super Workspace split-pane shell.
 - Loads per-user Super Workspace workspace state through `/api/super-workspace/workspaces`, active chats through `/api/super-workspace/chats`, active workspace roles through `/api/super-workspace`, and agent provider metadata for role editing.
-- Owns the sidebar drawer/pin/resize state and routes `FileSidebar.vue` events into chat, role, file, diff, and terminal pane actions. The sidebar's narrow activity rail includes browser-local pinned files and terminals plus backend-persisted pinned chats as quick pane shortcuts.
-- Chat CRUD opens chats as normal recursive layout panes through `layout.openChat(chatId)`. Role CRUD is global to the active Super Workspace; deleting a role also removes it from any chat membership lists.
+- Owns the sidebar drawer/pin/resize state and routes `FileSidebar.vue` events into chat, role, file, diff, and terminal pane actions. The sidebar's narrow activity rail includes browser-local pinned files and terminals plus backend-persisted pinned chats as quick pane shortcuts. Sidebar tools use the current chat working directory as their default cwd, preferring the active chat pane's `chatId` and falling back to the backend active chat; empty chat cwd means the profile root.
+- Chat CRUD opens chats as normal recursive layout panes through `layout.openChat(chatId)`. Role CRUD is global to the active Super Workspace; deleting a role also removes it from any chat membership lists. Chat list mutations emit a browser-local `super-workspace:chats-updated` event so already-open chat panes can refresh member-role context without waiting for a history poll.
 
 `frontend/src/components/SuperWorkspaceChatPane.vue`
 
 - Chat pane for a single `chatId`; loads flat display feed pages from `/api/super-workspace/runs?chat_id=...`, subscribes to `/api/super-workspace/events`, and incrementally refreshes changed runs.
-- The composer creates a persisted run through `/api/super-workspace/runs`. It sends structured `role_ids` from `stores/superChatDispatch.ts` when a manual target chip is selected in the Chats side panel, and still supports typed leading `@Role` mentions plus `@msg-{message_id}` citation tokens.
+- The composer creates a persisted run through `/api/super-workspace/runs`. It sends structured `role_ids` from `stores/superChatDispatch.ts` when manual target chips are selected in the Chats side panel or the composer dispatch dropdown selects one or more chat member roles; leaving the dropdown on Auto omits `role_ids` so the backend router LLM chooses among chat members. The composer dispatch button opens the dropdown only when no manual roles are selected; when highlighted with selected roles, clicking it clears back to Auto. Typed leading `@Role` mentions plus `@msg-{message_id}` citation tokens still work.
 - The composer defaults to pinned/open when a chat has no local pin preference, can be expanded with voice focus for mobile input, and has a pin action beside Clear to keep it open across focus loss. Explicit pin/unpin preferences and unsent input draft are owned by `stores/superChatComposer.ts`, keyed by `chatId`, and persisted in user-namespaced `localStorage` so reopening the same chat restores input-vs-reading mode and draft text.
+- The composer registers `super-workspace:{chat_id}:composer` with `stores/inputSessions.ts` as a submit-capable input context. If the user presses Send while voice processing is still running, the input session marks a pending send, waits for voice final text, and submits the completed query to the original chat without requiring the pane to remain active.
 - Role response headers are metadata rows: they show the role label, session id, context usage when available, and the cite action.
 - Visible user messages and final role responses have small cite buttons that insert `@msg-{message_id}` into the leading composer prefix. Backend `super_workspace_runtime.py` parses citation tokens, writes citation edges and queued dispatch-task rows, and leaves execution to the independent Super Workspace worker process.
 - The page renders flat display items directly: user query items show dispatch state and target chips, assistant `message:assistant` items with the same `driver_run_id` are grouped into one response bubble anchored at that run's first visible message even when multiple runs interleave, and reasoning/tool/thinking rows stay hidden at the display-feed query layer.
@@ -369,28 +371,29 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Sidebar shell with a VS Code-style activity rail and one active tool panel at a time.
 - Persists the active sidebar tool in `localStorage` under `viewer.sidebarActiveTool.v1`.
 - Tools: Chats, Roles, Files, Changes, and Terminals. Future side tools should be added to this shell instead of mixing unrelated lists into one panel.
+- Computes the default sidebar tool cwd from the current chat and passes it to Files, Changes, and Terminals panels so those tools follow chat scope instead of always using the profile root.
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool changes only the active selection; clicking the already-active tool toggles the tool panel open/closed.
 - On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
 - Re-emits `open-chat`, role CRUD, `open-file`, `open-diff`, and `open-terminal` events to `SuperWorkspacePage.vue`.
 
 `frontend/src/components/sidebar/FilesPanel.vue`
 
-- Files tool panel: pinned paths, current folder, parent button, upload button, drag-and-drop upload target, file delete confirmation/error display, and `FileTree`.
+- Files tool panel: pinned paths, current folder, parent button, upload button, drag-and-drop upload target, file delete confirmation/error display, and `FileTree`. When opened, it enters the current chat default cwd, falling back to root if that directory is unavailable.
 - Shows the active profile `home` as the current path label when browsing the user's root (`path=""`).
 - `openPinned(path)`: tries to enter pinned path as directory, otherwise emits `open-file`.
 
 `frontend/src/components/sidebar/TerminalsPanel.vue`
 
 - Terminals tool panel: new terminal button plus terminal list.
-- `newTerminal()`: creates terminal in the current sidebar directory and emits `open-terminal`.
+- `newTerminal()`: creates terminal in the current chat default cwd and emits `open-terminal`; empty cwd falls back to the profile root on the backend.
 - `closeTerminal(id)`: deletes terminal and clears matching panes.
 
 `frontend/src/components/sidebar/GitPanel.vue`
 
-- Changes tool panel: lists Git changed files from `/api/git/status`, showing served-root-relative paths, status codes, and small `+/-` line counts.
-- Loads Git status only from the manual Refresh button; the sidebar does not poll or auto-refresh Git status.
+- Changes tool panel: lists Git changed files from `/api/git/status` scoped to the current chat default cwd, showing served-root-relative paths, status codes, and small `+/-` line counts.
+- Loads Git status when the panel opens or the chat default cwd changes, and also supports manual Refresh; the sidebar does not poll Git status.
 - Binary files are displayed with a `bin` chip but disabled so they cannot be opened in the diff viewer.
-- Clicking a text change emits `open-diff` with the current Files directory so the active pane becomes a diff pane scoped to that directory.
+- Clicking a text change emits `open-diff` with the current chat default cwd so the active pane becomes a diff pane scoped to that directory.
 
 `frontend/src/components/ConfigPanel.vue`
 
@@ -551,6 +554,15 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/stores/superChatComposer.ts`
 
 - Pinia store for per-chat Super Workspace composer UI preferences. Persists explicit composer pin/open choices and unsent input draft by `chatId` in user-namespaced `localStorage` so all panes showing the same chat share the same input visibility mode and draft text; chats without a stored pin choice default to pinned/open.
+
+`frontend/src/stores/superChatDispatch.ts`
+
+- Pinia store for per-chat manual Super Workspace dispatch role selection. Persists selected role ids by `chatId` in user-namespaced `localStorage`, so reopening or switching back to a chat restores the last non-Auto role selection unless the role is no longer a chat member.
+
+`frontend/src/stores/inputSessions.ts`
+
+- Browser-local coordinator for long-running voice/input contexts. Tracks registered input contexts, optional submit targets, pending sends, and top-bar global status.
+- The first submit target is Super Workspace chat: global Send stops the active recording if needed, waits for voice/LLM final text, then calls `/api/super-workspace/runs` for the context's original chat. Contexts without a submit target only finish voice processing and keep the final text in their owning input context.
 
 `frontend/src/stores/paneToolbar.ts`
 

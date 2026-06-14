@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { getGitStatus } from "../../api/client";
-import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import type { GitDiffFile } from "../../types/git";
 
@@ -9,19 +8,34 @@ const emit = defineEmits<{
   "open-diff": [path: string, cwd: string];
 }>();
 
+const props = defineProps<{
+  defaultCwd?: string;
+}>();
+
 const layout = useLayoutStore();
-const fileStore = useFilesStore();
 const files = ref<GitDiffFile[]>([]);
 const loading = ref(false);
 const loaded = ref(false);
 const error = ref("");
+const currentCwd = computed(() => props.defaultCwd ?? "");
+
+watch(
+  currentCwd,
+  () => {
+    files.value = [];
+    loaded.value = false;
+    error.value = "";
+    void load();
+  },
+  { immediate: true },
+);
 
 async function load() {
   if (loading.value) return;
   loading.value = true;
   error.value = "";
   try {
-    files.value = (await getGitStatus(fileStore.currentPath)).files;
+    files.value = (await getGitStatus(currentCwd.value)).files;
     loaded.value = true;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -33,7 +47,7 @@ async function load() {
 
 function open(file: GitDiffFile) {
   if (file.is_binary) return;
-  emit("open-diff", file.path, fileStore.currentPath);
+  emit("open-diff", file.path, currentCwd.value);
 }
 
 function statusTitle(file: GitDiffFile) {
@@ -54,6 +68,10 @@ function statusTitle(file: GitDiffFile) {
 
     <div class="sidebar-section list-section">
       <div class="section-title">Changes</div>
+      <div class="current-path" :title="currentCwd || '/'">
+        <i class="bi bi-folder2-open"></i>
+        <span>{{ currentCwd || "/" }}</span>
+      </div>
       <div v-if="error" class="panel-error">{{ error }}</div>
       <div v-else-if="loading && !files.length" class="empty-panel">Loading changes</div>
       <div v-else-if="!loaded" class="empty-panel">Use Refresh to load changes</div>
@@ -107,6 +125,24 @@ function statusTitle(file: GitDiffFile) {
   letter-spacing: 0;
   margin-bottom: 6px;
   text-transform: uppercase;
+}
+
+.current-path {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  margin-bottom: 6px;
+  min-width: 0;
+  padding: 2px 6px;
+}
+
+.current-path span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-command {

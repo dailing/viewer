@@ -4,6 +4,7 @@ import ConfigPanel from "./components/ConfigPanel.vue";
 import SuperWorkspacePage from "./components/SuperWorkspacePage.vue";
 import { connectEvents } from "./api/events";
 import { useFilesStore } from "./stores/files";
+import { useInputSessionsStore } from "./stores/inputSessions";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
@@ -12,6 +13,7 @@ import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar
 import type { SplitDirection } from "./types/layout";
 
 const files = useFilesStore();
+const inputSessions = useInputSessionsStore();
 const layout = useLayoutStore();
 const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
@@ -130,6 +132,7 @@ const globalPaneActions = computed<PaneToolbarAction[]>(() => {
 const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
 const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
 const hasMobilePaneToolbar = computed(() => activePaneActions.value.length > 0 || activePaneControls.value.length > 0);
+const globalInputStatus = computed(() => inputSessions.globalStatus);
 
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
@@ -210,6 +213,10 @@ function refreshActivePane() {
   window.dispatchEvent(new CustomEvent("viewer:pane-refresh", { detail: { paneId } }));
 }
 
+function runGlobalInputSend() {
+  void inputSessions.requestGlobalSend();
+}
+
 onUnmounted(() => {
   source?.close();
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
@@ -249,6 +256,23 @@ onUnmounted(() => {
       <span v-if="paneToolbarVisible && activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
         {{ activePaneToolbar.status }}
       </span>
+      <div v-if="globalInputStatus.visible" class="global-input-status" :class="`status-${globalInputStatus.status}`">
+        <i class="bi" :class="globalInputStatus.busy ? 'bi-mic-fill' : globalInputStatus.status === 'failed' ? 'bi-exclamation-triangle-fill' : 'bi-check-circle-fill'"></i>
+        <span class="global-input-status-text" :title="`${globalInputStatus.label}: ${globalInputStatus.detail}`">
+          {{ globalInputStatus.detail || globalInputStatus.label }}
+        </span>
+        <button
+          class="btn btn-sm btn-primary global-input-send"
+          type="button"
+          :disabled="!globalInputStatus.canSend"
+          title="Finish voice input"
+          aria-label="Finish voice input"
+          @click="runGlobalInputSend"
+        >
+          <i class="bi bi-send"></i>
+          <span>Send</span>
+        </button>
+      </div>
       <div v-if="paneToolbarVisible && hasMobilePaneToolbar" class="mobile-pane-menu">
         <button
           class="btn btn-outline-secondary icon-button toolbar-action"

@@ -83,6 +83,7 @@ async function loadState() {
     chats.value = chatData.chats;
     activeChatId.value = chatData.active_chat_id;
     roles.value = superData.roles;
+    notifyChatListChanged();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -96,6 +97,7 @@ async function addChat() {
     const data = await createSuperChat({ name: `Chat ${chats.value.length + 1}`, type: "group" });
     chats.value = data.chats;
     activeChatId.value = data.active_chat_id;
+    notifyChatListChanged();
     if (activeChatId.value) layout.openChat(activeChatId.value);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -108,6 +110,7 @@ async function openChat(chatId: string) {
     const data = await activateSuperChat(chatId);
     chats.value = data.chats;
     activeChatId.value = data.active_chat_id;
+    notifyChatListChanged();
     layout.openChat(chatId);
     if (!sidebarPinned.value) sidebarOpen.value = false;
   } catch (err) {
@@ -128,6 +131,7 @@ async function saveChat(chat: SuperChatSummary) {
     });
     chats.value = data.chats;
     activeChatId.value = data.active_chat_id;
+    notifyChatListChanged();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -174,6 +178,7 @@ async function removeRole(role: SuperRole) {
     }
     if (affected.length) {
       chats.value = (await listSuperChats()).chats;
+      notifyChatListChanged();
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -187,9 +192,14 @@ async function removeChat(chat: SuperChatSummary) {
     const data = await deleteSuperChat(chat.id);
     chats.value = data.chats;
     activeChatId.value = data.active_chat_id;
+    notifyChatListChanged();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
+}
+
+function notifyChatListChanged() {
+  window.dispatchEvent(new CustomEvent("super-workspace:chats-updated"));
 }
 
 function openFile(path: string) {

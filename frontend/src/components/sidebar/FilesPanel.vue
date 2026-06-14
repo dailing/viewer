@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { useUsersStore } from "../../stores/users";
@@ -8,6 +8,10 @@ import FileTree from "../FileTree.vue";
 
 const emit = defineEmits<{
   "open-file": [path: string];
+}>();
+
+const props = defineProps<{
+  defaultCwd?: string;
 }>();
 
 const files = useFilesStore();
@@ -21,6 +25,32 @@ const dragDepth = ref(0);
 const uploadError = ref("");
 const uploading = ref(false);
 const isDragging = computed(() => dragDepth.value > 0);
+
+watch(
+  () => props.defaultCwd ?? "",
+  (cwd) => {
+    void enterDefaultDirectory(cwd);
+  },
+  { immediate: true },
+);
+
+async function enterDefaultDirectory(cwd: string) {
+  if (files.currentPath === cwd) return;
+  uploadError.value = "";
+  try {
+    await files.enterDirectory(cwd);
+  } catch (error) {
+    if (!cwd) {
+      uploadError.value = error instanceof Error ? error.message : String(error);
+      return;
+    }
+    try {
+      await files.enterDirectory("");
+    } catch (fallbackError) {
+      uploadError.value = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+    }
+  }
+}
 
 async function openPinned(path: string) {
   try {

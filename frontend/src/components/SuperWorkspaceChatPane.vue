@@ -3,16 +3,19 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   createSuperWorkspaceRun,
   getSuperWorkspace,
+  listSuperChats,
   listSuperWorkspaceRuns,
   resolveDirectoryLink,
 } from "../api/client";
 import { connectSuperWorkspaceEvents } from "../api/events";
 import { useAgentsStore } from "../stores/agents";
 import { useFilesStore } from "../stores/files";
+import { useInputSessionsStore } from "../stores/inputSessions";
 import { useLayoutStore } from "../stores/layout";
 import { useSuperChatComposerStore } from "../stores/superChatComposer";
 import { useSuperChatDispatchStore } from "../stores/superChatDispatch";
-import type { SuperDisplayItem, SuperDisplayTarget, SuperHistoryRun, SuperRole } from "../types/superWorkspace";
+import { useVoiceStore } from "../stores/voice";
+import type { SuperChatSummary, SuperDisplayItem, SuperDisplayTarget, SuperHistoryRun, SuperRole } from "../types/superWorkspace";
 import { renderMarkdown } from "../utils/markdownRender";
 import VoiceTextarea from "./VoiceTextarea.vue";
 
@@ -21,10 +24,13 @@ type SuperThreadItem = SuperDisplayItem & { merged_message_ids?: string[] };
 const props = defineProps<{ chatId: string; paneId: string }>();
 const agents = useAgentsStore();
 const files = useFilesStore();
+const inputSessions = useInputSessionsStore();
 const layout = useLayoutStore();
 const composerState = useSuperChatComposerStore();
 const dispatchSelection = useSuperChatDispatchStore();
+const voice = useVoiceStore();
 const roles = ref<SuperRole[]>([]);
+const currentChat = ref<SuperChatSummary | null>(null);
 const items = ref<SuperDisplayItem[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
 const composerShellRef = ref<HTMLElement | null>(null);
@@ -43,8 +49,21 @@ const hasOlderRuns = ref(false);
 const nextBefore = ref<number | null>(null);
 const runsAfterCursor = ref(0);
 const composerMentionItems = computed(() => buildComposerMentionItems(composer.value));
-const selectedDispatchRoleId = computed(() => dispatchSelection.selectedRoleId(props.chatId));
-const selectedDispatchRole = computed(() => roles.value.find((role) => role.id === selectedDispatchRoleId.value) ?? null);
+const rolesById = computed(() => new Map(roles.value.map((role) => [role.id, role])));
+const chatDispatchRoles = computed(() =>
+  (currentChat.value?.member_role_ids ?? []).map((roleId) => rolesById.value.get(roleId)).filter((role): role is SuperRole => Boolean(role)),
+);
+const chatMemberRoleIds = computed(() => new Set(currentChat.value?.member_role_ids ?? []));
+const selectedDispatchRoleIds = computed(() => dispatchSelection.selectedRoleIds(props.chatId));
+const selectedDispatchRoles = computed(() => {
+  const selected = new Set(selectedDispatchRoleIds.value);
+  return chatDispatchRoles.value.filter((role) => selected.has(role.id));
+});
+const dispatchPickerTitle = computed(() => {
+  if (!selectedDispatchRoles.value.length) return "Auto dispatch";
+  return `Dispatch to ${selectedDispatchRoles.value.map((role) => role.name).join(", ")}`;
+});
+const inputContextId = computed(() => `super-workspace:${props.chatId}:composer`);
 const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByDriverRun([...items.value].reverse()));
 const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value);
 const composerPinned = computed(() => composerState.isPinned(props.chatId));
@@ -55,7 +74,7 @@ let superWorkspaceEvents: EventSource | null = null;
 
 onMounted(async () => {
   await agents.loadProviders();
-  await loadRoles();
+  await Promise.all([loadRoles(), loadChatContext()]);
   await loadRuns(true);
   superWorkspaceEvents = connectSuperWorkspaceEvents((event) => {
     if (event.chat_id && event.chat_id !== props.chatId) return;
@@ -63,6 +82,7 @@ onMounted(async () => {
   });
   fallbackTimer = window.setInterval(() => scheduleRefreshLiveState(0), 30000);
   window.addEventListener("super-workspace:add-role-mention", handleExternalRoleMention);
+  window.addEventListener("super-workspace:chats-updated", handleChatsUpdated);
 });
 
 onUnmounted(() => {
@@ -70,6 +90,7 @@ onUnmounted(() => {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer);
   superWorkspaceEvents?.close();
   window.removeEventListener("super-workspace:add-role-mention", handleExternalRoleMention);
+  window.removeEventListener("super-workspace:chats-updated", handleChatsUpdated);
 });
 
 watch(() => props.chatId, async () => {
@@ -77,16 +98,34 @@ watch(() => props.chatId, async () => {
   items.value = [];
   nextBefore.value = null;
   runsAfterCursor.value = 0;
-  await loadRuns(true);
+  await Promise.all([loadChatContext(), loadRuns(true)]);
 });
 
-watch([selectedDispatchRoleId, roles], ([roleId]) => {
-  if (roleId && !roles.value.some((role) => role.id === roleId)) dispatchSelection.clearChat(props.chatId);
+watch([selectedDispatchRoleIds, () => props.chatId, () => currentChat.value?.id], ([roleIds, watchingChatId, currentChatId]) => {
+  if (!currentChatId || watchingChatId !== currentChatId) return;
+  const dispatchRoleIds = chatMemberRoleIds.value;
+  if (!roleIds.length) return;
+  if (!dispatchRoleIds.size) {
+    dispatchSelection.clearChat(props.chatId);
+    registerInputContext();
+    return;
+  }
+  for (const roleId of roleIds) {
+    if (!dispatchRoleIds.has(roleId)) dispatchSelection.clearRole(props.chatId, roleId);
+  }
+  registerInputContext();
 });
+
+watch(() => props.chatId, () => registerInputContext(), { immediate: true });
 
 async function loadRoles() {
   const data = await getSuperWorkspace();
   roles.value = data.roles;
+}
+
+async function loadChatContext() {
+  const data = await listSuperChats();
+  currentChat.value = data.chats.find((chat) => chat.id === props.chatId) ?? null;
 }
 
 function scheduleRefreshLiveState(delayMs: number) {
@@ -98,12 +137,39 @@ function scheduleRefreshLiveState(delayMs: number) {
 }
 
 async function refreshLiveState() {
-  await Promise.all([loadRoles(), loadChangedRuns()]);
+  await Promise.all([loadRoles(), loadChatContext(), loadChangedRuns()]);
+}
+
+function registerInputContext() {
+  inputSessions.registerContext({
+    id: inputContextId.value,
+    kind: "super-chat",
+    ownerId: props.chatId,
+    label: "Chat voice input",
+    submitTarget: {
+      type: "super-chat",
+      chatId: props.chatId,
+      roleIds: selectedDispatchRoleIds.value.length ? selectedDispatchRoleIds.value : undefined,
+    },
+  });
 }
 
 async function dispatchMessage() {
   const message = composer.value.trim();
   if (!message || busy.value) return;
+  if (voice.isBusy(inputContextId.value)) {
+    busy.value = true;
+    error.value = "";
+    try {
+      await inputSessions.requestSend(inputContextId.value);
+      await refreshLiveState();
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err);
+    } finally {
+      busy.value = false;
+    }
+    return;
+  }
   busy.value = true;
   error.value = "";
   composerState.clearDraft(props.chatId);
@@ -112,7 +178,7 @@ async function dispatchMessage() {
     const run = await createSuperWorkspaceRun({
       message,
       chat_id: props.chatId,
-      role_ids: selectedDispatchRole.value ? [selectedDispatchRole.value.id] : undefined,
+      role_ids: selectedDispatchRoleIds.value.length ? selectedDispatchRoleIds.value : undefined,
     });
     upsertDisplayItem(displayItemFromRun(run));
     updateItemsAfterCursor([displayItemFromRun(run)]);
@@ -142,6 +208,40 @@ function toggleComposerPinned() {
   if (pinned) composerExpanded.value = true;
 }
 
+function isDispatchRoleSelected(roleId: string) {
+  return dispatchSelection.isRoleSelected(props.chatId, roleId);
+}
+
+function toggleDispatchRole(roleId: string) {
+  dispatchSelection.toggleRole(props.chatId, roleId);
+}
+
+function handleDispatchPickerSummaryClick(event: MouseEvent) {
+  if (!selectedDispatchRoleIds.value.length) return;
+  event.preventDefault();
+  dispatchSelection.clearChat(props.chatId);
+  const details = event.currentTarget instanceof HTMLElement ? event.currentTarget.closest("details") : null;
+  if (details instanceof HTMLDetailsElement) details.open = false;
+}
+
+function closeDispatchPicker(event: Event) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLDetailsElement)) return;
+  target.open = false;
+}
+
+function handleDispatchPickerFocusOut(event: FocusEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLDetailsElement)) return;
+  const nextTarget = event.relatedTarget instanceof Node ? event.relatedTarget : null;
+  if (nextTarget && target.contains(nextTarget)) return;
+  window.setTimeout(() => {
+    const active = document.activeElement;
+    if (active && target.contains(active)) return;
+    target.open = false;
+  }, 0);
+}
+
 function handleComposerFocusOut(event: FocusEvent) {
   if (composerPinned.value) return;
   const nextTarget = event.relatedTarget instanceof Node ? event.relatedTarget : null;
@@ -159,6 +259,10 @@ function handleExternalRoleMention(event: Event) {
   if (!detail?.roleId || layout.activePaneId !== props.paneId) return;
   const role = roles.value.find((item) => item.id === detail.roleId);
   if (role) addRoleMention(role);
+}
+
+function handleChatsUpdated() {
+  void loadChatContext();
 }
 
 function addRoleMention(role: SuperRole) {
@@ -516,7 +620,7 @@ async function scrollThreadToBottom() {
             </button>
           </div>
           <div class="super-role-response" @click="openItemLink($event, item)">
-            <div class="markdown-body super-response-body" v-html="itemHtml(item)"></div>
+            <div class="markdown-body markdown-content super-response-body" v-html="itemHtml(item)"></div>
           </div>
         </div>
       </article>
@@ -555,7 +659,7 @@ async function scrollThreadToBottom() {
         <VoiceTextarea
           ref="composerTextareaRef"
           v-model="composer"
-          :context-id="`super-workspace:${chatId}:composer`"
+          :context-id="inputContextId"
           placeholder="Message chat"
           :rows="2"
           min-height="58px"
@@ -565,6 +669,36 @@ async function scrollThreadToBottom() {
           @keydown="handleComposerKeydown"
         >
           <template #actions>
+            <details
+              class="super-dispatch-picker"
+              :class="{ active: selectedDispatchRoles.length }"
+              :title="dispatchPickerTitle"
+              @focusout="handleDispatchPickerFocusOut"
+              @keydown.esc.stop.prevent="closeDispatchPicker"
+            >
+              <summary :aria-label="dispatchPickerTitle" @click="handleDispatchPickerSummaryClick">
+                <i class="bi" :class="selectedDispatchRoles.length ? 'bi-people-fill' : 'bi-diagram-3'"></i>
+                <span v-if="selectedDispatchRoles.length" class="super-dispatch-count">{{ selectedDispatchRoles.length }}</span>
+              </summary>
+              <div class="super-dispatch-menu" @mousedown.prevent>
+                <button class="super-dispatch-menu-auto" type="button" :class="{ selected: !selectedDispatchRoles.length }" @click="dispatchSelection.clearChat(props.chatId)">
+                  <i class="bi" :class="selectedDispatchRoles.length ? 'bi-circle' : 'bi-check-circle-fill'"></i>
+                  <span>Auto</span>
+                </button>
+                <div v-if="!chatDispatchRoles.length" class="super-dispatch-empty">No roles in chat</div>
+                <button
+                  v-for="role in chatDispatchRoles"
+                  :key="role.id"
+                  class="super-dispatch-option"
+                  type="button"
+                  :class="{ selected: isDispatchRoleSelected(role.id) }"
+                  @click="toggleDispatchRole(role.id)"
+                >
+                  <i class="bi" :class="isDispatchRoleSelected(role.id) ? 'bi-check-square-fill' : 'bi-square'"></i>
+                  <span>{{ role.name }}</span>
+                </button>
+              </div>
+            </details>
             <button class="btn btn-outline-primary voice-action-button super-send-button" type="button" :disabled="!canDispatch" title="Send message (Cmd/Ctrl+Enter)" aria-label="Send message" @click="dispatchMessage">
               <i class="bi bi-send"></i>
             </button>
@@ -606,7 +740,9 @@ async function scrollThreadToBottom() {
   flex-direction: column;
   gap: 18px;
   min-height: 0;
-  overflow: auto;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 18px clamp(14px, 3vw, 34px);
 }
 
@@ -614,6 +750,13 @@ async function scrollThreadToBottom() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
+}
+
+.super-user-turn,
+.super-role-turn,
+.super-message-meta {
+  min-width: 0;
 }
 
 .super-message-top,
@@ -643,6 +786,8 @@ async function scrollThreadToBottom() {
   background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 8px;
+  min-width: 0;
+  overflow-x: hidden;
   padding: 12px 14px;
   width: 100%;
 }
@@ -654,10 +799,14 @@ async function scrollThreadToBottom() {
 
 .super-role-response {
   background: #ffffff;
+  overflow-x: auto;
+  overflow-y: visible;
 }
 
 .super-message-text {
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .super-response-body {
@@ -669,6 +818,71 @@ async function scrollThreadToBottom() {
   --markdown-render-paragraph-line-height: 1.48;
   --markdown-render-paragraph-size: 13px;
   --markdown-render-pre-padding: 8px;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.super-response-body :deep(*) {
+  max-width: 100%;
+}
+
+.super-response-body :deep(a),
+.super-response-body :deep(code),
+.super-response-body :deep(p),
+.super-response-body :deep(li),
+.super-response-body :deep(td),
+.super-response-body :deep(th) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.super-response-body :deep(ol),
+.super-response-body :deep(ul) {
+  margin: 0.25em 0 0.7em;
+  padding-left: 1.4em;
+}
+
+.super-response-body :deep(ol) {
+  list-style: decimal;
+  list-style-position: outside;
+}
+
+.super-response-body :deep(ul) {
+  list-style: disc;
+  list-style-position: outside;
+}
+
+.super-response-body :deep(ol > li),
+.super-response-body :deep(ul > li) {
+  display: list-item;
+  min-width: 0;
+}
+
+.super-response-body :deep(pre) {
+  overflow-x: auto;
+  white-space: pre;
+  max-width: 100%;
+}
+
+.super-response-body :deep(table) {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  width: max-content;
+}
+
+.super-response-body :deep(th),
+.super-response-body :deep(td) {
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+}
+
+.super-response-body :deep(.markdown-code-line),
+.super-response-body :deep(.markdown-code-line-content) {
+  min-width: 0;
 }
 
 .super-response-role-label {
@@ -703,6 +917,133 @@ async function scrollThreadToBottom() {
   display: inline-flex;
   gap: 4px;
   padding: 3px 7px;
+}
+
+.super-dispatch-picker {
+  align-items: center;
+  display: inline-block;
+  flex: 0 0 auto;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  position: relative;
+  width: 32px;
+}
+
+.super-dispatch-picker summary {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 32px;
+  justify-content: center;
+  list-style: none;
+  position: relative;
+  width: 32px;
+}
+
+.super-dispatch-picker summary::-webkit-details-marker {
+  display: none;
+}
+
+.super-dispatch-picker.active {
+  color: #174ea6;
+}
+
+.super-dispatch-picker.active summary {
+  background: #e8f1ff;
+  border-color: #8db7ff;
+}
+
+.super-dispatch-picker .bi {
+  font-size: 14px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.super-dispatch-count {
+  align-items: center;
+  background: #174ea6;
+  border-radius: 999px;
+  color: #ffffff;
+  display: inline-flex;
+  font-size: 9px;
+  height: 14px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 14px;
+  padding: 0 4px;
+  position: absolute;
+  right: -4px;
+  top: -5px;
+}
+
+.super-dispatch-menu {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 14px 30px rgb(15 23 42 / 0.18);
+  bottom: calc(100% + 6px);
+  display: grid;
+  gap: 3px;
+  left: 0;
+  max-height: min(260px, 42vh);
+  min-width: 180px;
+  overflow-y: auto;
+  padding: 6px;
+  position: absolute;
+  z-index: 30;
+}
+
+.super-dispatch-menu-auto,
+.super-dispatch-option {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text);
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px 7px;
+  text-align: left;
+  width: 100%;
+}
+
+.super-dispatch-menu-auto:hover,
+.super-dispatch-option:hover {
+  background: #f2f6fb;
+}
+
+.super-dispatch-menu-auto.selected {
+  color: #174ea6;
+  font-weight: 700;
+}
+
+.super-dispatch-option.selected {
+  color: #174ea6;
+  font-weight: 700;
+}
+
+.super-dispatch-option .bi {
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
+.super-dispatch-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.super-dispatch-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 7px;
 }
 
 .super-route-chip {

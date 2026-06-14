@@ -60,6 +60,8 @@ function storedTool(): SidebarTool {
 
 const activeTool = ref<SidebarTool>(storedTool());
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
+const currentChatId = computed(() => (layout.activePane?.type === "pane" ? layout.activePane.chatId ?? "" : "") || props.activeChatId || "");
+const defaultToolCwd = computed(() => (props.chats ?? []).find((chat) => chat.id === currentChatId.value)?.cwd.trim() ?? "");
 const pinnedChats = computed(() => (props.chats ?? []).filter((chat) => chat.pinned));
 const pinnedFiles = computed(() => files.pinned);
 const pinnedTerminals = computed(() => terminals.pinnedTerminals);
@@ -175,9 +177,9 @@ async function openPinnedFile(path: string) {
           <i class="bi bi-x"></i>
         </button>
       </div>
-      <FilesPanel v-if="activeTool === 'files'" @open-file="emit('open-file', $event)" />
-      <GitPanel v-else-if="activeTool === 'git'" @open-diff="(path, cwd) => emit('open-diff', path, cwd)" />
-      <TerminalsPanel v-else-if="activeTool === 'terminals'" @open-terminal="emit('open-terminal', $event)" />
+      <FilesPanel v-if="activeTool === 'files'" :default-cwd="defaultToolCwd" @open-file="emit('open-file', $event)" />
+      <GitPanel v-else-if="activeTool === 'git'" :default-cwd="defaultToolCwd" @open-diff="(path, cwd) => emit('open-diff', path, cwd)" />
+      <TerminalsPanel v-else-if="activeTool === 'terminals'" :default-cwd="defaultToolCwd" @open-terminal="emit('open-terminal', $event)" />
       <ChatsPanel
         v-else-if="activeTool === 'chats'"
         :chats="props.chats ?? []"

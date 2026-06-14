@@ -74,7 +74,7 @@ function chatMemberRoles(chat: SuperChatSummary) {
 }
 
 function isDispatchRoleSelected(chat: SuperChatSummary, roleId: string) {
-  return dispatchSelection.selectedRoleId(chat.id) === roleId;
+  return dispatchSelection.isRoleSelected(chat.id, roleId);
 }
 
 function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {

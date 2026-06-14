@@ -144,6 +144,51 @@ body {
   color: #a33;
 }
 
+.global-input-status {
+  align-items: center;
+  border: 1px solid #d7e0ee;
+  border-radius: 999px;
+  color: #44526a;
+  display: inline-flex;
+  flex: 0 1 auto;
+  font-size: 10px;
+  gap: 5px;
+  min-width: 0;
+  padding: 2px 3px 2px 7px;
+}
+
+.global-input-status.status-recording,
+.global-input-status.status-connecting,
+.global-input-status.status-processing,
+.global-input-status.status-sending {
+  border-color: #f0c36d;
+  color: #7a4d00;
+}
+
+.global-input-status.status-failed,
+.global-input-status.status-error {
+  border-color: #e8c1c1;
+  color: #a33;
+}
+
+.global-input-status-text {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-input-send {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 10px;
+  gap: 4px;
+  line-height: 1;
+  min-height: 20px;
+  padding: 3px 7px;
+}
+
 .pane-actions {
   display: flex;
   flex: 0 1 auto;

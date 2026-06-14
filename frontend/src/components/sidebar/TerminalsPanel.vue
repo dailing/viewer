@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
 import { useTerminalsStore } from "../../stores/terminals";
 import { useVoiceStore } from "../../stores/voice";
@@ -8,7 +7,10 @@ const emit = defineEmits<{
   "open-terminal": [id: string];
 }>();
 
-const files = useFilesStore();
+const props = defineProps<{
+  defaultCwd?: string;
+}>();
+
 const layout = useLayoutStore();
 const terminals = useTerminalsStore();
 const voice = useVoiceStore();
@@ -27,7 +29,7 @@ function hasVoiceReady(terminalId: string) {
 }
 
 async function newTerminal() {
-  const terminal = await terminals.create(files.currentPath);
+  const terminal = await terminals.create(props.defaultCwd ?? "");
   emit("open-terminal", terminal.id);
 }
 

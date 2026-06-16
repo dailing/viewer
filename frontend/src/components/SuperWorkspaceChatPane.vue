@@ -69,9 +69,18 @@ const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByDriverRun(
 const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value);
 const composerPinned = computed(() => composerState.isPinned(resolvedChatId.value));
 const composerCollapsed = computed(() => !composerPinned.value && !composerExpanded.value && !composer.value.trim());
+const citationPreview = ref<{
+  messageId: string;
+  title: string;
+  text: string;
+  top: number;
+  left: number;
+} | null>(null);
 let fallbackTimer: number | null = null;
 let refreshTimer: number | null = null;
+let citationTimer: number | null = null;
 let superWorkspaceEvents: EventSource | null = null;
+const jumpedMessageId = ref("");
 
 onMounted(async () => {
   await agents.loadProviders();
@@ -89,6 +98,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (fallbackTimer !== null) window.clearInterval(fallbackTimer);
   if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+  if (citationTimer !== null) window.clearTimeout(citationTimer);
   superWorkspaceEvents?.close();
   window.removeEventListener("super-workspace:add-role-mention", handleExternalRoleMention);
   window.removeEventListener("super-workspace:chats-updated", handleChatsUpdated);
@@ -101,6 +111,7 @@ watch(() => props.chatId, async () => {
   items.value = [];
   nextBefore.value = null;
   runsAfterCursor.value = 0;
+  clearCitationPreview();
   await loadChatContext();
   if (resolvedChatId.value) await loadRuns(true);
 });
@@ -303,6 +314,75 @@ function addMessageCitation(messageId: string) {
   const position = leadingMentionPrefixEnd(composer.value);
   composer.value = `${composer.value.slice(0, position)}${token} ${composer.value.slice(position)}`;
   expandComposer();
+}
+
+function clearCitationPreview() {
+  if (citationTimer !== null) {
+    window.clearTimeout(citationTimer);
+    citationTimer = null;
+  }
+  citationPreview.value = null;
+}
+
+function citationLabel(messageId: string) {
+  return `@msg-${messageId.slice(0, 8)}`;
+}
+
+function citedMessage(messageId: string) {
+  const direct = items.value.find((item) => item.message_id === messageId);
+  if (direct) return direct;
+  const merged = displayItems.value.find((item) => item.merged_message_ids?.includes(messageId));
+  return merged;
+}
+
+function uniqueCitationIds(citationIds: string[] | undefined) {
+  return [...new Set(citationIds ?? [])];
+}
+
+function citationPreviewText(message: SuperDisplayItem | undefined) {
+  if (!message) return "Message not loaded";
+  const raw = (message.text || "").trim();
+  if (!raw) return "Empty message";
+  return raw.length > 280 ? `${raw.slice(0, 277)}...` : raw;
+}
+
+function jumpToMessage(messageId: string) {
+  const rendered = displayItems.value.find((item) => item.message_id === messageId || item.merged_message_ids?.includes(messageId));
+  const scrollTarget = rendered?.message_id;
+  if (!threadRef.value || !scrollTarget) return;
+  const selector = `[data-message-id="${CSS.escape(scrollTarget)}"]`;
+  const target = threadRef.value.querySelector<HTMLElement>(selector);
+  clearCitationPreview();
+  if (!target) return;
+  jumpedMessageId.value = scrollTarget;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => {
+    if (jumpedMessageId.value === scrollTarget) jumpedMessageId.value = "";
+  }, 1400);
+}
+
+function startCitationPreview(messageId: string, event: MouseEvent) {
+  clearCitationPreview();
+  const target = event.currentTarget as HTMLElement | null;
+  const message = citedMessage(messageId);
+  const title = message?.role_name || message?.role || "Message";
+  const previewText = citationPreviewText(message);
+  citationTimer = window.setTimeout(() => {
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const width = Math.min(340, Math.max(220, Math.round(window.innerWidth * 0.35)));
+    citationPreview.value = {
+      messageId,
+      title,
+      text: previewText,
+      top: rect.bottom + 8,
+      left: Math.min(window.innerWidth - width - 12, Math.max(12, rect.left)),
+    };
+  }, 1000);
+}
+
+function stopCitationPreview() {
+  clearCitationPreview();
 }
 
 function mergeMessagesByDriverRun(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
@@ -598,7 +678,21 @@ async function scrollThreadToBottom() {
       <div v-if="items.length && (loadingOlder || !hasOlderRuns)" class="super-history-boundary">
         <span>{{ loadingOlder ? "Loading older messages" : "No more messages" }}</span>
       </div>
-      <article v-for="item in displayItems" :key="item.id" class="super-run">
+      <div
+        v-if="citationPreview"
+        class="super-citation-preview"
+        :style="{ top: `${citationPreview.top}px`, left: `${citationPreview.left}px` }"
+      >
+        <div class="super-citation-preview-title">{{ citationPreview.title }}</div>
+        <div class="super-citation-preview-body">{{ citationPreview.text }}</div>
+      </div>
+      <article
+        v-for="item in displayItems"
+        :key="item.id"
+        class="super-run"
+        :class="{ 'super-citation-highlight': jumpedMessageId === item.message_id }"
+        :data-message-id="item.message_id"
+      >
         <div v-if="item.kind === 'query'" class="super-user-turn">
           <div class="super-message-top super-user-message-top">
             <div class="super-message-meta">
@@ -614,6 +708,22 @@ async function scrollThreadToBottom() {
                     <i class="bi" :class="targetIcon(target)"></i>
                     {{ target.role_name }}
                   </span>
+                </template>
+                <template v-if="item.citation_ids?.length">
+                  <span class="super-route-label">cited</span>
+                  <button
+                    v-for="citationId in uniqueCitationIds(item.citation_ids)"
+                    :key="citationId"
+                    class="super-citation-chip"
+                    type="button"
+                    :title="`Jump to ${citationId}`"
+                    @click="jumpToMessage(citationId)"
+                    @mouseenter="startCitationPreview(citationId, $event)"
+                    @mouseleave="stopCitationPreview"
+                  >
+                    <i class="bi bi-link-45deg"></i>
+                    {{ citationLabel(citationId) }}
+                  </button>
                 </template>
               </div>
             </div>
@@ -1078,6 +1188,56 @@ async function scrollThreadToBottom() {
   display: inline-flex;
   gap: 4px;
   padding: 2px 6px;
+}
+
+.super-citation-chip {
+  background: #f3f2ff;
+  color: #3b4375;
+  display: inline-flex;
+  gap: 4px;
+  padding: 2px 6px;
+}
+
+.super-citation-chip,
+.super-route-chip,
+.super-cite-button {
+  align-items: center;
+}
+
+.super-citation-preview {
+  background: #111827;
+  border-radius: 8px;
+  color: #ffffff;
+  left: 0;
+  max-width: 340px;
+  min-width: 220px;
+  pointer-events: none;
+  padding: 8px 10px;
+  position: fixed;
+  right: auto;
+  top: 0;
+  z-index: 30;
+  box-shadow: 0 10px 24px rgb(15 23 42 / 0.22);
+}
+
+.super-citation-preview-title {
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  opacity: 0.88;
+}
+
+.super-citation-preview-body {
+  font-size: 11.5px;
+  line-height: 1.35;
+  opacity: 0.93;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.super-citation-highlight {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
 }
 
 .super-route-pending {

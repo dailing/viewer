@@ -31,13 +31,14 @@ const dispatchSelection = useSuperChatDispatchStore();
 const voice = useVoiceStore();
 const roles = ref<SuperRole[]>([]);
 const currentChat = ref<SuperChatSummary | null>(null);
+const resolvedChatId = ref("");
 const items = ref<SuperDisplayItem[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
 const composerShellRef = ref<HTMLElement | null>(null);
 const composerTextareaRef = ref<InstanceType<typeof VoiceTextarea> | null>(null);
 const composer = computed({
-  get: () => composerState.draft(props.chatId),
-  set: (value: string) => composerState.setDraft(props.chatId, value),
+  get: () => composerState.draft(resolvedChatId.value),
+  set: (value: string) => composerState.setDraft(resolvedChatId.value, value),
 });
 const composerExpanded = ref(false);
 const selectedComposerMentionToken = ref("");
@@ -54,7 +55,7 @@ const chatDispatchRoles = computed(() =>
   (currentChat.value?.member_role_ids ?? []).map((roleId) => rolesById.value.get(roleId)).filter((role): role is SuperRole => Boolean(role)),
 );
 const chatMemberRoleIds = computed(() => new Set(currentChat.value?.member_role_ids ?? []));
-const selectedDispatchRoleIds = computed(() => dispatchSelection.selectedRoleIds(props.chatId));
+const selectedDispatchRoleIds = computed(() => dispatchSelection.selectedRoleIds(resolvedChatId.value));
 const selectedDispatchRoles = computed(() => {
   const selected = new Set(selectedDispatchRoleIds.value);
   return chatDispatchRoles.value.filter((role) => selected.has(role.id));
@@ -63,10 +64,10 @@ const dispatchPickerTitle = computed(() => {
   if (!selectedDispatchRoles.value.length) return "Auto dispatch";
   return `Dispatch to ${selectedDispatchRoles.value.map((role) => role.name).join(", ")}`;
 });
-const inputContextId = computed(() => `super-workspace:${props.chatId}:composer`);
+const inputContextId = computed(() => `super-workspace:${resolvedChatId.value}:composer`);
 const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByDriverRun([...items.value].reverse()));
 const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value);
-const composerPinned = computed(() => composerState.isPinned(props.chatId));
+const composerPinned = computed(() => composerState.isPinned(resolvedChatId.value));
 const composerCollapsed = computed(() => !composerPinned.value && !composerExpanded.value && !composer.value.trim());
 let fallbackTimer: number | null = null;
 let refreshTimer: number | null = null;
@@ -77,7 +78,7 @@ onMounted(async () => {
   await Promise.all([loadRoles(), loadChatContext()]);
   await loadRuns(true);
   superWorkspaceEvents = connectSuperWorkspaceEvents((event) => {
-    if (event.chat_id && event.chat_id !== props.chatId) return;
+    if (event.chat_id && event.chat_id !== resolvedChatId.value) return;
     scheduleRefreshLiveState(100);
   });
   fallbackTimer = window.setInterval(() => scheduleRefreshLiveState(0), 30000);
@@ -94,29 +95,32 @@ onUnmounted(() => {
 });
 
 watch(() => props.chatId, async () => {
+  resolvedChatId.value = "";
   selectedComposerMentionToken.value = "";
+  currentChat.value = null;
   items.value = [];
   nextBefore.value = null;
   runsAfterCursor.value = 0;
-  await Promise.all([loadChatContext(), loadRuns(true)]);
+  await loadChatContext();
+  if (resolvedChatId.value) await loadRuns(true);
 });
 
-watch([selectedDispatchRoleIds, () => props.chatId, () => currentChat.value?.id], ([roleIds, watchingChatId, currentChatId]) => {
+watch([selectedDispatchRoleIds, resolvedChatId, () => currentChat.value?.id], ([roleIds, watchingChatId, currentChatId]) => {
   if (!currentChatId || watchingChatId !== currentChatId) return;
   const dispatchRoleIds = chatMemberRoleIds.value;
   if (!roleIds.length) return;
   if (!dispatchRoleIds.size) {
-    dispatchSelection.clearChat(props.chatId);
+    dispatchSelection.clearChat(watchingChatId);
     registerInputContext();
     return;
   }
   for (const roleId of roleIds) {
-    if (!dispatchRoleIds.has(roleId)) dispatchSelection.clearRole(props.chatId, roleId);
+    if (!dispatchRoleIds.has(roleId)) dispatchSelection.clearRole(watchingChatId, roleId);
   }
   registerInputContext();
 });
 
-watch(() => props.chatId, () => registerInputContext(), { immediate: true });
+watch(() => resolvedChatId.value, () => registerInputContext(), { immediate: true });
 
 async function loadRoles() {
   const data = await getSuperWorkspace();
@@ -125,7 +129,25 @@ async function loadRoles() {
 
 async function loadChatContext() {
   const data = await listSuperChats();
-  currentChat.value = data.chats.find((chat) => chat.id === props.chatId) ?? null;
+  const byId = data.chats.find((chat) => chat.id === props.chatId) ?? null;
+  if (byId) {
+    currentChat.value = byId;
+    resolvedChatId.value = byId.id;
+    return;
+  }
+  const byName = data.chats.filter((chat) => chat.name === props.chatId);
+  if (byName.length === 1) {
+    dispatchSelection.migrateChatId(props.chatId, byName[0].id);
+    currentChat.value = byName[0];
+    resolvedChatId.value = byName[0].id;
+    return;
+  }
+  resolvedChatId.value = "";
+  currentChat.value = null;
+}
+
+function hasResolvedChatId(): boolean {
+  return Boolean(resolvedChatId.value);
 }
 
 function scheduleRefreshLiveState(delayMs: number) {
@@ -141,20 +163,22 @@ async function refreshLiveState() {
 }
 
 function registerInputContext() {
+  if (!hasResolvedChatId()) return;
   inputSessions.registerContext({
     id: inputContextId.value,
     kind: "super-chat",
-    ownerId: props.chatId,
+    ownerId: resolvedChatId.value,
     label: "Chat voice input",
     submitTarget: {
       type: "super-chat",
-      chatId: props.chatId,
+      chatId: resolvedChatId.value,
       roleIds: selectedDispatchRoleIds.value.length ? selectedDispatchRoleIds.value : undefined,
     },
   });
 }
 
 async function dispatchMessage() {
+  if (!hasResolvedChatId()) return;
   const message = composer.value.trim();
   if (!message || busy.value) return;
   if (voice.isBusy(inputContextId.value)) {
@@ -172,12 +196,12 @@ async function dispatchMessage() {
   }
   busy.value = true;
   error.value = "";
-  composerState.clearDraft(props.chatId);
+  composerState.clearDraft(resolvedChatId.value);
   if (!composerPinned.value) composerExpanded.value = false;
   try {
     const run = await createSuperWorkspaceRun({
       message,
-      chat_id: props.chatId,
+      chat_id: resolvedChatId.value,
       role_ids: selectedDispatchRoleIds.value.length ? selectedDispatchRoleIds.value : undefined,
     });
     upsertDisplayItem(displayItemFromRun(run));
@@ -204,22 +228,22 @@ function expandComposer() {
 }
 
 function toggleComposerPinned() {
-  const pinned = composerState.togglePinned(props.chatId);
+  const pinned = composerState.togglePinned(resolvedChatId.value);
   if (pinned) composerExpanded.value = true;
 }
 
 function isDispatchRoleSelected(roleId: string) {
-  return dispatchSelection.isRoleSelected(props.chatId, roleId);
+  return dispatchSelection.isRoleSelected(resolvedChatId.value, roleId);
 }
 
 function toggleDispatchRole(roleId: string) {
-  dispatchSelection.toggleRole(props.chatId, roleId);
+  dispatchSelection.toggleRole(resolvedChatId.value, roleId);
 }
 
 function handleDispatchPickerSummaryClick(event: MouseEvent) {
   if (!selectedDispatchRoleIds.value.length) return;
   event.preventDefault();
-  dispatchSelection.clearChat(props.chatId);
+  dispatchSelection.clearChat(resolvedChatId.value);
   const details = event.currentTarget instanceof HTMLElement ? event.currentTarget.closest("details") : null;
   if (details instanceof HTMLDetailsElement) details.open = false;
 }
@@ -444,6 +468,7 @@ function formatTime(value: number) {
 }
 
 async function loadRuns(reset: boolean) {
+  if (!hasResolvedChatId()) return;
   if (reset) historyLoading.value = true;
   else loadingOlder.value = true;
   const thread = reset ? null : threadRef.value;
@@ -451,7 +476,7 @@ async function loadRuns(reset: boolean) {
   const previousScrollTop = thread?.scrollTop ?? 0;
   try {
     const limit = reset ? Math.min(100, Math.max(30, items.value.length || 30)) : 30;
-    const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined, undefined, props.chatId);
+    const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined, undefined, resolvedChatId.value);
     if (reset) {
       items.value = page.items;
       await scrollThreadToBottom();
@@ -479,13 +504,14 @@ function handleThreadScroll() {
 }
 
 async function loadChangedRuns() {
+  if (!hasResolvedChatId()) return;
   const after = runsAfterCursor.value;
   if (!after) {
     await loadRuns(true);
     return;
   }
   const stickToBottom = isThreadNearBottom();
-  const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 0.001), props.chatId);
+  const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 0.001), resolvedChatId.value);
   for (const item of page.items) upsertDisplayItem(item);
   updateItemsAfterCursor(page.items, page.next_after ?? undefined);
   if (stickToBottom && page.items.length) await scrollThreadToBottom();
@@ -681,7 +707,7 @@ async function scrollThreadToBottom() {
                 <span v-if="selectedDispatchRoles.length" class="super-dispatch-count">{{ selectedDispatchRoles.length }}</span>
               </summary>
               <div class="super-dispatch-menu" @mousedown.prevent>
-                <button class="super-dispatch-menu-auto" type="button" :class="{ selected: !selectedDispatchRoles.length }" @click="dispatchSelection.clearChat(props.chatId)">
+                <button class="super-dispatch-menu-auto" type="button" :class="{ selected: !selectedDispatchRoles.length }" @click="dispatchSelection.clearChat(resolvedChatId)">
                   <i class="bi" :class="selectedDispatchRoles.length ? 'bi-circle' : 'bi-check-circle-fill'"></i>
                   <span>Auto</span>
                 </button>

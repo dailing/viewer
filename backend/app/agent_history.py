@@ -27,6 +27,7 @@ DEFAULT_MESSAGE_LIMIT = 120
 ROLE_SESSION_POLICIES = {"reuse", "new_each_run"}
 DEFAULT_CONTEXT_RECYCLE_PERCENT = 70.0
 TOKENISH_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+CHAT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def rough_token_count(value: str) -> int:
@@ -647,6 +648,7 @@ class AgentHistoryStore:
             if "context_used_percent" not in driver_columns:
                 connection.exec_driver_sql("ALTER TABLE super_workspace_driver_runs ADD COLUMN context_used_percent FLOAT")
             self._migrate_role_session_refs(connection)
+            self._migrate_invalid_super_chat_ids(connection)
             role_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(super_workspace_roles)").all()}
             if "session_ref" in role_columns:
                 connection.exec_driver_sql("ALTER TABLE super_workspace_roles DROP COLUMN session_ref")
@@ -727,6 +729,46 @@ class AgentHistoryStore:
                     now,
                     now,
                 ),
+            )
+
+    def _migrate_invalid_super_chat_ids(self, connection) -> None:
+        bad_chat_ids = connection.exec_driver_sql(
+            """
+            SELECT id
+            FROM super_workspace_chats
+            WHERE id NOT GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+            """
+        ).scalars().all()
+        if not bad_chat_ids:
+            return
+
+        existing_ids = {
+            str(row[1])
+            for row in connection.exec_driver_sql("SELECT id FROM super_workspace_chats").all()
+        }
+
+        for bad_chat_id in bad_chat_ids:
+            if CHAT_ID_RE.fullmatch(bad_chat_id):
+                continue
+            new_chat_id = uuid.uuid4().hex[:12]
+            while new_chat_id in existing_ids:
+                new_chat_id = uuid.uuid4().hex[:12]
+            existing_ids.add(new_chat_id)
+
+            tables = [
+                ("super_workspace_messages", "conversation_id"),
+                ("super_workspace_chat_role_sessions", "chat_id"),
+                ("super_workspace_chat_pins", "chat_id"),
+                ("super_workspace_user_state", "active_chat_id"),
+            ]
+            for table, column in tables:
+                connection.exec_driver_sql(
+                    f"UPDATE {table} SET {column} = :new_chat_id WHERE {column} = :old_chat_id",
+                    {"new_chat_id": new_chat_id, "old_chat_id": bad_chat_id},
+                )
+            connection.exec_driver_sql(
+                "UPDATE super_workspace_chats SET id = :new_chat_id WHERE id = :old_chat_id",
+                {"new_chat_id": new_chat_id, "old_chat_id": bad_chat_id},
             )
 
     def ensure_default_workspace(self, user_id: str | None) -> SuperWorkspaceRow:

@@ -112,16 +112,13 @@ export const useVoiceStore = defineStore("voice", {
   actions: {
     ensure(id: string, text = "") {
       if (!this.contexts[id]) {
-        this.contexts = { ...this.contexts, [id]: defaultState(text) };
+        this.contexts[id] = defaultState(text);
       }
       return this.contexts[id];
     },
     setContext(id: string, patch: Partial<VoiceContextState>) {
       const current = this.ensure(id);
-      this.contexts = {
-        ...this.contexts,
-        [id]: { ...current, ...patch, updatedAt: Date.now() },
-      };
+      this.contexts[id] = { ...current, ...patch, updatedAt: Date.now() };
     },
     syncText(id: string, text: string) {
       const current = this.ensure(id, text);

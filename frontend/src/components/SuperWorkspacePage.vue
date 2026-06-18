@@ -42,6 +42,7 @@ const bodyShellStyle = computed(() => ({ "--sidebar-width": `${sidebarWidth.valu
 const effectiveSidebarPinned = computed(() => sidebarPinned.value && sidebarOpen.value && !isMobile.value);
 
 let mobileQuery: MediaQueryList | null = null;
+let chatActivationRequest = 0;
 
 onMounted(async () => {
   layout.load("super-workspace");
@@ -105,15 +106,20 @@ async function addChat() {
 }
 
 async function openChat(chatId: string) {
+  const requestId = ++chatActivationRequest;
   error.value = "";
+  activeChatId.value = chatId;
+  notifyChatListChanged();
+  layout.openChat(chatId);
+  if (!sidebarPinned.value) sidebarOpen.value = false;
   try {
     const data = await activateSuperChat(chatId);
+    if (requestId !== chatActivationRequest) return;
     chats.value = data.chats;
     activeChatId.value = data.active_chat_id;
     notifyChatListChanged();
-    layout.openChat(chatId);
-    if (!sidebarPinned.value) sidebarOpen.value = false;
   } catch (err) {
+    if (requestId !== chatActivationRequest) return;
     error.value = err instanceof Error ? err.message : String(err);
   }
 }

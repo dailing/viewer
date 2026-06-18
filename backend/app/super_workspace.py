@@ -217,6 +217,8 @@ class SuperWorkspaceManager:
         for key, value in update.items():
             if isinstance(value, str):
                 value = value.strip()
+            if key == "model" and isinstance(value, str):
+                value = value or None
             if key == "name":
                 value = str(value or "New Role")[:120]
             if key == "provider":

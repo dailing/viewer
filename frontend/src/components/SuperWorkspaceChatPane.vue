@@ -68,6 +68,14 @@ const dispatchPickerTitle = computed(() => {
 });
 const inputContextId = computed(() => `super-workspace:${resolvedChatId.value}:composer`);
 const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByDriverRun([...items.value].reverse()));
+const renderedItemHtmlById = computed(() => {
+  const rendered = new Map<string, string>();
+  for (const item of displayItems.value) {
+    if (item.kind !== "message" || !item.text) continue;
+    rendered.set(item.id, renderMarkdown(item.text.trim(), { baseDirectory: itemBaseDirectory(item) }));
+  }
+  return rendered;
+});
 const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value);
 const composerPinned = computed(() => composerState.isPinned(resolvedChatId.value));
 const composerCollapsed = computed(() => !composerPinned.value && !composerExpanded.value && !composer.value.trim());
@@ -82,6 +90,7 @@ let fallbackTimer: number | null = null;
 let refreshTimer: number | null = null;
 let citationTimer: number | null = null;
 let superWorkspaceEvents: EventSource | null = null;
+let chatLoadRequest = 0;
 const jumpedMessageId = ref("");
 
 onMounted(async () => {
@@ -108,15 +117,7 @@ onUnmounted(() => {
 
 watch(() => props.chatId, async () => {
   if (props.chatId === resolvedChatId.value && currentChat.value) return;
-  resolvedChatId.value = "";
-  selectedComposerMentionToken.value = "";
-  currentChat.value = null;
-  items.value = [];
-  nextBefore.value = null;
-  runsAfterCursor.value = 0;
-  clearCitationPreview();
-  await loadChatContext();
-  if (resolvedChatId.value) await loadRuns(true);
+  await switchChat(props.chatId);
 });
 
 watch([selectedDispatchRoleIds, resolvedChatId, () => currentChat.value?.id], ([roleIds, watchingChatId, currentChatId]) => {
@@ -141,18 +142,49 @@ async function loadRoles() {
   roles.value = data.roles;
 }
 
-async function loadChatContext() {
+async function switchChat(chatId: string) {
+  const requestId = ++chatLoadRequest;
+  beginChatSwitch(chatId);
+  await nextPaint();
+  if (requestId !== chatLoadRequest) return;
+  await loadChatContext(chatId, requestId);
+  if (requestId !== chatLoadRequest) return;
+  if (resolvedChatId.value) await loadRuns(true, requestId);
+  else historyLoading.value = false;
+}
+
+function beginChatSwitch(chatId: string) {
+  resolvedChatId.value = chatId;
+  selectedComposerMentionToken.value = "";
+  currentChat.value = chatCache.value.find((chat) => chat.id === chatId) ?? null;
+  items.value = [];
+  nextBefore.value = null;
+  runsAfterCursor.value = 0;
+  hasOlderRuns.value = false;
+  loadingOlder.value = false;
+  historyLoading.value = Boolean(chatId);
+  clearCitationPreview();
+  if (threadRef.value) threadRef.value.scrollTop = 0;
+}
+
+async function nextPaint() {
+  await nextTick();
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
+async function loadChatContext(chatId = props.chatId, requestId = chatLoadRequest) {
   const chats = chatCache.value.length ? chatCache.value : (await listSuperChats()).chats;
+  if (requestId !== chatLoadRequest) return;
   if (!chatCache.value.length) chatCache.value = chats;
-  const byId = chats.find((chat) => chat.id === props.chatId) ?? null;
+  const byId = chats.find((chat) => chat.id === chatId) ?? null;
   if (byId) {
     currentChat.value = byId;
     resolvedChatId.value = byId.id;
     return;
   }
-  const byName = chats.filter((chat) => chat.name === props.chatId);
+  const byName = chats.filter((chat) => chat.name === chatId);
   if (byName.length === 1) {
-    dispatchSelection.migrateChatId(props.chatId, byName[0].id);
+    dispatchSelection.migrateChatId(chatId, byName[0].id);
     currentChat.value = byName[0];
     resolvedChatId.value = byName[0].id;
     return;
@@ -517,8 +549,8 @@ function itemBaseDirectory(item: SuperDisplayItem) {
   return typeof item.raw?.cwd_relative === "string" ? item.raw.cwd_relative : "";
 }
 
-function itemHtml(item: SuperDisplayItem) {
-  return item.text ? renderMarkdown(item.text.trim(), { baseDirectory: itemBaseDirectory(item) }) : "";
+function renderedItemHtml(item: SuperThreadItem) {
+  return renderedItemHtmlById.value.get(item.id) ?? "";
 }
 
 async function openItemLink(event: MouseEvent, item: SuperDisplayItem) {
@@ -565,8 +597,9 @@ function formatTime(value: number) {
   return new Date(value * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-async function loadRuns(reset: boolean) {
+async function loadRuns(reset: boolean, requestId = chatLoadRequest) {
   if (!hasResolvedChatId()) return;
+  const chatId = resolvedChatId.value;
   if (reset) historyLoading.value = true;
   else loadingOlder.value = true;
   const thread = reset ? null : threadRef.value;
@@ -574,7 +607,8 @@ async function loadRuns(reset: boolean) {
   const previousScrollTop = thread?.scrollTop ?? 0;
   try {
     const limit = reset ? Math.min(100, Math.max(30, items.value.length || 30)) : 30;
-    const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined, undefined, resolvedChatId.value);
+    const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined, undefined, chatId);
+    if (requestId !== chatLoadRequest || chatId !== resolvedChatId.value) return;
     if (reset) {
       items.value = page.items;
       await scrollThreadToBottom();
@@ -588,8 +622,10 @@ async function loadRuns(reset: boolean) {
     hasOlderRuns.value = page.has_more;
     nextBefore.value = page.next_before ?? null;
   } catch (err) {
+    if (requestId !== chatLoadRequest) return;
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
+    if (requestId !== chatLoadRequest) return;
     historyLoading.value = false;
     loadingOlder.value = false;
   }
@@ -603,13 +639,16 @@ function handleThreadScroll() {
 
 async function loadChangedRuns() {
   if (!hasResolvedChatId()) return;
+  const requestId = chatLoadRequest;
+  const chatId = resolvedChatId.value;
   const after = runsAfterCursor.value;
   if (!after) {
-    await loadRuns(true);
+    await loadRuns(true, requestId);
     return;
   }
   const stickToBottom = isThreadNearBottom();
-  const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 0.001), resolvedChatId.value);
+  const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 0.001), chatId);
+  if (requestId !== chatLoadRequest || chatId !== resolvedChatId.value) return;
   for (const item of page.items) upsertDisplayItem(item);
   updateItemsAfterCursor(page.items, page.next_after ?? undefined);
   if (stickToBottom && page.items.length) await scrollThreadToBottom();
@@ -774,7 +813,7 @@ async function scrollThreadToBottom() {
             </button>
           </div>
           <div class="super-role-response" @click="openItemLink($event, item)">
-            <div class="markdown-body markdown-content super-response-body" v-html="itemHtml(item)"></div>
+            <div class="markdown-body markdown-content super-response-body" v-html="renderedItemHtml(item)"></div>
           </div>
         </div>
       </article>

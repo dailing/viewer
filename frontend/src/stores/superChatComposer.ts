@@ -3,6 +3,9 @@ import { namespacedStorageKey } from "../utils/userProfile";
 
 const PIN_STORAGE_KEY = "viewer.superChatComposerPins.v1";
 const DRAFT_STORAGE_KEY = "viewer.superChatComposerDrafts.v1";
+const DRAFT_WRITE_DELAY_MS = 450;
+let draftWriteTimer: number | null = null;
+let pendingDrafts: Record<string, string> | null = null;
 
 function readPins(): Record<string, boolean> {
   try {
@@ -42,6 +45,27 @@ function writeDrafts(value: Record<string, string>) {
   localStorage.setItem(namespacedStorageKey(DRAFT_STORAGE_KEY), JSON.stringify(value));
 }
 
+function flushDrafts() {
+  if (draftWriteTimer !== null) {
+    window.clearTimeout(draftWriteTimer);
+    draftWriteTimer = null;
+  }
+  if (!pendingDrafts) return;
+  writeDrafts(pendingDrafts);
+  pendingDrafts = null;
+}
+
+function scheduleDraftWrite(value: Record<string, string>) {
+  pendingDrafts = { ...value };
+  if (draftWriteTimer !== null) window.clearTimeout(draftWriteTimer);
+  draftWriteTimer = window.setTimeout(() => flushDrafts(), DRAFT_WRITE_DELAY_MS);
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushDrafts);
+  window.addEventListener("beforeunload", flushDrafts);
+}
+
 export const useSuperChatComposerStore = defineStore("superChatComposer", {
   state: () => ({
     pinnedByChatId: readPins(),
@@ -77,10 +101,12 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
         delete next[chatId];
         this.draftByChatId = next;
       }
-      writeDrafts(this.draftByChatId);
+      scheduleDraftWrite(this.draftByChatId);
     },
     clearDraft(chatId: string) {
       this.setDraft(chatId, "");
+      flushDrafts();
     },
+    flushDrafts,
   },
 });

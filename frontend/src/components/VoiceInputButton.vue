@@ -11,6 +11,7 @@ const voiceButton = ref<HTMLButtonElement | null>(null);
 const voice = useVoiceStore();
 const applyingStoreText = ref(false);
 const state = computed(() => voice.context(props.contextId));
+const shouldSyncModelToVoice = computed(() => state.value.status !== "idle" || Boolean(state.value.text));
 const languageModelTitle = computed(() => (voice.languageModelRefine ? "Disable language model refine" : "Enable language model refine"));
 const languageModelIcon = computed(() => (voice.languageModelRefine ? "bi-stars" : "bi-magic"));
 const icon = computed(() => {
@@ -76,6 +77,7 @@ watch(
   model,
   (text) => {
     if (applyingStoreText.value) return;
+    if (!shouldSyncModelToVoice.value) return;
     voice.syncText(props.contextId, text);
   },
   { immediate: true },

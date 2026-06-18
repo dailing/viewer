@@ -423,6 +423,7 @@ class SuperWorkspaceMessageRow(AgentHistoryBase):
     __tablename__ = "super_workspace_messages"
     __table_args__ = (
         UniqueConstraint("provider", "viewer_session_id", "source_event_id"),
+        Index("idx_super_messages_workspace_user_chat_time", "workspace_id", "user_id", "conversation_id", "occurred_at", "id"),
         Index("idx_super_messages_user_query_time", "user_id", "query", "occurred_at", "id"),
         Index("idx_super_messages_query_message", "query_message_id", "occurred_at", "id"),
         Index("idx_super_messages_driver_time", "driver_run_id", "occurred_at", "id"),
@@ -2052,6 +2053,8 @@ class AgentHistoryStore:
         driver_ids = {str(row.driver_run_id) for row in rows if isinstance(row.driver_run_id, str) and row.driver_run_id}
         if not query_ids and not driver_ids:
             return []
+        citation_ids_by_query: dict[str, list[str]] = {}
+        target_chat_id_by_query_id: dict[str, str] = {}
         target_conditions = []
         if query_ids:
             target_conditions.append(SuperWorkspaceDriverRunRow.query_message_id.in_(query_ids))
@@ -2069,8 +2072,47 @@ class AgentHistoryStore:
         for target in target_rows:
             targets_by_query.setdefault(str(target.query_message_id), []).append(target)
             targets_by_id[str(target.id)] = target
+
+        all_query_ids_for_targets = {
+            str(target.query_message_id) for target in target_rows
+        }
+        query_message_ids = query_ids | all_query_ids_for_targets
+        if query_message_ids:
+            query_chat_rows = list(
+                db.execute(
+                    select(SuperWorkspaceMessageRow.id, SuperWorkspaceMessageRow.conversation_id).where(
+                        SuperWorkspaceMessageRow.id.in_(query_message_ids)
+                    )
+                ).all()
+            )
+            for query_id, conversation_id in query_chat_rows:
+                target_chat_id_by_query_id[str(query_id)] = str(conversation_id or "")
+
+        if query_ids:
+            citation_rows = list(
+                db.execute(
+                    select(
+                        SuperWorkspaceMessageCitationRow.source_message_id,
+                        SuperWorkspaceMessageCitationRow.cited_message_id,
+                    )
+                    .where(SuperWorkspaceMessageCitationRow.source_message_id.in_(query_ids))
+                    .order_by(
+                        SuperWorkspaceMessageCitationRow.source_message_id.asc(),
+                        SuperWorkspaceMessageCitationRow.position.asc(),
+                    )
+                ).all()
+            )
+            for source_message_id, cited_message_id in citation_rows:
+                citation_ids_by_query.setdefault(str(source_message_id), []).append(str(cited_message_id))
+
         return [
-            self._display_item_from_row(row, targets_by_query, targets_by_id)
+            self._display_item_from_row(
+                row,
+                targets_by_query,
+                targets_by_id,
+                citation_ids_by_query,
+                target_chat_id_by_query_id,
+            )
             for row in rows
             if not self._is_agent_message_event_row(row)
         ]
@@ -2178,12 +2220,16 @@ class AgentHistoryStore:
         row: SuperWorkspaceMessageRow,
         targets_by_query: dict[str, list[SuperWorkspaceDriverRunRow]],
         targets_by_id: dict[str, SuperWorkspaceDriverRunRow],
+        citation_ids_by_query: dict[str, list[str]],
+        target_chat_id_by_query_id: dict[str, str],
     ) -> SuperDisplayItem:
         is_query = isinstance(row.query, str) and bool(row.query)
         query_message_id = str(row.id) if is_query else row.query_message_id if isinstance(row.query_message_id, str) else None
         driver_run_id = row.driver_run_id if isinstance(row.driver_run_id, str) else None
         target = targets_by_id.get(driver_run_id or "")
-        dispatch_targets = [self._display_target_from_row(item) for item in targets_by_query.get(str(row.id), [])] if is_query else []
+        dispatch_targets = [
+            self._display_target_from_row(item, target_chat_id_by_query_id) for item in targets_by_query.get(str(row.id), [])
+        ] if is_query else []
         updated_at = float(row.ingested_at)
         if is_query and dispatch_targets:
             updated_at = max(updated_at, *(float(item.updated_at) for item in targets_by_query.get(str(row.id), [])))
@@ -2219,7 +2265,7 @@ class AgentHistoryStore:
             target_status=str(target.status) if target is not None else "",
             run_status=str(row.status or "") if is_query else "",
             error=str(row.error or "") if is_query else "",
-            citation_ids=self.citation_ids_for_message(str(row.id)) if is_query else [],
+            citation_ids=citation_ids_by_query.get(str(row.id), []) if is_query else [],
             dispatch_targets=dispatch_targets,
             raw=self._parse_json(row.raw_json, {}),
         )
@@ -2229,11 +2275,16 @@ class AgentHistoryStore:
             row = db.scalar(select(SuperWorkspaceMessageRow.conversation_id).where(SuperWorkspaceMessageRow.id == query_message_id))
         return str(row or "")
 
-    def _display_target_from_row(self, row: SuperWorkspaceDriverRunRow) -> SuperDisplayTarget:
+    def _display_target_from_row(
+        self,
+        row: SuperWorkspaceDriverRunRow,
+        target_chat_id_by_query_id: dict[str, str],
+    ) -> SuperDisplayTarget:
+        query_message_id = str(row.query_message_id)
         return SuperDisplayTarget(
             id=str(row.id),
             workspace_id=str(row.workspace_id),
-            chat_id=self._query_chat_id(str(row.query_message_id)),
+            chat_id=target_chat_id_by_query_id.get(query_message_id, ""),
             role_id=str(row.role_id),
             role_name=str(row.role_name),
             provider=str(row.provider),

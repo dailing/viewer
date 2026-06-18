@@ -20,6 +20,7 @@ import { renderMarkdown } from "../utils/markdownRender";
 import VoiceTextarea from "./VoiceTextarea.vue";
 
 type SuperThreadItem = SuperDisplayItem & { merged_message_ids?: string[] };
+type SuperChatCachePayload = { chats: SuperChatSummary[]; activeChatId: string };
 
 const props = defineProps<{ chatId: string; paneId: string }>();
 const agents = useAgentsStore();
@@ -49,6 +50,7 @@ const loadingOlder = ref(false);
 const hasOlderRuns = ref(false);
 const nextBefore = ref<number | null>(null);
 const runsAfterCursor = ref(0);
+const chatCache = ref<SuperChatSummary[]>([]);
 const composerMentionItems = computed(() => buildComposerMentionItems(composer.value));
 const rolesById = computed(() => new Map(roles.value.map((role) => [role.id, role])));
 const chatDispatchRoles = computed(() =>
@@ -105,6 +107,7 @@ onUnmounted(() => {
 });
 
 watch(() => props.chatId, async () => {
+  if (props.chatId === resolvedChatId.value && currentChat.value) return;
   resolvedChatId.value = "";
   selectedComposerMentionToken.value = "";
   currentChat.value = null;
@@ -139,14 +142,15 @@ async function loadRoles() {
 }
 
 async function loadChatContext() {
-  const data = await listSuperChats();
-  const byId = data.chats.find((chat) => chat.id === props.chatId) ?? null;
+  const chats = chatCache.value.length ? chatCache.value : (await listSuperChats()).chats;
+  if (!chatCache.value.length) chatCache.value = chats;
+  const byId = chats.find((chat) => chat.id === props.chatId) ?? null;
   if (byId) {
     currentChat.value = byId;
     resolvedChatId.value = byId.id;
     return;
   }
-  const byName = data.chats.filter((chat) => chat.name === props.chatId);
+  const byName = chats.filter((chat) => chat.name === props.chatId);
   if (byName.length === 1) {
     dispatchSelection.migrateChatId(props.chatId, byName[0].id);
     currentChat.value = byName[0];
@@ -296,7 +300,21 @@ function handleExternalRoleMention(event: Event) {
   if (role) addRoleMention(role);
 }
 
-function handleChatsUpdated() {
+function parseSuperWorkspaceChatPayload(event: Event): SuperChatCachePayload | null {
+  if (!(event instanceof CustomEvent)) return null;
+  const detail = event.detail as { chats?: SuperChatSummary[]; activeChatId?: string } | undefined;
+  if (!detail || !Array.isArray(detail.chats)) return null;
+  return {
+    chats: detail.chats,
+    activeChatId: typeof detail.activeChatId === "string" ? detail.activeChatId : "",
+  };
+}
+
+function handleChatsUpdated(event: Event) {
+  const payload = parseSuperWorkspaceChatPayload(event);
+  if (payload) {
+    chatCache.value = payload.chats;
+  }
   void loadChatContext();
 }
 

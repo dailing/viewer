@@ -199,7 +199,11 @@ async function removeChat(chat: SuperChatSummary) {
 }
 
 function notifyChatListChanged() {
-  window.dispatchEvent(new CustomEvent("super-workspace:chats-updated"));
+  window.dispatchEvent(
+    new CustomEvent("super-workspace:chats-updated", {
+      detail: { chats: chats.value, activeChatId: activeChatId.value },
+    }),
+  );
 }
 
 function openFile(path: string) {

@@ -387,7 +387,13 @@ class SuperWorkspaceRuntime:
         if not role_ids:
             try:
                 dispatch = await super_workspace_manager.dispatch(
-                    SuperDispatchRequest(message=query, role_ids=[role.id for role in scoped_roles]),
+                    SuperDispatchRequest(
+                        message=query,
+                        role_ids=[role.id for role in scoped_roles],
+                        workspace_id=run.workspace_id,
+                        chat_id=run.chat_id,
+                        before_message_id=run.message_id,
+                    ),
                     normalized_user,
                 )
                 role_ids = self._expand_role_names(dispatch.role_ids, scoped_roles)

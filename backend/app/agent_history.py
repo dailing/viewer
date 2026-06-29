@@ -2095,16 +2095,32 @@ class AgentHistoryStore:
                     .limit(200)
                 ).all()
             )
+            role_ids = {
+                value
+                for row in rows
+                for value in (row.role_id, row.sender_role_id, row.recipient_role_id)
+                if isinstance(value, str) and value
+            }
+            role_names: dict[str, str] = {}
+            if role_ids:
+                role_rows = db.execute(
+                    select(SuperWorkspaceRoleRow.id, SuperWorkspaceRoleRow.name).where(
+                        SuperWorkspaceRoleRow.user_id == normalized_user,
+                        SuperWorkspaceRoleRow.workspace_id == workspace_id,
+                        SuperWorkspaceRoleRow.id.in_(role_ids),
+                    )
+                ).all()
+                role_names = {str(role_id): str(name) for role_id, name in role_rows}
         blocks: list[str] = []
         used = 0
         for row in rows:
             content = str(row.query or row.text or "").strip()
             if not content:
                 continue
-            role = str(row.role or "assistant")
+            sender = self._visible_message_sender_label(row, role_names)
             metadata = (
                 f"Message ID: {row.id}\n"
-                f"Role: {role}\n"
+                f"Sender: {sender}\n"
                 f"Event type: {row.event_type}\n"
                 f"Occurred at: {float(row.occurred_at):.3f}"
             )
@@ -2123,6 +2139,21 @@ class AgentHistoryStore:
             return ""
         ordered = list(reversed(blocks))
         return "Recent visible chat history before the current message:\n\n" + "\n\n---\n\n".join(ordered)
+
+    @staticmethod
+    def _visible_message_sender_label(row: SuperWorkspaceMessageRow, role_names: dict[str, str]) -> str:
+        if isinstance(row.query, str) and row.query:
+            if isinstance(row.sender_role_id, str) and row.sender_role_id:
+                name = role_names.get(row.sender_role_id, row.sender_role_id)
+                return f"query from {name} ({row.sender_role_id})"
+            return "query from user"
+        if isinstance(row.role_id, str) and row.role_id:
+            name = role_names.get(row.role_id, row.role_id)
+            return f"{name} ({row.role_id})"
+        if isinstance(row.recipient_role_id, str) and row.recipient_role_id:
+            name = role_names.get(row.recipient_role_id, row.recipient_role_id)
+            return f"{name} ({row.recipient_role_id})"
+        return str(row.role or "assistant")
 
     def get_super_run(self, run_id: str, user_id: str | None, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)

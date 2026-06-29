@@ -103,12 +103,40 @@ class VoiceConfig(BaseModel):
     target_language: str = "en"
 
 
+class SuperWorkspaceDispatchProfile(BaseModel):
+    id: str = "local-vllm"
+    name: str = "Local vLLM"
+    api_url: str = "http://127.0.0.1:8010/v1/chat/completions"
+    model: str = "qwen3-14b"
+    api_key: str = ""
+
+
 class SuperWorkspaceConfig(BaseModel):
     hindsight_retain_enabled: bool = True
     hindsight_api_url: str = ""
     hindsight_bank_prefix: str = "super-workspace"
     chat_history_bootstrap_enabled: bool = True
     chat_history_bootstrap_tokens: int = Field(default=5000, ge=0, le=50000)
+    active_dispatch_profile_id: str = "local-vllm"
+    dispatch_history_word_budget: int = Field(default=5000, ge=0, le=50000)
+    dispatch_profiles: list[SuperWorkspaceDispatchProfile] = Field(
+        default_factory=lambda: [
+            SuperWorkspaceDispatchProfile(
+                id="local-vllm",
+                name="Local vLLM",
+                api_url="http://127.0.0.1:8010/v1/chat/completions",
+                model="qwen3-14b",
+                api_key="",
+            ),
+            SuperWorkspaceDispatchProfile(
+                id="deepseek",
+                name="DeepSeek",
+                api_url="https://api.deepseek.com/v1/chat/completions",
+                model="deepseek-v4-flash",
+                api_key="",
+            ),
+        ]
+    )
 
 
 class UserProfile(BaseModel):

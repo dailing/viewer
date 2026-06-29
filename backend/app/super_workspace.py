@@ -12,8 +12,9 @@ from pydantic import BaseModel, Field
 from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, SuperWorkspaceList, agent_history_store
 
 
-DEFAULT_DISPATCH_MODEL = "deepseek-v4-flash"
-DEFAULT_DISPATCH_URL = "https://api.deepseek.com/v1/chat/completions"
+DEFAULT_DISPATCH_MODEL = ""
+DEFAULT_DISPATCH_URL = "http://127.0.0.1:8010/v1/chat/completions"
+DEFAULT_DISPATCH_WORD_BUDGET = 5000
 PROJECT_ENV_PATH = Path(__file__).resolve().parents[2] / ".viewer.env"
 
 
@@ -79,6 +80,10 @@ class SuperChatPatch(BaseModel):
 class SuperDispatchRequest(BaseModel):
     message: str
     role_ids: list[str] | None = None
+    workspace_id: str | None = None
+    chat_id: str | None = None
+    before_message_id: str | None = None
+    history_word_budget: int | None = None
 
 
 class SuperDispatchResponse(BaseModel):
@@ -256,7 +261,21 @@ class SuperWorkspaceManager:
             candidates = [role for role in candidates if role.id in allowed]
         if not candidates:
             raise HTTPException(status_code=400, detail="No dispatchable roles have descriptions")
-        raw = await asyncio.to_thread(self._dispatch_sync, message, candidates)
+        history_context = ""
+        if request.chat_id:
+            dispatch_profile, super_workspace_config = self._dispatch_profile()
+            workspace_id = request.workspace_id or data.id
+            history_budget = request.history_word_budget
+            if history_budget is None:
+                history_budget = int(getattr(super_workspace_config, "dispatch_history_word_budget", DEFAULT_DISPATCH_WORD_BUDGET) or DEFAULT_DISPATCH_WORD_BUDGET)
+            history_context = agent_history_store.visible_chat_history_context(
+                user_id or "",
+                workspace_id,
+                request.chat_id,
+                request.before_message_id,
+                max(0, min(int(history_budget or 0), 8000)),
+            )
+        raw = await asyncio.to_thread(self._dispatch_sync, message, candidates, history_context)
         selected = self._normalize_selected(raw, candidates)
         return SuperDispatchResponse(role_ids=selected, rationale=str(raw.get("rationale") or ""), raw=raw)
 
@@ -266,12 +285,13 @@ class SuperWorkspaceManager:
                 return role
         raise HTTPException(status_code=404, detail="Role not found")
 
-    def _dispatch_sync(self, message: str, roles: list[SuperRole]) -> dict[str, Any]:
-        api_key = self._dispatch_api_key()
-        if not api_key:
-            raise HTTPException(status_code=503, detail="Set VIEWER_SUPER_DISPATCH_API_KEY or DEEPSEEK_API_KEY for LLM dispatch")
-        model = os.environ.get("VIEWER_SUPER_DISPATCH_MODEL", DEFAULT_DISPATCH_MODEL)
-        url = os.environ.get("VIEWER_SUPER_DISPATCH_URL", DEFAULT_DISPATCH_URL)
+    def _dispatch_sync(self, message: str, roles: list[SuperRole], history_context: str = "") -> dict[str, Any]:
+        profile, _config = self._dispatch_profile()
+        api_key = self._dispatch_api_key(profile)
+        url = str(profile.get("api_url") or os.environ.get("VIEWER_SUPER_DISPATCH_URL", DEFAULT_DISPATCH_URL))
+        if not url.strip():
+            url = DEFAULT_DISPATCH_URL
+        model = self._dispatch_model(profile, url)
         payload = {
             "model": model,
             "response_format": {"type": "json_object"},
@@ -280,6 +300,7 @@ class SuperWorkspaceManager:
                     "role": "system",
                     "content": (
                         "You route one user message to the most appropriate persistent agent roles. "
+                        "Use the recent visible chat history only as context for what has already happened. "
                         "Return only JSON with role_ids and rationale. role_ids must be an array of ids from the provided roles. "
                         "Choose multiple roles only when the message clearly asks for multiple independent roles."
                     ),
@@ -288,7 +309,8 @@ class SuperWorkspaceManager:
                     "role": "user",
                     "content": json.dumps(
                         {
-                            "message": message,
+                            "current_message": message,
+                            "recent_visible_chat_history": history_context,
                             "roles": [
                                 {
                                     "id": role.id,
@@ -308,7 +330,7 @@ class SuperWorkspaceManager:
         request = Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {api_key or 'EMPTY'}", "Content-Type": "application/json"},
             method="POST",
         )
         try:
@@ -326,15 +348,94 @@ class SuperWorkspaceManager:
             raise HTTPException(status_code=502, detail=f"Dispatch model returned non-JSON content: {content[:500]}") from exc
         return parsed if isinstance(parsed, dict) else {}
 
-    def _dispatch_api_key(self) -> str:
-        for name in ("VIEWER_SUPER_DISPATCH_API_KEY", "VIEWER_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY", "VIEWER_OPENAI_API_KEY", "OPENAI_API_KEY"):
+    def _dispatch_profile(self) -> tuple[dict[str, Any], Any]:
+        try:
+            from .files import read_config
+
+            config = read_config().super_workspace
+        except Exception:
+            return (
+                {
+                    "id": "env",
+                    "name": "Environment",
+                    "api_url": os.environ.get("VIEWER_SUPER_DISPATCH_URL", DEFAULT_DISPATCH_URL),
+                    "model": os.environ.get("VIEWER_SUPER_DISPATCH_MODEL", DEFAULT_DISPATCH_MODEL),
+                    "api_key": "",
+                    "_source": "env",
+                },
+                None,
+            )
+        profiles = [
+            profile.model_dump() if hasattr(profile, "model_dump") else dict(profile)
+            for profile in getattr(config, "dispatch_profiles", [])
+        ]
+        active_id = str(getattr(config, "active_dispatch_profile_id", "") or "")
+        active = next((profile for profile in profiles if str(profile.get("id") or "") == active_id), None)
+        if active is None and profiles:
+            active = profiles[0]
+        if active is None:
+            active = {
+                "id": "local-vllm",
+                "name": "Local vLLM",
+                "api_url": DEFAULT_DISPATCH_URL,
+                "model": DEFAULT_DISPATCH_MODEL,
+                "api_key": "",
+                "_source": "default",
+            }
+        return active, config
+
+    def _dispatch_api_key(self, profile: dict[str, Any] | None = None) -> str:
+        profile_key = str((profile or {}).get("api_key") or "").strip()
+        if profile_key:
+            return profile_key
+        for name in ("VIEWER_SUPER_DISPATCH_API_KEY", "VIEWER_VLLM_API_KEY", "VIEWER_OPENAI_API_KEY", "OPENAI_API_KEY"):
             value = os.environ.get(name, "").strip()
             if value:
                 return value
         for env_path in self._project_env_paths():
-            value = self._read_env_value(env_path, "VIEWER_SUPER_DISPATCH_API_KEY") or self._read_env_value(env_path, "DEEPSEEK_API_KEY")
+            value = (
+                self._read_env_value(env_path, "VIEWER_SUPER_DISPATCH_API_KEY")
+                or self._read_env_value(env_path, "VIEWER_VLLM_API_KEY")
+                or self._read_env_value(env_path, "VIEWER_OPENAI_API_KEY")
+                or self._read_env_value(env_path, "OPENAI_API_KEY")
+            )
             if value:
                 return value
+        return ""
+
+    def _dispatch_model(self, profile: dict[str, Any] | None = None, url: str | None = None) -> str:
+        configured = str((profile or {}).get("model") or "").strip()
+        if not configured and (profile or {}).get("_source") == "env":
+            configured = os.environ.get("VIEWER_SUPER_DISPATCH_MODEL", "").strip()
+        if configured:
+            return configured
+        url = (url or os.environ.get("VIEWER_SUPER_DISPATCH_URL", DEFAULT_DISPATCH_URL)).strip() or DEFAULT_DISPATCH_URL
+        model = self._discover_vllm_model(url)
+        return model or "default"
+
+    def _discover_vllm_model(self, chat_completions_url: str) -> str:
+        models_url = chat_completions_url.rstrip("/")
+        suffix = "/chat/completions"
+        if models_url.endswith(suffix):
+            models_url = f"{models_url[:-len(suffix)]}/models"
+        else:
+            models_url = f"{models_url.rsplit('/v1', 1)[0]}/v1/models" if "/v1" in models_url else "http://127.0.0.1:8010/v1/models"
+        request = Request(
+            models_url,
+            headers={"Authorization": f"Bearer {self._dispatch_api_key() or 'EMPTY'}", "Content-Type": "application/json"},
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, URLError, HTTPError, json.JSONDecodeError):
+            return ""
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            return ""
+        for item in data:
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
+                return item["id"].strip()
         return ""
 
     def _project_env_paths(self) -> list[Path]:

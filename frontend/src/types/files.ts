@@ -100,12 +100,23 @@ export interface VoiceConfig {
   target_language: string;
 }
 
+export interface SuperWorkspaceDispatchProfile {
+  id: string;
+  name: string;
+  api_url: string;
+  model: string;
+  api_key: string;
+}
+
 export interface SuperWorkspaceConfig {
   hindsight_retain_enabled: boolean;
   hindsight_api_url: string;
   hindsight_bank_prefix: string;
   chat_history_bootstrap_enabled: boolean;
   chat_history_bootstrap_tokens: number;
+  active_dispatch_profile_id: string;
+  dispatch_history_word_budget: number;
+  dispatch_profiles: SuperWorkspaceDispatchProfile[];
 }
 
 export interface UserProfile {

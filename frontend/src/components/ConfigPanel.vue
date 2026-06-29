@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
-import { DARK_MARKDOWN_THEME, DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
+import { DARK_MARKDOWN_THEME, DEFAULT_CODEX_CONFIG, DEFAULT_DISPATCH_PROFILES, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
 import { useUsersStore } from "../stores/users";
-import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, VoiceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, VoiceConfig } from "../types/files";
 
 const emit = defineEmits<{ close: [] }>();
 const files = useFilesStore();
@@ -30,6 +30,18 @@ const activeTheme = computed(() => {
   draft.markdown.active_theme = fallback.name;
   if (!draft.markdown.themes.length) draft.markdown.themes.push(fallback);
   return fallback;
+});
+
+const activeDispatchProfile = computed<SuperWorkspaceDispatchProfile>(() => {
+  if (!draft.superWorkspace.dispatch_profiles.length) {
+    draft.superWorkspace.dispatch_profiles.push(...clone(DEFAULT_DISPATCH_PROFILES));
+  }
+  let profile = draft.superWorkspace.dispatch_profiles.find((item) => item.id === draft.superWorkspace.active_dispatch_profile_id);
+  if (!profile) {
+    profile = draft.superWorkspace.dispatch_profiles[0];
+    draft.superWorkspace.active_dispatch_profile_id = profile.id;
+  }
+  return profile as SuperWorkspaceDispatchProfile;
 });
 
 const fullConfigJson = computed(() =>
@@ -189,6 +201,53 @@ function setDefaultModel(value: string) {
   if (model && !draft.codex.available_models.includes(model)) {
     draft.codex.available_models = [model, ...draft.codex.available_models];
   }
+}
+
+function setActiveDispatchProfile(profileId: string) {
+  const profile = draft.superWorkspace.dispatch_profiles.find((item) => item.id === profileId);
+  if (profile) draft.superWorkspace.active_dispatch_profile_id = profile.id;
+}
+
+function addDispatchProfile() {
+  const baseId = "dispatch";
+  let index = draft.superWorkspace.dispatch_profiles.length + 1;
+  let id = `${baseId}-${index}`;
+  while (draft.superWorkspace.dispatch_profiles.some((profile) => profile.id === id)) {
+    index += 1;
+    id = `${baseId}-${index}`;
+  }
+  const profile: SuperWorkspaceDispatchProfile = {
+    id,
+    name: `Dispatch ${index}`,
+    api_url: DEFAULT_DISPATCH_PROFILES[0].api_url,
+    model: "",
+    api_key: "",
+  };
+  draft.superWorkspace.dispatch_profiles.push(profile);
+  draft.superWorkspace.active_dispatch_profile_id = profile.id;
+}
+
+function removeActiveDispatchProfile() {
+  if (draft.superWorkspace.dispatch_profiles.length <= 1) return;
+  const id = activeDispatchProfile.value.id;
+  draft.superWorkspace.dispatch_profiles = draft.superWorkspace.dispatch_profiles.filter((profile) => profile.id !== id);
+  draft.superWorkspace.active_dispatch_profile_id = draft.superWorkspace.dispatch_profiles[0]?.id ?? DEFAULT_SUPER_WORKSPACE_CONFIG.active_dispatch_profile_id;
+}
+
+function applyDispatchPreset(presetId: string) {
+  const preset = DEFAULT_DISPATCH_PROFILES.find((profile) => profile.id === presetId);
+  if (!preset) return;
+  const index = draft.superWorkspace.dispatch_profiles.findIndex((profile) => profile.id === preset.id);
+  const replacement = clone(preset);
+  if (index === -1) {
+    draft.superWorkspace.dispatch_profiles.push(replacement);
+  } else {
+    draft.superWorkspace.dispatch_profiles[index] = {
+      ...replacement,
+      api_key: draft.superWorkspace.dispatch_profiles[index].api_key || replacement.api_key,
+    };
+  }
+  draft.superWorkspace.active_dispatch_profile_id = replacement.id;
 }
 
 function normalizeVoiceModelList(value: string) {
@@ -447,6 +506,80 @@ async function applyJson() {
             <span>Super Workspace</span>
           </button>
           <div v-if="openSections.superWorkspace" class="section-body">
+            <label class="compact-field">
+              <span>Dispatch profile</span>
+              <select class="form-select form-select-sm" :value="draft.superWorkspace.active_dispatch_profile_id" @change="setActiveDispatchProfile(($event.target as HTMLSelectElement).value)">
+                <option v-for="profile in draft.superWorkspace.dispatch_profiles" :key="profile.id" :value="profile.id">
+                  {{ profile.name || profile.id }}
+                </option>
+              </select>
+            </label>
+            <div class="inline-actions">
+              <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyDispatchPreset('local-vllm')">
+                <i class="bi bi-cpu"></i>
+                <span>Local vLLM</span>
+              </button>
+              <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyDispatchPreset('deepseek')">
+                <i class="bi bi-cloud"></i>
+                <span>DeepSeek</span>
+              </button>
+              <button class="btn btn-sm btn-outline-secondary" type="button" @click="addDispatchProfile">
+                <i class="bi bi-plus-lg"></i>
+                <span>Add</span>
+              </button>
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="draft.superWorkspace.dispatch_profiles.length <= 1" @click="removeActiveDispatchProfile">
+                <i class="bi bi-trash"></i>
+              </button>
+            </div>
+            <label class="compact-field">
+              <span>Profile name</span>
+              <input v-model.trim="activeDispatchProfile.name" class="form-control form-control-sm" />
+            </label>
+            <label class="compact-field">
+              <span>Chat completions URL</span>
+              <input
+                v-model.trim="activeDispatchProfile.api_url"
+                class="form-control form-control-sm"
+                placeholder="http://127.0.0.1:8010/v1/chat/completions"
+              />
+            </label>
+            <label class="compact-field">
+              <span>Model name</span>
+              <input
+                v-model.trim="activeDispatchProfile.model"
+                class="form-control form-control-sm"
+                placeholder="Leave empty to discover /v1/models"
+              />
+            </label>
+            <label class="compact-field">
+              <span>API key</span>
+              <input
+                v-model.trim="activeDispatchProfile.api_key"
+                class="form-control form-control-sm"
+                type="password"
+                autocomplete="off"
+                placeholder="Optional"
+              />
+            </label>
+            <label class="setting-row">
+              <span>Dispatch history budget</span>
+              <input
+                v-model.number="draft.superWorkspace.dispatch_history_word_budget"
+                class="form-range"
+                type="range"
+                min="0"
+                max="20000"
+                step="500"
+              />
+              <input
+                v-model.number="draft.superWorkspace.dispatch_history_word_budget"
+                class="form-control form-control-sm number-input"
+                type="number"
+                min="0"
+                max="50000"
+                step="500"
+              />
+            </label>
             <label class="compact-field checkbox-field">
               <span>Hindsight retain</span>
               <input v-model="draft.superWorkspace.hindsight_retain_enabled" class="form-check-input" type="checkbox" />
@@ -755,14 +888,16 @@ async function applyJson() {
   padding: 0 12px 12px;
 }
 
-.server-actions {
+.server-actions,
+.inline-actions {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.server-actions .btn {
+.server-actions .btn,
+.inline-actions .btn {
   align-items: center;
   display: inline-flex;
   gap: 6px;

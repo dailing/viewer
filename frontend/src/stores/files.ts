@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
-import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, SuperWorkspaceConfig, ViewerConfig, VoiceConfig } from "../types/files";
+import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, ViewerConfig, VoiceConfig } from "../types/files";
 import { parentPath as resolveParentPath } from "../utils/paths";
 import { namespacedStorageKey } from "../utils/userProfile";
 
@@ -84,12 +84,32 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   target_language: "en",
 };
 
+export const DEFAULT_DISPATCH_PROFILES: SuperWorkspaceDispatchProfile[] = [
+  {
+    id: "local-vllm",
+    name: "Local vLLM",
+    api_url: "http://127.0.0.1:8010/v1/chat/completions",
+    model: "qwen3-14b",
+    api_key: "",
+  },
+  {
+    id: "deepseek",
+    name: "DeepSeek",
+    api_url: "https://api.deepseek.com/v1/chat/completions",
+    model: "deepseek-v4-flash",
+    api_key: "",
+  },
+];
+
 export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
   hindsight_retain_enabled: true,
   hindsight_api_url: "",
   hindsight_bank_prefix: "super-workspace",
   chat_history_bootstrap_enabled: true,
   chat_history_bootstrap_tokens: 5000,
+  active_dispatch_profile_id: "local-vllm",
+  dispatch_history_word_budget: 5000,
+  dispatch_profiles: DEFAULT_DISPATCH_PROFILES,
 };
 
 function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
@@ -200,13 +220,46 @@ function normalizeAlpha(value: unknown, fallback: number): number {
 
 function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): SuperWorkspaceConfig {
   const tokens = Number(config?.chat_history_bootstrap_tokens ?? DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens);
+  const dispatchBudget = Number(config?.dispatch_history_word_budget ?? DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_history_word_budget);
+  const profiles = normalizeDispatchProfiles(config?.dispatch_profiles);
+  const activeProfileId = profiles.some((profile) => profile.id === config?.active_dispatch_profile_id)
+    ? String(config?.active_dispatch_profile_id)
+    : profiles[0]?.id ?? DEFAULT_SUPER_WORKSPACE_CONFIG.active_dispatch_profile_id;
   return {
     hindsight_retain_enabled: config?.hindsight_retain_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_retain_enabled,
     hindsight_api_url: config?.hindsight_api_url?.trim() ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_api_url,
     hindsight_bank_prefix: config?.hindsight_bank_prefix?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_bank_prefix,
     chat_history_bootstrap_enabled: config?.chat_history_bootstrap_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_enabled,
     chat_history_bootstrap_tokens: Math.min(50000, Math.max(0, Number.isFinite(tokens) ? Math.floor(tokens) : DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens)),
+    active_dispatch_profile_id: activeProfileId,
+    dispatch_history_word_budget: Math.min(50000, Math.max(0, Number.isFinite(dispatchBudget) ? Math.floor(dispatchBudget) : DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_history_word_budget)),
+    dispatch_profiles: profiles,
   };
+}
+
+function normalizeDispatchProfiles(profiles?: Partial<SuperWorkspaceDispatchProfile>[]): SuperWorkspaceDispatchProfile[] {
+  const seen = new Set<string>();
+  const source = profiles?.length ? profiles : DEFAULT_DISPATCH_PROFILES;
+  const normalized = source
+    .map((profile, index) => {
+      const id = (profile.id?.trim() || profile.name?.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || `dispatch-${index + 1}`).replace(/^-+|-+$/g, "");
+      return {
+        id: id || `dispatch-${index + 1}`,
+        name: profile.name?.trim() || id || `Dispatch ${index + 1}`,
+        api_url: profile.api_url?.trim() || DEFAULT_DISPATCH_PROFILES[0].api_url,
+        model: profile.model?.trim() || "",
+        api_key: profile.api_key?.trim() || "",
+      };
+    })
+    .filter((profile) => {
+      if (!profile.id || seen.has(profile.id)) return false;
+      seen.add(profile.id);
+      return true;
+    });
+  for (const builtin of DEFAULT_DISPATCH_PROFILES) {
+    if (!normalized.some((profile) => profile.id === builtin.id)) normalized.push({ ...builtin });
+  }
+  return normalized;
 }
 
 function readPinnedFiles(): string[] {

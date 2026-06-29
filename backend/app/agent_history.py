@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -26,6 +27,7 @@ DEFAULT_RUN_LIMIT = 30
 DEFAULT_MESSAGE_LIMIT = 120
 ROLE_SESSION_POLICIES = {"reuse", "new_each_run"}
 DEFAULT_CONTEXT_RECYCLE_PERCENT = 70.0
+STALE_DRIVER_RUN_GRACE_SECONDS = 120.0
 TOKENISH_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 CHAT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
@@ -1745,6 +1747,7 @@ class AgentHistoryStore:
     def claim_next_dispatch_task(self, worker_id: str, lease_seconds: float = 60.0) -> SuperDispatchTask | None:
         now = time.time()
         with self.session_scope() as db:
+            self._cleanup_stale_running_driver_runs(db, now)
             db.execute(
                 update(SuperWorkspaceDriverRunRow)
                 .where(
@@ -1814,6 +1817,94 @@ class AgentHistoryStore:
                 if claimed is not None:
                     return self._dispatch_task_from_row(claimed)
         return None
+
+    def _cleanup_stale_running_driver_runs(self, db: Session, now: float) -> None:
+        cutoff = now - STALE_DRIVER_RUN_GRACE_SECONDS
+        rows = list(
+            db.scalars(
+                select(SuperWorkspaceDriverRunRow).where(
+                    SuperWorkspaceDriverRunRow.status == "running",
+                    SuperWorkspaceDriverRunRow.updated_at <= cutoff,
+                    or_(
+                        SuperWorkspaceDriverRunRow.driver_pid.is_not(None),
+                        and_(
+                            SuperWorkspaceDriverRunRow.driver_state_path.is_not(None),
+                            SuperWorkspaceDriverRunRow.driver_state_path != "",
+                        ),
+                    ),
+                )
+            ).all()
+        )
+        for row in rows:
+            status = self._stale_driver_terminal_status(db, row)
+            if status is None:
+                continue
+            values: dict[str, Any] = {
+                "status": status,
+                "claimed_by": None,
+                "claim_expires_at": None,
+                "finished_at": row.finished_at or now,
+                "updated_at": now,
+            }
+            if status == "failed" and not row.error:
+                values["error"] = "Driver process exited before dispatch status was finalized"
+            db.execute(
+                update(SuperWorkspaceDriverRunRow)
+                .where(
+                    SuperWorkspaceDriverRunRow.id == row.id,
+                    SuperWorkspaceDriverRunRow.status == "running",
+                )
+                .values(**values)
+            )
+
+    def _stale_driver_terminal_status(self, db: Session, row: SuperWorkspaceDriverRunRow) -> str | None:
+        state = self._read_driver_state(row.driver_state_path)
+        state_status = str(state.get("status") or "").strip().lower()
+        exit_code = state.get("exit_code")
+        if state_status in {"exited", "completed", "succeeded"}:
+            return "completed"
+        if state_status in {"failed", "cancelled", "canceled"}:
+            return "failed"
+        if isinstance(exit_code, int):
+            return "completed" if exit_code == 0 else "failed"
+        if isinstance(row.driver_pid, int) and row.driver_pid > 0 and not self._pid_alive(row.driver_pid):
+            return "completed" if self._driver_has_final_message(db, str(row.id)) else "failed"
+        return None
+
+    @staticmethod
+    def _read_driver_state(path_value: str | None) -> dict[str, Any]:
+        if not isinstance(path_value, str) or not path_value:
+            return {}
+        try:
+            value = json.loads(Path(path_value).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @staticmethod
+    def _driver_has_final_message(db: Session, driver_run_id: str) -> bool:
+        return bool(
+            db.scalar(
+                select(SuperWorkspaceMessageRow.id)
+                .where(
+                    SuperWorkspaceMessageRow.driver_run_id == driver_run_id,
+                    SuperWorkspaceMessageRow.role == "assistant",
+                    SuperWorkspaceMessageRow.event_type == "message:assistant",
+                    SuperWorkspaceMessageRow.text != "",
+                )
+                .limit(1)
+            )
+        )
 
     def get_dispatch_task(self, task_id: str) -> SuperDispatchTask | None:
         with self.read_session() as db:

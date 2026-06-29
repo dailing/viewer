@@ -30,13 +30,40 @@ export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   },
 };
 
+export const DARK_MARKDOWN_THEME: MarkdownTheme = {
+  name: "Dark",
+  body: { font_size: 15, color: "#d8dee9", font_weight: null, line_height: 1.65 },
+  h1: { font_size: 28, color: "#f8fafc", font_weight: "700", line_height: 1.2 },
+  h2: { font_size: 23, color: "#f1f5f9", font_weight: "700", line_height: 1.25 },
+  h3: { font_size: 19, color: "#e5edf7", font_weight: "700", line_height: 1.3 },
+  h4: { font_size: 16, color: "#dbe7f3", font_weight: "700", line_height: 1.35 },
+  paragraph: { font_size: 15, color: "#d8dee9", font_weight: null, line_height: 1.65 },
+  code: { font_size: 13, color: "#e6edf3", font_weight: null, line_height: null },
+  code_background: "#161b22",
+  link_color: "#79c0ff",
+  border_color: "#30363d",
+  syntax: {
+    background: "#0d1117",
+    text: "#e6edf3",
+    keyword: "#ff7b72",
+    string: "#a5d6ff",
+    number: "#79c0ff",
+    title: "#d2a8ff",
+    comment: "#8b949e",
+    meta: "#ffa657",
+  },
+};
+
+const BUILTIN_MARKDOWN_THEMES = [DEFAULT_MARKDOWN_THEME, DARK_MARKDOWN_THEME];
+
 export const DEFAULT_APPEARANCE_CONFIG: AppearanceConfig = {
   navbar_size: 26,
+  color_theme: "light",
 };
 
 export const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
   active_theme: DEFAULT_MARKDOWN_THEME.name,
-  themes: [DEFAULT_MARKDOWN_THEME],
+  themes: BUILTIN_MARKDOWN_THEMES,
 };
 
 export const DEFAULT_CODEX_CONFIG: CodexConfig = {
@@ -71,7 +98,10 @@ function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
 
 function normalizeAppearance(config?: Partial<AppearanceConfig>): AppearanceConfig {
   const size = Number(config?.navbar_size ?? DEFAULT_APPEARANCE_CONFIG.navbar_size);
-  return { navbar_size: Math.min(56, Math.max(22, Number.isFinite(size) ? size : DEFAULT_APPEARANCE_CONFIG.navbar_size)) };
+  return {
+    navbar_size: Math.min(56, Math.max(22, Number.isFinite(size) ? size : DEFAULT_APPEARANCE_CONFIG.navbar_size)),
+    color_theme: config?.color_theme === "dark" ? "dark" : "light",
+  };
 }
 
 type MarkdownThemeInput = Partial<Omit<MarkdownTheme, "body" | "h1" | "h2" | "h3" | "h4" | "paragraph" | "code" | "syntax">> & {
@@ -103,6 +133,9 @@ function mergeTheme(theme?: MarkdownThemeInput): MarkdownTheme {
 
 function normalizeMarkdown(config?: Partial<MarkdownConfig>): MarkdownConfig {
   const themes = config?.themes?.length ? config.themes.map((theme) => mergeTheme(theme as MarkdownThemeInput)) : [cloneTheme(DEFAULT_MARKDOWN_THEME)];
+  for (const builtin of BUILTIN_MARKDOWN_THEMES) {
+    if (!themes.some((theme) => theme.name === builtin.name)) themes.push(cloneTheme(builtin));
+  }
   const activeTheme = themes.some((theme) => theme.name === config?.active_theme) ? config?.active_theme : themes[0].name;
   return { active_theme: activeTheme ?? DEFAULT_MARKDOWN_THEME.name, themes };
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
-import { DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
+import { DARK_MARKDOWN_THEME, DEFAULT_CODEX_CONFIG, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
 import { useUsersStore } from "../stores/users";
 import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, VoiceConfig } from "../types/files";
 
@@ -280,6 +280,17 @@ function resetActiveTheme() {
   draft.markdown.active_theme = replacement.name;
 }
 
+function applyDarkMarkdownTheme() {
+  const replacement = clone(DARK_MARKDOWN_THEME);
+  const index = draft.markdown.themes.findIndex((theme) => theme.name === replacement.name);
+  if (index === -1) {
+    draft.markdown.themes.push(replacement);
+  } else {
+    draft.markdown.themes[index] = replacement;
+  }
+  draft.markdown.active_theme = replacement.name;
+}
+
 async function save() {
   saving.value = true;
   error.value = "";
@@ -372,6 +383,13 @@ async function applyJson() {
             <span>Appearance</span>
           </button>
           <div v-if="openSections.appearance" class="section-body">
+            <label class="compact-field">
+              <span>Theme</span>
+              <select v-model="draft.appearance.color_theme" class="form-select form-select-sm">
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
             <label class="setting-row">
               <span>Nav bar size</span>
               <input v-model.number="draft.appearance.navbar_size" class="form-range" type="range" min="22" max="56" step="1" />
@@ -554,6 +572,9 @@ async function applyJson() {
               </button>
               <button class="btn btn-sm btn-outline-secondary" type="button" @click="resetActiveTheme">
                 <i class="bi bi-arrow-counterclockwise"></i>
+              </button>
+              <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyDarkMarkdownTheme">
+                Dark
               </button>
             </div>
             <label class="compact-field">

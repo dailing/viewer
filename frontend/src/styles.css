@@ -7,6 +7,7 @@
   --border: #d9dee7;
   --panel: #ffffff;
   --surface: #f5f7fa;
+  --text: #172033;
   --text-muted: #667085;
 }
 
@@ -22,7 +23,7 @@ body,
 
 body {
   background: var(--surface);
-  color: #172033;
+  color: var(--text);
   overflow: hidden;
 }
 
@@ -33,6 +34,117 @@ body {
   min-height: 0;
   overscroll-behavior: none;
   overflow: hidden;
+}
+
+.app-shell[data-theme="dark"] {
+  color-scheme: dark;
+  --border: #30363d;
+  --panel: #0d1117;
+  --surface: #010409;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.app-shell[data-theme="dark"] .topbar,
+.app-shell[data-theme="dark"] .sidebar-drawer,
+.app-shell[data-theme="dark"] .loop-list,
+.app-shell[data-theme="dark"] .user-select-panel,
+.app-shell[data-theme="dark"] .config-panel,
+.app-shell[data-theme="dark"] .config-sidebar,
+.app-shell[data-theme="dark"] .config-content,
+.app-shell[data-theme="dark"] .viewer-pane,
+.app-shell[data-theme="dark"] .preview-popover,
+.app-shell[data-theme="dark"] .super-chat-pane,
+.app-shell[data-theme="dark"] .super-composer-card,
+.app-shell[data-theme="dark"] .super-role-response,
+.app-shell[data-theme="dark"] .super-dispatch-menu {
+  background: var(--panel);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.app-shell[data-theme="dark"] .body-shell,
+.app-shell[data-theme="dark"] .workspace-wrap,
+.app-shell[data-theme="dark"] .top-level-page,
+.app-shell[data-theme="dark"] .loop-page,
+.app-shell[data-theme="dark"] .super-chat-pane,
+.app-shell[data-theme="dark"] .config-page {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.app-shell[data-theme="dark"] .btn-outline-secondary,
+.app-shell[data-theme="dark"] .form-control,
+.app-shell[data-theme="dark"] .form-select,
+.app-shell[data-theme="dark"] textarea,
+.app-shell[data-theme="dark"] input {
+  background-color: #0d1117;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.app-shell[data-theme="dark"] .btn-outline-secondary:hover,
+.app-shell[data-theme="dark"] .form-control:focus,
+.app-shell[data-theme="dark"] .form-select:focus {
+  background-color: #161b22;
+  border-color: #58a6ff;
+  color: var(--text);
+}
+
+.app-shell[data-theme="dark"] .sidebar-row.active,
+.app-shell[data-theme="dark"] .sidebar-row:hover,
+.app-shell[data-theme="dark"] .activity-button.active,
+.app-shell[data-theme="dark"] .activity-button:hover,
+.app-shell[data-theme="dark"] .file-tree-row:hover,
+.app-shell[data-theme="dark"] .file-tree-row.active,
+.app-shell[data-theme="dark"] .loop-list-item:hover,
+.app-shell[data-theme="dark"] .loop-list-item.active {
+  background: #182635;
+}
+
+.app-shell[data-theme="dark"] .super-user-message {
+  background: #0f2742;
+  border-color: #214f7a;
+  color: #e6f2ff;
+}
+
+.app-shell[data-theme="dark"] .super-meta-chip,
+.app-shell[data-theme="dark"] .super-route-chip,
+.app-shell[data-theme="dark"] .super-citation-chip,
+.app-shell[data-theme="dark"] .super-composer-mention,
+.app-shell[data-theme="dark"] .super-cite-button,
+.app-shell[data-theme="dark"] .super-dispatch-picker summary,
+.app-shell[data-theme="dark"] .super-composer-toggle {
+  background: #161b22;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.app-shell[data-theme="dark"] .super-route-chip,
+.app-shell[data-theme="dark"] .super-dispatch-option.selected,
+.app-shell[data-theme="dark"] .super-dispatch-menu-auto.selected,
+.app-shell[data-theme="dark"] .super-pin-button.active,
+.app-shell[data-theme="dark"] .super-composer-toggle:hover {
+  background: #102a43;
+  border-color: #2f81f7;
+  color: #79c0ff;
+}
+
+.app-shell[data-theme="dark"] .super-citation-chip {
+  background: #211d35;
+  color: #c9d1ff;
+}
+
+.app-shell[data-theme="dark"] .super-dispatch-menu-auto:hover,
+.app-shell[data-theme="dark"] .super-dispatch-option:hover,
+.app-shell[data-theme="dark"] .super-composer-mention.selected {
+  background: #1f2937;
+}
+
+.app-shell[data-theme="dark"] .markdown-content .markdown-fence-block {
+  background: color-mix(in srgb, var(--syntax-background) 78%, #161b22);
 }
 
 .user-select-page {

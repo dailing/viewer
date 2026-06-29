@@ -982,6 +982,7 @@ async function scrollThreadToBottom() {
   min-width: 0;
   overflow-x: hidden;
   padding: 12px 14px;
+  user-select: text;
   width: 100%;
 }
 
@@ -998,6 +999,7 @@ async function scrollThreadToBottom() {
 
 .super-message-text {
   overflow-wrap: anywhere;
+  user-select: text;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1014,11 +1016,13 @@ async function scrollThreadToBottom() {
   max-width: 100%;
   min-width: 0;
   overflow-wrap: anywhere;
+  user-select: text;
   word-break: break-word;
 }
 
 .super-response-body :deep(*) {
   max-width: 100%;
+  user-select: text;
 }
 
 .super-response-body :deep(a),

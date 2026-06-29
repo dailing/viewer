@@ -183,11 +183,23 @@ class SuperAgentDriver:
     @staticmethod
     def usage_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         provider_session_id = snapshot.get("codex_session_id") or snapshot.get("hermes_session_id")
+        driver_pid = snapshot.get("pid")
+        driver_state_path = snapshot.get("run_state_path")
         return {
             "provider_session_id": provider_session_id if isinstance(provider_session_id, str) and provider_session_id else None,
             "model_context_window": snapshot.get("model_context_window") if isinstance(snapshot.get("model_context_window"), int) else None,
             "total_tokens": snapshot.get("total_tokens") if isinstance(snapshot.get("total_tokens"), int) else None,
             "context_used_percent": float(snapshot["context_used_percent"]) if isinstance(snapshot.get("context_used_percent"), (int, float)) else None,
+            "driver_pid": driver_pid if isinstance(driver_pid, int) else None,
+            "driver_state_path": driver_state_path if isinstance(driver_state_path, str) and driver_state_path else None,
+        }
+
+    @staticmethod
+    def chat_role_session_usage(usage: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: usage[key]
+            for key in ("provider_session_id", "model_context_window", "total_tokens", "context_used_percent")
+            if key in usage
         }
 
     async def _create(self, prompt: str, cwd: str, model: str | None, user_id: str, lineage: dict[str, Any]) -> dict[str, Any]:
@@ -553,7 +565,7 @@ class SuperWorkspaceRuntime:
             driver_run_id=task.id,
             message_id=run.message_id,
             rotation_reason=rotation_reason,
-            **usage,
+            **driver.chat_role_session_usage(usage),
         )
         agent_history_store.update_driver_run_status(task.id, "running", session_ref=session_ref, agent_prompt=prompt, **usage)
         completed = await self._wait_for_session(
@@ -633,7 +645,7 @@ class SuperWorkspaceRuntime:
                     session_policy=role.session_policy,
                     driver_run_id=driver_run_id,
                     message_id=run_id,
-                    **usage,
+                    **driver.chat_role_session_usage(usage),
                 )
             await self._emit_update(
                 {

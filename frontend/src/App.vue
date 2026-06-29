@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import ConfigPanel from "./components/ConfigPanel.vue";
 import SuperWorkspacePage from "./components/SuperWorkspacePage.vue";
 import { connectEvents } from "./api/events";
-import { useFilesStore } from "./stores/files";
+import { DARK_MARKDOWN_THEME, DEFAULT_MARKDOWN_THEME, useFilesStore } from "./stores/files";
 import { useInputSessionsStore } from "./stores/inputSessions";
 import { useLayoutStore } from "./stores/layout";
 import { usePaneToolbarStore } from "./stores/paneToolbar";
@@ -28,7 +28,7 @@ const appStyle = computed(() => {
   const navbarSize = files.appearance.navbar_size;
   const buttonSize = Math.max(18, navbarSize - 4);
   const iconSize = Math.max(11, Math.round(navbarSize * 0.48));
-  const theme = files.activeMarkdownTheme;
+  const theme = files.appearance.color_theme === "dark" && files.markdown.active_theme === DEFAULT_MARKDOWN_THEME.name ? DARK_MARKDOWN_THEME : files.activeMarkdownTheme;
   return {
     "--topbar-height": `${navbarSize}px`,
     "--nav-button-size": `${buttonSize}px`,
@@ -239,7 +239,7 @@ onUnmounted(() => {
       </button>
     </section>
   </div>
-  <div v-else-if="appReady" class="app-shell" :style="appStyle">
+  <div v-else-if="appReady" class="app-shell" :data-theme="files.appearance.color_theme" :style="appStyle">
     <header class="topbar">
       <button
         class="btn btn-outline-secondary icon-button"

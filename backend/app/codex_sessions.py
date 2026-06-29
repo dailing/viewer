@@ -128,6 +128,7 @@ class CodexSession:
             "codex_pid": self.codex_pid,
             "run_id": self.run_id,
             "run_started_at": self.run_started_at,
+            "run_state_path": self.run_state_path.as_posix() if self.run_state_path else None,
             "event_count": len(self.events),
             "model_context_window": self.model_context_window,
             "context_used_percent": self.context_used_percent,

@@ -41,6 +41,7 @@ export interface TextLineWindow {
 
 export interface AppearanceConfig {
   navbar_size: number;
+  color_theme: "light" | "dark";
 }
 
 export interface MarkdownElementStyle {

@@ -44,6 +44,7 @@ class TextLineWindow(BaseModel):
 
 class AppearanceConfig(BaseModel):
     navbar_size: int = 26
+    color_theme: Literal["light", "dark"] = "light"
 
 
 class MarkdownElementStyle(BaseModel):

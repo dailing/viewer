@@ -67,7 +67,7 @@ const dispatchPickerTitle = computed(() => {
   return `Dispatch to ${selectedDispatchRoles.value.map((role) => role.name).join(", ")}`;
 });
 const inputContextId = computed(() => `super-workspace:${resolvedChatId.value}:composer`);
-const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByDriverRun([...items.value].reverse()));
+const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByDriverRun(withTargetPlaceholders([...items.value].reverse())));
 const renderedItemHtmlById = computed(() => {
   const rendered = new Map<string, string>();
   for (const item of displayItems.value) {
@@ -456,6 +456,64 @@ function mergeMessagesByDriverRun(orderedItems: SuperDisplayItem[]): SuperThread
   return merged;
 }
 
+function withTargetPlaceholders(orderedItems: SuperDisplayItem[]): SuperDisplayItem[] {
+  const messageDriverIds = new Set(
+    orderedItems
+      .filter((item) => item.kind === "message" && item.driver_run_id)
+      .map((item) => item.driver_run_id as string),
+  );
+  const expanded: SuperDisplayItem[] = [];
+  for (const item of orderedItems) {
+    expanded.push(item);
+    if (item.kind !== "query") continue;
+    for (const target of item.dispatch_targets) {
+      if (!shouldShowTargetPlaceholder(target) || messageDriverIds.has(target.id)) continue;
+      expanded.push(displayItemFromTargetPlaceholder(item, target));
+    }
+  }
+  return expanded;
+}
+
+function shouldShowTargetPlaceholder(target: SuperDisplayTarget) {
+  return ["queued", "claimed", "running", "failed"].includes(normalizedTargetStatus(target.status));
+}
+
+function displayItemFromTargetPlaceholder(query: SuperDisplayItem, target: SuperDisplayTarget): SuperDisplayItem {
+  return {
+    id: `${query.id}:target:${target.id}`,
+    workspace_id: target.workspace_id,
+    chat_id: target.chat_id,
+    kind: "message",
+    user_id: query.user_id,
+    text: "",
+    role: "assistant",
+    event_type: "target:placeholder",
+    provider: target.provider,
+    created_at: query.created_at,
+    updated_at: query.updated_at,
+    message_id: `${query.message_id}:target:${target.id}`,
+    query_message_id: query.message_id,
+    driver_run_id: target.id,
+    parent_message_id: query.parent_message_id ?? query.message_id,
+    sender_role_id: query.sender_role_id ?? null,
+    recipient_role_id: target.role_id,
+    role_id: target.role_id,
+    role_name: target.role_name,
+    viewer_session_id: target.viewer_session_id,
+    provider_session_id: target.provider_session_id ?? null,
+    session_ref: target.session_ref,
+    model_context_window: target.model_context_window ?? null,
+    total_tokens: target.total_tokens ?? null,
+    context_used_percent: target.context_used_percent ?? null,
+    target_status: target.status,
+    run_status: "",
+    error: "",
+    citation_ids: [],
+    dispatch_targets: [],
+    raw: {},
+  };
+}
+
 function messageDriverRunKey(item: SuperDisplayItem) {
   if (item.kind !== "message" || !item.driver_run_id) return "";
   return item.driver_run_id;
@@ -583,6 +641,32 @@ function contextUsageLabel(item: Pick<SuperDisplayItem, "context_used_percent" |
   if (typeof item.context_used_percent === "number") return `${item.context_used_percent.toFixed(1)}% ctx`;
   if (typeof item.total_tokens === "number") return `${item.total_tokens.toLocaleString()} tokens`;
   return "";
+}
+
+function normalizedTargetStatus(status: string) {
+  return (status || "").trim().toLowerCase();
+}
+
+function targetStatusLabel(status: string) {
+  const normalized = normalizedTargetStatus(status);
+  if (normalized === "claimed") return "starting";
+  if (normalized === "queued") return "queued";
+  if (normalized === "running") return "running";
+  if (normalized === "failed") return "failed";
+  return normalized;
+}
+
+function showTargetStatus(status: string) {
+  const normalized = normalizedTargetStatus(status);
+  return Boolean(normalized) && normalized !== "completed";
+}
+
+function responsePlaceholderText(status: string) {
+  const normalized = normalizedTargetStatus(status);
+  if (normalized === "queued") return "Waiting for this role to start.";
+  if (normalized === "claimed") return "Starting role session.";
+  if (normalized === "failed") return "No response was produced.";
+  return "Waiting for response.";
 }
 
 function targetIcon(target: SuperDisplayTarget) {
@@ -755,17 +839,16 @@ async function scrollThreadToBottom() {
             <div class="super-message-meta">
               <div class="super-run-time">{{ formatTime(item.created_at) }}</div>
               <div class="super-route-line">
-                <span v-if="item.run_status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
-                <span v-else-if="item.run_status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
-                <span v-else-if="item.run_status === 'running'" class="super-route-pending">role running...</span>
-                <span v-else-if="item.run_status === 'failed'" class="super-route-error">dispatch failed: {{ item.error }}</span>
-                <template v-else>
+                <template v-if="item.dispatch_targets.length">
                   <span class="super-route-label">dispatched to</span>
                   <span v-for="target in item.dispatch_targets" :key="target.id" class="super-route-chip">
                     <i class="bi" :class="targetIcon(target)"></i>
                     {{ target.role_name }}
                   </span>
                 </template>
+                <span v-else-if="item.run_status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
+                <span v-else-if="item.run_status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
+                <span v-else-if="item.run_status === 'failed'" class="super-route-error">dispatch failed: {{ item.error }}</span>
                 <template v-if="item.citation_ids?.length">
                   <span class="super-route-label">cited</span>
                   <button
@@ -800,6 +883,13 @@ async function scrollThreadToBottom() {
                 <i class="bi" :class="itemIcon(item)"></i>
                 {{ item.role_name }}
               </span>
+              <span
+                v-if="showTargetStatus(item.target_status)"
+                class="super-target-status"
+                :class="`status-${normalizedTargetStatus(item.target_status)}`"
+              >
+                {{ targetStatusLabel(item.target_status) }}
+              </span>
               <span v-if="shortSessionId(item)" class="super-meta-chip" :title="item.session_ref || item.viewer_session_id">
                 session {{ shortSessionId(item) }}
               </span>
@@ -807,13 +897,14 @@ async function scrollThreadToBottom() {
                 {{ contextUsageLabel(item) }}
               </span>
             </div>
-            <button class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
+            <button v-if="item.text.trim()" class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
               <i class="bi bi-link-45deg"></i>
               <span>Cite</span>
             </button>
           </div>
           <div class="super-role-response" @click="openItemLink($event, item)">
-            <div class="markdown-body markdown-content super-response-body" v-html="renderedItemHtml(item)"></div>
+            <div v-if="item.text.trim()" class="markdown-body markdown-content super-response-body" v-html="renderedItemHtml(item)"></div>
+            <div v-else class="super-response-placeholder">{{ responsePlaceholderText(item.target_status) }}</div>
           </div>
         </div>
       </article>
@@ -1099,6 +1190,42 @@ async function scrollThreadToBottom() {
   font-size: 11px;
   line-height: 1.2;
   padding: 2px 6px;
+}
+
+.super-target-status {
+  border: 1px solid #d7dde6;
+  border-radius: 999px;
+  color: #526071;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 2px 7px;
+}
+
+.super-target-status.status-running,
+.super-target-status.status-claimed {
+  background: #fff7d7;
+  border-color: #e9d27a;
+  color: #7a5c00;
+}
+
+.super-target-status.status-queued {
+  background: #eef3ff;
+  border-color: #c9d8f5;
+  color: #34507a;
+}
+
+.super-target-status.status-failed {
+  background: #fff0f0;
+  border-color: #efb8b8;
+  color: #9a2d2d;
+}
+
+.super-response-placeholder {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.45;
 }
 
 .super-cite-button,

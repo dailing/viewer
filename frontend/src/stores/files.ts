@@ -67,7 +67,7 @@ export const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
 };
 
 export const DEFAULT_CODEX_CONFIG: CodexConfig = {
-  available_models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"],
+  available_models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex", "gpt-5.3-codex-spark"],
   default_model: "gpt-5.5",
   proxy: "",
   muted_message_alpha: 0.56,
@@ -181,7 +181,8 @@ function normalizeMarkdown(config?: Partial<MarkdownConfig>): MarkdownConfig {
 
 function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
   const seen = new Set<string>();
-  const available = (config?.available_models?.length ? config.available_models : DEFAULT_CODEX_CONFIG.available_models)
+  const sourceModels = [...(config?.available_models?.length ? config.available_models : []), ...DEFAULT_CODEX_CONFIG.available_models];
+  const available = sourceModels
     .map((model) => model.trim())
     .filter((model) => {
       if (!model || seen.has(model)) return false;

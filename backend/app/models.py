@@ -86,7 +86,7 @@ class MarkdownConfig(BaseModel):
 
 
 class CodexConfig(BaseModel):
-    available_models: list[str] = Field(default_factory=lambda: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5"])
+    available_models: list[str] = Field(default_factory=lambda: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex", "gpt-5.3-codex-spark"])
     default_model: str = "gpt-5.5"
     proxy: str = ""
     muted_message_alpha: float = Field(default=0.56, ge=0.15, le=1.0)

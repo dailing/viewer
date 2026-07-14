@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { useFilesStore } from "../../stores/files";
 import type { AgentProvider } from "../../types/agents";
 import type { SuperRole } from "../../types/superWorkspace";
 import DirectoryPicker from "../DirectoryPicker.vue";
@@ -16,10 +17,20 @@ const emit = defineEmits<{
 }>();
 
 const selectedRoleId = ref("");
+const files = useFilesStore();
 const selectedRole = computed(() => props.roles.find((role) => role.id === selectedRoleId.value) ?? null);
+const codexModelOptions = computed(() => {
+  const selected = selectedRole.value?.model?.trim() || "";
+  const models = files.codexConfig.available_models;
+  return selected && !models.includes(selected) ? [selected, ...models] : models;
+});
 
 function selectRole(role: SuperRole) {
   selectedRoleId.value = selectedRoleId.value === role.id ? "" : role.id;
+}
+
+function updateProvider(role: SuperRole) {
+  if (role.provider !== "codex") role.model = null;
 }
 </script>
 
@@ -62,7 +73,7 @@ function selectRole(role: SuperRole) {
       </label>
       <label class="field">
         <span>Provider</span>
-        <select v-model="selectedRole.provider" class="form-select form-select-sm">
+        <select v-model="selectedRole.provider" class="form-select form-select-sm" @change="updateProvider(selectedRole)">
           <option v-for="provider in props.providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
         </select>
       </label>
@@ -76,7 +87,14 @@ function selectRole(role: SuperRole) {
       </label>
       <label class="field">
         <span>Model</span>
-        <input v-model="selectedRole.model" class="form-control form-control-sm" placeholder="Provider default" />
+        <select
+          v-model="selectedRole.model"
+          class="form-select form-select-sm"
+          :disabled="selectedRole.provider !== 'codex'"
+        >
+          <option :value="null">Provider Default</option>
+          <option v-for="model in codexModelOptions" :key="model" :value="model">{{ model }}</option>
+        </select>
       </label>
       <label class="field">
         <span>Session Management</span>

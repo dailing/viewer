@@ -196,14 +196,6 @@ function normalizeModelList(value: string) {
   }
 }
 
-function setDefaultModel(value: string) {
-  const model = value.trim();
-  draft.codex.default_model = model;
-  if (model && !draft.codex.available_models.includes(model)) {
-    draft.codex.available_models = [model, ...draft.codex.available_models];
-  }
-}
-
 function setActiveDispatchProfile(profileId: string) {
   const profile = draft.superWorkspace.dispatch_profiles.find((item) => item.id === profileId);
   if (profile) draft.superWorkspace.active_dispatch_profile_id = profile.id;
@@ -470,16 +462,10 @@ async function applyJson() {
           <div v-if="openSections.codex" class="section-body">
             <label class="compact-field">
               <span>Default model</span>
-              <input
-                class="form-control form-control-sm"
-                list="codex-model-options"
-                :value="draft.codex.default_model"
-                @input="setDefaultModel(($event.target as HTMLInputElement).value)"
-              />
+              <select v-model="draft.codex.default_model" class="form-select form-select-sm">
+                <option v-for="model in draft.codex.available_models" :key="model" :value="model">{{ model }}</option>
+              </select>
             </label>
-            <datalist id="codex-model-options">
-              <option v-for="model in draft.codex.available_models" :key="model" :value="model"></option>
-            </datalist>
             <label class="compact-field model-list-field">
               <span>Available models</span>
               <textarea

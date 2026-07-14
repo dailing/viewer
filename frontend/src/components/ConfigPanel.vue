@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
-import { DARK_MARKDOWN_THEME, DEFAULT_CODEX_CONFIG, DEFAULT_DISPATCH_PROFILES, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
+import { DARK_MARKDOWN_THEME, DEFAULT_CODEX_CONFIG, DEFAULT_DISPATCH_PROFILES, DEFAULT_DISPATCH_PROMPT_TEMPLATE, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
 import { useUsersStore } from "../stores/users";
 import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, VoiceConfig } from "../types/files";
 
@@ -13,6 +13,7 @@ const restarting = ref<"backend" | "all" | "">("");
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
+const dispatchPromptVariables = ["{{message}}", "{{history}}", "{{roles_json}}", "{{roles_table}}"];
 const openSections = reactive({ server: true, users: true, appearance: true, codex: true, superWorkspace: true, voice: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const draft = reactive({
@@ -248,6 +249,10 @@ function applyDispatchPreset(presetId: string) {
     };
   }
   draft.superWorkspace.active_dispatch_profile_id = replacement.id;
+}
+
+function resetDispatchPromptTemplate() {
+  draft.superWorkspace.dispatch_prompt_template = DEFAULT_DISPATCH_PROMPT_TEMPLATE;
 }
 
 function normalizeVoiceModelList(value: string) {
@@ -579,6 +584,23 @@ async function applyJson() {
                 max="50000"
                 step="500"
               />
+            </label>
+            <label class="compact-field prompt-template-field">
+              <span>Dispatch prompt</span>
+              <div class="prompt-template-editor">
+                <textarea
+                  v-model="draft.superWorkspace.dispatch_prompt_template"
+                  class="form-control form-control-sm dispatch-prompt-template"
+                  spellcheck="false"
+                ></textarea>
+                <div class="template-footer">
+                  <span>Variables: {{ dispatchPromptVariables.join(", ") }}</span>
+                  <button class="btn btn-sm btn-outline-secondary" type="button" @click="resetDispatchPromptTemplate">
+                    <i class="bi bi-arrow-counterclockwise"></i>
+                    <span>Reset</span>
+                  </button>
+                </div>
+              </div>
             </label>
             <label class="compact-field checkbox-field">
               <span>Hindsight retain</span>
@@ -933,6 +955,40 @@ async function applyJson() {
 
 .checkbox-field .form-check-input {
   margin: 0;
+}
+
+.prompt-template-field {
+  align-items: start;
+}
+
+.prompt-template-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.dispatch-prompt-template {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  min-height: 220px;
+  resize: vertical;
+}
+
+.template-footer {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.template-footer span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.template-footer .btn {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  white-space: nowrap;
 }
 
 .number-input {

@@ -116,6 +116,7 @@ export interface SuperWorkspaceConfig {
   chat_history_bootstrap_tokens: number;
   active_dispatch_profile_id: string;
   dispatch_history_word_budget: number;
+  dispatch_prompt_template: string;
   dispatch_profiles: SuperWorkspaceDispatchProfile[];
 }
 

@@ -101,6 +101,24 @@ export const DEFAULT_DISPATCH_PROFILES: SuperWorkspaceDispatchProfile[] = [
   },
 ];
 
+export const DEFAULT_DISPATCH_PROMPT_TEMPLATE = `You route one user message to persistent agent roles.
+
+Default to exactly one role.
+Choose multiple roles only when the user explicitly asks for multiple independent tasks, or when no single role can reasonably complete the request.
+
+Use recent visible chat history only to understand context, not as a separate task.
+Return only JSON:
+{"role_ids":["role-id"],"rationale":"short reason"}
+
+Available roles:
+{{roles_json}}
+
+Recent visible chat history:
+{{history}}
+
+Current message:
+{{message}}`;
+
 export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
   hindsight_retain_enabled: true,
   hindsight_api_url: "",
@@ -108,7 +126,8 @@ export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
   chat_history_bootstrap_enabled: true,
   chat_history_bootstrap_tokens: 5000,
   active_dispatch_profile_id: "local-vllm",
-  dispatch_history_word_budget: 5000,
+  dispatch_history_word_budget: 2048,
+  dispatch_prompt_template: DEFAULT_DISPATCH_PROMPT_TEMPLATE,
   dispatch_profiles: DEFAULT_DISPATCH_PROFILES,
 };
 
@@ -233,6 +252,7 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
     chat_history_bootstrap_tokens: Math.min(50000, Math.max(0, Number.isFinite(tokens) ? Math.floor(tokens) : DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens)),
     active_dispatch_profile_id: activeProfileId,
     dispatch_history_word_budget: Math.min(50000, Math.max(0, Number.isFinite(dispatchBudget) ? Math.floor(dispatchBudget) : DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_history_word_budget)),
+    dispatch_prompt_template: config?.dispatch_prompt_template?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_prompt_template,
     dispatch_profiles: profiles,
   };
 }

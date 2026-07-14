@@ -111,6 +111,25 @@ class SuperWorkspaceDispatchProfile(BaseModel):
     api_key: str = ""
 
 
+DEFAULT_DISPATCH_PROMPT_TEMPLATE = """You route one user message to persistent agent roles.
+
+Default to exactly one role.
+Choose multiple roles only when the user explicitly asks for multiple independent tasks, or when no single role can reasonably complete the request.
+
+Use recent visible chat history only to understand context, not as a separate task.
+Return only JSON:
+{"role_ids":["role-id"],"rationale":"short reason"}
+
+Available roles:
+{{roles_json}}
+
+Recent visible chat history:
+{{history}}
+
+Current message:
+{{message}}"""
+
+
 class SuperWorkspaceConfig(BaseModel):
     hindsight_retain_enabled: bool = True
     hindsight_api_url: str = ""
@@ -118,7 +137,8 @@ class SuperWorkspaceConfig(BaseModel):
     chat_history_bootstrap_enabled: bool = True
     chat_history_bootstrap_tokens: int = Field(default=5000, ge=0, le=50000)
     active_dispatch_profile_id: str = "local-vllm"
-    dispatch_history_word_budget: int = Field(default=5000, ge=0, le=50000)
+    dispatch_history_word_budget: int = Field(default=2048, ge=0, le=50000)
+    dispatch_prompt_template: str = DEFAULT_DISPATCH_PROMPT_TEMPLATE
     dispatch_profiles: list[SuperWorkspaceDispatchProfile] = Field(
         default_factory=lambda: [
             SuperWorkspaceDispatchProfile(

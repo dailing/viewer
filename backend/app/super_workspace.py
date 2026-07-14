@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -10,11 +11,13 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, SuperWorkspaceList, agent_history_store
+from .models import DEFAULT_DISPATCH_PROMPT_TEMPLATE
 
 
 DEFAULT_DISPATCH_MODEL = ""
 DEFAULT_DISPATCH_URL = "http://127.0.0.1:8010/v1/chat/completions"
-DEFAULT_DISPATCH_WORD_BUDGET = 5000
+DEFAULT_DISPATCH_WORD_BUDGET = 2048
+DISPATCH_TEMPLATE_PATTERN = re.compile(r"\{\{(?:message|history|roles_json|roles_table)\}\}")
 PROJECT_ENV_PATH = Path(__file__).resolve().parents[2] / ".viewer.env"
 
 
@@ -292,6 +295,7 @@ class SuperWorkspaceManager:
         if not url.strip():
             url = DEFAULT_DISPATCH_URL
         model = self._dispatch_model(profile, url)
+        prompt = self._render_dispatch_prompt(message, roles, history_context, _config)
         payload = {
             "model": model,
             "response_format": {"type": "json_object"},
@@ -299,31 +303,13 @@ class SuperWorkspaceManager:
                 {
                     "role": "system",
                     "content": (
-                        "You route one user message to the most appropriate persistent agent roles. "
-                        "Use the recent visible chat history only as context for what has already happened. "
-                        "Return only JSON with role_ids and rationale. role_ids must be an array of ids from the provided roles. "
-                        "Choose multiple roles only when the message clearly asks for multiple independent roles."
+                        "Follow the routing prompt exactly. Return only a JSON object with role_ids and rationale. "
+                        "role_ids must be an array of ids from the provided roles."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {
-                            "current_message": message,
-                            "recent_visible_chat_history": history_context,
-                            "roles": [
-                                {
-                                    "id": role.id,
-                                    "name": role.name,
-                                    "description": role.description,
-                                    "cwd": role.cwd,
-                                    "provider": role.provider,
-                                }
-                                for role in roles
-                            ],
-                        },
-                        ensure_ascii=False,
-                    ),
+                    "content": prompt,
                 },
             ],
         }
@@ -347,6 +333,32 @@ class SuperWorkspaceManager:
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=502, detail=f"Dispatch model returned non-JSON content: {content[:500]}") from exc
         return parsed if isinstance(parsed, dict) else {}
+
+    def _render_dispatch_prompt(self, message: str, roles: list[SuperRole], history_context: str, config: Any | None) -> str:
+        template = str(getattr(config, "dispatch_prompt_template", "") or "").strip() or DEFAULT_DISPATCH_PROMPT_TEMPLATE
+        roles_payload = [self._dispatch_role_payload(role) for role in roles]
+        roles_json = json.dumps(roles_payload, ensure_ascii=False, indent=2)
+        roles_table = "\n".join(
+            f"- {role['id']} | {role['name']} | provider={role['provider']} | cwd={role['cwd'] or '-'}\n  {role['description']}"
+            for role in roles_payload
+        )
+        replacements = {
+            "{{message}}": message,
+            "{{history}}": history_context,
+            "{{roles_json}}": roles_json,
+            "{{roles_table}}": roles_table,
+        }
+        return DISPATCH_TEMPLATE_PATTERN.sub(lambda match: replacements[match.group(0)], template)
+
+    @staticmethod
+    def _dispatch_role_payload(role: SuperRole) -> dict[str, str]:
+        return {
+            "id": role.id,
+            "name": role.name,
+            "description": role.description,
+            "cwd": role.cwd,
+            "provider": role.provider,
+        }
 
     def _dispatch_profile(self) -> tuple[dict[str, Any], Any]:
         try:

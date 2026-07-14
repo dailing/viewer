@@ -442,6 +442,7 @@ def read_config() -> ConfigData:
         or "dispatch_profiles" not in super_workspace_raw
         or "active_dispatch_profile_id" not in super_workspace_raw
         or "dispatch_history_word_budget" not in super_workspace_raw
+        or "dispatch_prompt_template" not in super_workspace_raw
     )
     missing_user_defaults = "users" not in raw or "default_user" not in raw
     if isinstance(raw, dict) and (

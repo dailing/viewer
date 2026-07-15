@@ -253,10 +253,10 @@ function clearPath() {
 }
 
 .path-options {
-  background: #ffffff;
-  border: 1px solid var(--border);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
   border-radius: 6px;
-  box-shadow: 0 8px 24px rgb(15 23 42 / 0.14);
+  box-shadow: var(--shadow-popover);
   left: 0;
   max-height: 220px;
   overflow: auto;
@@ -284,15 +284,15 @@ function clearPath() {
 
 .path-option.highlighted,
 .path-option:hover {
-  background: #eef3f8;
+  background: var(--color-surface-hover);
 }
 
 .path-option.muted {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
 }
 
 .path-option.error {
-  color: #a33;
+  color: var(--color-danger);
 }
 
 .clear-cwd-button {
@@ -302,7 +302,7 @@ function clearPath() {
 }
 
 .directory-picker-meta {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   display: flex;
   flex-wrap: wrap;
   font-size: 12px;
@@ -312,6 +312,6 @@ function clearPath() {
 }
 
 .directory-error {
-  color: #a33;
+  color: var(--color-danger);
 }
 </style>

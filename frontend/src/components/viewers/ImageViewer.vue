@@ -251,7 +251,7 @@ onUnmounted(() => {
 .image-viewer {
   align-items: center;
   touch-action: none;
-  background: #f8fafc;
+  background: var(--color-surface-muted);
   display: flex;
   height: 100%;
   justify-content: center;

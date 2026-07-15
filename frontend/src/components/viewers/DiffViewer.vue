@@ -359,36 +359,36 @@ onUnmounted(() => {
 }
 
 .diff-add {
-  background: rgb(34 134 58 / 0.14);
-  color: #116329;
+  background: color-mix(in srgb, var(--color-success) 14%, transparent);
+  color: var(--color-success);
 }
 
 .diff-delete {
-  background: rgb(207 34 46 / 0.13);
-  color: #a40e26;
+  background: color-mix(in srgb, var(--color-danger) 13%, transparent);
+  color: var(--color-danger);
 }
 
 .diff-hunk {
-  background: rgb(9 105 218 / 0.1);
-  color: #0969da;
+  background: color-mix(in srgb, var(--color-info) 10%, transparent);
+  color: var(--color-info);
 }
 
 .diff-file {
-  color: #8250df;
+  color: var(--syntax-title);
   font-weight: 700;
 }
 
 .diff-word-change {
-  background: rgb(255 212 0 / 0.45);
+  background: color-mix(in srgb, var(--color-warning) 38%, transparent);
   border-radius: 2px;
 }
 
 .diff-add .diff-word-change {
-  background: rgb(34 134 58 / 0.26);
+  background: color-mix(in srgb, var(--color-success) 26%, transparent);
 }
 
 .diff-delete .diff-word-change {
-  background: rgb(207 34 46 / 0.22);
+  background: color-mix(in srgb, var(--color-danger) 22%, transparent);
 }
 
 .diff-split-content {
@@ -405,8 +405,8 @@ onUnmounted(() => {
 }
 
 .split-full {
-  background: rgb(9 105 218 / 0.1);
-  color: #0969da;
+  background: color-mix(in srgb, var(--color-info) 10%, transparent);
+  color: var(--color-info);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   grid-column: 1 / -1;
@@ -420,7 +420,7 @@ onUnmounted(() => {
 
 .split-file .split-full {
   background: transparent;
-  color: #8250df;
+  color: var(--syntax-title);
   font-weight: 700;
 }
 
@@ -439,16 +439,16 @@ onUnmounted(() => {
 }
 
 .split-left {
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--color-border);
 }
 
 .split-empty {
-  background: rgb(148 163 184 / 0.08);
+  background: color-mix(in srgb, var(--color-text-subtle) 8%, transparent);
 }
 
 .diff-state {
   align-items: center;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -463,6 +463,6 @@ onUnmounted(() => {
 }
 
 .error-state {
-  color: #a33;
+  color: var(--color-danger);
 }
 </style>

@@ -214,8 +214,8 @@ async function openPinnedFile(path: string) {
 
 .activity-bar {
   align-items: center;
-  background: #f3f6fa;
-  border-right: 1px solid var(--border);
+  background: var(--color-surface-muted);
+  border-right: 1px solid var(--color-border);
   display: flex;
   flex: 0 0 42px;
   flex-direction: column;
@@ -232,7 +232,7 @@ async function openPinnedFile(path: string) {
   background: transparent;
   border: 0;
   border-radius: 6px;
-  color: #5f6f86;
+  color: var(--color-text-muted);
   display: inline-flex;
   flex: 0 0 34px;
   height: 34px;
@@ -243,17 +243,17 @@ async function openPinnedFile(path: string) {
 }
 
 .activity-button:hover {
-  background: #e8edf5;
-  color: #1f2937;
+  background: var(--color-surface-hover);
+  color: var(--color-text);
 }
 
 .activity-button.active {
-  background: #ffffff;
-  color: #174ea6;
+  background: var(--color-surface);
+  color: var(--color-accent-hover);
 }
 
 .activity-button.active::before {
-  background: #1f6feb;
+  background: var(--color-accent);
   border-radius: 999px;
   content: "";
   height: 22px;
@@ -268,7 +268,7 @@ async function openPinnedFile(path: string) {
 }
 
 .workspace-buttons {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -314,7 +314,7 @@ async function openPinnedFile(path: string) {
 .workspace-button.workspace-notice-running::after,
 .workspace-button.workspace-notice-completed::after,
 .workspace-button.workspace-notice-failed::after {
-  border: 2px solid #f3f6fa;
+  border: 2px solid var(--color-surface-muted);
   border-radius: 999px;
   content: "";
   height: 9px;
@@ -325,23 +325,23 @@ async function openPinnedFile(path: string) {
 }
 
 .workspace-button.workspace-notice-running::after {
-  background: #2da44e;
+  background: var(--color-success);
 }
 
 .workspace-button.workspace-notice-completed::after {
-  background: #f0ad00;
+  background: var(--color-warning);
 }
 
 .workspace-button.workspace-notice-failed::after {
-  background: #d1242f;
+  background: var(--color-danger);
 }
 
 .workspace-button.workspace-switching::after {
   animation: workspace-spin 0.75s linear infinite;
   background: transparent;
-  border: 2px solid #c8d3e3;
+  border: 2px solid var(--color-border-strong);
   border-radius: 999px;
-  border-top-color: #1f6feb;
+  border-top-color: var(--color-accent);
   content: "";
   height: 15px;
   position: absolute;
@@ -349,7 +349,7 @@ async function openPinnedFile(path: string) {
 }
 
 .tool-panel {
-  background: #ffffff;
+  background: var(--color-surface);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -359,7 +359,7 @@ async function openPinnedFile(path: string) {
 
 .tool-sidebar:not(.panel-pinned) .tool-panel {
   bottom: 0;
-  box-shadow: 8px 0 24px rgb(15 23 42 / 0.16);
+  box-shadow: var(--shadow-popover);
   left: 42px;
   max-width: calc(88vw - 42px);
   position: absolute;
@@ -368,14 +368,14 @@ async function openPinnedFile(path: string) {
 }
 
 .tool-sidebar.panel-pinned .tool-panel {
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--color-border);
   flex: 1 1 auto;
 }
 
 .tool-panel-title {
   align-items: center;
-  border-bottom: 1px solid var(--border);
-  color: #1f2937;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
   display: flex;
   flex: 0 0 30px;
   font-size: 12px;
@@ -397,9 +397,9 @@ async function openPinnedFile(path: string) {
 .panel-title-button {
   align-items: center;
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border);
   border-radius: 4px;
-  color: #5f6f86;
+  color: var(--color-text-muted);
   display: inline-flex;
   flex: 0 0 22px;
   height: 22px;
@@ -409,8 +409,8 @@ async function openPinnedFile(path: string) {
 }
 
 .panel-title-button:hover {
-  background: #e8edf5;
-  color: #1f2937;
+  background: var(--color-surface-hover);
+  color: var(--color-text);
 }
 
 .panel-title-button .bi {
@@ -427,7 +427,7 @@ async function openPinnedFile(path: string) {
   .tool-sidebar.panel-pinned .tool-panel,
   .tool-sidebar:not(.panel-pinned) .tool-panel {
     bottom: 0;
-    box-shadow: 8px 0 24px rgb(15 23 42 / 0.16);
+    box-shadow: var(--shadow-popover);
     left: 42px;
     max-width: calc(100vw - 42px);
     position: absolute;

@@ -119,7 +119,7 @@ onUnmounted(() => {
 
 <style scoped>
 .local-preview-backdrop {
-  background: rgb(15 23 42 / 0.32);
+  background: var(--color-overlay);
   inset: var(--topbar-height) 0 0 0;
   padding: 28px;
   position: fixed;
@@ -127,10 +127,10 @@ onUnmounted(() => {
 }
 
 .local-preview-panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
-  box-shadow: 0 20px 60px rgb(15 23 42 / 0.26);
+  box-shadow: var(--shadow-popover);
   display: flex;
   flex-direction: column;
   height: min(86vh, 900px);
@@ -143,7 +143,7 @@ onUnmounted(() => {
 
 .local-preview-header {
   align-items: center;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
   display: flex;
   flex: 0 0 auto;
   gap: 10px;
@@ -152,7 +152,7 @@ onUnmounted(() => {
 }
 
 .local-preview-title {
-  color: #253044;
+  color: var(--color-text);
   flex: 1 1 auto;
   font-size: 12px;
   font-weight: 700;
@@ -191,7 +191,7 @@ onUnmounted(() => {
 
 .local-preview-state {
   align-items: center;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -202,7 +202,7 @@ onUnmounted(() => {
 }
 
 .local-preview-error {
-  color: #a33;
+  color: var(--color-danger);
 }
 
 @media (max-width: 767.98px) {

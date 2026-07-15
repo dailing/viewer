@@ -183,7 +183,7 @@ async function deleteEntry(entry: FileEntry) {
 }
 
 .sidebar-section {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
   padding: 10px;
 }
 
@@ -195,7 +195,7 @@ async function deleteEntry(entry: FileEntry) {
 }
 
 .files-panel.dragging {
-  box-shadow: inset 0 0 0 2px #2f6fdd;
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 .files-header {
@@ -221,7 +221,7 @@ async function deleteEntry(entry: FileEntry) {
 }
 
 .section-title {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
@@ -231,7 +231,7 @@ async function deleteEntry(entry: FileEntry) {
 
 .current-path {
   align-items: center;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   display: flex;
   font-size: 12px;
   gap: 7px;
@@ -249,10 +249,10 @@ async function deleteEntry(entry: FileEntry) {
 
 .drop-target {
   align-items: center;
-  background: #eaf2ff;
-  border: 1px dashed #2f6fdd;
+  background: var(--color-accent-soft);
+  border: 1px dashed var(--color-accent);
   border-radius: 6px;
-  color: #174ea6;
+  color: var(--color-accent-hover);
   display: flex;
   font-size: 12px;
   gap: 7px;
@@ -262,10 +262,10 @@ async function deleteEntry(entry: FileEntry) {
 }
 
 .upload-error {
-  background: #fff1f0;
-  border: 1px solid #ffc9c2;
+  background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--color-danger) 38%, var(--color-border));
   border-radius: 6px;
-  color: #8a1f14;
+  color: var(--color-danger);
   font-size: 12px;
   line-height: 1.35;
   margin-bottom: 6px;
@@ -289,12 +289,12 @@ async function deleteEntry(entry: FileEntry) {
 }
 
 .sidebar-row:hover {
-  background: #eef3f8;
+  background: var(--color-surface-hover);
 }
 
 .sidebar-row.active {
-  border-color: #2f6fdd;
-  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .parent-row {

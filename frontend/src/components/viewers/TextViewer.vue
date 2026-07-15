@@ -308,14 +308,14 @@ onUnmounted(() => {
 }
 
 .text-editor-preview {
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--color-border);
   min-width: 0;
 }
 
 .text-editor-actions {
   align-items: center;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
   display: flex;
   flex: 0 0 auto;
   gap: 8px;
@@ -330,7 +330,7 @@ onUnmounted(() => {
 }
 
 .text-error {
-  color: #a33;
+  color: var(--color-danger);
   padding: 14px;
 }
 
@@ -342,7 +342,7 @@ onUnmounted(() => {
 
   .text-editor-preview {
     border-left: 0;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--color-border);
   }
 }
 </style>

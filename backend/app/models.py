@@ -43,8 +43,8 @@ class TextLineWindow(BaseModel):
 
 
 class AppearanceConfig(BaseModel):
-    navbar_size: int = 26
-    color_theme: Literal["light", "dark"] = "light"
+    color_theme: Literal["system", "light", "dark"] = "system"
+    density: Literal["compact", "comfortable"] = "compact"
 
 
 class MarkdownElementStyle(BaseModel):
@@ -82,6 +82,7 @@ class MarkdownTheme(BaseModel):
 
 class MarkdownConfig(BaseModel):
     active_theme: str = "Default"
+    follow_app_theme: bool = True
     themes: list[MarkdownTheme] = Field(default_factory=lambda: [MarkdownTheme()])
 
 

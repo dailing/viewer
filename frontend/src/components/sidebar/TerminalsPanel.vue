@@ -91,7 +91,7 @@ async function closeTerminal(id: string) {
 }
 
 .sidebar-section {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
   padding: 10px;
 }
 
@@ -103,7 +103,7 @@ async function closeTerminal(id: string) {
 }
 
 .section-title {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
@@ -120,7 +120,7 @@ async function closeTerminal(id: string) {
 }
 
 .empty-panel {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
   padding: 4px 6px;
 }
@@ -141,28 +141,28 @@ async function closeTerminal(id: string) {
 }
 
 .sidebar-row:hover {
-  background: #eef3f8;
+  background: var(--color-surface-hover);
 }
 
 .sidebar-row.active {
-  border-color: #2f6fdd;
-  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .sidebar-row.voice-pending {
-  background: #fff6d7;
+  background: color-mix(in srgb, var(--color-warning) 10%, var(--color-surface));
 }
 
 .sidebar-row.voice-pending:hover {
-  background: #ffedb0;
+  background: color-mix(in srgb, var(--color-warning) 20%, var(--color-surface));
 }
 
 .sidebar-row.voice-ready {
-  background: #fff0b8;
+  background: color-mix(in srgb, var(--color-warning) 24%, var(--color-surface));
 }
 
 .sidebar-row.voice-ready:hover {
-  background: #ffe48a;
+  background: color-mix(in srgb, var(--color-warning) 34%, var(--color-surface));
 }
 
 .sidebar-row-main {
@@ -194,9 +194,9 @@ async function closeTerminal(id: string) {
 }
 
 .state-pill {
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border);
   border-radius: 999px;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   flex: 0 0 auto;
   font-size: 10px;
   line-height: 1;
@@ -204,12 +204,12 @@ async function closeTerminal(id: string) {
 }
 
 .state-pill.running {
-  border-color: #9fc5a8;
-  color: #146c43;
+  border-color: color-mix(in srgb, var(--color-success) 40%, var(--color-border));
+  color: var(--color-success);
 }
 
 .state-pill.failed {
-  border-color: #e8c1c1;
-  color: #a33;
+  border-color: color-mix(in srgb, var(--color-danger) 38%, var(--color-border));
+  color: var(--color-danger);
 }
 </style>

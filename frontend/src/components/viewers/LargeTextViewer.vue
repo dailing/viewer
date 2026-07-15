@@ -233,9 +233,9 @@ onUnmounted(() => {
 }
 
 .large-text-gutter {
-  background: color-mix(in srgb, var(--syntax-background) 88%, var(--text-muted));
-  border-right: 1px solid var(--border);
-  color: var(--text-muted);
+  background: color-mix(in srgb, var(--syntax-background) 88%, var(--color-text-muted));
+  border-right: 1px solid var(--color-border);
+  color: var(--color-text-muted);
   padding: 0 8px;
   position: sticky;
   left: 0;
@@ -249,10 +249,10 @@ onUnmounted(() => {
 }
 
 .large-text-loading {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: 6px;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
   padding: 4px 8px;
   position: absolute;
@@ -261,7 +261,7 @@ onUnmounted(() => {
 }
 
 .large-text-error {
-  color: #a33;
+  color: var(--color-danger);
   padding: 14px;
 }
 </style>

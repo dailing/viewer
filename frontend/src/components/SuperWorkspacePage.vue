@@ -351,7 +351,7 @@ function startSidebarResize(event: PointerEvent) {
 }
 
 .sidebar-resizer:hover {
-  background: rgb(47 111 221 / 0.18);
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .workspace-wrap {
@@ -362,10 +362,10 @@ function startSidebarResize(event: PointerEvent) {
 }
 
 .super-error {
-  background: #fff5f5;
-  border: 1px solid #f1c7c7;
+  background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, var(--color-border));
   border-radius: 6px;
-  color: #9f1c1c;
+  color: var(--color-danger);
   font-size: 12px;
   left: 16px;
   max-width: min(520px, calc(100% - 32px));

@@ -77,7 +77,7 @@ function startDrag(event: PointerEvent) {
 }
 
 .split-resizer::before {
-  background: var(--border);
+  background: var(--color-border);
   content: "";
   inset: 0 3px;
   position: absolute;
@@ -98,7 +98,7 @@ function startDrag(event: PointerEvent) {
 }
 
 .split-resizer:hover::before {
-  background: #4f6f96;
+  background: var(--color-border-strong);
 }
 
 @media (max-width: 767.98px) {

@@ -5,7 +5,10 @@ import { DARK_MARKDOWN_THEME, DEFAULT_CODEX_CONFIG, DEFAULT_DISPATCH_PROFILES, D
 import { useUsersStore } from "../stores/users";
 import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, VoiceConfig } from "../types/files";
 
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{
+  close: [];
+  preview: [appearance: AppearanceConfig, markdown: MarkdownConfig];
+}>();
 const files = useFilesStore();
 const users = useUsersStore();
 const saving = ref(false);
@@ -16,6 +19,19 @@ const serverNotice = ref("");
 const dispatchPromptVariables = ["{{message}}", "{{history}}", "{{roles_json}}", "{{roles_table}}"];
 const openSections = reactive({ server: true, users: true, appearance: true, codex: true, superWorkspace: true, voice: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
+const settingsSearch = ref("");
+const activeSettingSection = ref("appearance");
+const settingSections = [
+  { id: "appearance", label: "Appearance", icon: "bi-palette" },
+  { id: "users", label: "User Profile", icon: "bi-person" },
+  { id: "codex", label: "Codex Models", icon: "bi-cpu" },
+  { id: "superWorkspace", label: "Super Workspace", icon: "bi-diagram-3" },
+  { id: "voice", label: "Voice", icon: "bi-mic" },
+  { id: "markdown", label: "Markdown", icon: "bi-markdown" },
+  { id: "syntax", label: "Syntax", icon: "bi-code-slash" },
+  { id: "server", label: "Server", icon: "bi-hdd-rack" },
+  { id: "json", label: "Advanced", icon: "bi-braces" },
+] as const;
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
   codex: clone(files.codexConfig) as CodexConfig,
@@ -58,6 +74,12 @@ const fullConfigJson = computed(() =>
     2,
   ),
 );
+const initialConfigJson = ref(fullConfigJson.value);
+const hasUnsavedChanges = computed(() => fullConfigJson.value !== initialConfigJson.value);
+const filteredSettingSections = computed(() => {
+  const query = settingsSearch.value.trim().toLowerCase();
+  return query ? settingSections.filter((section) => section.label.toLowerCase().includes(query)) : settingSections;
+});
 
 watch(
   () => files.appearance,
@@ -105,6 +127,12 @@ watch(fullConfigJson, (value) => {
   if (!openSections.json) jsonDraft.value = value;
 });
 
+watch(
+  [() => draft.appearance, () => draft.markdown],
+  () => emit("preview", clone(draft.appearance), clone(draft.markdown)),
+  { deep: true, immediate: true },
+);
+
 jsonDraft.value = fullConfigJson.value;
 
 function clone<T>(value: T): T {
@@ -114,6 +142,12 @@ function clone<T>(value: T): T {
 function sectionToggle(section: keyof typeof openSections) {
   openSections[section] = !openSections[section];
   if (section === "json" && openSections.json) jsonDraft.value = fullConfigJson.value;
+}
+
+function selectSettingSection(section: string) {
+  activeSettingSection.value = section;
+  if (section in openSections) openSections[section as keyof typeof openSections] = true;
+  if (section === "json") jsonDraft.value = fullConfigJson.value;
 }
 
 function sleep(ms: number) {
@@ -381,15 +415,33 @@ async function applyJson() {
       <header class="config-header">
         <div>
           <h2>Configuration</h2>
-          <span>~/.view/config.json</span>
+          <span>{{ hasUnsavedChanges ? "Unsaved changes" : "~/.view/config.json" }}</span>
         </div>
         <button class="btn btn-outline-secondary icon-button" type="button" title="Close configuration" @click="emit('close')">
           <i class="bi bi-x"></i>
         </button>
       </header>
 
-      <div class="config-content">
-        <section class="config-section">
+      <div class="config-main">
+        <aside class="config-nav" aria-label="Settings categories">
+          <label class="config-search">
+            <i class="bi bi-search"></i>
+            <input v-model="settingsSearch" type="search" placeholder="Search settings" aria-label="Search settings" />
+          </label>
+          <button
+            v-for="section in filteredSettingSections"
+            :key="section.id"
+            class="config-nav-item"
+            :class="{ active: activeSettingSection === section.id }"
+            type="button"
+            @click="selectSettingSection(section.id)"
+          >
+            <i class="bi" :class="section.icon"></i>
+            <span>{{ section.label }}</span>
+          </button>
+        </aside>
+        <div class="config-content">
+        <section v-show="activeSettingSection === 'server'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('server')">
             <i class="bi" :class="openSections.server ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>Server</span>
@@ -416,7 +468,7 @@ async function applyJson() {
           </div>
         </section>
 
-        <section class="config-section">
+        <section v-show="activeSettingSection === 'users'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('users')">
             <i class="bi" :class="openSections.users ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>User Profile</span>
@@ -433,7 +485,7 @@ async function applyJson() {
           </div>
         </section>
 
-        <section class="config-section">
+        <section v-show="activeSettingSection === 'appearance'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('appearance')">
             <i class="bi" :class="openSections.appearance ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>Appearance</span>
@@ -442,19 +494,22 @@ async function applyJson() {
             <label class="compact-field">
               <span>Theme</span>
               <select v-model="draft.appearance.color_theme" class="form-select form-select-sm">
+                <option value="system">System</option>
                 <option value="light">Light</option>
                 <option value="dark">Dark</option>
               </select>
             </label>
-            <label class="setting-row">
-              <span>Nav bar size</span>
-              <input v-model.number="draft.appearance.navbar_size" class="form-range" type="range" min="22" max="56" step="1" />
-              <input v-model.number="draft.appearance.navbar_size" class="form-control form-control-sm number-input" type="number" min="22" max="56" />
+            <label class="compact-field">
+              <span>Density</span>
+              <select v-model="draft.appearance.density" class="form-select form-select-sm">
+                <option value="compact">Compact</option>
+                <option value="comfortable">Comfortable</option>
+              </select>
             </label>
           </div>
         </section>
 
-        <section class="config-section">
+        <section v-show="activeSettingSection === 'codex'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('codex')">
             <i class="bi" :class="openSections.codex ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>Codex Models</span>
@@ -491,7 +546,7 @@ async function applyJson() {
           </div>
         </section>
 
-        <section class="config-section">
+        <section v-show="activeSettingSection === 'superWorkspace'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('superWorkspace')">
             <i class="bi" :class="openSections.superWorkspace ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>Super Workspace</span>
@@ -634,7 +689,7 @@ async function applyJson() {
           </div>
         </section>
 
-        <section class="config-section">
+        <section v-show="activeSettingSection === 'voice'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('voice')">
             <i class="bi" :class="openSections.voice ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>Voice</span>
@@ -698,14 +753,18 @@ async function applyJson() {
           </div>
         </section>
 
-        <section class="config-section">
+        <section v-show="activeSettingSection === 'markdown'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('markdown')">
             <i class="bi" :class="openSections.markdown ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>Markdown</span>
           </button>
           <div v-if="openSections.markdown" class="section-body">
+            <label class="compact-field checkbox-field">
+              <span>Follow app theme</span>
+              <input v-model="draft.markdown.follow_app_theme" class="form-check-input" type="checkbox" />
+            </label>
             <div class="theme-toolbar">
-              <select v-model="draft.markdown.active_theme" class="form-select form-select-sm">
+              <select v-model="draft.markdown.active_theme" class="form-select form-select-sm" :disabled="draft.markdown.follow_app_theme">
                 <option v-for="theme in draft.markdown.themes" :key="theme.name" :value="theme.name">{{ theme.name }}</option>
               </select>
               <button class="btn btn-sm btn-outline-secondary" type="button" @click="duplicateTheme">
@@ -777,7 +836,7 @@ async function applyJson() {
           </div>
         </section>
 
-        <section class="config-section">
+        <section v-show="activeSettingSection === 'syntax'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('syntax')">
             <i class="bi" :class="openSections.syntax ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>Syntax Highlighting</span>
@@ -790,7 +849,7 @@ async function applyJson() {
           </div>
         </section>
 
-        <section class="config-section">
+        <section v-show="activeSettingSection === 'json'" class="config-section">
           <button class="section-toggle" type="button" @click="sectionToggle('json')">
             <i class="bi" :class="openSections.json ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
             <span>JSON</span>
@@ -800,12 +859,14 @@ async function applyJson() {
             <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyJson">Apply JSON</button>
           </div>
         </section>
+        </div>
       </div>
 
       <footer class="config-footer">
         <span v-if="error" class="config-error">{{ error }}</span>
         <button class="btn btn-sm btn-outline-secondary" type="button" @click="emit('close')">Cancel</button>
-        <button class="btn btn-sm btn-primary" type="button" :disabled="saving" @click="save">
+        <span v-if="hasUnsavedChanges && !error" class="config-dirty"><i class="bi bi-circle-fill"></i> Unsaved</span>
+        <button class="btn btn-sm btn-primary" type="button" :disabled="saving || !hasUnsavedChanges" @click="save">
           <span v-if="saving" class="spinner-border spinner-border-sm"></span>
           <span v-else>Save</span>
         </button>
@@ -816,28 +877,28 @@ async function applyJson() {
 
 <style scoped>
 .config-page {
-  background: #f6f8fb;
+  background: var(--color-canvas);
   height: 100%;
   overflow: hidden;
 }
 
 .config-panel {
-  background: #ffffff;
-  border-left: 1px solid var(--border);
-  border-right: 1px solid var(--border);
+  background: var(--color-surface);
+  border-left: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   height: 100%;
   margin: 0 auto;
   max-width: 100vw;
   min-width: 0;
-  width: min(960px, 100vw);
+  width: min(1080px, 100vw);
 }
 
 .config-header,
 .config-footer {
   align-items: center;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
   display: flex;
   flex: 0 0 auto;
   gap: 10px;
@@ -847,7 +908,7 @@ async function applyJson() {
 
 .config-footer {
   border-bottom: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-border);
   justify-content: flex-end;
 }
 
@@ -860,13 +921,78 @@ async function applyJson() {
 .config-header span,
 .config-error,
 .server-notice {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
 }
 
 .config-error {
-  color: #a33;
+  color: var(--color-danger);
   margin-right: auto;
+}
+
+.config-main {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: 210px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.config-nav {
+  background: var(--color-surface-muted);
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 8px;
+}
+
+.config-search {
+  align-items: center;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  display: flex;
+  gap: 7px;
+  margin-bottom: 7px;
+  padding: 5px 8px;
+}
+
+.config-search input {
+  background: transparent;
+  border: 0;
+  color: var(--color-text);
+  font-size: 12px;
+  min-width: 0;
+  outline: 0;
+  width: 100%;
+}
+
+.config-nav-item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  display: flex;
+  font-size: 12px;
+  gap: 9px;
+  min-height: 34px;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.config-nav-item:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.config-nav-item.active {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-hover);
+  font-weight: 700;
 }
 
 .config-content {
@@ -876,24 +1002,26 @@ async function applyJson() {
 }
 
 .config-section {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
+  min-height: 100%;
 }
 
 .section-toggle {
   align-items: center;
-  background: #ffffff;
+  background: var(--color-surface);
   border: 0;
   display: flex;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 700;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 18px 18px 10px;
   text-align: left;
   width: 100%;
 }
 
 .section-body {
-  padding: 0 12px 12px;
+  max-width: 780px;
+  padding: 0 18px 24px;
 }
 
 .server-actions,
@@ -966,7 +1094,7 @@ async function applyJson() {
 }
 
 .template-footer span {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
 }
 
@@ -995,8 +1123,9 @@ async function applyJson() {
 }
 
 .style-card {
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-raised);
+  border-radius: var(--radius-md);
   display: grid;
   gap: 6px;
   grid-template-columns: 62px 1fr;
@@ -1011,7 +1140,7 @@ async function applyJson() {
 .color-grid span,
 .compact-field span,
 .setting-row span {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
 }
 
@@ -1035,8 +1164,10 @@ async function applyJson() {
 }
 
 .json-editor {
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border-radius: var(--radius-sm);
   display: block;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
@@ -1045,6 +1176,19 @@ async function applyJson() {
   padding: 10px;
   resize: vertical;
   width: 100%;
+}
+
+.config-dirty {
+  align-items: center;
+  color: var(--color-warning);
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+  margin-right: auto;
+}
+
+.config-dirty .bi {
+  font-size: 7px;
 }
 
 .model-list-field {
@@ -1058,6 +1202,27 @@ async function applyJson() {
 }
 
 @media (max-width: 640px) {
+  .config-main {
+    grid-template-columns: 1fr;
+  }
+
+  .config-nav {
+    border-bottom: 1px solid var(--color-border);
+    border-right: 0;
+    flex-direction: row;
+    min-height: auto;
+    overflow-x: auto;
+    padding: 7px;
+  }
+
+  .config-search {
+    display: none;
+  }
+
+  .config-nav-item {
+    flex: 0 0 auto;
+  }
+
   .config-header,
   .config-footer {
     gap: 8px;

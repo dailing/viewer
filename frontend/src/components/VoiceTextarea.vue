@@ -123,7 +123,7 @@ defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
 }
 
 .voice-textarea textarea {
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border);
   border-radius: 6px;
   font-size: 14px;
   line-height: 1.35;
@@ -141,8 +141,8 @@ defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
 }
 
 .voice-textarea textarea:focus {
-  border-color: #1f6feb;
-  box-shadow: 0 0 0 2px rgb(31 111 235 / 0.16);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 16%, transparent);
 }
 
 .voice-textarea-actions {
@@ -166,7 +166,7 @@ defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
 }
 
 .voice-textarea-actions-trailing {
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--color-border);
   flex: 0 0 auto;
   margin-left: auto;
   padding-left: 10px;

@@ -70,13 +70,13 @@ function isActive(entry: FileEntry): boolean {
 }
 
 .tree-row:hover {
-  background: #eef3f8;
+  background: var(--color-surface-hover);
 }
 
 .tree-row.active {
-  border-color: #2f6fdd;
-  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
-  color: #0b5ed7;
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
+  color: var(--color-accent-hover);
   font-weight: 600;
 }
 
@@ -107,7 +107,7 @@ function isActive(entry: FileEntry): boolean {
 }
 
 .delete-button {
-  color: #b42318;
+  color: var(--color-danger);
   flex: 0 0 auto;
   height: 24px;
   opacity: 0.72;
@@ -115,7 +115,7 @@ function isActive(entry: FileEntry): boolean {
 }
 
 .delete-button:hover {
-  background: #fff1f0;
-  color: #8a1f14;
+  background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
+  color: var(--color-danger);
 }
 </style>

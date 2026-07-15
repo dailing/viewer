@@ -107,7 +107,7 @@ function statusTitle(file: GitDiffFile) {
 }
 
 .sidebar-section {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
   padding: 10px;
 }
 
@@ -119,7 +119,7 @@ function statusTitle(file: GitDiffFile) {
 }
 
 .section-title {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
@@ -129,7 +129,7 @@ function statusTitle(file: GitDiffFile) {
 
 .current-path {
   align-items: center;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   display: flex;
   font-size: 12px;
   gap: 7px;
@@ -155,13 +155,13 @@ function statusTitle(file: GitDiffFile) {
 
 .empty-panel,
 .panel-error {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
   padding: 4px 6px;
 }
 
 .panel-error {
-  color: #a33;
+  color: var(--color-danger);
 }
 
 .change-row {
@@ -181,21 +181,21 @@ function statusTitle(file: GitDiffFile) {
 }
 
 .change-row:hover {
-  background: #eef3f8;
+  background: var(--color-surface-hover);
 }
 
 .change-row.active {
-  border-color: #2f6fdd;
-  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .change-row.disabled {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   cursor: not-allowed;
 }
 
 .status-code {
-  color: #5f6f86;
+  color: var(--color-text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10px;
 }
@@ -215,17 +215,17 @@ function statusTitle(file: GitDiffFile) {
 }
 
 .added {
-  color: #116329;
+  color: var(--color-success);
 }
 
 .deleted {
-  color: #a40e26;
+  color: var(--color-danger);
 }
 
 .binary-pill {
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border);
   border-radius: 999px;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 10px;
   padding: 1px 5px;
 }

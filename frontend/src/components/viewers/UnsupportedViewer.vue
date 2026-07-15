@@ -23,7 +23,7 @@ function formatSize(size: number): string {
 <style scoped>
 .unsupported {
   align-items: center;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -38,7 +38,7 @@ function formatSize(size: number): string {
 }
 
 h2 {
-  color: #172033;
+  color: var(--color-text);
   font-size: 18px;
   margin: 0;
   max-width: 100%;

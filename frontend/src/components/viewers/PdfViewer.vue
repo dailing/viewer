@@ -309,7 +309,7 @@ onUnmounted(() => {
 
 <style scoped>
 .pdf-shell {
-  background: #eef2f7;
+  background: var(--color-surface-muted);
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -318,8 +318,8 @@ onUnmounted(() => {
 
 .pdf-toolbar {
   align-items: center;
-  background: #ffffff;
-  border-bottom: 1px solid var(--border);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
   display: flex;
   flex: 0 0 auto;
   gap: 10px;
@@ -329,7 +329,7 @@ onUnmounted(() => {
 }
 
 .pdf-status {
-  color: #526070;
+  color: var(--color-text-muted);
   font-size: 12px;
   font-weight: 700;
   min-width: 0;
@@ -350,7 +350,7 @@ onUnmounted(() => {
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
-  color: #42526a;
+  color: var(--color-text-muted);
   display: inline-flex;
   height: 28px;
   justify-content: center;
@@ -361,13 +361,13 @@ onUnmounted(() => {
 }
 
 .pdf-button:hover {
-  background: #eef2f7;
-  border-color: #d7dee8;
-  color: #172033;
+  background: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
 }
 
 .pdf-zoom {
-  color: #526070;
+  color: var(--color-text-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   min-width: 38px;
@@ -383,7 +383,7 @@ onUnmounted(() => {
 
 .pdf-loading {
   align-items: center;
-  color: #526070;
+  color: var(--color-text-muted);
   display: flex;
   gap: 8px;
   justify-content: center;
@@ -392,7 +392,7 @@ onUnmounted(() => {
 
 .pdf-error {
   align-items: center;
-  color: #a33;
+  color: var(--color-danger);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -421,7 +421,7 @@ onUnmounted(() => {
 
 .pdf-page-placeholder {
   align-items: center;
-  color: #8a96a8;
+  color: var(--color-text-subtle);
   display: flex;
   font-size: 12px;
   inset: 0;

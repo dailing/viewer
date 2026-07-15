@@ -199,7 +199,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .sidebar-section {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
   padding: 10px;
 }
 
@@ -211,7 +211,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .section-title {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
@@ -228,7 +228,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .empty-panel {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
   padding: 4px 6px;
 }
@@ -254,12 +254,12 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .sidebar-row:hover {
-  background: #eef3f8;
+  background: var(--color-surface-hover);
 }
 
 .sidebar-row.active {
-  border-color: #2f6fdd;
-  box-shadow: inset 0 0 0 1px rgb(47 111 221 / 0.18);
+  border-color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .sidebar-row-main {
@@ -299,10 +299,10 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 
 .dispatch-role-chip {
   align-items: center;
-  background: #f6f8fb;
-  border: 1px solid var(--border);
+  background: var(--color-canvas);
+  border: 1px solid var(--color-border);
   border-radius: 6px;
-  color: #3f4d63;
+  color: var(--color-text-muted);
   display: inline-flex;
   font-size: 11px;
   gap: 5px;
@@ -313,9 +313,9 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .dispatch-role-chip.selected {
-  background: #eaf2ff;
-  border-color: #2f6fdd;
-  color: #174ea6;
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent-hover);
 }
 
 .dispatch-role-chip span {
@@ -326,13 +326,13 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .dispatch-role-empty {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
   padding: 2px 0;
 }
 
 .chat-settings {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-border);
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -344,7 +344,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 
 .settings-title {
   align-items: center;
-  color: #1f2937;
+  color: var(--color-text);
   display: flex;
   font-size: 12px;
   font-weight: 700;
@@ -357,7 +357,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .field > span {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
   font-weight: 700;
 }
@@ -377,7 +377,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .setting-check span {
-  color: #1f2937;
+  color: var(--color-text);
   font-size: 12px;
 }
 

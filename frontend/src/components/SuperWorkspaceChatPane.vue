@@ -962,7 +962,8 @@ async function scrollThreadToBottom() {
             >
               <summary :aria-label="dispatchPickerTitle" @click="handleDispatchPickerSummaryClick">
                 <i class="bi" :class="selectedDispatchRoles.length ? 'bi-people-fill' : 'bi-diagram-3'"></i>
-                <span v-if="selectedDispatchRoles.length" class="super-dispatch-count">{{ selectedDispatchRoles.length }}</span>
+                <span class="super-dispatch-label">{{ selectedDispatchRoles.length ? selectedDispatchRoles.map((role) => role.name).join(', ') : 'Auto' }}</span>
+                <span v-if="selectedDispatchRoles.length > 1" class="super-dispatch-count">{{ selectedDispatchRoles.length }}</span>
               </summary>
               <div class="super-dispatch-menu" @mousedown.prevent>
                 <button class="super-dispatch-menu-auto" type="button" :class="{ selected: !selectedDispatchRoles.length }" @click="dispatchSelection.clearChat(resolvedChatId)">
@@ -1009,7 +1010,7 @@ async function scrollThreadToBottom() {
 
 <style scoped>
 .super-chat-pane {
-  background: #f6f7f9;
+  background: var(--color-canvas);
   container-type: size;
   display: flex;
   flex-direction: column;
@@ -1053,7 +1054,7 @@ async function scrollThreadToBottom() {
 }
 
 .super-message-top {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
   justify-content: space-between;
 }
@@ -1067,9 +1068,9 @@ async function scrollThreadToBottom() {
 
 .super-user-message,
 .super-role-response {
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   min-width: 0;
   overflow-x: hidden;
   padding: 12px 14px;
@@ -1078,12 +1079,15 @@ async function scrollThreadToBottom() {
 }
 
 .super-user-message {
-  background: #eaf3ff;
-  border-color: #cfe0f7;
+  background: var(--color-accent-soft);
+  border-color: color-mix(in srgb, var(--color-accent) 28%, var(--color-border));
+  margin-left: auto;
+  max-width: min(88%, 960px);
 }
 
 .super-role-response {
-  background: #ffffff;
+  background: var(--color-surface);
+  border-color: color-mix(in srgb, var(--color-border) 72%, transparent);
   overflow-x: auto;
   overflow-y: visible;
 }
@@ -1164,7 +1168,7 @@ async function scrollThreadToBottom() {
 
 .super-response-body :deep(th),
 .super-response-body :deep(td) {
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border);
   padding: 6px 8px;
 }
 
@@ -1174,7 +1178,7 @@ async function scrollThreadToBottom() {
 }
 
 .super-response-role-label {
-  color: var(--text);
+  color: var(--color-text);
   display: inline-flex;
   gap: 5px;
   align-items: center;
@@ -1183,19 +1187,19 @@ async function scrollThreadToBottom() {
 }
 
 .super-meta-chip {
-  background: #f4f6f8;
-  border: 1px solid var(--border);
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
   border-radius: 999px;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
   line-height: 1.2;
   padding: 2px 6px;
 }
 
 .super-target-status {
-  border: 1px solid #d7dde6;
+  border: 1px solid var(--color-border);
   border-radius: 999px;
-  color: #526071;
+  color: var(--color-text-muted);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.2;
@@ -1204,25 +1208,25 @@ async function scrollThreadToBottom() {
 
 .super-target-status.status-running,
 .super-target-status.status-claimed {
-  background: #fff7d7;
-  border-color: #e9d27a;
-  color: #7a5c00;
+  background: color-mix(in srgb, var(--color-warning) 13%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--color-warning) 42%, var(--color-border));
+  color: var(--color-warning);
 }
 
 .super-target-status.status-queued {
-  background: #eef3ff;
-  border-color: #c9d8f5;
-  color: #34507a;
+  background: var(--color-accent-soft);
+  border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border));
+  color: var(--color-accent-hover);
 }
 
 .super-target-status.status-failed {
-  background: #fff0f0;
-  border-color: #efb8b8;
-  color: #9a2d2d;
+  background: color-mix(in srgb, var(--color-danger) 12%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--color-danger) 40%, var(--color-border));
+  color: var(--color-danger);
 }
 
 .super-response-placeholder {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
   font-style: italic;
   line-height: 1.45;
@@ -1231,13 +1235,13 @@ async function scrollThreadToBottom() {
 .super-cite-button,
 .super-route-chip,
 .super-composer-mention {
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border);
   border-radius: 7px;
 }
 
 .super-cite-button {
-  background: #fff;
-  color: var(--text-muted);
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
   display: inline-flex;
   gap: 4px;
   padding: 3px 7px;
@@ -1251,22 +1255,26 @@ async function scrollThreadToBottom() {
   margin: 0;
   padding: 0;
   position: relative;
-  width: 32px;
+  max-width: min(220px, 34vw);
+  width: auto;
 }
 
 .super-dispatch-picker summary {
   align-items: center;
-  background: #ffffff;
-  border: 1px solid var(--border);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
   border-radius: 6px;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   cursor: pointer;
   display: inline-flex;
   height: 32px;
+  gap: 5px;
   justify-content: center;
   list-style: none;
   position: relative;
-  width: 32px;
+  max-width: min(220px, 34vw);
+  min-width: 58px;
+  padding: 0 8px;
 }
 
 .super-dispatch-picker summary::-webkit-details-marker {
@@ -1274,12 +1282,12 @@ async function scrollThreadToBottom() {
 }
 
 .super-dispatch-picker.active {
-  color: #174ea6;
+  color: var(--color-accent-hover);
 }
 
 .super-dispatch-picker.active summary {
-  background: #e8f1ff;
-  border-color: #8db7ff;
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
 }
 
 .super-dispatch-picker .bi {
@@ -1290,9 +1298,9 @@ async function scrollThreadToBottom() {
 
 .super-dispatch-count {
   align-items: center;
-  background: #174ea6;
+  background: var(--color-accent);
   border-radius: 999px;
-  color: #ffffff;
+  color: var(--color-text-inverse);
   display: inline-flex;
   font-size: 9px;
   height: 14px;
@@ -1305,11 +1313,19 @@ async function scrollThreadToBottom() {
   top: -5px;
 }
 
+.super-dispatch-label {
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .super-dispatch-menu {
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 14px 30px rgb(15 23 42 / 0.18);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
   bottom: calc(100% + 6px);
   display: grid;
   gap: 3px;
@@ -1328,7 +1344,7 @@ async function scrollThreadToBottom() {
   background: transparent;
   border: 0;
   border-radius: 6px;
-  color: var(--text);
+  color: var(--color-text);
   display: flex;
   font-size: 12px;
   gap: 7px;
@@ -1340,16 +1356,16 @@ async function scrollThreadToBottom() {
 
 .super-dispatch-menu-auto:hover,
 .super-dispatch-option:hover {
-  background: #f2f6fb;
+  background: var(--color-surface-hover);
 }
 
 .super-dispatch-menu-auto.selected {
-  color: #174ea6;
+  color: var(--color-accent-hover);
   font-weight: 700;
 }
 
 .super-dispatch-option.selected {
-  color: #174ea6;
+  color: var(--color-accent-hover);
   font-weight: 700;
 }
 
@@ -1365,22 +1381,22 @@ async function scrollThreadToBottom() {
 }
 
 .super-dispatch-empty {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
   padding: 7px;
 }
 
 .super-route-chip {
-  background: #eef3ff;
-  color: #34507a;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-hover);
   display: inline-flex;
   gap: 4px;
   padding: 2px 6px;
 }
 
 .super-citation-chip {
-  background: #f3f2ff;
-  color: #3b4375;
+  background: var(--color-reference-soft);
+  color: var(--color-reference);
   display: inline-flex;
   gap: 4px;
   padding: 2px 6px;
@@ -1393,9 +1409,10 @@ async function scrollThreadToBottom() {
 }
 
 .super-citation-preview {
-  background: #111827;
-  border-radius: 8px;
-  color: #ffffff;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
   left: 0;
   max-width: 340px;
   min-width: 220px;
@@ -1405,7 +1422,7 @@ async function scrollThreadToBottom() {
   right: auto;
   top: 0;
   z-index: 30;
-  box-shadow: 0 10px 24px rgb(15 23 42 / 0.22);
+  box-shadow: var(--shadow-popover);
 }
 
 .super-citation-preview-title {
@@ -1424,17 +1441,17 @@ async function scrollThreadToBottom() {
 }
 
 .super-citation-highlight {
-  outline: 2px solid #93c5fd;
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
 
 .super-route-pending {
-  color: #6b5b15;
+  color: var(--color-warning);
 }
 
 .super-route-error,
 .super-error {
-  color: #a33;
+  color: var(--color-danger);
 }
 
 .super-composer {
@@ -1454,9 +1471,10 @@ async function scrollThreadToBottom() {
 }
 
 .super-composer-card {
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 -8px 28px color-mix(in srgb, var(--color-canvas) 70%, transparent);
   padding: 8px;
   width: 100%;
 }
@@ -1467,11 +1485,11 @@ async function scrollThreadToBottom() {
 
 .super-composer-toggle {
   align-items: center;
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 10px 24px rgb(15 23 42 / 0.16);
-  color: #34507a;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  color: var(--color-accent-hover);
   display: inline-flex;
   height: 42px;
   justify-content: center;
@@ -1480,9 +1498,9 @@ async function scrollThreadToBottom() {
 }
 
 .super-composer-toggle:hover {
-  background: #edf4ff;
-  border-color: #b7cef6;
-  color: #174ea6;
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent-hover);
 }
 
 .super-composer-toggle .bi {
@@ -1491,9 +1509,9 @@ async function scrollThreadToBottom() {
 }
 
 .super-pin-button.active {
-  background: #e8f1ff;
-  border-color: #8db7ff;
-  color: #174ea6;
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent-hover);
 }
 
 .super-composer-mentions {
@@ -1501,25 +1519,25 @@ async function scrollThreadToBottom() {
 }
 
 .super-composer-mention {
-  background: #f8fafc;
-  color: var(--text);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
   gap: 5px;
   padding: 3px 7px;
 }
 
 .super-composer-mention.selected {
-  background: #fff1f1;
-  border-color: #d99;
+  background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--color-danger) 45%, var(--color-border));
 }
 
 .super-composer-mention-token {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   font-size: 11px;
 }
 
 .super-empty-thread,
 .super-history-boundary {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   padding: 24px;
   text-align: center;
 }

@@ -143,15 +143,15 @@ onUnmounted(() => {
 .csv-table {
   border-collapse: separate;
   border-spacing: 0;
-  color: var(--text);
+  color: var(--color-text);
   font-size: 12px;
   min-width: 100%;
 }
 
 .csv-table th,
 .csv-table td {
-  border-bottom: 1px solid var(--border);
-  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
   max-width: 420px;
   min-width: 90px;
   padding: 6px 8px;
@@ -162,7 +162,7 @@ onUnmounted(() => {
 }
 
 .csv-table th {
-  background: #f5f7fa;
+  background: var(--color-surface-muted);
   font-weight: 700;
   position: sticky;
   top: 0;
@@ -171,11 +171,11 @@ onUnmounted(() => {
 
 .csv-table th:first-child,
 .csv-table td:first-child {
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--color-border);
 }
 
 .csv-table tbody tr:hover td {
-  background: #f8fbff;
+  background: var(--color-surface-selected);
 }
 
 .csv-raw {
@@ -191,11 +191,11 @@ onUnmounted(() => {
 
 .csv-empty,
 .csv-error {
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   padding: 14px;
 }
 
 .csv-error {
-  color: #a33;
+  color: var(--color-danger);
 }
 </style>

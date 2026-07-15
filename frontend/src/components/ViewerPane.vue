@@ -106,8 +106,8 @@ onUnmounted(() => {
 
 <style scoped>
 .viewer-pane {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   display: flex;
   flex-direction: column;
@@ -118,8 +118,8 @@ onUnmounted(() => {
 }
 
 .viewer-pane.active {
-  border-color: #4f6f96;
-  box-shadow: 0 0 0 2px rgb(79 111 150 / 0.18);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .pane-body {
@@ -142,7 +142,7 @@ onUnmounted(() => {
 
 .empty-state {
   align-items: center;
-  color: var(--text-muted);
+  color: var(--color-text-muted);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -157,6 +157,6 @@ onUnmounted(() => {
 }
 
 .error-state {
-  color: #a33;
+  color: var(--color-danger);
 }
 </style>

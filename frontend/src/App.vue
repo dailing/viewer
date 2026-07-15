@@ -10,6 +10,7 @@ import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
 import { useUsersStore } from "./stores/users";
 import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
+import type { AppearanceConfig, MarkdownConfig } from "./types/files";
 import type { SplitDirection } from "./types/layout";
 
 const files = useFilesStore();
@@ -23,12 +24,27 @@ const appReady = ref(false);
 const selectingUser = ref(false);
 const activePage = ref<"super" | "settings">("super");
 const mobileToolbarOpen = ref(false);
+const systemPrefersDark = ref(false);
+const previewAppearance = ref<AppearanceConfig | null>(null);
+const previewMarkdown = ref<MarkdownConfig | null>(null);
+let colorSchemeQuery: MediaQueryList | null = null;
+
+const effectiveAppearance = computed(() => previewAppearance.value ?? files.appearance);
+const effectiveMarkdown = computed(() => previewMarkdown.value ?? files.markdown);
+const effectiveColorTheme = computed<"light" | "dark">(() => {
+  if (effectiveAppearance.value.color_theme === "system") return systemPrefersDark.value ? "dark" : "light";
+  return effectiveAppearance.value.color_theme;
+});
+const effectiveDensity = computed(() => effectiveAppearance.value.density ?? "compact");
 
 const appStyle = computed(() => {
-  const navbarSize = files.appearance.navbar_size;
+  const navbarSize = effectiveDensity.value === "comfortable" ? 34 : 28;
   const buttonSize = Math.max(18, navbarSize - 4);
   const iconSize = Math.max(11, Math.round(navbarSize * 0.48));
-  const theme = files.appearance.color_theme === "dark" && files.markdown.active_theme === DEFAULT_MARKDOWN_THEME.name ? DARK_MARKDOWN_THEME : files.activeMarkdownTheme;
+  const configuredTheme = effectiveMarkdown.value.themes.find((item) => item.name === effectiveMarkdown.value.active_theme) ?? DEFAULT_MARKDOWN_THEME;
+  const theme = effectiveMarkdown.value.follow_app_theme
+    ? effectiveColorTheme.value === "dark" ? DARK_MARKDOWN_THEME : DEFAULT_MARKDOWN_THEME
+    : configuredTheme;
   return {
     "--topbar-height": `${navbarSize}px`,
     "--nav-button-size": `${buttonSize}px`,
@@ -138,6 +154,9 @@ let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 
 onMounted(async () => {
+  colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  systemPrefersDark.value = colorSchemeQuery.matches;
+  colorSchemeQuery.addEventListener("change", handleColorSchemeChange);
   await users.load();
   if (users.needsSelection) {
     selectingUser.value = true;
@@ -218,9 +237,25 @@ function runGlobalInputSend() {
 }
 
 onUnmounted(() => {
+  colorSchemeQuery?.removeEventListener("change", handleColorSchemeChange);
   source?.close();
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
 });
+
+function handleColorSchemeChange(event: MediaQueryListEvent) {
+  systemPrefersDark.value = event.matches;
+}
+
+function previewConfig(appearance: AppearanceConfig, markdown: MarkdownConfig) {
+  previewAppearance.value = JSON.parse(JSON.stringify(appearance)) as AppearanceConfig;
+  previewMarkdown.value = JSON.parse(JSON.stringify(markdown)) as MarkdownConfig;
+}
+
+function closeSettings() {
+  previewAppearance.value = null;
+  previewMarkdown.value = null;
+  activePage.value = "super";
+}
 </script>
 
 <template>
@@ -239,7 +274,7 @@ onUnmounted(() => {
       </button>
     </section>
   </div>
-  <div v-else-if="appReady" class="app-shell" :data-theme="files.appearance.color_theme" :style="appStyle">
+  <div v-else-if="appReady" class="app-shell" :data-theme="effectiveColorTheme" :data-density="effectiveDensity" :style="appStyle">
     <header class="topbar">
       <button
         class="btn btn-outline-secondary icon-button"
@@ -366,7 +401,7 @@ onUnmounted(() => {
     </header>
 
     <main v-if="activePage === 'settings'" class="top-level-page">
-      <ConfigPanel @close="activePage = 'super'" />
+      <ConfigPanel @close="closeSettings" @preview="previewConfig" />
     </main>
     <main v-else class="top-level-page">
       <SuperWorkspacePage />

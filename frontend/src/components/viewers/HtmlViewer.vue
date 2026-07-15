@@ -208,7 +208,7 @@ onUnmounted(() => {
 }
 
 .html-error {
-  color: #a33;
+  color: var(--color-danger);
   padding: 14px;
 }
 </style>

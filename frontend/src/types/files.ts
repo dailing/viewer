@@ -40,8 +40,8 @@ export interface TextLineWindow {
 }
 
 export interface AppearanceConfig {
-  navbar_size: number;
-  color_theme: "light" | "dark";
+  color_theme: "system" | "light" | "dark";
+  density: "compact" | "comfortable";
 }
 
 export interface MarkdownElementStyle {
@@ -79,6 +79,7 @@ export interface MarkdownTheme {
 
 export interface MarkdownConfig {
   active_theme: string;
+  follow_app_theme: boolean;
   themes: MarkdownTheme[];
 }
 

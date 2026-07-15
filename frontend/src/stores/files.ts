@@ -57,12 +57,13 @@ export const DARK_MARKDOWN_THEME: MarkdownTheme = {
 const BUILTIN_MARKDOWN_THEMES = [DEFAULT_MARKDOWN_THEME, DARK_MARKDOWN_THEME];
 
 export const DEFAULT_APPEARANCE_CONFIG: AppearanceConfig = {
-  navbar_size: 26,
-  color_theme: "light",
+  color_theme: "system",
+  density: "compact",
 };
 
 export const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
   active_theme: DEFAULT_MARKDOWN_THEME.name,
+  follow_app_theme: true,
   themes: BUILTIN_MARKDOWN_THEMES,
 };
 
@@ -136,10 +137,11 @@ function cloneTheme(theme: MarkdownTheme): MarkdownTheme {
 }
 
 function normalizeAppearance(config?: Partial<AppearanceConfig>): AppearanceConfig {
-  const size = Number(config?.navbar_size ?? DEFAULT_APPEARANCE_CONFIG.navbar_size);
+  const colorTheme = config?.color_theme;
+  const density = config?.density;
   return {
-    navbar_size: Math.min(56, Math.max(22, Number.isFinite(size) ? size : DEFAULT_APPEARANCE_CONFIG.navbar_size)),
-    color_theme: config?.color_theme === "dark" ? "dark" : "light",
+    color_theme: colorTheme === "light" || colorTheme === "dark" ? colorTheme : "system",
+    density: density === "comfortable" ? "comfortable" : "compact",
   };
 }
 
@@ -176,7 +178,11 @@ function normalizeMarkdown(config?: Partial<MarkdownConfig>): MarkdownConfig {
     if (!themes.some((theme) => theme.name === builtin.name)) themes.push(cloneTheme(builtin));
   }
   const activeTheme = themes.some((theme) => theme.name === config?.active_theme) ? config?.active_theme : themes[0].name;
-  return { active_theme: activeTheme ?? DEFAULT_MARKDOWN_THEME.name, themes };
+  return {
+    active_theme: activeTheme ?? DEFAULT_MARKDOWN_THEME.name,
+    follow_app_theme: config?.follow_app_theme ?? true,
+    themes,
+  };
 }
 
 function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {

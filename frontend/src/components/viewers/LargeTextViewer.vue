@@ -142,11 +142,6 @@ function saveBeforePaneNavigate(event: Event) {
   }
 }
 
-function saveBeforeWorkspaceSwitch() {
-  saveCurrentScroll();
-  skipUnmountSave = true;
-}
-
 watch(
   () => [props.path, props.version] as const,
   async ([newPath], [oldPath, oldVersion]) => {
@@ -163,7 +158,6 @@ watch(
 onMounted(() => {
   window.addEventListener("beforeunload", saveCurrentScroll);
   window.addEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
-  window.addEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
   registerToolbar();
   void initialLoad();
 });
@@ -173,7 +167,6 @@ onUnmounted(() => {
   toolbar.clearPaneToolbar(props.paneId);
   window.removeEventListener("beforeunload", saveCurrentScroll);
   window.removeEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
-  window.removeEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
 });
 </script>
 

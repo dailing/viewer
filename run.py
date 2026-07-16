@@ -200,11 +200,8 @@ def main() -> None:
     if args.build_frontend:
         build_frontend(args.debug)
 
-    display_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
-    base_url = f"http://{display_host}:{args.port}"
     print(f"Serving {root} at http://{args.host}:{args.port}")
     print(f"Log file: {log_file}")
-    print(f"Log URL:  {base_url}/api/debug/log")
     uvicorn.run(
         "app.main:app",
         host=args.host,

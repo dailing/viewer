@@ -220,8 +220,8 @@ class SuperAgentDriver:
         common = data.common_prompt.strip()
         role_prompt = (
             f'You are a persistent Super Workspace role named "{role.name}".\n\n'
-            "Fixed role rules:\n"
-            f"{role.description or '(No role rules were provided.)'}\n\n"
+            "Role prompt:\n"
+            f"{role.prompt or '(No role-specific prompt was provided.)'}\n\n"
             "Operate as this role only. Prefer work that matches the fixed rules, files, topic, and responsibilities above. "
             "If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks."
         )
@@ -250,10 +250,12 @@ class SuperAgentDriver:
 
     @staticmethod
     def parse_ref(session_ref: str, fallback_provider: str) -> tuple[str, str]:
+        if not session_ref:
+            return fallback_provider, ""
         if ":" in session_ref:
             provider, session_id = session_ref.split(":", 1)
             return provider or fallback_provider, session_id
-        return fallback_provider, session_ref
+        raise ValueError("session_ref must use provider:session_id format")
 
 
 class CodexSuperDriver(SuperAgentDriver):
@@ -390,7 +392,6 @@ class SuperWorkspaceRuntime:
                     SuperDispatchRequest(
                         message=query,
                         role_ids=[role.id for role in scoped_roles],
-                        workspace_id=run.workspace_id,
                         chat_id=run.chat_id,
                         before_message_id=run.message_id,
                     ),
@@ -656,6 +657,7 @@ class SuperWorkspaceRuntime:
         raw.setdefault("name", task.role_name)
         raw.setdefault("provider", task.provider or "codex")
         raw.setdefault("description", "")
+        raw.setdefault("prompt", "")
         raw.setdefault("cwd", "")
         raw.setdefault("model", None)
         raw.setdefault("session_policy", "reuse")
@@ -687,7 +689,6 @@ class SuperWorkspaceRuntime:
                     await manager.terminate(session_id)
                 return self._summarize_run_status(run_id, user_id)
             snapshot = manager.snapshot(session_id, "focus")
-            queue = snapshot.get("queue") if isinstance(snapshot.get("queue"), list) else []
             status = str(snapshot.get("status") or "")
             usage = driver.usage_from_snapshot(snapshot)
             if driver_run_id:
@@ -717,7 +718,7 @@ class SuperWorkspaceRuntime:
                     "updated_at": time.time(),
                 }
             )
-            if status not in {"running"} and not queue:
+            if status != "running":
                 if status == "failed":
                     if driver_run_id and self._driver_has_final_response(run_id, user_id, driver_run_id):
                         agent_history_store.update_driver_run_status(driver_run_id, "completed", **usage)
@@ -774,10 +775,7 @@ class SuperWorkspaceRuntime:
         cited_messages = agent_history_store.cited_messages_for_query(run.user_id, run.message_id)
         cited_section = self._citation_prompt_section(cited_messages)
         query_heading = "The below is the query for this time:" if cited_section else "User message:"
-        if ":workspace:" in run.workspace_id:
-            intro = "The traditional workspace routed this message to this pane's agent session. Continue the existing session context and answer the user request."
-        else:
-            intro = "Super Workspace routed this message to your role. Apply your fixed role rules and answer only for your own responsibility."
+        intro = "Super Workspace routed this message to your role. Apply your fixed role rules and answer only for your own responsibility."
         return (
             f"{intro}\n\n"
             f"Routing metadata:\n{json.dumps(lineage, ensure_ascii=False)}\n\n"

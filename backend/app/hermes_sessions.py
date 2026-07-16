@@ -11,15 +11,14 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from fastapi import HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import HTTPException
 from loguru import logger
 
 from .config import settings
 from .files import resolve_served_directory
 from .models import AgentEventType
 from .storage import HERMES_LOG_DIR
-from .users import default_user_id, normalize_user_id
-from .ws_clients import WebSocketClient, add_client, enqueue, remove_client
+from .users import normalize_user_id
 
 HERMES_BASE_URL = os.environ.get("VIEWER_HERMES_BASE_URL", "http://127.0.0.1:8642").rstrip("/")
 HERMES_API_KEY = os.environ.get("VIEWER_HERMES_API_KEY", "").strip()
@@ -65,14 +64,11 @@ class HermesSession:
     exit_code: int | None = None
     prompts: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
-    queue: list[dict] = field(default_factory=list)
     pending_approvals: list[dict] = field(default_factory=list)
-    clients: dict[WebSocket, WebSocketClient] = field(default_factory=dict)
     run_task: asyncio.Task | None = None
     approval_stream_task: asyncio.Task | None = None
     meta_path: Path | None = None
     total_tokens: int | None = None
-    suppress_queue_drain: bool = False
     local_approval_responses: int = 0
     lineage: dict[str, str | None] = field(default_factory=dict)
 
@@ -93,7 +89,6 @@ class HermesSession:
             "exit_code": self.exit_code,
             "event_count": len(self.events),
             "total_tokens": self.total_tokens,
-            "queue": self.queue,
             "pending_approvals": self.pending_approvals,
         }
 
@@ -118,9 +113,10 @@ class HermesSessionManager:
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 session_id = str(meta["id"])
+                user_id = str(meta["user_id"])
                 session = HermesSession(
                     id=session_id,
-                    user_id=meta.get("user_id") or default_user_id(),
+                    user_id=user_id,
                     hermes_session_id=meta.get("hermes_session_id"),
                     hermes_run_id=meta.get("hermes_run_id"),
                     title=meta.get("title") or "Hermes session",
@@ -131,7 +127,6 @@ class HermesSessionManager:
                     status=meta.get("status", "exited"),
                     exit_code=meta.get("exit_code"),
                     prompts=list(meta.get("prompts") or []),
-                    queue=self._queue_from_meta(meta.get("queue")),
                     pending_approvals=self._approvals_from_meta(meta.get("pending_approvals")),
                     meta_path=meta_path,
                     lineage=meta.get("lineage") if isinstance(meta.get("lineage"), dict) else {},
@@ -141,30 +136,6 @@ class HermesSessionManager:
             except Exception:
                 logger.warning("Failed to load Hermes session metadata {}", meta_path)
         self._loaded = True
-
-    def _queue_from_meta(self, value: Any) -> list[dict]:
-        if not isinstance(value, list):
-            return []
-        queue: list[dict] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            prompt = item.get("prompt")
-            if not isinstance(prompt, str) or not prompt.strip():
-                continue
-            created_at = item.get("created_at")
-            updated_at = item.get("updated_at")
-            model = item.get("model")
-            queue.append(
-                {
-                    "id": str(item.get("id") or uuid.uuid4().hex),
-                    "prompt": prompt,
-                    "created_at": float(created_at) if isinstance(created_at, (int, float)) else time.time(),
-                    "updated_at": float(updated_at) if isinstance(updated_at, (int, float)) else time.time(),
-                    "model": model if isinstance(model, str) and model.strip() else None,
-                }
-            )
-        return queue
 
     def _approvals_from_meta(self, value: Any) -> list[dict]:
         if not isinstance(value, list):
@@ -210,7 +181,6 @@ class HermesSessionManager:
                 "status": session.status,
                 "exit_code": session.exit_code,
                 "prompts": session.prompts,
-                "queue": session.queue,
                 "pending_approvals": session.pending_approvals,
                 "lineage": session.lineage,
             },
@@ -479,18 +449,6 @@ class HermesSessionManager:
     def snapshot(self, session_id: str, detail: str | None = None) -> dict:
         return self._snapshot(self.get(session_id), detail)
 
-    def list(self, user_id: str | None = None) -> list[dict]:
-        self._ensure_loaded()
-        normalized_user_id = normalize_user_id(user_id)
-        for session in self.sessions.values():
-            if session.status == "running":
-                self._sync_db_events(session)
-        return sorted(
-            (session.summary() for session in self.sessions.values() if session.user_id == normalized_user_id),
-            key=lambda item: item["updated_at"],
-            reverse=True,
-        )
-
     def get(self, session_id: str) -> HermesSession:
         self._ensure_loaded()
         session = self.sessions.get(session_id)
@@ -554,84 +512,8 @@ class HermesSessionManager:
         session.exit_code = None
         session.updated_at = now
         self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
         session.run_task = asyncio.create_task(self._run(session, cleaned_prompt))
         return session.summary()
-
-    async def enqueue(self, session_id: str, prompt: str, model: str | None = None) -> dict:
-        session = self.get(session_id)
-        cleaned_prompt = prompt.strip()
-        if not cleaned_prompt:
-            raise HTTPException(status_code=400, detail="Prompt is required")
-        now = time.time()
-        session.queue.append(
-            {
-                "id": uuid.uuid4().hex,
-                "prompt": cleaned_prompt,
-                "created_at": now,
-                "updated_at": now,
-                "model": model.strip() if isinstance(model, str) and model.strip() else None,
-            }
-        )
-        session.updated_at = now
-        self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
-        if session.status != "running":
-            await self._start_next_queued(session)
-        return session.summary()
-
-    async def update_queue_item(self, session_id: str, item_id: str, prompt: str, model: str | None = None) -> dict:
-        session = self.get(session_id)
-        cleaned_prompt = prompt.strip()
-        if not cleaned_prompt:
-            raise HTTPException(status_code=400, detail="Prompt is required")
-        for item in session.queue:
-            if item.get("id") != item_id:
-                continue
-            item["prompt"] = cleaned_prompt
-            item["updated_at"] = time.time()
-            item["model"] = model.strip() if isinstance(model, str) and model.strip() else item.get("model")
-            session.updated_at = time.time()
-            self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
-            return session.summary()
-        raise HTTPException(status_code=404, detail="Queued message not found")
-
-    async def delete_queue_item(self, session_id: str, item_id: str) -> dict:
-        session = self.get(session_id)
-        original_count = len(session.queue)
-        session.queue = [item for item in session.queue if item.get("id") != item_id]
-        if len(session.queue) == original_count:
-            raise HTTPException(status_code=404, detail="Queued message not found")
-        session.updated_at = time.time()
-        self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
-        return session.summary()
-
-    async def _start_next_queued(self, session: HermesSession) -> bool:
-        if session.status == "running" or not session.queue:
-            return False
-        item = session.queue.pop(0)
-        prompt = str(item.get("prompt") or "").strip()
-        if not prompt:
-            self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
-            return await self._start_next_queued(session)
-        model = item.get("model")
-        if isinstance(model, str) and model.strip():
-            session.model = model.strip()
-        now = time.time()
-        session.prompts.append({"text": prompt, "created_at": now})
-        if not session.events:
-            session.title = self._title_for(prompt)
-        session.status = "running"
-        session.exit_code = None
-        session.updated_at = now
-        session.suppress_queue_drain = False
-        self._write_meta(session)
-        await self._broadcast(session, {"type": "snapshot", "session": self._snapshot(session, AGENT_DETAIL_FULL), "source": "hermes"})
-        session.run_task = asyncio.create_task(self._run(session, prompt))
-        return True
 
     def _request_json(self, method: str, path: str, payload: dict | None = None, timeout: float = 10.0) -> dict:
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -690,7 +572,6 @@ class HermesSessionManager:
                 self._sync_db_events(session)
                 session.updated_at = time.time()
                 self._write_meta(session)
-                await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
             else:
                 await self._monitor_run(session)
         except HTTPException as exc:
@@ -698,7 +579,6 @@ class HermesSessionManager:
             session.exit_code = exc.status_code
             session.updated_at = time.time()
             self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
             logger.warning("Hermes run failed session={} detail={}", session.id, exc.detail)
         except asyncio.CancelledError:
             raise
@@ -707,7 +587,6 @@ class HermesSessionManager:
             session.exit_code = 1
             session.updated_at = time.time()
             self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
             logger.exception("Hermes run failed session={}", session.id)
         finally:
             session.run_task = None
@@ -716,8 +595,6 @@ class HermesSessionManager:
                 with suppress(asyncio.CancelledError):
                     await session.approval_stream_task
                 session.approval_stream_task = None
-            if session.status != "running" and not session.suppress_queue_drain:
-                await self._start_next_queued(session)
 
     def _start_approval_stream(self, session: HermesSession, run_id: str) -> None:
         if session.approval_stream_task and not session.approval_stream_task.done():
@@ -762,7 +639,6 @@ class HermesSessionManager:
                 session.pending_approvals.append(approval)
             session.updated_at = time.time()
             self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
             return
         if event_name == "approval.responded":
             resolved = event.get("resolved")
@@ -774,7 +650,6 @@ class HermesSessionManager:
                 session.pending_approvals = session.pending_approvals[external_count:]
             session.updated_at = time.time()
             self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
 
     def _approval_from_event(self, session: HermesSession, event: dict) -> dict:
         run_id = event.get("run_id") if isinstance(event.get("run_id"), str) else session.hermes_run_id
@@ -799,9 +674,7 @@ class HermesSessionManager:
     async def _monitor_run(self, session: HermesSession) -> None:
         idle_polls = 0
         while session.status == "running":
-            new_events = self._sync_db_events(session)
-            for event in new_events:
-                await self._broadcast(session, {"type": "event", "event": event, "session": session.summary(), "source": "hermes"})
+            self._sync_db_events(session)
             if session.hermes_run_id:
                 status = await asyncio.to_thread(self._read_run_status, session.hermes_run_id)
                 if status in {"completed", "succeeded", "exited", "failed", "cancelled", "canceled"}:
@@ -817,7 +690,6 @@ class HermesSessionManager:
         self._sync_db_events(session)
         session.updated_at = time.time()
         self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
 
     def _read_run_status(self, run_id: str) -> str | None:
         try:
@@ -851,12 +723,10 @@ class HermesSessionManager:
             session.pending_approvals = [item for item in session.pending_approvals if item.get("id") != approval_id]
         session.updated_at = time.time()
         self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
         return {**session.summary(), "approval_response": response}
 
     async def terminate(self, session_id: str) -> dict:
         session = self.get(session_id)
-        session.suppress_queue_drain = True
         if session.hermes_run_id:
             with suppress(HTTPException):
                 await asyncio.to_thread(self._request_json, "POST", f"/v1/runs/{session.hermes_run_id}/stop", {}, 10.0)
@@ -874,58 +744,7 @@ class HermesSessionManager:
             session.status = "exited"
         session.updated_at = time.time()
         self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary(), "source": "hermes"})
         return session.summary()
-
-    async def connect(self, session_id: str, websocket: WebSocket, detail: str | None = None) -> None:
-        session = self.get(session_id)
-        normalized_detail = normalize_agent_detail(detail)
-        await websocket.accept()
-        client = add_client(session.clients, websocket)
-        setattr(client, "agent_detail", normalized_detail)
-        enqueue(client, {"type": "snapshot", "session": self._snapshot(session, normalized_detail), "source": "hermes"})
-        try:
-            while True:
-                await websocket.receive_text()
-        except WebSocketDisconnect:
-            pass
-        except RuntimeError as exc:
-            if "disconnect" not in str(exc).lower():
-                raise
-        finally:
-            await self._remove_client(session, client)
-
-    async def _broadcast(self, session: HermesSession, message: dict) -> None:
-        stale: list[WebSocketClient] = []
-        for client in list(session.clients.values()):
-            if client.writer_task and client.writer_task.done():
-                stale.append(client)
-                continue
-            detail = normalize_agent_detail(getattr(client, "agent_detail", AGENT_DETAIL_FOCUS))
-            next_message = self._message_for_detail(session, message, detail)
-            if next_message is None:
-                continue
-            if not enqueue(client, next_message):
-                stale.append(client)
-        for client in stale:
-            await remove_client(session.clients, client)
-
-    def _message_for_detail(self, session: HermesSession, message: dict, detail: str) -> dict | None:
-        message_type = message.get("type")
-        if message_type == "snapshot":
-            return {**message, "session": self._snapshot(session, detail)}
-        if message_type == "event":
-            event = message.get("event")
-            if not isinstance(event, dict):
-                return message
-            next_event = self._event_for_detail(event, detail)
-            if next_event is None:
-                return None
-            return {**message, "event": next_event}
-        return message
-
-    async def _remove_client(self, session: HermesSession, client: WebSocketClient) -> None:
-        await remove_client(session.clients, client)
 
     async def shutdown(self) -> None:
         for session in list(self.sessions.values()):

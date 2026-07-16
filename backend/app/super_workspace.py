@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, SuperWorkspaceList, agent_history_store
+from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, agent_history_store
 from .models import DEFAULT_DISPATCH_PROMPT_TEMPLATE
 
 
@@ -25,6 +25,7 @@ class SuperRole(BaseModel):
     id: str
     name: str
     description: str = ""
+    prompt: str = ""
     provider: str = "codex"
     cwd: str = ""
     model: str | None = None
@@ -36,6 +37,7 @@ class SuperRole(BaseModel):
 class SuperRoleCreate(BaseModel):
     name: str
     description: str = ""
+    prompt: str = ""
     provider: str = "codex"
     cwd: str = ""
     model: str | None = None
@@ -45,6 +47,7 @@ class SuperRoleCreate(BaseModel):
 class SuperRolePatch(BaseModel):
     name: str | None = None
     description: str | None = None
+    prompt: str | None = None
     provider: str | None = None
     cwd: str | None = None
     model: str | None = None
@@ -83,7 +86,6 @@ class SuperChatPatch(BaseModel):
 class SuperDispatchRequest(BaseModel):
     message: str
     role_ids: list[str] | None = None
-    workspace_id: str | None = None
     chat_id: str | None = None
     before_message_id: str | None = None
     history_word_budget: int | None = None
@@ -96,23 +98,14 @@ class SuperDispatchResponse(BaseModel):
 
 
 class SuperWorkspaceManager:
-    def list_workspaces(self, user_id: str | None = None) -> SuperWorkspaceList:
-        return agent_history_store.list_super_workspaces(user_id)
-
-    def activate_workspace(self, workspace_id: str, user_id: str | None = None) -> SuperWorkspaceList:
-        try:
-            return agent_history_store.activate_super_workspace(user_id, workspace_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Super Workspace not found") from exc
-
     def list_chats(self, user_id: str | None = None) -> SuperChatList:
         return agent_history_store.list_super_chats(user_id)
 
     def active_chat(self, user_id: str | None = None, chat_id: str | None = None) -> SuperChatSummary:
         try:
             if chat_id:
-                active_workspace = agent_history_store.active_super_workspace(user_id)
-                chats = agent_history_store.list_super_chats(user_id, active_workspace.id)
+                workspace = agent_history_store.super_workspace(user_id)
+                chats = agent_history_store.list_super_chats(user_id, workspace.id)
                 selected = next((chat for chat in chats.chats if chat.id == chat_id), None)
                 if selected is None:
                     raise KeyError(chat_id)
@@ -183,6 +176,7 @@ class SuperWorkspaceManager:
                     id=role.id,
                     name=role.name,
                     description=role.description,
+                    prompt=role.prompt,
                     provider=role.provider,
                     cwd=role.cwd,
                     model=role.model,
@@ -193,9 +187,6 @@ class SuperWorkspaceManager:
                 for role in roles
             ],
         )
-
-    def write(self, data: SuperWorkspaceData, user_id: str | None = None) -> SuperWorkspaceData:
-        return data
 
     def update(self, patch: SuperWorkspacePatch, user_id: str | None = None) -> SuperWorkspaceData:
         update = patch.model_dump(exclude_unset=True)
@@ -209,6 +200,7 @@ class SuperWorkspaceManager:
                 user_id,
                 name=(request.name or "New Role").strip()[:120] or "New Role",
                 description=request.description.strip(),
+                prompt=request.prompt.strip(),
                 provider=(request.provider or "codex").strip() or "codex",
                 cwd=request.cwd.strip(),
                 model=request.model.strip() if request.model else None,
@@ -239,6 +231,7 @@ class SuperWorkspaceManager:
                 {
                     "name": role.name,
                     "description": role.description,
+                    "prompt": role.prompt,
                     "provider": role.provider,
                     "cwd": role.cwd,
                     "model": role.model,
@@ -267,13 +260,12 @@ class SuperWorkspaceManager:
         history_context = ""
         if request.chat_id:
             dispatch_profile, super_workspace_config = self._dispatch_profile()
-            workspace_id = request.workspace_id or data.id
             history_budget = request.history_word_budget
             if history_budget is None:
                 history_budget = int(getattr(super_workspace_config, "dispatch_history_word_budget", DEFAULT_DISPATCH_WORD_BUDGET) or DEFAULT_DISPATCH_WORD_BUDGET)
             history_context = agent_history_store.visible_chat_history_context(
                 user_id or "",
-                workspace_id,
+                data.id,
                 request.chat_id,
                 request.before_message_id,
                 max(0, min(int(history_budget or 0), 8000)),
@@ -377,11 +369,8 @@ class SuperWorkspaceManager:
                 },
                 None,
             )
-        profiles = [
-            profile.model_dump() if hasattr(profile, "model_dump") else dict(profile)
-            for profile in getattr(config, "dispatch_profiles", [])
-        ]
-        active_id = str(getattr(config, "active_dispatch_profile_id", "") or "")
+        profiles = [profile.model_dump() for profile in config.dispatch_profiles]
+        active_id = config.active_dispatch_profile_id
         active = next((profile for profile in profiles if str(profile.get("id") or "") == active_id), None)
         if active is None and profiles:
             active = profiles[0]

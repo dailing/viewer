@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 from .config import settings
 from .models import UserProfile
-from .storage import CONFIG_PATH, migrate_legacy_state
+from .storage import CONFIG_PATH
 
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 INITIAL_USER_PROFILES = [
@@ -26,7 +26,6 @@ def normalize_user_id(value: str | None) -> str:
 
 
 def _raw_config() -> dict:
-    migrate_legacy_state()
     if not CONFIG_PATH.exists():
         return {}
     try:

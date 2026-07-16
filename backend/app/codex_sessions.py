@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import HTTPException
 from loguru import logger
 from watchfiles import awatch
 
@@ -22,8 +22,7 @@ from .files import resolve_served_directory
 from .models import AgentEventType
 from .process_registry import driver_process_name, process_slot_state
 from .storage import AGENT_HISTORY_DB_PATH, CODEX_LOG_DIR, CODEX_RUN_DIR
-from .users import default_user_id, normalize_user_id
-from .ws_clients import WebSocketClient, add_client, enqueue, remove_client
+from .users import normalize_user_id
 
 CODEX_ROLLOUT_ROOT = Path.home() / ".codex" / "sessions"
 PROXY_ENV_KEYS = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY")
@@ -89,8 +88,6 @@ class CodexSession:
     exit_code: int | None = None
     prompts: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
-    queue: list[dict] = field(default_factory=list)
-    clients: dict[WebSocket, WebSocketClient] = field(default_factory=dict)
     run_task: asyncio.Task | None = None
     process: subprocess.Popen | None = None
     pid: int | None = None
@@ -108,7 +105,6 @@ class CodexSession:
     model_context_window: int | None = None
     context_used_percent: float | None = None
     total_tokens: int | None = None
-    suppress_queue_drain: bool = False
 
     def summary(self) -> dict:
         return {
@@ -133,7 +129,6 @@ class CodexSession:
             "model_context_window": self.model_context_window,
             "context_used_percent": self.context_used_percent,
             "total_tokens": self.total_tokens,
-            "queue": self.queue,
             "pending_approvals": [],
         }
 
@@ -166,12 +161,13 @@ class CodexSessionManager:
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 session_id = str(meta["id"])
+                user_id = str(meta["user_id"])
                 _, log_path, stderr_path = self._paths(session_id)
                 rollout_path = self._rollout_path_from_meta(meta.get("rollout_path"))
                 status = meta.get("status", "exited")
                 session = CodexSession(
                     id=session_id,
-                    user_id=meta.get("user_id") or default_user_id(),
+                    user_id=user_id,
                     codex_session_id=meta.get("codex_session_id"),
                     title=meta.get("title") or "Codex session",
                     cwd=meta.get("cwd") or settings.root_resolved.as_posix(),
@@ -189,7 +185,6 @@ class CodexSessionManager:
                     run_stderr_path=self._path_from_meta(meta.get("run_stderr_path")),
                     run_prompt_path=self._path_from_meta(meta.get("run_prompt_path")),
                     prompts=list(meta.get("prompts") or []),
-                    queue=self._queue_from_meta(meta.get("queue")),
                     meta_path=meta_path,
                     log_path=log_path,
                     stderr_path=stderr_path,
@@ -201,30 +196,6 @@ class CodexSessionManager:
             except Exception:
                 logger.warning("Failed to load Codex session metadata {}", meta_path)
         self._loaded = True
-
-    def _queue_from_meta(self, value: Any) -> list[dict]:
-        if not isinstance(value, list):
-            return []
-        queue: list[dict] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            prompt = item.get("prompt")
-            if not isinstance(prompt, str) or not prompt.strip():
-                continue
-            created_at = item.get("created_at")
-            updated_at = item.get("updated_at")
-            model = item.get("model")
-            queue.append(
-                {
-                    "id": str(item.get("id") or uuid.uuid4().hex),
-                    "prompt": prompt,
-                    "created_at": float(created_at) if isinstance(created_at, (int, float)) else time.time(),
-                    "updated_at": float(updated_at) if isinstance(updated_at, (int, float)) else time.time(),
-                    "model": model if isinstance(model, str) and model.strip() else None,
-                }
-            )
-        return queue
 
     def _write_meta(self, session: CodexSession) -> None:
         if session.meta_path is None:
@@ -252,7 +223,6 @@ class CodexSessionManager:
                 "run_stderr_path": session.run_stderr_path.as_posix() if session.run_stderr_path else None,
                 "run_prompt_path": session.run_prompt_path.as_posix() if session.run_prompt_path else None,
                 "prompts": session.prompts,
-                "queue": session.queue,
             },
             indent=2,
         )
@@ -841,12 +811,11 @@ class CodexSessionManager:
             session.updated_at = max(session.updated_at, float(events[-1]["received_at"]))
         if new_events:
             logger.debug(
-                "Codex session {} synced {} new rollout event(s) total={} status={} clients={} path={}",
+                "Codex session {} synced {} new rollout event(s) total={} status={} path={}",
                 session.id,
                 len(new_events),
                 len(events),
                 session.status,
-                len(session.clients),
                 session.rollout_path,
             )
         self._write_meta(session)
@@ -857,17 +826,6 @@ class CodexSessionManager:
         if not first:
             return "Codex session"
         return first[:72]
-
-    def list(self, user_id: str | None = None) -> list[dict]:
-        self._ensure_loaded()
-        normalized_user_id = normalize_user_id(user_id)
-        for session in self.sessions.values():
-            self._sync_background_run_state(session)
-        return sorted(
-            (session.summary() for session in self.sessions.values() if session.user_id == normalized_user_id),
-            key=lambda item: item["updated_at"],
-            reverse=True,
-        )
 
     def get(self, session_id: str) -> CodexSession:
         self._ensure_loaded()
@@ -913,56 +871,6 @@ class CodexSessionManager:
             session.run_task = asyncio.create_task(self._run(session, cleaned_prompt, resume=False, lineage=lineage))
         return session.summary()
 
-    async def enqueue(self, session_id: str, prompt: str, model: str | None = None) -> dict:
-        session = self.get(session_id)
-        cleaned_prompt = prompt.strip()
-        if not cleaned_prompt:
-            raise HTTPException(status_code=400, detail="Prompt is required")
-        now = time.time()
-        item = {
-            "id": uuid.uuid4().hex,
-            "prompt": cleaned_prompt,
-            "created_at": now,
-            "updated_at": now,
-            "model": model.strip() if isinstance(model, str) and model.strip() else None,
-        }
-        session.queue.append(item)
-        session.updated_at = now
-        self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary()})
-        if not self._background_run_active(session):
-            await self._start_next_queued(session)
-        return session.summary()
-
-    async def update_queue_item(self, session_id: str, item_id: str, prompt: str, model: str | None = None) -> dict:
-        session = self.get(session_id)
-        cleaned_prompt = prompt.strip()
-        if not cleaned_prompt:
-            raise HTTPException(status_code=400, detail="Prompt is required")
-        for item in session.queue:
-            if item.get("id") != item_id:
-                continue
-            now = time.time()
-            item["prompt"] = cleaned_prompt
-            item["updated_at"] = now
-            item["model"] = model.strip() if isinstance(model, str) and model.strip() else item.get("model")
-            session.updated_at = now
-            self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary()})
-            return session.summary()
-        raise HTTPException(status_code=404, detail="Queued message not found")
-
-    async def delete_queue_item(self, session_id: str, item_id: str) -> dict:
-        session = self.get(session_id)
-        original_count = len(session.queue)
-        session.queue = [item for item in session.queue if item.get("id") != item_id]
-        if len(session.queue) == original_count:
-            raise HTTPException(status_code=404, detail="Queued message not found")
-        session.updated_at = time.time()
-        self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary()})
-        return session.summary()
-
     async def send(self, session_id: str, prompt: str, model: str | None = None, lineage: dict[str, str | None] | None = None) -> dict:
         session = self.get(session_id)
         if not prompt.strip():
@@ -981,35 +889,8 @@ class CodexSessionManager:
         self._prepare_new_background_run(session, now)
         session.updated_at = now
         self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary()})
         session.run_task = asyncio.create_task(self._run(session, prompt, resume=resume, lineage=lineage))
         return session.summary()
-
-    async def _start_next_queued(self, session: CodexSession) -> bool:
-        if session.status == "running" or self._background_run_active(session) or not session.queue:
-            return False
-        item = session.queue.pop(0)
-        prompt = str(item.get("prompt") or "").strip()
-        if not prompt:
-            self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary()})
-            return await self._start_next_queued(session)
-        model = item.get("model")
-        if isinstance(model, str) and model.strip():
-            session.model = model.strip()
-        now = time.time()
-        session.prompts.append({"text": prompt, "created_at": now})
-        if not session.codex_session_id:
-            session.title = self._title_for(prompt)
-        session.status = "running"
-        session.exit_code = None
-        self._prepare_new_background_run(session, now)
-        session.updated_at = now
-        session.suppress_queue_drain = False
-        self._write_meta(session)
-        await self._broadcast(session, {"type": "snapshot", "session": self._snapshot(session, AGENT_DETAIL_FULL)})
-        session.run_task = asyncio.create_task(self._run(session, prompt, resume=bool(session.codex_session_id)))
-        return True
 
     async def terminate(self, session_id: str) -> dict:
         session = self.get(session_id)
@@ -1033,33 +914,13 @@ class CodexSessionManager:
             session.run_task = None
         if session.status == "running":
             session.status = "exited"
-        session.suppress_queue_drain = True
         session.updated_at = time.time()
         self._write_meta(session)
-        await self._broadcast(session, {"type": "status", "session": session.summary()})
         return session.summary()
 
     async def resolve_approval(self, session_id: str, approval_id: str, choice: str, resolve_all: bool = False) -> dict:
         self.get(session_id)
         raise HTTPException(status_code=409, detail="Codex session has no pending approvals")
-
-    async def connect(self, session_id: str, websocket: WebSocket, detail: str | None = None) -> None:
-        session = self.get(session_id)
-        normalized_detail = normalize_agent_detail(detail)
-        await websocket.accept()
-        client = add_client(session.clients, websocket)
-        setattr(client, "agent_detail", normalized_detail)
-        enqueue(client, {"type": "snapshot", "session": self._snapshot(session, normalized_detail), "source": "codex"})
-        try:
-            while True:
-                await websocket.receive_text()
-        except WebSocketDisconnect:
-            pass
-        except RuntimeError as exc:
-            if "disconnect" not in str(exc).lower():
-                raise
-        finally:
-            await self._remove_client(session, client)
 
     async def shutdown(self) -> None:
         for session in list(self.sessions.values()):
@@ -1345,7 +1206,6 @@ class CodexSessionManager:
                 session.exit_code = -2
                 session.updated_at = time.time()
                 self._write_meta(session)
-                await self._broadcast(session, {"type": "status", "session": session.summary()})
                 return
             if slot["pid_file_exists"]:
                 logger.warning(
@@ -1371,7 +1231,6 @@ class CodexSessionManager:
             session.exit_code = 127
             session.updated_at = time.time()
             self._write_meta(session)
-            await self._broadcast(session, {"type": "status", "session": session.summary()})
             return
 
         session.process = process
@@ -1393,7 +1252,7 @@ class CodexSessionManager:
             while True:
                 previous_status = session.status
                 self._sync_background_run_state(session)
-                await self._sync_and_broadcast_rollout_events(session)
+                self._sync_rollout_events(session)
                 if session.process is not None:
                     exit_code = session.process.poll()
                     if exit_code is not None:
@@ -1408,7 +1267,6 @@ class CodexSessionManager:
                 if session.status != previous_status:
                     session.updated_at = time.time()
                     self._write_meta(session)
-                    await self._broadcast(session, {"type": "status", "session": session.summary()})
 
                 runner_alive = self._background_run_active(session)
                 if session.status != "running" and runner_alive:
@@ -1421,14 +1279,10 @@ class CodexSessionManager:
                             session.process.wait(timeout=0)
                     session.process = None
                     self._sync_background_run_state(session)
-                    await self._sync_and_broadcast_rollout_events(session)
+                    self._sync_rollout_events(session)
                     session.updated_at = time.time()
                     self._write_meta(session)
                     logger.info("Background Codex session {} finished status={} code={}", session.id, session.status, session.exit_code)
-                    await self._broadcast(session, {"type": "status", "session": session.summary()})
-                    if not session.suppress_queue_drain:
-                        await self._start_next_queued(session)
-                    session.suppress_queue_drain = False
                     return
 
                 await asyncio.sleep(0.5)
@@ -1458,7 +1312,7 @@ class CodexSessionManager:
                     session.rollout_path,
                 )
                 self._write_meta(session)
-            await self._sync_and_broadcast_rollout_events(session)
+            self._sync_rollout_events(session)
 
     async def _watch_rollout_events(self, session: CodexSession, process: asyncio.subprocess.Process, stop_event: asyncio.Event) -> None:
         while process.returncode is None and not stop_event.is_set():
@@ -1468,14 +1322,14 @@ class CodexSessionManager:
                     if session.rollout_path is not None:
                         logger.info("Codex session {} rollout watcher matched {}", session.id, session.rollout_path)
                         self._write_meta(session)
-                await self._sync_and_broadcast_rollout_events(session)
+                self._sync_rollout_events(session)
                 await asyncio.sleep(0.25)
                 continue
 
             path = session.rollout_path
             parent = path.parent
             logger.debug("Codex session {} watching rollout file {}", session.id, path)
-            await self._sync_and_broadcast_rollout_events(session)
+            self._sync_rollout_events(session)
             if not parent.exists():
                 logger.debug("Codex session {} rollout parent missing {}", session.id, parent)
                 await asyncio.sleep(0.5)
@@ -1493,35 +1347,10 @@ class CodexSessionManager:
                         break
                     if any(Path(raw_path) == path for _change, raw_path in changes):
                         logger.debug("Codex session {} detected rollout file change {}", session.id, path)
-                        await self._sync_and_broadcast_rollout_events(session)
+                        self._sync_rollout_events(session)
             except OSError:
                 logger.debug("Codex session {} rollout watcher failed for {}; retrying", session.id, path)
                 await asyncio.sleep(0.5)
-
-    async def _sync_and_broadcast_rollout_events(self, session: CodexSession) -> None:
-        new_events = self._sync_rollout_events(session)
-        assistant_response_texts = {
-            self._normalize_message_text(self._text_from_value(event["raw"]))
-            for event in session.events
-            if isinstance(event.get("raw"), dict) and self._is_assistant_response_item(event["raw"])
-        }
-        assistant_response_texts.discard("")
-        for event in new_events:
-            raw = event.get("raw")
-            event_type = self._raw_type(raw) if isinstance(raw, dict) else "event"
-            logger.debug(
-                "Codex session {} broadcasting rollout event index={} type={} status={} clients={}",
-                session.id,
-                event.get("index"),
-                event_type,
-                session.status,
-                len(session.clients),
-            )
-            compact = self._compact_event(event, assistant_response_texts)
-            if compact is not None:
-                await self._broadcast(session, {"type": "event", "event": compact, "session": session.summary()})
-            else:
-                await self._broadcast(session, {"type": "status", "session": session.summary()})
 
     async def _read_stderr(self, session: CodexSession, process: asyncio.subprocess.Process) -> None:
         assert process.stderr is not None
@@ -1532,46 +1361,5 @@ class CodexSessionManager:
             text = line.decode(encoding="utf-8", errors="replace")
             self._append_stderr(session, text)
             logger.debug("Codex session {} stderr: {}", session.id, text.rstrip())
-
-    async def _broadcast(self, session: CodexSession, message: dict) -> None:
-        message.setdefault("source", "codex")
-        stale: list[WebSocketClient] = []
-        for client in list(session.clients.values()):
-            if client.writer_task and client.writer_task.done():
-                stale.append(client)
-                continue
-            detail = normalize_agent_detail(getattr(client, "agent_detail", AGENT_DETAIL_FOCUS))
-            next_message = self._message_for_detail(session, message, detail)
-            if next_message is None:
-                continue
-            if not enqueue(client, next_message):
-                stale.append(client)
-        for client in stale:
-            await remove_client(session.clients, client)
-        logger.debug(
-            "Codex session {} websocket broadcast type={} clients={} stale_removed={}",
-            session.id,
-            message.get("type"),
-            len(session.clients),
-            len(stale),
-        )
-
-    def _message_for_detail(self, session: CodexSession, message: dict, detail: str) -> dict | None:
-        message_type = message.get("type")
-        if message_type == "snapshot":
-            return {**message, "session": self._snapshot(session, detail)}
-        if message_type == "event":
-            event = message.get("event")
-            if not isinstance(event, dict):
-                return message
-            next_event = self._event_for_detail(event, detail)
-            if next_event is None:
-                return None
-            return {**message, "event": next_event}
-        return message
-
-    async def _remove_client(self, session: CodexSession, client: WebSocketClient) -> None:
-        await remove_client(session.clients, client)
-
 
 codex_session_manager = CodexSessionManager()

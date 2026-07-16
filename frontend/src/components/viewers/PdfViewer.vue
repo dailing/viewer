@@ -89,11 +89,6 @@ function saveBeforePaneNavigate(event: Event): void {
   }
 }
 
-function saveBeforeWorkspaceSwitch(): void {
-  saveCurrentScroll();
-  skipUnmountSave = true;
-}
-
 function rotateClockwise(): void {
   rotation.value = (rotation.value + 90) % 360;
 }
@@ -230,7 +225,6 @@ onMounted(() => {
   }
   window.addEventListener("beforeunload", saveCurrentScroll);
   window.addEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
-  window.addEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
   void restoreScrollPosition(scrollTarget(), container.value);
   setupPageObserver();
 });
@@ -239,7 +233,6 @@ onUnmounted(() => {
   if (!skipUnmountSave) saveCurrentScroll();
   window.removeEventListener("beforeunload", saveCurrentScroll);
   window.removeEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
-  window.removeEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
   resizeObserver?.disconnect();
   pageObserver?.disconnect();
 });

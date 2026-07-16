@@ -47,24 +47,13 @@ class VoiceRuntimeConfig:
     upstream_ws: str
 
 
-LANGUAGE_ALIASES = {
-    "cn": "zh",
-    "zh-cn": "zh",
-    "zh_cn": "zh",
-    "chinese": "zh",
-    "eng": "en",
-    "english": "en",
-}
-
-
 def _normalize_language(value: str, fallback: str, *, allow_auto: bool) -> str:
     cleaned = (value or "").strip().lower()
     if not cleaned:
         return fallback
-    normalized = LANGUAGE_ALIASES.get(cleaned, cleaned)
-    if normalized == "auto" and not allow_auto:
+    if cleaned == "auto" and not allow_auto:
         return fallback
-    return normalized
+    return cleaned
 
 
 def _voice_config() -> VoiceRuntimeConfig:

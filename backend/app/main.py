@@ -35,9 +35,8 @@ from .files import (
 )
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
 from .hermes_sessions import hermes_session_manager
-from .logging import current_log_path, ensure_logging
-from .models import ClientLog, ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate
-from .profiling import api_profiler
+from .logging import ensure_logging
+from .models import ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate
 from .restart import request_restart, request_stop
 from .super_workspace import SuperChatCreate, SuperChatPatch, SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
 from .super_workspace_runtime import SuperWorkspaceMessageCreate, super_workspace_runtime
@@ -83,11 +82,9 @@ async def log_requests(request: Request, call_next):
         response = await call_next(request)
     except Exception:
         elapsed_ms = (time.perf_counter() - started) * 1000
-        api_profiler.record(request, 500, elapsed_ms)
         logger.exception("HTTP {} {} failed", request.method, request.url.path)
         raise
     elapsed_ms = (time.perf_counter() - started) * 1000
-    api_profiler.record(request, response.status_code, elapsed_ms)
     if response.status_code >= 400:
         logger.warning("HTTP {} {} -> {} {:.1f}ms", request.method, request.url.path, response.status_code, elapsed_ms)
     elif elapsed_ms >= SLOW_REQUEST_MS:
@@ -132,33 +129,6 @@ async def health() -> dict[str, str | int]:
     return {"status": "ok", "root": settings.root_resolved.as_posix(), "pid": os.getpid()}
 
 
-@app.get("/profile", response_class=HTMLResponse)
-async def profile_report() -> HTMLResponse:
-    return HTMLResponse(api_profiler.html_report())
-
-
-@app.get("/api/profile")
-async def profile_data():
-    return api_profiler.snapshot()
-
-
-@app.post("/api/profile/reset")
-async def reset_profile_data() -> dict[str, str]:
-    api_profiler.reset()
-    return {"status": "reset"}
-
-
-@app.get("/api/debug/info")
-async def debug_info() -> dict[str, str | bool | None]:
-    log_path = current_log_path()
-    return {
-        "debug": settings.debug,
-        "root": settings.root_resolved.as_posix(),
-        "frontend_dist": settings.frontend_dist_resolved.as_posix() if settings.frontend_dist_resolved else None,
-        "log_file": log_path.as_posix() if log_path else None,
-    }
-
-
 @app.get("/api/users")
 async def users():
     return [
@@ -171,14 +141,6 @@ async def users():
 async def current_user(user: str | None = None):
     profile = get_user_profile(user)
     return {**profile.model_dump(), "home_path": user_home_relative(profile.id), "cwd": user_home_path(profile.id).as_posix()}
-
-
-@app.get("/api/debug/log")
-async def debug_log():
-    log_path = current_log_path()
-    if not log_path or not log_path.exists():
-        return PlainTextResponse("No log file is configured.", status_code=404)
-    return PlainTextResponse(log_path.read_text(encoding="utf-8", errors="replace"))
 
 
 @app.post("/api/admin/restart", status_code=202)
@@ -195,23 +157,6 @@ async def stop_server():
         return request_stop()
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/debug/client-log")
-async def client_log(entry: ClientLog) -> dict[str, str]:
-    log = logger.bind(source=entry.source, url=entry.url, user_agent=entry.user_agent)
-    message = entry.message
-    if entry.stack:
-        message = f"{message}\n{entry.stack}"
-    if entry.level == "debug":
-        log.debug("Frontend: {}", message)
-    elif entry.level == "info":
-        log.info("Frontend: {}", message)
-    elif entry.level == "warning":
-        log.warning("Frontend: {}", message)
-    else:
-        log.error("Frontend: {}", message)
-    return {"status": "ok"}
 
 
 @app.get("/api/tree")
@@ -533,16 +478,6 @@ async def update_super_workspace(request: SuperWorkspacePatch, user: str | None 
     return super_workspace_manager.update(request, user)
 
 
-@app.get("/api/super-workspace/workspaces")
-async def super_workspaces(user: str | None = None):
-    return super_workspace_manager.list_workspaces(user)
-
-
-@app.post("/api/super-workspace/active-workspace/{workspace_id}")
-async def activate_super_workspace(workspace_id: str, user: str | None = None):
-    return super_workspace_manager.activate_workspace(workspace_id, user)
-
-
 @app.get("/api/super-workspace/chats")
 async def super_chats(user: str | None = None):
     return super_workspace_manager.list_chats(user)
@@ -592,11 +527,6 @@ async def super_workspace_runs(
     user: str | None = None,
 ):
     return agent_history_store.list_super_display_items(user, limit=limit, before=before, after=after, chat_id=chat_id)
-
-
-@app.post("/api/super-workspace/messages")
-async def create_super_workspace_message(request: SuperWorkspaceMessageCreate, user: str | None = None):
-    return await super_workspace_runtime.submit(request, user)
 
 
 @app.get("/api/super-workspace/events")

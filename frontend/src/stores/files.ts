@@ -205,12 +205,11 @@ function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
   };
 }
 
-function uniqueCleanList(items: string[] | undefined, fallback: string[], options?: { lowercase?: boolean; aliases?: boolean }) {
+function uniqueCleanList(items: string[] | undefined, fallback: string[], options?: { lowercase?: boolean }) {
   const seen = new Set<string>();
   const source = items?.length ? items : fallback;
   return source
     .map((item) => (options?.lowercase ? item.trim().toLowerCase() : item.trim()))
-    .map((item) => (options?.aliases && item === "cn" ? "zh" : item))
     .filter((item) => {
       if (!item || seen.has(item)) return false;
       seen.add(item);
@@ -220,13 +219,13 @@ function uniqueCleanList(items: string[] | undefined, fallback: string[], option
 
 function normalizeVoiceConfig(config?: Partial<VoiceConfig>): VoiceConfig {
   const models = uniqueCleanList(config?.available_models, DEFAULT_VOICE_CONFIG.available_models);
-  const languages = uniqueCleanList(config?.available_languages, DEFAULT_VOICE_CONFIG.available_languages, { lowercase: true, aliases: true });
-  const targetLanguages = uniqueCleanList(config?.available_target_languages, DEFAULT_VOICE_CONFIG.available_target_languages, { lowercase: true, aliases: true }).filter(
+  const languages = uniqueCleanList(config?.available_languages, DEFAULT_VOICE_CONFIG.available_languages, { lowercase: true });
+  const targetLanguages = uniqueCleanList(config?.available_target_languages, DEFAULT_VOICE_CONFIG.available_target_languages, { lowercase: true }).filter(
     (item) => item !== "auto",
   );
   const model = (config?.model?.trim() || models[0] || DEFAULT_VOICE_CONFIG.model);
-  const language = (config?.language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.language).replace(/^cn$/, "zh");
-  const targetLanguage = (config?.target_language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.target_language).replace(/^cn$/, "zh");
+  const language = config?.language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.language;
+  const targetLanguage = config?.target_language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.target_language;
   return {
     enabled: config?.enabled ?? DEFAULT_VOICE_CONFIG.enabled,
     language_model_refine: config?.language_model_refine ?? DEFAULT_VOICE_CONFIG.language_model_refine,

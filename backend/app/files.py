@@ -9,7 +9,7 @@ from loguru import logger
 
 from .config import settings
 from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, TextLineWindow
-from .storage import CONFIG_PATH, migrate_legacy_state
+from .storage import CONFIG_PATH
 from .users import default_user_id, list_user_profiles, user_home_path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
@@ -402,7 +402,6 @@ def write_text(path: str, content: str, user_id: str | None = None) -> FileMeta:
 
 
 def config_path() -> Path:
-    migrate_legacy_state()
     return CONFIG_PATH
 
 

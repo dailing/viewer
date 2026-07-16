@@ -10,7 +10,6 @@ import type {
   SuperRoleCreate,
   SuperRolePatch,
   SuperWorkspaceData,
-  SuperWorkspaceList,
 } from "../types/superWorkspace";
 import type { AgentProviderInfo } from "../types/agents";
 import type { GitDiffText, GitStatus } from "../types/git";
@@ -211,10 +210,6 @@ export async function listAgentProviders(): Promise<AgentProviderInfo[]> {
 
 export async function getSuperWorkspace(): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>("/api/super-workspace");
-}
-
-export async function listSuperWorkspaces(): Promise<SuperWorkspaceList> {
-  return request<SuperWorkspaceList>("/api/super-workspace/workspaces");
 }
 
 export async function listSuperChats(): Promise<SuperChatList> {

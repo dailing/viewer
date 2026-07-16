@@ -4,6 +4,7 @@ export type SuperRole = {
   id: string;
   name: string;
   description: string;
+  prompt: string;
   provider: AgentProvider;
   cwd: string;
   model?: string | null;
@@ -17,18 +18,6 @@ export type SuperWorkspaceData = {
   name: string;
   common_prompt: string;
   roles: SuperRole[];
-};
-
-export type SuperWorkspaceSummary = {
-  id: string;
-  name: string;
-  created_at: number;
-  updated_at: number;
-};
-
-export type SuperWorkspaceList = {
-  active_workspace_id: string;
-  workspaces: SuperWorkspaceSummary[];
 };
 
 export type SuperChatSummary = {
@@ -63,6 +52,7 @@ export type SuperChatPatch = Partial<SuperChatCreate>;
 export type SuperRoleCreate = {
   name: string;
   description?: string;
+  prompt?: string;
   provider?: AgentProvider;
   cwd?: string;
   model?: string | null;
@@ -97,11 +87,8 @@ export type AgentHistoryMessage = {
   patch_text?: string | null;
   raw: Record<string, unknown>;
   occurred_at: number;
-  query_id?: string | null;
   query_message_id?: string | null;
   driver_run_id?: string | null;
-  super_run_id?: string | null;
-  super_target_id?: string | null;
   parent_message_id?: string | null;
   sender_role_id?: string | null;
   recipient_role_id?: string | null;

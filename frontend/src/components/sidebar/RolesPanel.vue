@@ -76,8 +76,14 @@ function updateProvider(role: SuperRole) {
         </select>
       </label>
       <label class="field">
-        <span>Description / Rules</span>
-        <textarea v-model="selectedRole.description" class="form-control form-control-sm" rows="5"></textarea>
+        <span>Description</span>
+        <small>For dispatch: when to call this role, its capabilities, scope, and routing constraints.</small>
+        <textarea v-model="selectedRole.description" class="form-control form-control-sm" rows="4"></textarea>
+      </label>
+      <label class="field">
+        <span>Role Prompt</span>
+        <small>For the Agent: operating rules, workflow, standards, and style. Changing this starts a fresh session next time.</small>
+        <textarea v-model="selectedRole.prompt" class="form-control form-control-sm" rows="7"></textarea>
       </label>
       <label class="field">
         <span>Working Directory</span>
@@ -137,6 +143,12 @@ function updateProvider(role: SuperRole) {
   min-height: 0;
   overflow: auto;
   padding: 10px;
+}
+
+.field small {
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .editor-title {

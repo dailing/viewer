@@ -29,15 +29,9 @@ export function useReloadingScrollMemory(
     }
   }
 
-  function saveBeforeWorkspaceSwitch() {
-    saveCurrentScroll();
-    skipUnmountSave = true;
-  }
-
   onMounted(() => {
     window.addEventListener("beforeunload", saveCurrentScroll);
     window.addEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
-    window.addEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
     void load();
   });
 
@@ -45,7 +39,6 @@ export function useReloadingScrollMemory(
     if (!skipUnmountSave) saveCurrentScroll();
     window.removeEventListener("beforeunload", saveCurrentScroll);
     window.removeEventListener("viewer:pane-before-navigate", saveBeforePaneNavigate);
-    window.removeEventListener("viewer:workspace-before-switch", saveBeforeWorkspaceSwitch);
   });
 
   watch(

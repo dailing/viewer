@@ -189,8 +189,6 @@ export const useVoiceStore = defineStore("voice", {
                   type: "start",
                   mimeType: selectedMimeType,
                   llm_refine: this.languageModelRefine,
-                  language_model_refine: this.languageModelRefine,
-                  languageModelRefine: this.languageModelRefine,
                 }),
               );
             }

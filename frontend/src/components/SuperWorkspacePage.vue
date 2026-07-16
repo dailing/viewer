@@ -8,7 +8,6 @@ import {
   deleteSuperChat,
   getSuperWorkspace,
   listSuperChats,
-  listSuperWorkspaces,
   updateSuperRole,
   updateSuperChat,
 } from "../api/client";
@@ -81,8 +80,8 @@ async function loadState() {
   loading.value = true;
   error.value = "";
   try {
-    const [workspaceData, chatData, superData] = await Promise.all([listSuperWorkspaces(), listSuperChats(), getSuperWorkspace()]);
-    activeWorkspaceId.value = workspaceData.active_workspace_id;
+    const [chatData, superData] = await Promise.all([listSuperChats(), getSuperWorkspace()]);
+    activeWorkspaceId.value = superData.id;
     chats.value = chatData.chats;
     activeChatId.value = chatData.active_chat_id;
     roles.value = superData.roles;
@@ -161,6 +160,7 @@ async function saveRole(role: SuperRole) {
     const data = await updateSuperRole(role.id, {
       name: role.name,
       description: role.description,
+      prompt: role.prompt,
       provider: role.provider,
       cwd: role.cwd,
       model: role.model ?? null,

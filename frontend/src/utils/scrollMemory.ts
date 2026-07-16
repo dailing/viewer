@@ -1,7 +1,7 @@
 import { nextTick } from "vue";
 import { namespacedStorageKey } from "./userProfile";
 
-const STORAGE_KEY = "viewer.scrollPositions.v1";
+const STORAGE_KEY = "viewer.scrollPositions.v2";
 
 interface ScrollPosition {
   top: number;
@@ -31,10 +31,6 @@ function keyFor(target: string | ScrollMemoryTarget): string {
   return [target.workspaceId || "workspace", target.paneId || "pane", target.path].join("\u0000");
 }
 
-function legacyKeyFor(target: string | ScrollMemoryTarget): string {
-  return typeof target === "string" ? target : target.path;
-}
-
 export function saveScrollPosition(target: string | ScrollMemoryTarget, element: HTMLElement | null): void {
   if (!element) return;
   const all = readAll();
@@ -48,7 +44,7 @@ export function saveScrollPosition(target: string | ScrollMemoryTarget, element:
 export async function restoreScrollPosition(target: string | ScrollMemoryTarget, element: HTMLElement | null): Promise<void> {
   if (!element) return;
   const all = readAll();
-  const position = all[keyFor(target)] ?? all[legacyKeyFor(target)];
+  const position = all[keyFor(target)];
   if (!position) return;
 
   await nextTick();

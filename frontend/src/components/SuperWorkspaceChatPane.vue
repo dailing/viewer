@@ -197,13 +197,6 @@ async function loadChatContext(chatId = props.chatId, requestId = chatLoadReques
     resolvedChatId.value = byId.id;
     return;
   }
-  const byName = chats.filter((chat) => chat.name === chatId);
-  if (byName.length === 1) {
-    dispatchSelection.migrateChatId(chatId, byName[0].id);
-    currentChat.value = byName[0];
-    resolvedChatId.value = byName[0].id;
-    return;
-  }
   resolvedChatId.value = "";
   currentChat.value = null;
 }

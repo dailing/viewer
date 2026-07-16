@@ -378,7 +378,7 @@ async function openPinnedFile(path: string) {
 
 .tool-panel-title {
   align-items: center;
-  background: var(--color-surface-muted);
+  background: var(--color-surface);
   color: var(--color-text);
   display: flex;
   box-sizing: border-box;

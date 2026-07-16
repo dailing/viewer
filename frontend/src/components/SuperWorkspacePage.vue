@@ -346,7 +346,7 @@ function startSidebarResize(event: PointerEvent) {
 }
 
 .sidebar-resizer {
-  background: var(--color-surface-muted);
+  background: transparent;
   cursor: col-resize;
   flex: 0 0 3px;
   position: relative;
@@ -354,7 +354,7 @@ function startSidebarResize(event: PointerEvent) {
 }
 
 .sidebar-resizer:hover {
-  background: var(--color-accent-soft);
+  background: transparent;
 }
 
 .workspace-wrap {

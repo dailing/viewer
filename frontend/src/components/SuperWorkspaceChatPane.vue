@@ -847,6 +847,7 @@ async function scrollThreadToBottom() {
         <div v-if="item.kind === 'query'" class="super-user-turn">
           <div class="super-message-top super-user-message-top">
             <div class="super-message-meta">
+              <span class="super-response-role-label">User</span>
               <div class="super-run-time">{{ formatTime(item.created_at) }}</div>
               <div class="super-route-line">
                 <template v-if="item.dispatch_targets.length">
@@ -995,7 +996,7 @@ async function scrollThreadToBottom() {
                 </button>
               </div>
             </details>
-            <button class="btn btn-outline-primary voice-action-button super-send-button" type="button" :disabled="!canDispatch" title="Send message (Cmd/Ctrl+Enter)" aria-label="Send message" @click="dispatchMessage">
+            <button class="btn voice-action-button super-send-button" type="button" :disabled="!canDispatch" title="Send message (Cmd/Ctrl+Enter)" aria-label="Send message" @click="dispatchMessage">
               <i class="bi bi-send"></i>
             </button>
           </template>
@@ -1107,6 +1108,12 @@ async function scrollThreadToBottom() {
   flex: 0 0 auto;
 }
 
+.super-run-time {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
 .super-user-message,
 .super-role-response {
   background: var(--color-surface-muted);
@@ -1120,7 +1127,7 @@ async function scrollThreadToBottom() {
 }
 
 .super-user-message {
-  background: var(--color-accent-soft);
+  background: var(--color-surface-muted);
   max-width: none;
 }
 
@@ -1307,7 +1314,7 @@ async function scrollThreadToBottom() {
 
 .super-dispatch-picker summary {
   align-items: center;
-  background: var(--color-surface-raised);
+  background: transparent;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
@@ -1328,12 +1335,13 @@ async function scrollThreadToBottom() {
 }
 
 .super-dispatch-picker.active {
-  color: var(--color-accent-hover);
+  color: var(--color-text-muted);
 }
 
 .super-dispatch-picker.active summary {
-  background: var(--color-accent-soft);
-  border-color: var(--color-accent);
+  background: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
 }
 
 .super-dispatch-picker .bi {
@@ -1344,9 +1352,9 @@ async function scrollThreadToBottom() {
 
 .super-dispatch-count {
   align-items: center;
-  background: var(--color-accent);
+  background: transparent;
   border-radius: 999px;
-  color: var(--color-text-inverse);
+  color: var(--color-text-muted);
   display: inline-flex;
   font-size: 9px;
   height: 14px;
@@ -1504,7 +1512,7 @@ async function scrollThreadToBottom() {
 .super-composer {
   flex: 0 0 auto;
   min-width: 0;
-  padding: 6px 0 8px;
+  padding: 0;
   width: 100%;
   z-index: 5;
 }
@@ -1521,7 +1529,7 @@ async function scrollThreadToBottom() {
   background: var(--color-surface-muted);
   border: 0;
   border-radius: var(--radius-md);
-  padding: 5px;
+  padding: 3px;
   width: 100%;
 }
 
@@ -1543,9 +1551,8 @@ async function scrollThreadToBottom() {
 }
 
 .super-composer-toggle:hover {
-  background: var(--color-accent-soft);
-  border-color: var(--color-accent);
-  color: var(--color-accent-hover);
+  background: var(--color-surface-hover);
+  color: var(--color-text);
 }
 
 .super-composer-toggle .bi {
@@ -1554,9 +1561,25 @@ async function scrollThreadToBottom() {
 }
 
 .super-pin-button.active {
-  background: var(--color-accent-soft);
-  border-color: var(--color-accent);
-  color: var(--color-accent-hover);
+  background: var(--color-surface-selected);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.super-send-button {
+  background: var(--color-surface-selected);
+  border: 0;
+  color: var(--color-text);
+}
+
+.super-send-button:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.super-send-button:disabled {
+  background: transparent;
+  color: var(--color-text-subtle);
 }
 
 .super-composer-mentions {
@@ -1639,7 +1662,7 @@ async function scrollThreadToBottom() {
   }
 
   .super-composer {
-    padding: 6px 0;
+    padding: 0;
   }
 
   .super-composer.collapsed {

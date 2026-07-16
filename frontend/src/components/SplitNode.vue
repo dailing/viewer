@@ -70,41 +70,71 @@ function startDrag(event: PointerEvent) {
 }
 
 .split-resizer {
-  background: var(--color-surface-muted);
-  flex: 0 0 3px;
+  background: transparent;
+  flex: 0 0 1px;
   position: relative;
   touch-action: none;
+  z-index: 2;
 }
 
 .split-resizer::before {
-  content: none;
+  background: var(--color-border);
+  content: "";
+  pointer-events: none;
+  position: absolute;
+}
+
+.split-resizer::after {
+  background: transparent;
+  content: "";
+  position: absolute;
+  touch-action: none;
 }
 
 .split-node.horizontal > .split-resizer {
   cursor: row-resize;
-  min-height: 3px;
+  min-height: 1px;
+}
+
+.split-node.horizontal > .split-resizer::before {
+  height: 1px;
+  inset: 0;
+}
+
+.split-node.horizontal > .split-resizer::after {
+  inset: -4px 0;
 }
 
 .split-node:not(.horizontal) > .split-resizer {
   cursor: col-resize;
-  min-width: 3px;
+  min-width: 1px;
 }
 
-.split-resizer:hover {
-  background: var(--color-accent-soft);
+.split-node:not(.horizontal) > .split-resizer::before {
+  inset: 0;
+  width: 1px;
+}
+
+.split-node:not(.horizontal) > .split-resizer::after {
+  inset: 0 -4px;
+}
+
+.split-resizer:hover::before,
+.split-resizer:active::before {
+  background: var(--color-border-strong);
 }
 
 @media (max-width: 767.98px) {
   .split-resizer {
-    flex-basis: 3px;
+    flex-basis: 1px;
   }
 
   .split-node.horizontal > .split-resizer {
-    min-height: 3px;
+    min-height: 1px;
   }
 
   .split-node:not(.horizontal) > .split-resizer {
-    min-width: 3px;
+    min-width: 1px;
   }
 
 }

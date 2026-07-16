@@ -118,7 +118,7 @@ defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
 <style scoped>
 .voice-textarea {
   display: grid;
-  gap: 7px;
+  gap: 3px;
   min-width: 0;
 }
 

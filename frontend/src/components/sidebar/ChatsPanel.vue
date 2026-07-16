@@ -92,7 +92,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
         class="chat-entry"
       >
         <div class="sidebar-row" :class="{ active: chat.id === props.activeChatId || layout.openChatIds.includes(chat.id) }">
-          <button class="sidebar-row-main" type="button" @click="emit('open-chat', chat.id)">
+          <button class="sidebar-row-main" type="button" :title="chat.name" @click="emit('open-chat', chat.id)">
             <i class="bi" :class="chat.type === 'direct' ? 'bi-person' : 'bi-chat-left-text'"></i>
             <span class="sidebar-row-name">{{ chat.name }}</span>
           </button>
@@ -189,16 +189,48 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 </template>
 
 <style scoped>
+.list-section {
+  padding: 3px 2px;
+}
+
 .chat-entry {
   display: grid;
   gap: 4px;
+  min-width: 0;
+}
+
+.chat-entry .sidebar-row {
+  display: grid;
+  gap: 2px;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  min-width: 0;
+  padding: 2px 3px;
+}
+
+.chat-entry .sidebar-row-main {
+  overflow: hidden;
+}
+
+.chat-entry .sidebar-row-main > .bi {
+  flex: 0 0 auto;
+}
+
+.chat-entry .sidebar-row-action {
+  align-self: center;
+  height: 20px;
+  opacity: 0.66;
+  width: 20px;
+}
+
+.chat-entry .sidebar-row-action .bi {
+  font-size: 11px;
 }
 
 .dispatch-role-list {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-  padding: 0 4px 5px 30px;
+  padding: 0 2px 4px 24px;
 }
 
 .dispatch-role-chip {

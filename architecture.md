@@ -630,8 +630,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/styles.css`
 
-- Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile behavior, flattened sidebar panel/row/field primitives, shared Markdown rendering, and Highlight.js token colors. Feature sidebar components keep only feature-specific layout instead of duplicating these primitives.
-- Semantic theme variables cover canvas/surface states, text hierarchy, borders, accent/status colors, focus, radius, overlay, and popover shadow. Normal controls and panels use a 2px radius; full circles are reserved for notification dots, spinners, and numeric badges.
+- Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile behavior, flattened sidebar panel/row/field primitives, shared Markdown rendering, and Highlight.js token colors. Feature sidebar components keep only feature-specific layout instead of duplicating these primitives. The sidebar, workspace, and pane canvas intentionally share one base background; muted/hover/selected color blocks provide hierarchy instead of container strokes, outer margins, or shadows.
+- Semantic theme variables cover canvas/surface states, text hierarchy, borders, accent/status colors, focus, radius, overlay, and shared UI typography. The light palette intentionally uses low-saturation neutral blocks and softened status colors, while the dark palette remains higher contrast. Sidebar and main-panel chrome share a 12px UI size, secondary metadata uses 11px, and editable/long-form content can use the 13px content token; document/Markdown headings retain their own content hierarchy. Normal controls and panels use at most a 2px radius, popover shadows are disabled, and full circles are reserved for notification dots, spinners, and numeric badges. Borders remain primarily on actual form inputs and data structures where a boundary carries meaning.
 
 `frontend/src/vite-env.d.ts`
 

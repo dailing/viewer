@@ -1010,10 +1010,11 @@ async function scrollThreadToBottom() {
 
 <style scoped>
 .super-chat-pane {
-  background: var(--color-canvas);
+  background: var(--color-surface);
   container-type: size;
   display: flex;
   flex-direction: column;
+  font-size: var(--font-size-ui);
   height: 100%;
   min-height: 0;
   position: relative;
@@ -1023,18 +1024,18 @@ async function scrollThreadToBottom() {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 18px;
+  gap: 10px;
   min-height: 0;
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 18px clamp(14px, 3vw, 34px);
+  padding: 10px clamp(8px, 2vw, 18px);
 }
 
 .super-run {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 5px;
   min-width: 0;
 }
 
@@ -1055,7 +1056,7 @@ async function scrollThreadToBottom() {
 
 .super-message-top {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: var(--font-size-ui);
   justify-content: space-between;
 }
 
@@ -1068,26 +1069,24 @@ async function scrollThreadToBottom() {
 
 .super-user-message,
 .super-role-response {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  border: 0;
   border-radius: var(--radius-md);
   min-width: 0;
   overflow-x: hidden;
-  padding: 12px 14px;
+  padding: 8px 10px;
   user-select: text;
   width: 100%;
 }
 
 .super-user-message {
   background: var(--color-accent-soft);
-  border-color: color-mix(in srgb, var(--color-accent) 28%, var(--color-border));
   margin-left: auto;
   max-width: min(88%, 960px);
 }
 
 .super-role-response {
-  background: var(--color-surface);
-  border-color: color-mix(in srgb, var(--color-border) 72%, transparent);
+  background: var(--color-surface-muted);
   overflow-x: auto;
   overflow-y: visible;
 }
@@ -1100,13 +1099,13 @@ async function scrollThreadToBottom() {
 }
 
 .super-response-body {
-  --markdown-render-body-size: 13px;
+  --markdown-render-body-size: var(--font-size-ui);
   --markdown-render-h1-size: 20px;
   --markdown-render-h2-size: 17px;
   --markdown-render-h3-size: 15px;
   --markdown-render-h4-size: 14px;
   --markdown-render-paragraph-line-height: 1.48;
-  --markdown-render-paragraph-size: 13px;
+  --markdown-render-paragraph-size: var(--font-size-ui);
   --markdown-render-pre-padding: 8px;
   max-width: 100%;
   min-width: 0;
@@ -1182,7 +1181,7 @@ async function scrollThreadToBottom() {
   display: inline-flex;
   gap: 5px;
   align-items: center;
-  font-size: 13px;
+  font-size: var(--font-size-ui);
   font-weight: 700;
 }
 
@@ -1227,7 +1226,7 @@ async function scrollThreadToBottom() {
 
 .super-response-placeholder {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: var(--font-size-ui);
   font-style: italic;
   line-height: 1.45;
 }
@@ -1325,9 +1324,8 @@ async function scrollThreadToBottom() {
   --bs-list-group-border-width: 0;
   --bs-list-group-color: var(--color-text);
   background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
+  border: 0;
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popover);
   bottom: calc(100% + 6px);
   display: flex;
   gap: 3px;
@@ -1403,7 +1401,7 @@ async function scrollThreadToBottom() {
 
 .super-citation-preview {
   background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
+  border: 0;
   border-radius: var(--radius-md);
   color: var(--color-text);
   left: 0;
@@ -1415,7 +1413,6 @@ async function scrollThreadToBottom() {
   right: auto;
   top: 0;
   z-index: 30;
-  box-shadow: var(--shadow-popover);
 }
 
 .super-citation-preview-title {
@@ -1450,7 +1447,7 @@ async function scrollThreadToBottom() {
 .super-composer {
   flex: 0 0 auto;
   min-width: 0;
-  padding: 10px clamp(14px, 3vw, 34px) 14px;
+  padding: 6px clamp(8px, 2vw, 18px) 8px;
   width: 100%;
   z-index: 5;
 }
@@ -1464,10 +1461,10 @@ async function scrollThreadToBottom() {
 }
 
 .super-composer-card {
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  border: 0;
   border-radius: var(--radius-md);
-  padding: 8px;
+  padding: 5px;
   width: 100%;
 }
 
@@ -1478,9 +1475,8 @@ async function scrollThreadToBottom() {
 .super-composer-toggle {
   align-items: center;
   background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
+  border: 0;
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popover);
   color: var(--color-accent-hover);
   display: inline-flex;
   height: 42px;
@@ -1550,13 +1546,13 @@ async function scrollThreadToBottom() {
   }
 
   .super-response-body {
-    --markdown-render-body-size: 12.5px;
+    --markdown-render-body-size: var(--font-size-ui);
     --markdown-render-h1-size: 17px;
     --markdown-render-h2-size: 15px;
     --markdown-render-h3-size: 13.5px;
     --markdown-render-h4-size: 13px;
     --markdown-render-paragraph-line-height: 1.42;
-    --markdown-render-paragraph-size: 12.5px;
+    --markdown-render-paragraph-size: var(--font-size-ui);
     --markdown-render-pre-padding: 6px;
   }
 
@@ -1568,13 +1564,13 @@ async function scrollThreadToBottom() {
   .super-user-message,
   .super-role-response {
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--font-size-ui);
     line-height: 1.45;
     padding: 7px 8px;
   }
 
   .super-response-role-label {
-    font-size: 11.5px;
+    font-size: var(--font-size-ui);
   }
 
   .super-cite-button {

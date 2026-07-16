@@ -14,15 +14,16 @@ const layout = useLayoutStore();
 
 <style scoped>
 .workspace {
+  background: var(--color-surface);
   height: 100%;
   min-height: 0;
   min-width: 0;
-  padding: 8px;
+  padding: 0;
 }
 
 @media (max-width: 767.98px) {
   .workspace {
-    padding: 3px;
+    padding: 0;
   }
 }
 </style>

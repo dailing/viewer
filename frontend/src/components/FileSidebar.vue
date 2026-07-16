@@ -214,14 +214,13 @@ async function openPinnedFile(path: string) {
 
 .activity-bar {
   align-items: center;
-  background: var(--color-surface-muted);
-  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
   display: flex;
   flex: 0 0 42px;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   min-width: 42px;
-  padding: 6px 4px;
+  padding: 4px;
   position: relative;
   width: 42px;
   z-index: 2;
@@ -248,18 +247,12 @@ async function openPinnedFile(path: string) {
 }
 
 .activity-button.active {
-  background: var(--color-surface);
+  background: var(--color-surface-selected);
   color: var(--color-accent-hover);
 }
 
 .activity-button.active::before {
-  background: var(--color-accent);
-  border-radius: 999px;
-  content: "";
-  height: 22px;
-  left: -4px;
-  position: absolute;
-  width: 3px;
+  content: none;
 }
 
 .activity-button .bi {
@@ -268,12 +261,11 @@ async function openPinnedFile(path: string) {
 }
 
 .workspace-buttons {
-  border-top: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-top: 4px;
-  padding-top: 6px;
+  margin-top: 2px;
+  padding-top: 3px;
 }
 
 .workspace-button {
@@ -359,7 +351,6 @@ async function openPinnedFile(path: string) {
 
 .tool-sidebar:not(.panel-pinned) .tool-panel {
   bottom: 0;
-  box-shadow: var(--shadow-popover);
   left: 42px;
   max-width: calc(88vw - 42px);
   position: absolute;
@@ -368,13 +359,12 @@ async function openPinnedFile(path: string) {
 }
 
 .tool-sidebar.panel-pinned .tool-panel {
-  border-right: 1px solid var(--color-border);
   flex: 1 1 auto;
 }
 
 .tool-panel-title {
   align-items: center;
-  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
   color: var(--color-text);
   display: flex;
   flex: 0 0 30px;
@@ -383,7 +373,7 @@ async function openPinnedFile(path: string) {
   gap: 4px;
   line-height: 30px;
   overflow: hidden;
-  padding: 3px 6px 3px 10px;
+  padding: 2px 5px 2px 7px;
 }
 
 .tool-panel-title span {
@@ -397,7 +387,7 @@ async function openPinnedFile(path: string) {
 .panel-title-button {
   align-items: center;
   background: transparent;
-  border: 1px solid var(--color-border);
+  border: 0;
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   display: inline-flex;
@@ -427,7 +417,6 @@ async function openPinnedFile(path: string) {
   .tool-sidebar.panel-pinned .tool-panel,
   .tool-sidebar:not(.panel-pinned) .tool-panel {
     bottom: 0;
-    box-shadow: var(--shadow-popover);
     left: 42px;
     max-width: calc(100vw - 42px);
     position: absolute;

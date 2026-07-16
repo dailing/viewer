@@ -107,18 +107,14 @@ onUnmounted(() => {
 <style scoped>
 .viewer-pane {
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border: 0;
+  border-radius: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-}
-
-.viewer-pane.active {
-  border-color: var(--color-accent);
 }
 
 .pane-body {
@@ -144,10 +140,10 @@ onUnmounted(() => {
   color: var(--color-text-muted);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   height: 100%;
   justify-content: center;
-  padding: 18px;
+  padding: 10px;
   text-align: center;
 }
 

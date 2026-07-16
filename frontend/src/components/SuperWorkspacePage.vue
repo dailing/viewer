@@ -307,6 +307,7 @@ function startSidebarResize(event: PointerEvent) {
 
 <style scoped>
 .super-workspace-shell {
+  background: var(--color-surface);
   display: flex;
   flex: 1 1 auto;
   height: 100%;
@@ -342,19 +343,19 @@ function startSidebarResize(event: PointerEvent) {
 }
 
 .sidebar-resizer {
-  background: transparent;
+  background: var(--color-surface-muted);
   cursor: col-resize;
-  flex: 0 0 5px;
-  margin-left: -2px;
+  flex: 0 0 3px;
   position: relative;
   z-index: 6;
 }
 
 .sidebar-resizer:hover {
-  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  background: var(--color-accent-soft);
 }
 
 .workspace-wrap {
+  background: var(--color-surface);
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;

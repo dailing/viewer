@@ -183,7 +183,7 @@ async function deleteEntry(entry: FileEntry) {
 }
 
 .files-panel.dragging {
-  box-shadow: inset 0 0 0 2px var(--color-accent);
+  background: var(--color-accent-soft);
 }
 
 .files-header {

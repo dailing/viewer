@@ -55,28 +55,28 @@ class MarkdownElementStyle(BaseModel):
 
 
 class MarkdownSyntaxStyle(BaseModel):
-    background: str = "#f6f8fa"
-    text: str = "#24292f"
-    keyword: str = "#cf222e"
-    string: str = "#0a3069"
-    number: str = "#0550ae"
-    title: str = "#8250df"
-    comment: str = "#6e7781"
-    meta: str = "#57606a"
+    background: str = "#f5f5f5"
+    text: str = "#4a4e53"
+    keyword: str = "#8f5f63"
+    string: str = "#55706b"
+    number: str = "#627796"
+    title: str = "#766b8c"
+    comment: str = "#8a8e93"
+    meta: str = "#72777c"
 
 
 class MarkdownTheme(BaseModel):
     name: str = "Default"
-    body: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=15, color="#172033", line_height=1.65))
-    h1: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=28, color="#172033", font_weight="700", line_height=1.2))
-    h2: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=23, color="#172033", font_weight="700", line_height=1.25))
-    h3: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=19, color="#172033", font_weight="700", line_height=1.3))
-    h4: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=16, color="#172033", font_weight="700", line_height=1.35))
-    paragraph: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=15, color="#172033", line_height=1.65))
-    code: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=13, color="#24292f"))
-    code_background: str = "#f6f8fa"
-    link_color: str = "#0969da"
-    border_color: str = "#d0d7de"
+    body: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=15, color="#404449", line_height=1.65))
+    h1: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=28, color="#30343a", font_weight="700", line_height=1.2))
+    h2: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=23, color="#30343a", font_weight="700", line_height=1.25))
+    h3: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=19, color="#34383d", font_weight="700", line_height=1.3))
+    h4: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=16, color="#34383d", font_weight="700", line_height=1.35))
+    paragraph: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=15, color="#404449", line_height=1.65))
+    code: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=13, color="#4a4e53"))
+    code_background: str = "#f5f5f5"
+    link_color: str = "#58749a"
+    border_color: str = "#e3e4e6"
     syntax: MarkdownSyntaxStyle = Field(default_factory=MarkdownSyntaxStyle)
 
 

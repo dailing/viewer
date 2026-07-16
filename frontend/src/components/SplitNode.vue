@@ -70,56 +70,42 @@ function startDrag(event: PointerEvent) {
 }
 
 .split-resizer {
-  background: transparent;
-  flex: 0 0 7px;
+  background: var(--color-surface-muted);
+  flex: 0 0 3px;
   position: relative;
   touch-action: none;
 }
 
 .split-resizer::before {
-  background: var(--color-border);
-  content: "";
-  inset: 0 3px;
-  position: absolute;
+  content: none;
 }
 
 .split-node.horizontal > .split-resizer {
   cursor: row-resize;
-  min-height: 7px;
+  min-height: 3px;
 }
 
 .split-node:not(.horizontal) > .split-resizer {
   cursor: col-resize;
-  min-width: 7px;
+  min-width: 3px;
 }
 
-.split-node.horizontal > .split-resizer::before {
-  inset: 3px 0;
-}
-
-.split-resizer:hover::before {
-  background: var(--color-border-strong);
+.split-resizer:hover {
+  background: var(--color-accent-soft);
 }
 
 @media (max-width: 767.98px) {
   .split-resizer {
-    flex-basis: 4px;
+    flex-basis: 3px;
   }
 
   .split-node.horizontal > .split-resizer {
-    min-height: 4px;
+    min-height: 3px;
   }
 
   .split-node:not(.horizontal) > .split-resizer {
-    min-width: 4px;
+    min-width: 3px;
   }
 
-  .split-resizer::before {
-    inset: 0 1px;
-  }
-
-  .split-node.horizontal > .split-resizer::before {
-    inset: 1px 0;
-  }
 }
 </style>

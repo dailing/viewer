@@ -778,7 +778,7 @@ async function applyJson() {
                 <input
                   class="form-control form-control-sm form-control-color"
                   type="color"
-                  :value="(item[1] as MarkdownElementStyle).color || '#172033'"
+                  :value="(item[1] as MarkdownElementStyle).color || '#404449'"
                   @input="updateStyleText(item[1] as MarkdownElementStyle, 'color', ($event.target as HTMLInputElement).value)"
                 />
                 <span>Weight</span>
@@ -843,15 +843,13 @@ async function applyJson() {
 
 <style scoped>
 .config-page {
-  background: var(--color-canvas);
+  background: var(--color-surface);
   height: 100%;
   overflow: hidden;
 }
 
 .config-panel {
   background: var(--color-surface);
-  border-left: 1px solid var(--color-border);
-  border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -864,17 +862,16 @@ async function applyJson() {
 .config-header,
 .config-footer {
   align-items: center;
-  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
   display: flex;
   flex: 0 0 auto;
-  gap: 10px;
+  gap: 6px;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 7px 9px;
 }
 
 .config-footer {
-  border-bottom: 0;
-  border-top: 1px solid var(--color-border);
+  border: 0;
   justify-content: flex-end;
 }
 
@@ -905,25 +902,24 @@ async function applyJson() {
 
 .config-nav {
   background: var(--color-surface-muted);
-  border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   gap: 3px;
   min-height: 0;
   overflow-y: auto;
-  padding: 10px 8px;
+  padding: 7px 6px;
 }
 
 .config-search {
   align-items: center;
   background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
+  border: 0;
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   display: flex;
   gap: 7px;
-  margin-bottom: 7px;
-  padding: 5px 8px;
+  margin-bottom: 4px;
+  padding: 4px 6px;
 }
 
 .config-search input {
@@ -944,9 +940,9 @@ async function applyJson() {
   color: var(--color-text-muted);
   display: flex;
   font-size: 12px;
-  gap: 9px;
+  gap: 7px;
   min-height: 34px;
-  padding: 7px 9px;
+  padding: 5px 7px;
   text-align: left;
 }
 
@@ -976,7 +972,7 @@ async function applyJson() {
   align-items: center;
   display: flex;
   gap: 8px;
-  padding: 18px 18px 10px;
+  padding: 10px 12px 6px;
 }
 
 .section-heading h2 {
@@ -991,7 +987,7 @@ async function applyJson() {
 
 .section-body {
   max-width: 780px;
-  padding: 0 18px 24px;
+  padding: 0 12px 14px;
 }
 
 .server-actions,
@@ -1087,19 +1083,19 @@ async function applyJson() {
 
 .style-grid {
   display: grid;
-  gap: 10px;
+  gap: 6px;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  margin-top: 12px;
+  margin-top: 7px;
 }
 
 .style-card {
-  border: 1px solid var(--color-border);
-  background: var(--color-surface-raised);
+  border: 0;
+  background: var(--color-surface-muted);
   border-radius: var(--radius-md);
   display: grid;
   gap: 6px;
   grid-template-columns: 62px 1fr;
-  padding: 10px;
+  padding: 7px;
 }
 
 .style-card strong {
@@ -1116,9 +1112,9 @@ async function applyJson() {
 
 .color-grid {
   display: grid;
-  gap: 10px;
+  gap: 7px;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  margin-top: 12px;
+  margin-top: 7px;
 }
 
 .color-grid label {

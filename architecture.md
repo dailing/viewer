@@ -11,8 +11,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 1. `run.py` loads project-local `.viewer.env` without overriding existing process variables, parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
 2. `backend/app/main.py` creates the FastAPI app, installs CORS, gzip compression, and request logging middleware, starts `watch_root()` and the Super Workspace worker on startup, stops watcher and terminal sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
-4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading app state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/draft keys are namespaced by user. The app then loads file tree/config/terminal state, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The normal page is the Super Workspace split-pane shell; the top bar opens only utility pages such as settings. The outer app shell and document root suppress top-level overscroll/scroll chaining, while pane-level scroll containers keep their own contained momentum scrolling.
-5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer and oversized Markdown/CSV/text files to the virtualized large text viewer. The app top bar exposes a global active-pane refresh action that dispatches `viewer:pane-refresh`; file panes clear visible content before refetching metadata and incrementing their pane `version`, diff panes clear and reload their Git diff directly, and terminal panes reconnect through their own viewer. Viewers fetch raw/text content and reload when their `version` prop changes; image and PDF panes include the pane version in raw-file URLs so manual refreshes can bypass browser cache even when the content hash is unchanged. Markdown panes render embedded images with browser lazy loading, track simple relative local image dependencies client-side, use a pane-level version cache key for raw-file URLs, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. PDF panes configure the PDF.js worker explicitly, preload document metadata from `/api/file/raw` for the page count, and render individual pages lazily from the same cache-busted raw URL as page placeholders approach the scroll viewport. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
+4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading app state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/draft keys are namespaced by user. The app then loads file tree/config/terminal state, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The normal page is the Super Workspace split-pane shell with no global navbar: every viewer pane owns a title bar, while Settings is launched from the sidebar activity bar. The outer app shell and document root suppress top-level overscroll/scroll chaining, while pane-level scroll containers keep their own contained momentum scrolling.
+5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer and oversized Markdown/CSV/text files to the virtualized large text viewer. Each pane renders `PaneTitleBar.vue`, which combines that pane's registered viewer controls with refresh/back/split/clear actions and dispatches `viewer:pane-refresh` for the concrete pane id; file panes clear visible content before refetching metadata and incrementing their pane `version`, diff panes clear and reload their Git diff directly, and terminal panes reconnect through their own viewer. Viewers fetch raw/text content and reload when their `version` prop changes; image and PDF panes include the pane version in raw-file URLs so manual refreshes can bypass browser cache even when the content hash is unchanged. Markdown panes render embedded images with browser lazy loading, track simple relative local image dependencies client-side, use a pane-level version cache key for raw-file URLs, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. PDF panes configure the PDF.js worker explicitly, preload document metadata from `/api/file/raw` for the page count, and render individual pages lazily from the same cache-busted raw URL as page placeholders approach the scroll viewport. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 7. Codex and Hermes provider sessions are internal runtime primitives for Super Workspace roles. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Hermes talks to the local Hermes API server at `VIEWER_HERMES_BASE_URL` / `http://127.0.0.1:8642` and reads canonical session history directly from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`. Provider driver output is written into `super_workspace_messages`; the frontend does not expose low-level provider session panes or `/api/agents/sessions`.
 
@@ -169,7 +169,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Codex subprocess proxying is controlled by `~/.view/config.json` `codex.proxy`; when non-empty it sets `https_proxy`, `HTTPS_PROXY`, `http_proxy`, and `HTTP_PROXY` for Codex runs, and when empty those variables are removed from the Codex subprocess environment. The default is no proxy.
 - Rendered Codex events are read from the canonical `~/.codex/sessions/**/rollout-*.jsonl` file matched by Codex session id. Viewer-local metadata/prompts and the matched `rollout_path` are stored in `~/.view/logs/codex-sessions/{viewer_session_id}.json`; stderr goes to `{viewer_session_id}.stderr.log`.
 - API snapshots and WebSocket event messages compact raw rollout entries into a transport/display shape before sending them to the frontend. Full raw events remain in memory/on disk for status parsing; compact events carry `event_type`, rendered `text`, `file_changes`, `patch_text`, and a bounded `raw_preview`. The detached Codex driver process also performs the same visible-event compaction while tailing rollout JSONL and writes provider message rows to `~/.view/agent-history.sqlite3`; this detached driver is the Codex provider-message ingestion path, not the Super Workspace runtime or backend watcher.
-- Per-session Codex summaries parse `last_token_usage.total_tokens` from that session's matched rollout `token_count` events to expose `context_used_percent`, `model_context_window`, and `total_tokens`; navbar Codex chips use these session fields instead of the newest global rollout.
+- Per-session Codex summaries parse `last_token_usage.total_tokens` from that session's matched rollout `token_count` events to expose `context_used_percent`, `model_context_window`, and `total_tokens`; pane titlebar Codex chips use these session fields instead of the newest global rollout.
 - `_find_session_id(raw)`: extracts `session_id`, `conversation_id`, or `thread_id` from JSON events so later messages can resume the correct Codex thread. For detached runs, the manager scans the persisted runner stdout JSONL file to discover this id after service restarts.
 - Active Codex runs are monitored by polling detached runner state and matched rollout JSONL files, then broadcasting newly parsed events. The service can recreate this monitor after restart because stdout, state, and canonical rollout files are persisted outside process memory.
 - Codex session status is updated from rollout turn-finish events and detached runner exit state: `task_complete` / `turn.completed` mark the viewer session `exited`, `turn_aborted` / `turn.failed` mark it `failed`, and runner `state.json` records the final process exit code when available.
@@ -291,19 +291,15 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/App.vue`
 
-- Root shell: top bar, profile selection, full-page settings, and the Super Workspace split-pane shell as the normal page.
-- Defaults directly to Super Workspace. The top bar has no Super Workspace button and no old pane-workspace button.
+- Root shell: profile selection, full-page settings, and the Super Workspace split-pane shell as the normal page. There is no global navbar.
+- Defaults directly to Super Workspace; Settings is opened by the activity-rail button emitted through `FileSidebar.vue` and `SuperWorkspacePage.vue`.
 - Loads config, the root file listing, and terminal lists before mounting the Super Workspace page.
-- Applies appearance and active Markdown theme settings from `stores/files.ts` as CSS variables on the app shell, including nav height/icon size and Markdown/syntax colors.
+- Applies appearance and active Markdown theme settings from `stores/files.ts` as CSS variables on the app shell, including pane-titlebar/icon size and Markdown/syntax colors.
 - Connects SSE with `connectEvents()`.
 - Refreshes affected file listings on change events.
 - Dispatches every filesystem SSE as `viewer:file-changed`; individual panes filter these events against their own file path or viewer-specific dependency set.
 - Polls terminal list every 15 seconds with overlap guarded in `stores/terminals.ts`.
-- Renders active pane toolbar metadata, actions, and generic controls from `stores/paneToolbar.ts` in the top bar while Super Workspace is active, plus global pane split actions.
-- Renders the global voice/input status control from `stores/inputSessions.ts` in the top bar. When a voice input is recording or processing, the top bar can finish the current voice job from any pane; registered Super Workspace chat contexts auto-submit to their original chat after voice/LLM final text is ready, while generic contexts only receive their final text.
-- On phone-width screens, active-pane toolbar actions and controls collapse behind a top-bar overflow menu while global pane actions remain inline.
-- Top-bar ownership rule: cross-viewer pane actions such as split belong in `App.vue`; view-specific icons/controls/status belong in the owning viewer and must be registered through `stores/paneToolbar.ts`, not hard-coded in `App.vue`. The global SSE connection dot is intentionally not rendered.
-- The global pane toolbar in `App.vue` owns pane-level navigation actions such as Go Back, Split, and Close. `stores/layout.ts` keeps each pane's local content history so a pane can return from a linked file, sidebar-opened file, diff, terminal, or agent session to its previous content.
+- Pane toolbar rendering and pane navigation actions live in `PaneTitleBar.vue`, not the app shell. `stores/layout.ts` keeps each pane's local content history so a pane can return from a linked file, sidebar-opened file, diff, terminal, or agent session to its previous content.
 - User selection: `useUsersStore` loads `/api/users`, reads/writes `viewer.activeUser.v1`, and blocks normal app startup behind the first-run profile picker when no valid active profile is stored. The Settings page includes a profile selector that stores the new user and reloads the app so all stores reconnect under the new profile.
 - File viewer scroll memory lives in `utils/scrollMemory.ts` and `composables/useScrollMemory.ts`. Scroll positions are browser-local, user-namespaced, and keyed by workspace id, pane id, and file path so two panes can keep different positions for the same file; layout navigation emits `viewer:pane-before-navigate` before replacing pane content and workspace switching emits `viewer:workspace-before-switch` before the displayed workspace id changes so the current viewer can save its last scroll position under the correct key.
 - Agent provider/session list is loaded on startup and polled every 15 seconds through `stores/agents.ts`.
@@ -312,12 +308,13 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Default full-page Super Workspace split-pane shell.
 - Loads per-user Super Workspace workspace state through `/api/super-workspace/workspaces`, active chats through `/api/super-workspace/chats`, active workspace roles through `/api/super-workspace`, and agent provider metadata for role editing.
-- Owns the sidebar drawer/pin/resize state and routes `FileSidebar.vue` events into chat, role, file, diff, and terminal pane actions. The sidebar's narrow activity rail includes browser-local pinned files and terminals plus backend-persisted pinned chats as quick pane shortcuts. Sidebar tools use the current chat working directory as their default cwd, preferring the active chat pane's `chatId` and falling back to the backend active chat; empty chat cwd means the profile root.
+- Owns the sidebar drawer/pin/resize state and routes `FileSidebar.vue` events into chat, role, file, diff, terminal, and Settings actions. The sidebar's narrow activity rail includes browser-local pinned files and terminals plus backend-persisted pinned chats as quick pane shortcuts, with Settings anchored at the bottom. Sidebar tools use the current chat working directory as their default cwd, preferring the active chat pane's `chatId` and falling back to the backend active chat; empty chat cwd means the profile root.
 - Chat CRUD opens chats as normal recursive layout panes through `layout.openChat(chatId)`. Role CRUD is global to the active Super Workspace; deleting a role also removes it from any chat membership lists. Chat list mutations emit a browser-local `super-workspace:chats-updated` event so already-open chat panes can refresh member-role context without waiting for a history poll.
 
 `frontend/src/components/SuperWorkspaceChatPane.vue`
 
 - Chat pane for a single `chatId`; loads flat display feed pages from `/api/super-workspace/runs?chat_id=...`, subscribes to `/api/super-workspace/events`, and incrementally refreshes changed runs.
+- Registers the resolved chat name in `stores/paneToolbar.ts` so its pane title bar follows chat creation/rename updates instead of displaying a generic `Chat` label.
 - The composer creates a persisted run through `/api/super-workspace/runs`. It sends structured `role_ids` from `stores/superChatDispatch.ts` when manual target chips are selected in the Chats side panel or the composer dispatch dropdown selects one or more chat member roles; leaving the dropdown on Auto omits `role_ids` so the backend router LLM chooses among chat members. The composer dispatch button opens the dropdown only when no manual roles are selected; when highlighted with selected roles, clicking it clears back to Auto. Typed leading `@Role` mentions plus `@msg-{message_id}` citation tokens still work.
 - The composer defaults to pinned/open when a chat has no local pin preference, can be expanded with voice focus for mobile input, and has a pin action beside Clear to keep it open across focus loss. Explicit pin/unpin preferences and unsent input draft are owned by `stores/superChatComposer.ts`, keyed by `chatId`, and persisted in user-namespaced `localStorage` so reopening the same chat restores input-vs-reading mode and draft text.
 - The composer registers `super-workspace:{chat_id}:composer` with `stores/inputSessions.ts` as a submit-capable input context. If the user presses Send while voice processing is still running, the input session marks a pending send, waits for voice final text, and submits the completed query to the original chat without requiring the pane to remain active.
@@ -364,6 +361,13 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `handleChange(event)`: reloads metadata when this pane's file changed, or when the pane file's parent directory changes (covers delete/recreate and atomic-save workflows).
 - Chooses `TerminalViewer`, `SuperWorkspaceChatPane`, `DiffViewer`, `ImageViewer`, `LargeTextViewer`, `MarkdownViewer`, `HtmlViewer`, lazy-loaded `PdfViewer`, `TextViewer`, or `UnsupportedViewer`.
 - Adds a transparent activation shield over inactive HTML iframe previews so iframe pointer handling cannot leave the wrong pane active before sidebar actions replace the active pane.
+- Renders `PaneTitleBar.vue` above every pane body.
+
+`frontend/src/components/PaneTitleBar.vue`
+
+- Per-pane title bar replacing the former app-wide navbar. Reads the concrete pane's title/status/actions/controls from `stores/paneToolbar.ts`, combines them with refresh, local-history back, split, and clear/close actions, and targets the pane id directly.
+- Shows the global voice/input completion status only when this pane is active, so the global state stays reachable without duplicating it across every pane.
+- Uses a flat selected-color block to identify the active pane and horizontal overflow on narrow screens.
 
 `frontend/src/components/FileSidebar.vue`
 
@@ -372,6 +376,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Tools: Chats, Roles, Files, Changes, and Terminals. Future side tools should be added to this shell instead of mixing unrelated lists into one panel.
 - Computes the default sidebar tool cwd from the current chat and passes it to Files, Changes, and Terminals panels so those tools follow chat scope instead of always using the profile root.
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool changes only the active selection; clicking the already-active tool toggles the tool panel open/closed.
+- Settings is a dedicated activity-rail button anchored below tools and pinned shortcuts.
 - On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
 - Re-emits `open-chat`, role CRUD, `open-file`, `open-diff`, and `open-terminal` events to `SuperWorkspacePage.vue`.
 
@@ -396,7 +401,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/components/ConfigPanel.vue`
 
-- Full-page configuration UI opened from the top bar Settings button.
+- Full-page configuration UI opened from the sidebar activity-rail Settings button.
 - Edits `~/.view/config.json` through the existing `/api/config` endpoint.
 - Uses a searchable category sidebar rather than nested accordion state; each category renders a direct heading plus Bootstrap form controls. Categories are Server, User Profile, Appearance, Codex Models, Super Workspace, Voice, Markdown, Syntax Highlighting, and raw JSON.
 - Server section has confirmed backend-only restart, backend+worker restart, and stop buttons. Both restart buttons call `/api/admin/restart`, with the full restart adding `include_worker=true`; the page polls `/api/health` until the PID changes, then reloads. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
@@ -422,7 +427,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `escapeHtml(value)`: manual HTML escaping for plaintext fallback.
 - `languageForPath(path)`: resolves preferred highlighter.
 - `highlightText(value)`: returns highlighted HTML.
-- Registers Text-specific top-bar actions for manual reload, edit mode, and copy-all. `.env`, `.env.*`, and `*.env` paths use shell-style highlighting.
+- Registers Text-specific pane-titlebar actions for manual reload, edit mode, and copy-all. `.env`, `.env.*`, and `*.env` paths use shell-style highlighting.
 - Edit mode replaces the read-only highlighted preview with a split textarea and live highlighted preview plus bottom save/cancel controls. The editor and highlighted preview panes synchronize scroll position proportionally in both directions. Save writes through `/api/file/content` PUT, updates the highlighted preview, and exits edit mode; cancel restores the last loaded text without writing.
 - `saveCurrentScroll()`: saves scroll position.
 - `copyAll()`: clipboard write with textarea fallback.
@@ -433,7 +438,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Diff preview pane backed by `/api/git/diff`.
 - Renders unified diffs with Highlight.js `diff` highlighting, word-level diff mode, and side-by-side split diff mode.
-- Registers Diff-specific top-bar actions through `stores/paneToolbar.ts`: view mode switches, refresh, stage file, stage all, revert file, commit, and push.
+- Registers Diff-specific pane-titlebar actions through `stores/paneToolbar.ts`: view mode switches, refresh, stage file, stage all, revert file, commit, and push.
 - Binary diffs render a disabled-state message instead of diff text.
 
 `frontend/src/components/viewers/HtmlViewer.vue`
@@ -441,7 +446,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - HTML preview with rendered/raw modes.
 - Rendered mode uses an iframe pointed at `/api/file/site/{path}` so normal browser loading handles local scripts, stylesheets, images, media, and in-document navigation.
 - Raw mode fetches `/api/file/content` and highlights as XML/HTML with Highlight.js.
-- Registers HTML-specific top-bar actions for reload, rendered/raw switching, and opening the static-site URL in a new tab.
+- Registers HTML-specific pane-titlebar actions for reload, rendered/raw switching, and opening the static-site URL in a new tab.
 - Tracks direct local `src`, `href`, `poster`, `data`, and `srcset` dependencies from the HTML source and reloads the iframe when those files change. For `index.html`, changes under the same directory also trigger reloads so simple static folders update without precise dependency discovery.
 
 `frontend/src/components/viewers/MarkdownViewer.vue`
@@ -452,7 +457,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Custom fence renderer turns ```mermaid fences into Mermaid blocks.
 - `renderMermaidIn()`: replaces Mermaid blocks with rendered SVG or marks errors.
 - `load()`: fetches Markdown text, renders HTML with the current Markdown path as link context, tracks local image dependencies, renders Mermaid, restores scroll.
-- Registers Markdown-specific top-bar actions for manual reload, edit mode, and rendered/raw view switching.
+- Registers Markdown-specific pane-titlebar actions for manual reload, edit mode, and rendered/raw view switching.
 - Edit mode replaces preview/raw display with a split textarea and live Markdown preview plus bottom save/cancel controls. The editor and preview panes synchronize scroll position proportionally in both directions. Save writes through `/api/file/content` PUT, updates rendered HTML and image dependencies, and exits edit mode; cancel restores the last loaded text without writing.
 - Normal clicks on local Markdown links call `/api/file/resolve-link` and open the resolved file in the active viewer pane. Local images are rendered through `/api/file/raw` with the current Markdown path as `base` and a viewer version cache key.
 - `persistCurrentScroll()`: saves scroll position.
@@ -478,7 +483,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/components/viewers/TerminalViewer.vue`
 
 - xterm.js terminal pane connected to backend WebSocket.
-- Registers terminal shell/status, quick-key controls, and terminate action with `stores/paneToolbar.ts` for top-bar rendering while the pane is active.
+- Registers terminal shell/status, quick-key controls, and terminate action with `stores/paneToolbar.ts` for rendering in that pane's title bar.
 - The terminal text input pad uses `VoiceTextarea.vue` for microphone transcription and clear behavior, with terminal-specific Send, Send+Enter, Bracketed, and Slow paste actions injected through the reusable component action slot. Command sending stays under explicit user control.
 - Maintains socket, xterm instance, fit addon, resize observer, parser disposables, output-version ordering, reconnect timer, and reset state.
 - `firstParam()`: helper for xterm parser mode query parameters.
@@ -559,13 +564,13 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/stores/inputSessions.ts`
 
-- Browser-local coordinator for long-running voice/input contexts. Tracks registered input contexts, optional submit targets, pending sends, and top-bar global status.
+- Browser-local coordinator for long-running voice/input contexts. Tracks registered input contexts, optional submit targets, pending sends, and the global status rendered in the active pane title bar.
 - The first submit target is Super Workspace chat: global Send stops the active recording if needed, waits for voice/LLM final text, then calls `/api/super-workspace/runs` for the context's original chat. Contexts without a submit target only finish voice processing and keep the final text in their owning input context.
 
 `frontend/src/stores/paneToolbar.ts`
 
-- Non-persistent active-pane toolbar registry.
-- Exposes generic per-pane title/status/action/control metadata so viewers can contribute top-bar controls without coupling `App.vue` to viewer-specific behavior.
+- Non-persistent per-pane toolbar registry.
+- Exposes generic per-pane title/status/action/control metadata so viewers can contribute controls to their own `PaneTitleBar.vue` without coupling the app shell to viewer-specific behavior.
 - Actions may hold callbacks owned by the registering viewer and are cleared when that viewer unmounts.
 
 `frontend/src/stores/terminals.ts`

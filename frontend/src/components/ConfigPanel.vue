@@ -1170,6 +1170,8 @@ async function applyJson() {
 @media (max-width: 640px) {
   .config-main {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
   }
 
   .config-nav {
@@ -1178,7 +1180,15 @@ async function applyJson() {
     flex-direction: row;
     min-height: auto;
     overflow-x: auto;
-    padding: 7px;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    padding: 5px 8px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .config-nav::-webkit-scrollbar {
+    display: none;
   }
 
   .config-search {
@@ -1187,6 +1197,20 @@ async function applyJson() {
 
   .config-nav-item {
     flex: 0 0 auto;
+    font-weight: 600;
+    height: 36px;
+    line-height: 1.2;
+    min-height: 36px;
+    padding: 6px 9px;
+    white-space: nowrap;
+  }
+
+  .config-nav-item.active {
+    font-weight: 600;
+  }
+
+  .config-content {
+    overscroll-behavior: contain;
   }
 
   .config-header,
@@ -1230,6 +1254,13 @@ async function applyJson() {
   .compact-field .form-control,
   .compact-field .form-select {
     width: 100%;
+  }
+
+  .config-content .form-control:not(.form-control-color),
+  .config-content .form-select {
+    font-size: 16px;
+    line-height: 1.25;
+    min-height: 40px;
   }
 
   .theme-toolbar {

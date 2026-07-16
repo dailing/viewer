@@ -15,6 +15,7 @@ import TextViewer from "./viewers/TextViewer.vue";
 import TerminalViewer from "./viewers/TerminalViewer.vue";
 import UnsupportedViewer from "./viewers/UnsupportedViewer.vue";
 import SuperWorkspaceChatPane from "./SuperWorkspaceChatPane.vue";
+import PaneTitleBar from "./PaneTitleBar.vue";
 
 const props = defineProps<{ pane: Extract<LayoutNode, { type: "pane" }>; workspaceId: string; workspaceLoading?: boolean }>();
 const PdfViewer = defineAsyncComponent(() => import("./viewers/PdfViewer.vue"));
@@ -63,6 +64,7 @@ onUnmounted(() => {
 
 <template>
   <section class="viewer-pane" :class="{ active: layout.activePaneId === pane.id }" @click="layout.setActive(pane.id)">
+    <PaneTitleBar :pane="pane" />
     <div class="pane-body">
       <div v-if="workspaceLoading" class="empty-state">
         <div class="spinner-border spinner-border-sm" role="status" aria-label="Loading workspace pane"></div>

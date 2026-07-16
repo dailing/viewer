@@ -39,6 +39,7 @@ const emit = defineEmits<{
   "toggle-tool-panel": [];
   "toggle-pin": [];
   "close-panel": [];
+  "open-settings": [];
 }>();
 
 const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
@@ -152,6 +153,15 @@ async function openPinnedFile(path: string) {
           <span>{{ chatInitial(chat) }}</span>
         </button>
       </div>
+      <button
+        class="activity-button settings-button"
+        type="button"
+        title="Settings"
+        aria-label="Settings"
+        @click="emit('open-settings')"
+      >
+        <i class="bi bi-gear"></i>
+      </button>
     </nav>
 
     <section v-if="props.panelOpen" class="tool-panel" :aria-label="activeTitle">
@@ -266,6 +276,10 @@ async function openPinnedFile(path: string) {
   gap: 4px;
   margin-top: 2px;
   padding-top: 3px;
+}
+
+.settings-button {
+  margin-top: auto;
 }
 
 .workspace-button {

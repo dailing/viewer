@@ -4,26 +4,17 @@ import ConfigPanel from "./components/ConfigPanel.vue";
 import SuperWorkspacePage from "./components/SuperWorkspacePage.vue";
 import { connectEvents } from "./api/events";
 import { DARK_MARKDOWN_THEME, DEFAULT_MARKDOWN_THEME, useFilesStore } from "./stores/files";
-import { useInputSessionsStore } from "./stores/inputSessions";
-import { useLayoutStore } from "./stores/layout";
-import { usePaneToolbarStore } from "./stores/paneToolbar";
 import { useTerminalsStore } from "./stores/terminals";
 import { useUsersStore } from "./stores/users";
-import type { PaneToolbarAction, PaneToolbarControl } from "./stores/paneToolbar";
 import type { AppearanceConfig, MarkdownConfig } from "./types/files";
-import type { SplitDirection } from "./types/layout";
 
 const files = useFilesStore();
-const inputSessions = useInputSessionsStore();
-const layout = useLayoutStore();
-const paneToolbar = usePaneToolbarStore();
 const terminals = useTerminalsStore();
 const users = useUsersStore();
 
 const appReady = ref(false);
 const selectingUser = ref(false);
 const activePage = ref<"super" | "settings">("super");
-const mobileToolbarOpen = ref(false);
 const systemPrefersDark = ref(false);
 const previewAppearance = ref<AppearanceConfig | null>(null);
 const previewMarkdown = ref<MarkdownConfig | null>(null);
@@ -38,15 +29,15 @@ const effectiveColorTheme = computed<"light" | "dark">(() => {
 const effectiveDensity = computed(() => effectiveAppearance.value.density ?? "compact");
 
 const appStyle = computed(() => {
-  const navbarSize = effectiveDensity.value === "comfortable" ? 34 : 28;
-  const buttonSize = Math.max(18, navbarSize - 4);
-  const iconSize = Math.max(11, Math.round(navbarSize * 0.48));
+  const titlebarSize = effectiveDensity.value === "comfortable" ? 34 : 28;
+  const buttonSize = Math.max(18, titlebarSize - 4);
+  const iconSize = Math.max(11, Math.round(titlebarSize * 0.48));
   const configuredTheme = effectiveMarkdown.value.themes.find((item) => item.name === effectiveMarkdown.value.active_theme) ?? DEFAULT_MARKDOWN_THEME;
   const theme = effectiveMarkdown.value.follow_app_theme
     ? effectiveColorTheme.value === "dark" ? DARK_MARKDOWN_THEME : DEFAULT_MARKDOWN_THEME
     : configuredTheme;
   return {
-    "--topbar-height": `${navbarSize}px`,
+    "--pane-titlebar-height": `${titlebarSize}px`,
     "--nav-button-size": `${buttonSize}px`,
     "--nav-icon-size": `${iconSize}px`,
     "--markdown-body-font-size": `${theme.body.font_size ?? 15}px`,
@@ -87,69 +78,6 @@ const appStyle = computed(() => {
   };
 });
 
-const activePaneToolbar = computed(() => (layout.activePaneId ? paneToolbar.forPane(layout.activePaneId) : undefined));
-const activePaneTitle = computed(() => {
-  if (activePaneToolbar.value?.title) return activePaneToolbar.value.title;
-  const pane = layout.activePane;
-  if (!pane || pane.type !== "pane") return "Empty pane";
-  if (pane.chatId) return "Chat";
-  if (pane.terminalId) return "Terminal";
-  if (pane.diffPath) return `Diff: ${pane.diffPath}`;
-  return pane.filePath || "Empty pane";
-});
-const activePaneHasContent = computed(() => {
-  const pane = layout.activePane;
-  return Boolean(pane?.type === "pane" && (pane.filePath || pane.terminalId || pane.diffPath || pane.chatId));
-});
-const paneToolbarVisible = computed(() => activePage.value === "super");
-const activePageTitle = computed(() => {
-  if (activePage.value === "settings") return "Settings";
-  return activePaneTitle.value;
-});
-const globalPaneActions = computed<PaneToolbarAction[]>(() => {
-  if (!layout.activePaneId || activePage.value !== "super") return [];
-  return [
-    {
-      id: "refresh-pane",
-      title: "Refresh pane",
-      icon: "bi-arrow-clockwise",
-      run: () => refreshActivePane(),
-    },
-    ...(layout.activePaneCanGoBack
-      ? [
-          {
-            id: "go-back",
-            title: "Go back",
-            icon: "bi-arrow-left",
-            run: () => goBackActivePane(),
-          },
-        ]
-      : []),
-    {
-      id: "split-vertical",
-      title: "Split pane right",
-      icon: "bi-layout-split",
-      run: () => splitActivePane("vertical"),
-    },
-    {
-      id: "split-horizontal",
-      title: "Split pane down",
-      icon: "bi-view-stacked",
-      run: () => splitActivePane("horizontal"),
-    },
-    {
-      id: "close-pane",
-      title: activePaneHasContent.value ? "Clear pane content" : "Close empty pane",
-      icon: "bi-x-lg",
-      run: () => closeActivePane(),
-    },
-  ];
-});
-const activePaneActions = computed(() => activePaneToolbar.value?.actions ?? []);
-const activePaneControls = computed(() => activePaneToolbar.value?.controls ?? []);
-const hasMobilePaneToolbar = computed(() => activePaneActions.value.length > 0 || activePaneControls.value.length > 0);
-const globalInputStatus = computed(() => inputSessions.globalStatus);
-
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
 
@@ -186,55 +114,6 @@ async function selectUserProfile(userId: string) {
   await initializeApp();
 }
 
-function runPaneAction(action: PaneToolbarAction) {
-  void action.run();
-}
-
-function runMobilePaneAction(action: PaneToolbarAction) {
-  mobileToolbarOpen.value = false;
-  runPaneAction(action);
-}
-
-function updatePaneControl(control: PaneToolbarControl, event: Event) {
-  if (control.kind !== "select") return;
-  const target = event.target as HTMLSelectElement | null;
-  if (!target) return;
-  void control.onChange(target.value);
-}
-
-function updateMobilePaneControl(control: PaneToolbarControl, event: Event) {
-  updatePaneControl(control, event);
-  mobileToolbarOpen.value = false;
-}
-
-function splitActivePane(direction: SplitDirection) {
-  if (!layout.activePaneId) return;
-  layout.splitPane(layout.activePaneId, direction);
-}
-
-function goBackActivePane() {
-  layout.goBack();
-}
-
-function closeActivePane() {
-  const paneId = layout.activePaneId;
-  if (!paneId) return;
-  if (activePaneHasContent.value) {
-    layout.clearPane(paneId);
-    return;
-  }
-  layout.closePane(paneId);
-}
-
-function refreshActivePane() {
-  const paneId = layout.activePaneId;
-  if (!paneId) return;
-  window.dispatchEvent(new CustomEvent("viewer:pane-refresh", { detail: { paneId } }));
-}
-
-function runGlobalInputSend() {
-  void inputSessions.requestGlobalSend();
-}
 
 onUnmounted(() => {
   colorSchemeQuery?.removeEventListener("change", handleColorSchemeChange);
@@ -275,136 +154,11 @@ function closeSettings() {
     </section>
   </div>
   <div v-else-if="appReady" class="app-shell" :data-theme="effectiveColorTheme" :data-density="effectiveDensity" :style="appStyle">
-    <header class="topbar">
-      <button
-        class="btn btn-outline-secondary icon-button"
-        :class="{ active: activePage === 'settings' }"
-        type="button"
-        title="Settings"
-        @click="activePage = activePage === 'settings' ? 'super' : 'settings'"
-      >
-        <i class="bi bi-gear"></i>
-      </button>
-      <div class="active-pane-title" :title="activePageTitle">
-        {{ activePageTitle }}
-      </div>
-      <span v-if="paneToolbarVisible && activePaneToolbar?.status" class="pane-status" :class="activePaneToolbar.statusClass">
-        {{ activePaneToolbar.status }}
-      </span>
-      <div v-if="globalInputStatus.visible" class="global-input-status" :class="`status-${globalInputStatus.status}`">
-        <i class="bi" :class="globalInputStatus.busy ? 'bi-mic-fill' : globalInputStatus.status === 'failed' ? 'bi-exclamation-triangle-fill' : 'bi-check-circle-fill'"></i>
-        <span class="global-input-status-text" :title="`${globalInputStatus.label}: ${globalInputStatus.detail}`">
-          {{ globalInputStatus.detail || globalInputStatus.label }}
-        </span>
-        <button
-          class="btn btn-sm btn-primary global-input-send"
-          type="button"
-          :disabled="!globalInputStatus.canSend"
-          title="Finish voice input"
-          aria-label="Finish voice input"
-          @click="runGlobalInputSend"
-        >
-          <i class="bi bi-send"></i>
-          <span>Send</span>
-        </button>
-      </div>
-      <div v-if="paneToolbarVisible && hasMobilePaneToolbar" class="mobile-pane-menu">
-        <button
-          class="btn btn-outline-secondary icon-button toolbar-action"
-          type="button"
-          title="Pane controls"
-          aria-label="Pane controls"
-          :aria-expanded="mobileToolbarOpen"
-          @click="mobileToolbarOpen = !mobileToolbarOpen"
-        >
-          <i class="bi bi-three-dots-vertical"></i>
-        </button>
-        <div v-if="mobileToolbarOpen" class="mobile-pane-menu-panel" role="menu">
-          <button
-            v-for="action in activePaneActions"
-            :key="action.id"
-            class="mobile-pane-menu-item"
-            :class="[{ active: action.active }, action.variant === 'danger' ? 'danger' : '']"
-            type="button"
-            role="menuitem"
-            @click="runMobilePaneAction(action)"
-          >
-            <i v-if="action.icon" class="bi" :class="action.icon"></i>
-            <span v-else-if="action.label" class="mobile-pane-menu-label">{{ action.label }}</span>
-            <span>{{ action.title }}</span>
-          </button>
-          <template v-for="control in activePaneControls" :key="control.id">
-            <label v-if="control.kind === 'select'" class="mobile-pane-menu-control">
-              <span>{{ control.title }}</span>
-              <select
-                class="form-select form-select-sm"
-                :value="control.value"
-                @change="updateMobilePaneControl(control, $event)"
-              >
-                <option v-for="option in control.options" :key="option" :value="option">{{ option }}</option>
-              </select>
-            </label>
-            <div v-else class="mobile-pane-menu-control">
-              <span>{{ control.title }}</span>
-              <div class="mobile-pane-menu-chips">
-                <span v-for="(item, index) in control.items" :key="`${index}:${item}`" class="pane-toolbar-chip">{{ item }}</span>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-      <div v-if="paneToolbarVisible && activePaneActions.length" class="pane-actions" aria-label="Active pane actions">
-        <button
-          v-for="action in activePaneActions"
-          :key="action.id"
-          class="btn btn-outline-secondary icon-button toolbar-action"
-          :class="[{ active: action.active, 'has-label': action.label }, action.variant === 'danger' ? 'toolbar-action-danger' : '']"
-          type="button"
-          :title="action.title"
-          :aria-label="action.title"
-          @click="runPaneAction(action)"
-        >
-          <i v-if="action.icon" class="bi" :class="action.icon"></i>
-          <span v-else-if="action.label">{{ action.label }}</span>
-        </button>
-      </div>
-      <template v-if="paneToolbarVisible" v-for="control in activePaneControls" :key="control.id">
-        <select
-          v-if="control.kind === 'select'"
-          class="form-select form-select-sm pane-toolbar-select"
-          :class="{ 'pane-toolbar-select-compact': control.size === 'compact' }"
-          :title="control.title"
-          :value="control.value"
-          @change="updatePaneControl(control, $event)"
-        >
-          <option v-for="option in control.options" :key="option" :value="option">{{ option }}</option>
-        </select>
-        <div v-else class="pane-toolbar-chips" :title="control.title">
-          <span v-for="(item, index) in control.items" :key="`${index}:${item}`" class="pane-toolbar-chip">{{ item }}</span>
-        </div>
-      </template>
-      <div v-if="paneToolbarVisible && globalPaneActions.length" class="pane-actions global-pane-actions" aria-label="Global pane actions">
-        <button
-          v-for="action in globalPaneActions"
-          :key="action.id"
-          class="btn btn-outline-secondary icon-button toolbar-action"
-          :class="[{ active: action.active, 'has-label': action.label }, action.variant === 'danger' ? 'toolbar-action-danger' : '']"
-          type="button"
-          :title="action.title"
-          :aria-label="action.title"
-          @click="runPaneAction(action)"
-        >
-          <i v-if="action.icon" class="bi" :class="action.icon"></i>
-          <span v-else-if="action.label">{{ action.label }}</span>
-        </button>
-      </div>
-    </header>
-
     <main v-if="activePage === 'settings'" class="top-level-page">
       <ConfigPanel @close="closeSettings" @preview="previewConfig" />
     </main>
     <main v-else class="top-level-page">
-      <SuperWorkspacePage />
+      <SuperWorkspacePage @open-settings="activePage = 'settings'" />
     </main>
   </div>
 </template>

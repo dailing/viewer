@@ -20,6 +20,8 @@ import { namespacedStorageKey } from "../utils/userProfile";
 import FileSidebar from "./FileSidebar.vue";
 import Workspace from "./Workspace.vue";
 
+const emit = defineEmits<{ "open-settings": [] }>();
+
 const SIDEBAR_PIN_KEY = "viewer.superSidebarPinned.v1";
 const SIDEBAR_WIDTH_KEY = "viewer.superSidebarWidth.v1";
 const SIDEBAR_MIN_WIDTH = 220;
@@ -289,6 +291,7 @@ function startSidebarResize(event: PointerEvent) {
         @toggle-tool-panel="toggleToolPanel"
         @toggle-pin="toggleSidebarPin"
         @close-panel="sidebarOpen = false"
+        @open-settings="emit('open-settings')"
       />
     </aside>
     <div

@@ -12,6 +12,7 @@ import { useAgentsStore } from "../stores/agents";
 import { useFilesStore } from "../stores/files";
 import { useInputSessionsStore } from "../stores/inputSessions";
 import { useLayoutStore } from "../stores/layout";
+import { usePaneToolbarStore } from "../stores/paneToolbar";
 import { useSuperChatComposerStore } from "../stores/superChatComposer";
 import { useSuperChatDispatchStore } from "../stores/superChatDispatch";
 import { useVoiceStore } from "../stores/voice";
@@ -27,6 +28,7 @@ const agents = useAgentsStore();
 const files = useFilesStore();
 const inputSessions = useInputSessionsStore();
 const layout = useLayoutStore();
+const paneToolbar = usePaneToolbarStore();
 const composerState = useSuperChatComposerStore();
 const dispatchSelection = useSuperChatDispatchStore();
 const voice = useVoiceStore();
@@ -113,6 +115,7 @@ onUnmounted(() => {
   superWorkspaceEvents?.close();
   window.removeEventListener("super-workspace:add-role-mention", handleExternalRoleMention);
   window.removeEventListener("super-workspace:chats-updated", handleChatsUpdated);
+  paneToolbar.clearPaneToolbar(props.paneId);
 });
 
 watch(() => props.chatId, async () => {
@@ -136,6 +139,13 @@ watch([selectedDispatchRoleIds, resolvedChatId, () => currentChat.value?.id], ([
 });
 
 watch(() => resolvedChatId.value, () => registerInputContext(), { immediate: true });
+watch([() => props.paneId, () => currentChat.value?.name], registerChatToolbar, { immediate: true });
+
+function registerChatToolbar() {
+  paneToolbar.setPaneToolbar(props.paneId, {
+    title: currentChat.value?.name.trim() || "Chat",
+  });
+}
 
 async function loadRoles() {
   const data = await getSuperWorkspace();
@@ -840,7 +850,7 @@ async function scrollThreadToBottom() {
               <div class="super-run-time">{{ formatTime(item.created_at) }}</div>
               <div class="super-route-line">
                 <template v-if="item.dispatch_targets.length">
-                  <span class="super-route-label">dispatched to</span>
+                  <i class="bi bi-arrow-right super-route-arrow" title="Dispatched to"></i>
                   <span v-for="target in item.dispatch_targets" :key="target.id" class="super-route-chip">
                     <i class="bi" :class="targetIcon(target)"></i>
                     {{ target.role_name }}
@@ -850,7 +860,7 @@ async function scrollThreadToBottom() {
                 <span v-else-if="item.run_status === 'queued'" class="super-route-pending">queued for role dispatch...</span>
                 <span v-else-if="item.run_status === 'failed'" class="super-route-error">dispatch failed: {{ item.error }}</span>
                 <template v-if="item.citation_ids?.length">
-                  <span class="super-route-label">cited</span>
+                  <i class="bi bi-link-45deg super-route-arrow" title="Citations"></i>
                   <button
                     v-for="citationId in uniqueCitationIds(item.citation_ids)"
                     :key="citationId"
@@ -867,7 +877,7 @@ async function scrollThreadToBottom() {
                 </template>
               </div>
             </div>
-            <button class="btn btn-sm btn-outline-secondary super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
+            <button class="btn btn-sm super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
               <i class="bi bi-link-45deg"></i>
               <span>Cite</span>
             </button>
@@ -890,14 +900,15 @@ async function scrollThreadToBottom() {
               >
                 {{ targetStatusLabel(item.target_status) }}
               </span>
-              <span v-if="shortSessionId(item)" class="super-meta-chip" :title="item.session_ref || item.viewer_session_id">
-                session {{ shortSessionId(item) }}
+              <span v-if="shortSessionId(item)" class="super-meta-text super-session-id" :title="item.session_ref || item.viewer_session_id">
+                {{ shortSessionId(item) }}
               </span>
-              <span v-if="contextUsageLabel(item)" class="super-meta-chip">
+              <span v-if="contextUsageLabel(item)" class="super-meta-text super-context-usage">
                 {{ contextUsageLabel(item) }}
               </span>
+              <span class="super-run-time">{{ formatTime(item.created_at) }}</span>
             </div>
-            <button v-if="item.text.trim()" class="btn btn-sm btn-outline-secondary super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
+            <button v-if="item.text.trim()" class="btn btn-sm super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
               <i class="bi bi-link-45deg"></i>
               <span>Cite</span>
             </button>
@@ -1029,7 +1040,7 @@ async function scrollThreadToBottom() {
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 10px clamp(8px, 2vw, 18px);
+  padding: 10px 0;
 }
 
 .super-run {
@@ -1046,6 +1057,7 @@ async function scrollThreadToBottom() {
 }
 
 .super-message-top,
+.super-message-meta,
 .super-route-line,
 .super-response-meta,
 .super-composer-mentions,
@@ -1058,13 +1070,41 @@ async function scrollThreadToBottom() {
   color: var(--color-text-muted);
   font-size: var(--font-size-ui);
   justify-content: space-between;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .super-route-line,
-.super-response-meta,
+.super-composer-mentions {
+  gap: 6px;
+}
+
 .super-composer-mentions {
   flex-wrap: wrap;
+}
+
+.super-message-meta,
+.super-response-meta,
+.super-route-line {
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.super-message-meta,
+.super-response-meta {
+  flex: 1 1 auto;
   gap: 6px;
+}
+
+.super-route-line {
+  flex: 1 1 auto;
+}
+
+.super-run-time,
+.super-route-arrow {
+  flex: 0 0 auto;
 }
 
 .super-user-message,
@@ -1081,8 +1121,7 @@ async function scrollThreadToBottom() {
 
 .super-user-message {
   background: var(--color-accent-soft);
-  margin-left: auto;
-  max-width: min(88%, 960px);
+  max-width: none;
 }
 
 .super-role-response {
@@ -1185,14 +1224,12 @@ async function scrollThreadToBottom() {
   font-weight: 700;
 }
 
-.super-meta-chip {
-  background: var(--color-surface-muted);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+.super-meta-text {
   color: var(--color-text-muted);
   font-size: 11px;
   line-height: 1.2;
-  padding: 2px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .super-target-status {
@@ -1233,14 +1270,27 @@ async function scrollThreadToBottom() {
 
 .super-cite-button,
 .super-route-chip,
+.super-citation-chip,
 .super-composer-mention {
   border-radius: var(--radius-sm);
 }
 
 .super-cite-button {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-muted);
   display: inline-flex;
+  flex: 0 0 auto;
+  font-size: var(--font-size-ui-small);
   gap: 4px;
-  padding: 3px 7px;
+  height: 24px;
+  line-height: 1;
+  padding: 0 6px;
+}
+
+.super-cite-button:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
 }
 
 .super-dispatch-picker {
@@ -1381,15 +1431,22 @@ async function scrollThreadToBottom() {
   background: var(--color-accent-soft);
   color: var(--color-accent-hover);
   display: inline-flex;
+  flex: 0 0 auto;
+  font: inherit;
   gap: 4px;
+  line-height: 1.2;
   padding: 2px 6px;
 }
 
 .super-citation-chip {
   background: var(--color-reference-soft);
+  border: 0;
   color: var(--color-reference);
   display: inline-flex;
+  flex: 0 0 auto;
+  font: inherit;
   gap: 4px;
+  line-height: 1.2;
   padding: 2px 6px;
 }
 
@@ -1447,7 +1504,7 @@ async function scrollThreadToBottom() {
 .super-composer {
   flex: 0 0 auto;
   min-width: 0;
-  padding: 6px clamp(8px, 2vw, 18px) 8px;
+  padding: 6px 0 8px;
   width: 100%;
   z-index: 5;
 }
@@ -1533,7 +1590,7 @@ async function scrollThreadToBottom() {
 @media (max-width: 767.98px) {
   .super-thread {
     gap: 8px;
-    padding: 6px;
+    padding: 6px 0;
   }
 
   .super-run {
@@ -1574,7 +1631,7 @@ async function scrollThreadToBottom() {
   }
 
   .super-cite-button {
-    padding: 2px 5px;
+    padding: 0 5px;
   }
 
   .super-route-chip {
@@ -1582,7 +1639,7 @@ async function scrollThreadToBottom() {
   }
 
   .super-composer {
-    padding: 6px;
+    padding: 6px 0;
   }
 
   .super-composer.collapsed {
@@ -1599,6 +1656,24 @@ async function scrollThreadToBottom() {
   .super-history-boundary {
     font-size: 12px;
     padding: 12px 8px;
+  }
+}
+
+@container (max-width: 560px) {
+  .super-session-id {
+    display: none;
+  }
+}
+
+@container (max-width: 440px) {
+  .super-context-usage {
+    display: none;
+  }
+}
+
+@container (max-width: 340px) {
+  .super-message-meta .super-route-line {
+    display: none;
   }
 }
 </style>

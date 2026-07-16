@@ -141,10 +141,9 @@ defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
 }
 
 .voice-textarea textarea:focus {
-  border-color: var(--color-accent);
+  border-color: var(--color-border);
   box-shadow: none;
-  outline: 2px solid color-mix(in srgb, var(--color-focus) 45%, transparent);
-  outline-offset: 1px;
+  outline: 0;
 }
 
 .voice-textarea-actions {

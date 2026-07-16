@@ -255,7 +255,7 @@ function clearPath() {
 .path-options {
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   box-shadow: var(--shadow-popover);
   left: 0;
   max-height: 220px;
@@ -271,7 +271,7 @@ function clearPath() {
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: inherit;
   display: flex;
   font-size: 12px;

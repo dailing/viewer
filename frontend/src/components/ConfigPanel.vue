@@ -17,7 +17,6 @@ const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
 const dispatchPromptVariables = ["{{message}}", "{{history}}", "{{roles_json}}", "{{roles_table}}"];
-const openSections = reactive({ server: true, users: true, appearance: true, codex: true, superWorkspace: true, voice: true, markdown: true, syntax: false, json: false });
 const jsonDraft = ref("");
 const settingsSearch = ref("");
 const activeSettingSection = ref("appearance");
@@ -124,7 +123,7 @@ watch(
 );
 
 watch(fullConfigJson, (value) => {
-  if (!openSections.json) jsonDraft.value = value;
+  if (activeSettingSection.value !== "json") jsonDraft.value = value;
 });
 
 watch(
@@ -139,14 +138,8 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function sectionToggle(section: keyof typeof openSections) {
-  openSections[section] = !openSections[section];
-  if (section === "json" && openSections.json) jsonDraft.value = fullConfigJson.value;
-}
-
 function selectSettingSection(section: string) {
   activeSettingSection.value = section;
-  if (section in openSections) openSections[section as keyof typeof openSections] = true;
   if (section === "json") jsonDraft.value = fullConfigJson.value;
 }
 
@@ -442,11 +435,8 @@ async function applyJson() {
         </aside>
         <div class="config-content">
         <section v-show="activeSettingSection === 'server'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('server')">
-            <i class="bi" :class="openSections.server ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Server</span>
-          </button>
-          <div v-if="openSections.server" class="section-body">
+          <div class="section-heading"><i class="bi bi-hdd-rack"></i><h2>Server</h2></div>
+          <div class="section-body">
             <div class="server-actions">
               <button class="btn btn-sm btn-outline-danger" type="button" :disabled="!!restarting || stopping" @click="restart(false)">
                 <span v-if="restarting === 'backend'" class="spinner-border spinner-border-sm"></span>
@@ -469,11 +459,8 @@ async function applyJson() {
         </section>
 
         <section v-show="activeSettingSection === 'users'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('users')">
-            <i class="bi" :class="openSections.users ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>User Profile</span>
-          </button>
-          <div v-if="openSections.users" class="section-body">
+          <div class="section-heading"><i class="bi bi-person"></i><h2>User Profile</h2></div>
+          <div class="section-body">
             <label class="compact-field">
               <span>Active profile</span>
               <select class="form-select form-select-sm" :value="users.activeUserId" @change="switchUser(($event.target as HTMLSelectElement).value)">
@@ -486,11 +473,8 @@ async function applyJson() {
         </section>
 
         <section v-show="activeSettingSection === 'appearance'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('appearance')">
-            <i class="bi" :class="openSections.appearance ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Appearance</span>
-          </button>
-          <div v-if="openSections.appearance" class="section-body">
+          <div class="section-heading"><i class="bi bi-palette"></i><h2>Appearance</h2></div>
+          <div class="section-body">
             <label class="compact-field">
               <span>Theme</span>
               <select v-model="draft.appearance.color_theme" class="form-select form-select-sm">
@@ -510,11 +494,8 @@ async function applyJson() {
         </section>
 
         <section v-show="activeSettingSection === 'codex'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('codex')">
-            <i class="bi" :class="openSections.codex ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Codex Models</span>
-          </button>
-          <div v-if="openSections.codex" class="section-body">
+          <div class="section-heading"><i class="bi bi-cpu"></i><h2>Codex Models</h2></div>
+          <div class="section-body">
             <label class="compact-field">
               <span>Default model</span>
               <select v-model="draft.codex.default_model" class="form-select form-select-sm">
@@ -547,11 +528,8 @@ async function applyJson() {
         </section>
 
         <section v-show="activeSettingSection === 'superWorkspace'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('superWorkspace')">
-            <i class="bi" :class="openSections.superWorkspace ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Super Workspace</span>
-          </button>
-          <div v-if="openSections.superWorkspace" class="section-body">
+          <div class="section-heading"><i class="bi bi-diagram-3"></i><h2>Super Workspace</h2></div>
+          <div class="section-body">
             <label class="compact-field">
               <span>Dispatch profile</span>
               <select class="form-select form-select-sm" :value="draft.superWorkspace.active_dispatch_profile_id" @change="setActiveDispatchProfile(($event.target as HTMLSelectElement).value)">
@@ -690,11 +668,8 @@ async function applyJson() {
         </section>
 
         <section v-show="activeSettingSection === 'voice'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('voice')">
-            <i class="bi" :class="openSections.voice ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Voice</span>
-          </button>
-          <div v-if="openSections.voice" class="section-body">
+          <div class="section-heading"><i class="bi bi-mic"></i><h2>Voice</h2></div>
+          <div class="section-body">
             <label class="compact-field checkbox-field">
               <span>Enabled</span>
               <input v-model="draft.voice.enabled" class="form-check-input" type="checkbox" />
@@ -754,11 +729,8 @@ async function applyJson() {
         </section>
 
         <section v-show="activeSettingSection === 'markdown'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('markdown')">
-            <i class="bi" :class="openSections.markdown ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Markdown</span>
-          </button>
-          <div v-if="openSections.markdown" class="section-body">
+          <div class="section-heading"><i class="bi bi-markdown"></i><h2>Markdown</h2></div>
+          <div class="section-body">
             <label class="compact-field checkbox-field">
               <span>Follow app theme</span>
               <input v-model="draft.markdown.follow_app_theme" class="form-check-input" type="checkbox" />
@@ -837,11 +809,8 @@ async function applyJson() {
         </section>
 
         <section v-show="activeSettingSection === 'syntax'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('syntax')">
-            <i class="bi" :class="openSections.syntax ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>Syntax Highlighting</span>
-          </button>
-          <div v-if="openSections.syntax" class="section-body color-grid syntax-grid">
+          <div class="section-heading"><i class="bi bi-code-slash"></i><h2>Syntax Highlighting</h2></div>
+          <div class="section-body color-grid syntax-grid">
             <label v-for="key in Object.keys(activeTheme.syntax)" :key="key">
               <span>{{ key }}</span>
               <input v-model="activeTheme.syntax[key as keyof MarkdownTheme['syntax']]" class="form-control form-control-sm form-control-color" type="color" />
@@ -850,11 +819,8 @@ async function applyJson() {
         </section>
 
         <section v-show="activeSettingSection === 'json'" class="config-section">
-          <button class="section-toggle" type="button" @click="sectionToggle('json')">
-            <i class="bi" :class="openSections.json ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-            <span>JSON</span>
-          </button>
-          <div v-if="openSections.json" class="section-body">
+          <div class="section-heading"><i class="bi bi-braces"></i><h2>JSON</h2></div>
+          <div class="section-body">
             <textarea v-model="jsonDraft" class="json-editor" spellcheck="false"></textarea>
             <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyJson">Apply JSON</button>
           </div>
@@ -1006,17 +972,21 @@ async function applyJson() {
   min-height: 100%;
 }
 
-.section-toggle {
+.section-heading {
   align-items: center;
-  background: var(--color-surface);
-  border: 0;
   display: flex;
-  font-size: 15px;
-  font-weight: 700;
   gap: 8px;
   padding: 18px 18px 10px;
-  text-align: left;
-  width: 100%;
+}
+
+.section-heading h2 {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.section-heading .bi {
+  color: var(--color-text-muted);
 }
 
 .section-body {
@@ -1241,7 +1211,7 @@ async function applyJson() {
     flex: 1 0 100%;
   }
 
-  .section-toggle {
+  .section-heading {
     padding: 9px 10px;
   }
 

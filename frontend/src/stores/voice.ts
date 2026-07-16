@@ -126,10 +126,6 @@ export const useVoiceStore = defineStore("voice", {
       if (!contextHasRuntimeJobs(id)) compositions.delete(id);
       this.setContext(id, { text });
     },
-    markRead(id: string) {
-      if (!this.contexts[id]?.unread) return;
-      this.setContext(id, { unread: false });
-    },
     clear(id: string) {
       compositions.delete(id);
       this.setContext(id, defaultState(""));

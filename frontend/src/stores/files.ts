@@ -326,9 +326,6 @@ export const useFilesStore = defineStore("files", {
     loading: false,
   }),
   getters: {
-    rootEntries(state): FileEntry[] {
-      return state.listings[""]?.entries ?? [];
-    },
     currentEntries(state): FileEntry[] {
       const entries = [...(state.listings[state.currentPath]?.entries ?? [])];
       return entries.sort((left, right) => {
@@ -341,9 +338,6 @@ export const useFilesStore = defineStore("files", {
     },
     parentPath(state): string {
       return resolveParentPath(state.currentPath);
-    },
-    activeMarkdownTheme(state): MarkdownTheme {
-      return state.markdown.themes.find((theme) => theme.name === state.markdown.active_theme) ?? state.markdown.themes[0] ?? DEFAULT_MARKDOWN_THEME;
     },
   },
   actions: {
@@ -369,19 +363,6 @@ export const useFilesStore = defineStore("files", {
       this.codexConfig = normalizeCodexConfig(saved.codex);
       this.voiceConfig = normalizeVoiceConfig(saved.voice);
       this.superWorkspaceConfig = normalizeSuperWorkspaceConfig(saved.super_workspace);
-    },
-    async saveAppearance(appearance: AppearanceConfig) {
-      this.appearance = normalizeAppearance(appearance);
-      await this.saveConfig();
-    },
-    async saveMarkdown(markdown: MarkdownConfig) {
-      this.markdown = normalizeMarkdown(markdown);
-      await this.saveConfig();
-    },
-    async saveViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig) {
-      this.appearance = normalizeAppearance(appearance);
-      this.markdown = normalizeMarkdown(markdown);
-      await this.saveConfig();
     },
     async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, voice: VoiceConfig, superWorkspace: SuperWorkspaceConfig) {
       this.appearance = normalizeAppearance(appearance);
@@ -409,14 +390,6 @@ export const useFilesStore = defineStore("files", {
     },
     async enterParentDirectory() {
       await this.enterDirectory(this.parentPath);
-    },
-    async toggleDirectory(path: string) {
-      if (this.expanded.has(path)) {
-        this.expanded.delete(path);
-        return;
-      }
-      this.expanded.add(path);
-      await this.loadDirectory(path);
     },
     async refreshAffected(path: string, isDir: boolean) {
       if (isDir && this.expanded.has(path)) await this.loadDirectory(path);

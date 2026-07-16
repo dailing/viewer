@@ -118,36 +118,8 @@ function updateProvider(role: SuperRole) {
 </template>
 
 <style scoped>
-.sidebar-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.sidebar-section {
-  border-bottom: 1px solid var(--color-border);
-  padding: 10px;
-}
-
-.list-section {
-  border-bottom: 0;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-}
-
 .list-section.editing {
   flex: 0 1 34%;
-}
-
-.section-title {
-  color: var(--color-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0;
-  margin-bottom: 6px;
-  text-transform: uppercase;
 }
 
 .panel-command,
@@ -156,47 +128,6 @@ function updateProvider(role: SuperRole) {
   display: inline-flex;
   gap: 7px;
   justify-content: center;
-}
-
-.panel-command {
-  width: 100%;
-}
-
-.empty-panel {
-  color: var(--color-text-muted);
-  font-size: 12px;
-  padding: 4px 6px;
-}
-
-.sidebar-row {
-  align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: inherit;
-  display: flex;
-  gap: 7px;
-  min-height: 30px;
-  padding: 3px 6px;
-  text-align: left;
-  width: 100%;
-}
-
-.sidebar-row:hover {
-  background: var(--color-surface-hover);
-}
-
-.sidebar-row.active {
-  border-color: var(--color-accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
-}
-
-.sidebar-row-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .role-editor {
@@ -217,17 +148,6 @@ function updateProvider(role: SuperRole) {
   font-size: 12px;
   font-weight: 700;
   justify-content: space-between;
-}
-
-.field {
-  display: grid;
-  gap: 4px;
-}
-
-.field span {
-  color: var(--color-text-muted);
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .editor-actions {

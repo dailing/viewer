@@ -99,34 +99,6 @@ function statusTitle(file: GitDiffFile) {
 </template>
 
 <style scoped>
-.sidebar-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.sidebar-section {
-  border-bottom: 1px solid var(--color-border);
-  padding: 10px;
-}
-
-.list-section {
-  border-bottom: 0;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-}
-
-.section-title {
-  color: var(--color-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0;
-  margin-bottom: 6px;
-  text-transform: uppercase;
-}
-
 .current-path {
   align-items: center;
   color: var(--color-text-muted);
@@ -145,14 +117,6 @@ function statusTitle(file: GitDiffFile) {
   white-space: nowrap;
 }
 
-.panel-command {
-  align-items: center;
-  display: inline-flex;
-  gap: 7px;
-  justify-content: center;
-  width: 100%;
-}
-
 .empty-panel,
 .panel-error {
   color: var(--color-text-muted);
@@ -168,7 +132,7 @@ function statusTitle(file: GitDiffFile) {
   align-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: inherit;
   display: grid;
   font-size: 11px;
@@ -186,7 +150,6 @@ function statusTitle(file: GitDiffFile) {
 
 .change-row.active {
   border-color: var(--color-accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .change-row.disabled {
@@ -224,7 +187,7 @@ function statusTitle(file: GitDiffFile) {
 
 .binary-pill {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   font-size: 10px;
   padding: 1px 5px;

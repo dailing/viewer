@@ -307,7 +307,6 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - User selection: `useUsersStore` loads `/api/users`, reads/writes `viewer.activeUser.v1`, and blocks normal app startup behind the first-run profile picker when no valid active profile is stored. The Settings page includes a profile selector that stores the new user and reloads the app so all stores reconnect under the new profile.
 - File viewer scroll memory lives in `utils/scrollMemory.ts` and `composables/useScrollMemory.ts`. Scroll positions are browser-local, user-namespaced, and keyed by workspace id, pane id, and file path so two panes can keep different positions for the same file; layout navigation emits `viewer:pane-before-navigate` before replacing pane content and workspace switching emits `viewer:workspace-before-switch` before the displayed workspace id changes so the current viewer can save its last scroll position under the correct key.
 - Agent provider/session list is loaded on startup and polled every 15 seconds through `stores/agents.ts`.
-- `LocalFilePreview.vue` is a floating file preview dialog used for transient local-file inspection from Codex transcript links. It resolves to normal viewer components and offers only three navigation actions: open in the active pane, open in a vertical split, or open in a horizontal split.
 
 `frontend/src/components/SuperWorkspacePage.vue`
 
@@ -399,9 +398,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Full-page configuration UI opened from the top bar Settings button.
 - Edits `~/.view/config.json` through the existing `/api/config` endpoint.
-- Sections: Server, User Profile, Appearance, Codex Models, Super Workspace, Voice, Markdown, Syntax Highlighting, and raw JSON.
+- Uses a searchable category sidebar rather than nested accordion state; each category renders a direct heading plus Bootstrap form controls. Categories are Server, User Profile, Appearance, Codex Models, Super Workspace, Voice, Markdown, Syntax Highlighting, and raw JSON.
 - Server section has confirmed backend-only restart, backend+worker restart, and stop buttons. Both restart buttons call `/api/admin/restart`, with the full restart adding `include_worker=true`; the page polls `/api/health` until the PID changes, then reloads. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
-- Appearance currently controls nav bar size, which also drives icon/button size via CSS variables.
+- Appearance controls system/light/dark theme selection and compact/comfortable density; density maps directly to the shared control sizing rather than persisting arbitrary pixel sizes.
 - Codex Models controls the default Codex model, the available model list used by Super Workspace Codex roles, and the optional Codex subprocess proxy.
 - Super Workspace controls chat-level Hindsight retain, optional Hindsight API URL override, chat memory bank prefix, and new-session visible chat-history bootstrap with a rough token budget.
 - Voice controls voice enablement, the persisted Whisper model option list, selected model, language code, translation toggle, and target language used by `/api/voice/ws`.
@@ -526,9 +525,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
 - Git APIs: `getGitStatus()`, `getGitDiff()`, `stageGitPath()`, `revertGitPath()`, `commitGit()`, and `pushGit()`.
 - Admin APIs: `restartServer(includeWorker?)` and `stopServer()`.
-- Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `getTerminal()`, `terminateTerminal()`, `deleteTerminal()`, `terminalSocketUrl()`.
+- Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `terminateTerminal()`, `deleteTerminal()`, and `terminalSocketUrl()`.
 - Agent provider metadata API: `listAgentProviders()`.
-- Super Workspace APIs: `listSuperWorkspaces()`, `activateSuperWorkspace()`, `getSuperWorkspace()`, `updateSuperWorkspace()`, role CRUD helpers, `listSuperWorkspaceRuns()`, `createSuperWorkspaceRun()`, and the raw `dispatchSuperWorkspace()` wrapper cover workspace activation, role storage, persisted query history, and LLM routing. Normal role-message delivery is owned by the backend Super Workspace runtime, not by frontend shared agent session helpers.
+- Super Workspace APIs: `listSuperWorkspaces()`, `getSuperWorkspace()`, chat/role CRUD helpers, `listSuperWorkspaceRuns()`, and `createSuperWorkspaceRun()` cover active workspace data and persisted chat/query flows. Normal role-message delivery and automatic routing are owned by the backend Super Workspace runtime, not by frontend wrappers.
 - `frontend/src/api/client.ts` appends the active user id from `viewer.activeUser.v1` to REST and WebSocket API URLs; `frontend/src/api/events.ts` does the same for the SSE stream.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 
@@ -539,16 +538,15 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/stores/files.ts`
 
 - Pinia store for directory listings, current path, expanded dirs, pinned paths, visit timestamps, appearance config, Markdown theme config, Codex config, Super Workspace config, voice config, and loading state. Pinned file paths are persisted in user-namespaced browser `localStorage`; appearance, Markdown themes, Codex config, Super Workspace config, voice config, and profile definitions are persisted in `~/.view/config.json`.
-- Getters: `rootEntries`, `currentEntries`, `parentPath`, `activeMarkdownTheme`.
-- Actions: `loadConfig()`, `saveConfig()`, `saveAppearance()`, `saveMarkdown()`, `saveViewerConfig()`, `saveFullViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `toggleDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
+- Getters: `currentEntries`, `parentPath`.
+- Actions: `loadConfig()`, `saveConfig()`, `saveFullViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
 `frontend/src/stores/layout.ts`
 
 - Pinia store for recursive split layout and active pane.
 - Helpers: `id()`, `defaultLayout()`, `findPane()`, `mapNode()`, `firstPaneId()`, `mapAllPanes()`, `removePane()`.
 - Getters: `activePane`, `openPaths`, `openTerminalIds`, `openDiffPaths`, and `openChatIds`.
-- Actions: `load()`, `save()`, `snapshot()`, `restore()`, `reset()`, `setActive()`, `openFile()`, `openFileInSplit()`, `openTerminal()`, `openDiff()`, `openChat()`, `openChatInSplit()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, and `clearTerminal()`.
-- `openFileInSplit(path, direction)` creates a new split beside the active pane, opens a file in the new pane, and makes that pane active. It is used by floating local-file previews.
+- Actions: `load()`, `save()`, `snapshot()`, `restore()`, `reset()`, `setActive()`, `openFile()`, `openTerminal()`, `openDiff()`, `openChat()`, `splitPane()`, `setRatio()`, `clearPane()`, `closePane()`, `clearTerminal()`, and `goBack()`.
 - Persists to `localStorage` key `viewer.layout.v1`.
 
 `frontend/src/stores/superChatComposer.ts`
@@ -632,8 +630,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/styles.css`
 
-- Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile sidebar behavior, scroll area, muted text, shared Markdown rendering, and shared Highlight.js token colors.
-- CSS variables: `--sidebar-width`, `--topbar-height`, `--nav-button-size`, `--nav-icon-size`, `--border`, `--panel`, `--surface`, `--text-muted`.
+- Global app layout and shared classes: shell, top bar, sidebar drawer/pinned mode, resizers, workspace wrapper, icon buttons, mobile behavior, flattened sidebar panel/row/field primitives, shared Markdown rendering, and Highlight.js token colors. Feature sidebar components keep only feature-specific layout instead of duplicating these primitives.
+- Semantic theme variables cover canvas/surface states, text hierarchy, borders, accent/status colors, focus, radius, overlay, and popover shadow. Normal controls and panels use a 2px radius; full circles are reserved for notification dots, spinners, and numeric badges.
 
 `frontend/src/vite-env.d.ts`
 

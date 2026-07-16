@@ -250,20 +250,20 @@ onUnmounted(() => {
     <div class="pdf-toolbar">
       <span class="pdf-status">{{ pageCount ? `${pageCount} pages` : "PDF" }}</span>
       <div class="pdf-actions">
-        <button class="pdf-button" type="button" title="Zoom out" aria-label="Zoom out" @click="zoomOut">
+        <button class="btn btn-sm btn-outline-secondary pdf-button" type="button" title="Zoom out" aria-label="Zoom out" @click="zoomOut">
           <i class="bi bi-zoom-out"></i>
         </button>
         <span class="pdf-zoom">{{ Math.round(zoom * 100) }}%</span>
-        <button class="pdf-button" type="button" title="Zoom in" aria-label="Zoom in" @click="zoomIn">
+        <button class="btn btn-sm btn-outline-secondary pdf-button" type="button" title="Zoom in" aria-label="Zoom in" @click="zoomIn">
           <i class="bi bi-zoom-in"></i>
         </button>
-        <button class="pdf-button" type="button" title="Rotate" aria-label="Rotate" @click="rotateClockwise">
+        <button class="btn btn-sm btn-outline-secondary pdf-button" type="button" title="Rotate" aria-label="Rotate" @click="rotateClockwise">
           <i class="bi bi-arrow-clockwise"></i>
         </button>
-        <button class="pdf-button" type="button" title="Reset view" aria-label="Reset view" @click="resetView">
+        <button class="btn btn-sm btn-outline-secondary pdf-button" type="button" title="Reset view" aria-label="Reset view" @click="resetView">
           <i class="bi bi-aspect-ratio"></i>
         </button>
-        <a class="pdf-button" :href="src" target="_blank" rel="noreferrer" title="Open raw PDF" aria-label="Open raw PDF">
+        <a class="btn btn-sm btn-outline-secondary pdf-button" :href="src" target="_blank" rel="noreferrer" title="Open raw PDF" aria-label="Open raw PDF">
           <i class="bi bi-box-arrow-up-right"></i>
         </a>
       </div>
@@ -347,23 +347,12 @@ onUnmounted(() => {
 
 .pdf-button {
   align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: var(--color-text-muted);
   display: inline-flex;
   height: 28px;
   justify-content: center;
   line-height: 1;
   padding: 0;
-  text-decoration: none;
   width: 28px;
-}
-
-.pdf-button:hover {
-  background: var(--color-surface-hover);
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
 }
 
 .pdf-zoom {
@@ -412,7 +401,7 @@ onUnmounted(() => {
 .pdf-page-frame {
   align-items: center;
   background: #ffffff;
-  box-shadow: 0 2px 12px rgb(15 23 42 / 0.18);
+  border: 1px solid var(--color-border);
   display: flex;
   justify-content: center;
   margin: 0 auto;

@@ -1,18 +1,16 @@
 import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerConfig } from "../types/files";
-import type { TerminalInfo, TerminalSnapshot } from "../types/terminals";
+import type { TerminalInfo } from "../types/terminals";
 import type {
   SuperChatCreate,
   SuperChatList,
   SuperChatPatch,
   SuperDisplayItemsPage,
-  SuperDispatchResponse,
   SuperHistoryRun,
   SuperHistoryRunCreate,
   SuperRoleCreate,
   SuperRolePatch,
   SuperWorkspaceData,
   SuperWorkspaceList,
-  SuperWorkspacePatch,
 } from "../types/superWorkspace";
 import type { AgentProviderInfo } from "../types/agents";
 import type { GitDiffText, GitStatus } from "../types/git";
@@ -195,10 +193,6 @@ export async function createTerminal(cwd = ""): Promise<TerminalInfo> {
   });
 }
 
-export async function getTerminal(id: string): Promise<TerminalSnapshot> {
-  return request<TerminalSnapshot>(`/api/terminals/${encodeURIComponent(id)}`);
-}
-
 export async function terminateTerminal(id: string): Promise<TerminalInfo> {
   return request<TerminalInfo>(`/api/terminals/${encodeURIComponent(id)}/terminate`, { method: "POST" });
 }
@@ -219,20 +213,8 @@ export async function getSuperWorkspace(): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>("/api/super-workspace");
 }
 
-export async function updateSuperWorkspace(patch: SuperWorkspacePatch): Promise<SuperWorkspaceData> {
-  return request<SuperWorkspaceData>("/api/super-workspace", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-}
-
 export async function listSuperWorkspaces(): Promise<SuperWorkspaceList> {
   return request<SuperWorkspaceList>("/api/super-workspace/workspaces");
-}
-
-export async function activateSuperWorkspace(workspaceId: string): Promise<SuperWorkspaceList> {
-  return request<SuperWorkspaceList>(`/api/super-workspace/active-workspace/${workspaceId}`, { method: "POST" });
 }
 
 export async function listSuperChats(): Promise<SuperChatList> {
@@ -296,14 +278,6 @@ export async function createSuperWorkspaceRun(payload: SuperHistoryRunCreate): P
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
-}
-
-export async function dispatchSuperWorkspace(message: string, roleIds?: string[]): Promise<SuperDispatchResponse> {
-  return request<SuperDispatchResponse>("/api/super-workspace/dispatch", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, role_ids: roleIds }),
   });
 }
 

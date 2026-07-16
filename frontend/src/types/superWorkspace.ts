@@ -60,10 +60,6 @@ export type SuperChatCreate = {
 
 export type SuperChatPatch = Partial<SuperChatCreate>;
 
-export type SuperWorkspacePatch = {
-  common_prompt?: string;
-};
-
 export type SuperRoleCreate = {
   name: string;
   description?: string;
@@ -74,12 +70,6 @@ export type SuperRoleCreate = {
 };
 
 export type SuperRolePatch = Partial<Omit<SuperRole, "id" | "created_at" | "updated_at">>;
-
-export type SuperDispatchResponse = {
-  role_ids: string[];
-  rationale: string;
-  raw?: Record<string, unknown> | null;
-};
 
 export type AgentHistoryMessage = {
   id: string;

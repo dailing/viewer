@@ -63,7 +63,7 @@ function isActive(entry: FileEntry): boolean {
 .tree-row {
   align-items: center;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   box-sizing: border-box;
   display: flex;
   min-height: 30px;
@@ -75,7 +75,6 @@ function isActive(entry: FileEntry): boolean {
 
 .tree-row.active {
   border-color: var(--color-accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
   color: var(--color-accent-hover);
   font-weight: 600;
 }

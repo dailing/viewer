@@ -267,20 +267,6 @@ export const useLayoutStore = defineStore("layout", {
       this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForFile(path)));
       this.save();
     },
-    openFileInSplit(path: string, direction: SplitDirection) {
-      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
-      const nextPaneId = id("pane");
-      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
-        type: "split",
-        id: id("split"),
-        direction,
-        ratio: 0.5,
-        first: { ...pane },
-        second: { type: "pane", id: nextPaneId, filePath: path },
-      }));
-      this.activePaneId = nextPaneId;
-      this.save();
-    },
     openTerminal(id: string) {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
       emitPaneBeforeNavigate(this.activePaneId);
@@ -297,20 +283,6 @@ export const useLayoutStore = defineStore("layout", {
       if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
       emitPaneBeforeNavigate(this.activePaneId);
       this.root = mapNode(this.root, this.activePaneId, (pane) => replacePaneContent(pane, contentForChat(chatId)));
-      this.save();
-    },
-    openChatInSplit(chatId: string, direction: SplitDirection) {
-      if (!this.activePaneId) this.activePaneId = firstPaneId(this.root);
-      const nextPaneId = id("pane");
-      this.root = mapNode(this.root, this.activePaneId, (pane) => ({
-        type: "split",
-        id: id("split"),
-        direction,
-        ratio: 0.5,
-        first: { ...pane },
-        second: { type: "pane", id: nextPaneId, chatId },
-      }));
-      this.activePaneId = nextPaneId;
       this.save();
     },
     goBack(paneId?: string) {

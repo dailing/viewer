@@ -681,7 +681,6 @@ onUnmounted(() => {
   background: var(--color-surface-raised);
   border-top: 1px solid #2f3b4f;
   bottom: 0;
-  box-shadow: 0 -8px 24px rgb(0 0 0 / 0.35);
   color: var(--color-text);
   display: flex;
   flex-direction: column;

@@ -867,7 +867,7 @@ async function scrollThreadToBottom() {
                 </template>
               </div>
             </div>
-            <button class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
+            <button class="btn btn-sm btn-outline-secondary super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
               <i class="bi bi-link-45deg"></i>
               <span>Cite</span>
             </button>
@@ -897,7 +897,7 @@ async function scrollThreadToBottom() {
                 {{ contextUsageLabel(item) }}
               </span>
             </div>
-            <button v-if="item.text.trim()" class="super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
+            <button v-if="item.text.trim()" class="btn btn-sm btn-outline-secondary super-cite-button" type="button" :title="`Cite @msg-${item.message_id}`" @click="addMessageCitation(item.message_id)">
               <i class="bi bi-link-45deg"></i>
               <span>Cite</span>
             </button>
@@ -915,7 +915,7 @@ async function scrollThreadToBottom() {
     <div ref="composerShellRef" class="super-composer" :class="{ collapsed: composerCollapsed }" @focusout="handleComposerFocusOut">
       <button
         v-if="composerCollapsed"
-        class="super-composer-toggle"
+        class="btn btn-outline-secondary super-composer-toggle"
         type="button"
         title="Open message input"
         aria-label="Open message input"
@@ -965,8 +965,8 @@ async function scrollThreadToBottom() {
                 <span class="super-dispatch-label">{{ selectedDispatchRoles.length ? selectedDispatchRoles.map((role) => role.name).join(', ') : 'Auto' }}</span>
                 <span v-if="selectedDispatchRoles.length > 1" class="super-dispatch-count">{{ selectedDispatchRoles.length }}</span>
               </summary>
-              <div class="super-dispatch-menu" @mousedown.prevent>
-                <button class="super-dispatch-menu-auto" type="button" :class="{ selected: !selectedDispatchRoles.length }" @click="dispatchSelection.clearChat(resolvedChatId)">
+              <div class="list-group super-dispatch-menu" @mousedown.prevent>
+                <button class="list-group-item list-group-item-action super-dispatch-menu-auto" type="button" :class="{ selected: !selectedDispatchRoles.length }" @click="dispatchSelection.clearChat(resolvedChatId)">
                   <i class="bi" :class="selectedDispatchRoles.length ? 'bi-circle' : 'bi-check-circle-fill'"></i>
                   <span>Auto</span>
                 </button>
@@ -974,7 +974,7 @@ async function scrollThreadToBottom() {
                 <button
                   v-for="role in chatDispatchRoles"
                   :key="role.id"
-                  class="super-dispatch-option"
+                  class="list-group-item list-group-item-action super-dispatch-option"
                   type="button"
                   :class="{ selected: isDispatchRoleSelected(role.id) }"
                   @click="toggleDispatchRole(role.id)"
@@ -1189,7 +1189,7 @@ async function scrollThreadToBottom() {
 .super-meta-chip {
   background: var(--color-surface-muted);
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   font-size: 11px;
   line-height: 1.2;
@@ -1198,7 +1198,7 @@ async function scrollThreadToBottom() {
 
 .super-target-status {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   font-size: 11px;
   font-weight: 600;
@@ -1235,13 +1235,10 @@ async function scrollThreadToBottom() {
 .super-cite-button,
 .super-route-chip,
 .super-composer-mention {
-  border: 1px solid var(--color-border);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
 }
 
 .super-cite-button {
-  background: var(--color-surface-raised);
-  color: var(--color-text-muted);
   display: inline-flex;
   gap: 4px;
   padding: 3px 7px;
@@ -1263,7 +1260,7 @@ async function scrollThreadToBottom() {
   align-items: center;
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   cursor: pointer;
   display: inline-flex;
@@ -1322,12 +1319,17 @@ async function scrollThreadToBottom() {
 }
 
 .super-dispatch-menu {
+  --bs-list-group-action-hover-bg: var(--color-surface-hover);
+  --bs-list-group-bg: transparent;
+  --bs-list-group-border-radius: 0;
+  --bs-list-group-border-width: 0;
+  --bs-list-group-color: var(--color-text);
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-popover);
   bottom: calc(100% + 6px);
-  display: grid;
+  display: flex;
   gap: 3px;
   left: 0;
   max-height: min(260px, 42vh);
@@ -1341,10 +1343,6 @@ async function scrollThreadToBottom() {
 .super-dispatch-menu-auto,
 .super-dispatch-option {
   align-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  color: var(--color-text);
   display: flex;
   font-size: 12px;
   gap: 7px;
@@ -1352,11 +1350,6 @@ async function scrollThreadToBottom() {
   padding: 6px 7px;
   text-align: left;
   width: 100%;
-}
-
-.super-dispatch-menu-auto:hover,
-.super-dispatch-option:hover {
-  background: var(--color-surface-hover);
 }
 
 .super-dispatch-menu-auto.selected {
@@ -1474,7 +1467,6 @@ async function scrollThreadToBottom() {
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 -8px 28px color-mix(in srgb, var(--color-canvas) 70%, transparent);
   padding: 8px;
   width: 100%;
 }
@@ -1575,7 +1567,7 @@ async function scrollThreadToBottom() {
 
   .super-user-message,
   .super-role-response {
-    border-radius: 7px;
+    border-radius: var(--radius-sm);
     font-size: 12.5px;
     line-height: 1.45;
     padding: 7px 8px;
@@ -1603,7 +1595,7 @@ async function scrollThreadToBottom() {
   }
 
   .super-composer-card {
-    border-radius: 7px;
+    border-radius: var(--radius-sm);
     padding: 6px;
   }
 

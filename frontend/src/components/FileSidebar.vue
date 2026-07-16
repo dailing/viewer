@@ -231,7 +231,7 @@ async function openPinnedFile(path: string) {
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   display: inline-flex;
   flex: 0 0 34px;
@@ -398,7 +398,7 @@ async function openPinnedFile(path: string) {
   align-items: center;
   background: transparent;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   display: inline-flex;
   flex: 0 0 22px;

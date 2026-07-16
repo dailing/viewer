@@ -108,7 +108,7 @@ onUnmounted(() => {
 .viewer-pane {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -119,7 +119,6 @@ onUnmounted(() => {
 
 .viewer-pane.active {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .pane-body {

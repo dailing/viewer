@@ -364,7 +364,7 @@ function startSidebarResize(event: PointerEvent) {
 .super-error {
   background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
   border: 1px solid color-mix(in srgb, var(--color-danger) 35%, var(--color-border));
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--color-danger);
   font-size: 12px;
   left: 16px;

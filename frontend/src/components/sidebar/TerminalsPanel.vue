@@ -83,72 +83,6 @@ async function closeTerminal(id: string) {
 </template>
 
 <style scoped>
-.sidebar-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.sidebar-section {
-  border-bottom: 1px solid var(--color-border);
-  padding: 10px;
-}
-
-.list-section {
-  border-bottom: 0;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-}
-
-.section-title {
-  color: var(--color-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0;
-  margin-bottom: 6px;
-  text-transform: uppercase;
-}
-
-.panel-command {
-  align-items: center;
-  display: inline-flex;
-  gap: 7px;
-  justify-content: center;
-  width: 100%;
-}
-
-.empty-panel {
-  color: var(--color-text-muted);
-  font-size: 12px;
-  padding: 4px 6px;
-}
-
-.sidebar-row {
-  align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  box-sizing: border-box;
-  color: inherit;
-  display: flex;
-  gap: 7px;
-  min-height: 30px;
-  padding: 3px 6px;
-  text-align: left;
-  width: 100%;
-}
-
-.sidebar-row:hover {
-  background: var(--color-surface-hover);
-}
-
-.sidebar-row.active {
-  border-color: var(--color-accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
-}
-
 .sidebar-row.voice-pending {
   background: color-mix(in srgb, var(--color-warning) 10%, var(--color-surface));
 }
@@ -165,37 +99,9 @@ async function closeTerminal(id: string) {
   background: color-mix(in srgb, var(--color-warning) 34%, var(--color-surface));
 }
 
-.sidebar-row-main {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  display: flex;
-  flex: 1 1 auto;
-  gap: 7px;
-  min-width: 0;
-  padding: 0;
-  text-align: left;
-}
-
-.sidebar-row-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-row-action {
-  flex: 0 0 auto;
-  height: 24px;
-  opacity: 0.75;
-  width: 24px;
-}
-
 .state-pill {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   flex: 0 0 auto;
   font-size: 10px;

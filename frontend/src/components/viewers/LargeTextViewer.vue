@@ -251,7 +251,7 @@ onUnmounted(() => {
 .large-text-loading {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   font-size: 12px;
   padding: 4px 8px;

@@ -175,18 +175,6 @@ async function deleteEntry(entry: FileEntry) {
 </template>
 
 <style scoped>
-.sidebar-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.sidebar-section {
-  border-bottom: 1px solid var(--color-border);
-  padding: 10px;
-}
-
 .tree-section {
   border-bottom: 0;
   flex: 1 1 auto;
@@ -220,15 +208,6 @@ async function deleteEntry(entry: FileEntry) {
   display: none;
 }
 
-.section-title {
-  color: var(--color-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0;
-  margin-bottom: 6px;
-  text-transform: uppercase;
-}
-
 .current-path {
   align-items: center;
   color: var(--color-text-muted);
@@ -251,7 +230,7 @@ async function deleteEntry(entry: FileEntry) {
   align-items: center;
   background: var(--color-accent-soft);
   border: 1px dashed var(--color-accent);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--color-accent-hover);
   display: flex;
   font-size: 12px;
@@ -264,7 +243,7 @@ async function deleteEntry(entry: FileEntry) {
 .upload-error {
   background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
   border: 1px solid color-mix(in srgb, var(--color-danger) 38%, var(--color-border));
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--color-danger);
   font-size: 12px;
   line-height: 1.35;
@@ -273,59 +252,7 @@ async function deleteEntry(entry: FileEntry) {
   word-break: break-word;
 }
 
-.sidebar-row {
-  align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  box-sizing: border-box;
-  color: inherit;
-  display: flex;
-  gap: 7px;
-  min-height: 30px;
-  padding: 3px 6px;
-  text-align: left;
-  width: 100%;
-}
-
-.sidebar-row:hover {
-  background: var(--color-surface-hover);
-}
-
-.sidebar-row.active {
-  border-color: var(--color-accent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent);
-}
-
 .parent-row {
   margin-bottom: 2px;
-}
-
-.sidebar-row-main {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  display: flex;
-  flex: 1 1 auto;
-  gap: 7px;
-  min-width: 0;
-  padding: 0;
-  text-align: left;
-}
-
-.sidebar-row-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-row-action {
-  flex: 0 0 auto;
-  height: 24px;
-  opacity: 0.75;
-  width: 24px;
 }
 </style>

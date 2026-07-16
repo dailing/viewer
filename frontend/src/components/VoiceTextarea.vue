@@ -124,7 +124,7 @@ defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
 
 .voice-textarea textarea {
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 14px;
   line-height: 1.35;
   max-height: var(--voice-textarea-max-height);

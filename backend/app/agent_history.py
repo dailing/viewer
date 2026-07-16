@@ -1738,11 +1738,45 @@ class AgentHistoryStore:
             values["claim_expires_at"] = None
             values["next_attempt_at"] = next_attempt_at
         with self.session_scope() as db:
-            db.execute(
+            statement = update(SuperWorkspaceDriverRunRow).where(SuperWorkspaceDriverRunRow.id == driver_run_id)
+            if status != "cancelled":
+                statement = statement.where(SuperWorkspaceDriverRunRow.status != "cancelled")
+            db.execute(statement.values(**values))
+
+    def cancel_dispatch_task(self, task_id: str, user_id: str | None) -> SuperDispatchTask:
+        normalized_user = normalize_user_id(user_id)
+        now = time.time()
+        with self.session_scope() as db:
+            result = db.execute(
                 update(SuperWorkspaceDriverRunRow)
-                .where(SuperWorkspaceDriverRunRow.id == driver_run_id)
-                .values(**values)
+                .where(
+                    SuperWorkspaceDriverRunRow.id == task_id,
+                    SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                    SuperWorkspaceDriverRunRow.status == "running",
+                )
+                .values(
+                    status="cancelled",
+                    error="",
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    finished_at=now,
+                    updated_at=now,
+                )
             )
+            if result.rowcount == 0:
+                row = db.scalar(
+                    select(SuperWorkspaceDriverRunRow).where(
+                        SuperWorkspaceDriverRunRow.id == task_id,
+                        SuperWorkspaceDriverRunRow.user_id == normalized_user,
+                    )
+                )
+                if row is None:
+                    raise KeyError(task_id)
+                raise ValueError(str(row.status))
+        task = self.get_dispatch_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        return task
 
     def claim_next_dispatch_task(self, worker_id: str, lease_seconds: float = 60.0) -> SuperDispatchTask | None:
         now = time.time()
@@ -1916,8 +1950,9 @@ class AgentHistoryStore:
         statuses = [target.status for target in run.targets]
         if any(status == "failed" for status in statuses):
             return self.update_super_run(run_id, user_id, status="failed", error=fallback_error)
-        if statuses and all(status == "completed" for status in statuses):
-            return self.update_super_run(run_id, user_id, status="completed", error="")
+        if statuses and all(status in {"completed", "cancelled"} for status in statuses):
+            terminal_status = "cancelled" if any(status == "cancelled" for status in statuses) else "completed"
+            return self.update_super_run(run_id, user_id, status=terminal_status, error="")
         if any(status in {"claimed", "running"} for status in statuses):
             return self.update_super_run(run_id, user_id, status="running", error="")
         return self.update_super_run(run_id, user_id, status="queued", error="")

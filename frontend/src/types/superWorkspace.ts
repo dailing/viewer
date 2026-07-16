@@ -138,7 +138,7 @@ export type SuperHistoryRun = {
   message_id: string;
   role_ids: string[];
   citation_ids?: string[];
-  status: "selecting" | "queued" | "running" | "dispatched" | "completed" | "failed";
+  status: "selecting" | "queued" | "running" | "dispatched" | "completed" | "failed" | "cancelled";
   rationale: string;
   error: string;
   parent_message_id?: string | null;

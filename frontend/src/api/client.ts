@@ -281,6 +281,10 @@ export async function createSuperWorkspaceRun(payload: SuperHistoryRunCreate): P
   });
 }
 
+export async function stopSuperWorkspaceTarget(taskId: string): Promise<SuperHistoryRun> {
+  return request<SuperHistoryRun>(`/api/super-workspace/targets/${encodeURIComponent(taskId)}/stop`, { method: "POST" });
+}
+
 export function voiceSocketUrl(): string {
   return socketUrl("/api/voice/ws");
 }

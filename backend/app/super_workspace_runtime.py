@@ -425,6 +425,38 @@ class SuperWorkspaceRuntime:
         await self._emit_update({"type": "run-updated", "user_id": normalized_user, "chat_id": run.chat_id, "run_id": run.id})
         return agent_history_store.get_super_run(queued.id, normalized_user)
 
+    async def stop_dispatch_task(self, task_id: str, user_id: str | None = None) -> SuperHistoryRun:
+        normalized_user = normalize_user_id(user_id)
+        try:
+            task = agent_history_store.cancel_dispatch_task(task_id, normalized_user)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Running agent task not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=f"Agent task is no longer running ({exc})") from exc
+
+        if task.session_ref:
+            driver = self._drivers.get(task.provider)
+            if driver is None:
+                raise HTTPException(status_code=409, detail=f"Unsupported provider: {task.provider}")
+            provider, session_id = driver.parse_ref(task.session_ref, task.provider)
+            if provider != driver.provider or not session_id:
+                raise HTTPException(status_code=409, detail="Agent task has no stoppable session")
+            await driver.manager().terminate(session_id)
+
+        run = agent_history_store.summarize_super_run_status(task.query_message_id, normalized_user)
+        await self._emit_update(
+            {
+                "type": "run-updated",
+                "user_id": normalized_user,
+                "chat_id": task.chat_id,
+                "run_id": task.query_message_id,
+                "driver_run_id": task.id,
+                "status": "cancelled",
+                "updated_at": time.time(),
+            }
+        )
+        return run
+
     def _merge_requested_role_ids(self, requested_role_ids: list[str], parsed_role_ids: list[str], roles: list[SuperRole]) -> list[str]:
         valid_role_ids = {role.id for role in roles}
         merged: list[str] = []
@@ -556,6 +588,22 @@ class SuperWorkspaceRuntime:
         session_ref = str(dispatch_result["session_ref"])
         rotation_reason = str(dispatch_result.get("rotation_reason") or "")
         provider, session_id = driver.parse_ref(session_ref, role.provider)
+        current_task = agent_history_store.get_dispatch_task(task.id)
+        if current_task is not None and current_task.status == "cancelled":
+            await driver.manager().terminate(session_id)
+            agent_history_store.summarize_super_run_status(run.id, task.user_id)
+            await self._emit_update(
+                {
+                    "type": "run-updated",
+                    "user_id": task.user_id,
+                    "chat_id": run.chat_id,
+                    "run_id": run.id,
+                    "driver_run_id": task.id,
+                    "status": "cancelled",
+                    "updated_at": time.time(),
+                }
+            )
+            return
         snapshot = driver.manager().snapshot(session_id, "focus")
         usage = driver.usage_from_snapshot(snapshot)
         agent_history_store.upsert_chat_role_session(
@@ -633,6 +681,11 @@ class SuperWorkspaceRuntime:
         manager = driver.manager()
         provider = driver.provider
         while not self._stop.is_set():
+            current_task = agent_history_store.get_dispatch_task(driver_run_id) if driver_run_id else None
+            if current_task is not None and current_task.status == "cancelled":
+                with contextlib.suppress(Exception):
+                    await manager.terminate(session_id)
+                return self._summarize_run_status(run_id, user_id)
             snapshot = manager.snapshot(session_id, "focus")
             queue = snapshot.get("queue") if isinstance(snapshot.get("queue"), list) else []
             status = str(snapshot.get("status") or "")
@@ -689,8 +742,9 @@ class SuperWorkspaceRuntime:
                 statuses.append(target.status)
         if any(status == "failed" for status in statuses):
             return agent_history_store.update_super_run(run_id, user_id, status="failed", error=fallback_error)
-        if statuses and all(status == "completed" for status in statuses):
-            return agent_history_store.update_super_run(run_id, user_id, status="completed")
+        if statuses and all(status in {"completed", "cancelled"} for status in statuses):
+            terminal_status = "cancelled" if any(status == "cancelled" for status in statuses) else "completed"
+            return agent_history_store.update_super_run(run_id, user_id, status=terminal_status, error="")
         return agent_history_store.update_super_run(run_id, user_id, status="running")
 
     def _driver_has_final_response(self, run_id: str, user_id: str, driver_run_id: str) -> bool:

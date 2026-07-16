@@ -6,6 +6,7 @@ import {
   listSuperChats,
   listSuperWorkspaceRuns,
   resolveDirectoryLink,
+  stopSuperWorkspaceTarget,
 } from "../api/client";
 import { connectSuperWorkspaceEvents } from "../api/events";
 import { useAgentsStore } from "../stores/agents";
@@ -94,6 +95,9 @@ let citationTimer: number | null = null;
 let superWorkspaceEvents: EventSource | null = null;
 let chatLoadRequest = 0;
 const jumpedMessageId = ref("");
+const stopConfirmationId = ref("");
+const stoppingTargetId = ref("");
+let stopConfirmationTimer: number | null = null;
 
 onMounted(async () => {
   await agents.loadProviders();
@@ -112,6 +116,7 @@ onUnmounted(() => {
   if (fallbackTimer !== null) window.clearInterval(fallbackTimer);
   if (refreshTimer !== null) window.clearTimeout(refreshTimer);
   if (citationTimer !== null) window.clearTimeout(citationTimer);
+  clearStopConfirmation();
   superWorkspaceEvents?.close();
   window.removeEventListener("super-workspace:add-role-mention", handleExternalRoleMention);
   window.removeEventListener("super-workspace:chats-updated", handleChatsUpdated);
@@ -485,7 +490,7 @@ function withTargetPlaceholders(orderedItems: SuperDisplayItem[]): SuperDisplayI
 }
 
 function shouldShowTargetPlaceholder(target: SuperDisplayTarget) {
-  return ["queued", "claimed", "running", "failed"].includes(normalizedTargetStatus(target.status));
+  return ["queued", "claimed", "running", "failed", "cancelled"].includes(normalizedTargetStatus(target.status));
 }
 
 function displayItemFromTargetPlaceholder(query: SuperDisplayItem, target: SuperDisplayTarget): SuperDisplayItem {
@@ -661,9 +666,63 @@ function targetStatusLabel(status: string) {
   const normalized = normalizedTargetStatus(status);
   if (normalized === "claimed") return "starting";
   if (normalized === "queued") return "queued";
-  if (normalized === "running") return "running";
+  if (normalized === "running") return "running…";
   if (normalized === "failed") return "failed";
+  if (normalized === "cancelled") return "stopped";
   return normalized;
+}
+
+function targetStatusButtonLabel(item: SuperThreadItem) {
+  if (stoppingTargetId.value === item.driver_run_id) return "stopping…";
+  if (stopConfirmationId.value === item.driver_run_id) return "stop?";
+  return targetStatusLabel(item.target_status);
+}
+
+function canStopTarget(item: SuperThreadItem) {
+  return Boolean(item.driver_run_id) && normalizedTargetStatus(item.target_status) === "running";
+}
+
+function clearStopConfirmation() {
+  if (stopConfirmationTimer !== null) {
+    window.clearTimeout(stopConfirmationTimer);
+    stopConfirmationTimer = null;
+  }
+  stopConfirmationId.value = "";
+}
+
+function markTargetStopped(driverRunId: string) {
+  items.value = items.value.map((item) => ({
+    ...item,
+    target_status: item.driver_run_id === driverRunId ? "cancelled" : item.target_status,
+    dispatch_targets: item.dispatch_targets.map((target) => (
+      target.id === driverRunId ? { ...target, status: "cancelled" } : target
+    )),
+  }));
+}
+
+async function requestTargetStop(item: SuperThreadItem) {
+  const driverRunId = item.driver_run_id || "";
+  if (!driverRunId || stoppingTargetId.value) return;
+  if (stopConfirmationId.value !== driverRunId) {
+    clearStopConfirmation();
+    stopConfirmationId.value = driverRunId;
+    stopConfirmationTimer = window.setTimeout(clearStopConfirmation, 2000);
+    return;
+  }
+
+  clearStopConfirmation();
+  stoppingTargetId.value = driverRunId;
+  error.value = "";
+  try {
+    await stopSuperWorkspaceTarget(driverRunId);
+    markTargetStopped(driverRunId);
+    scheduleRefreshLiveState(0);
+  } catch (stopError) {
+    error.value = stopError instanceof Error ? stopError.message : "Failed to stop agent";
+    scheduleRefreshLiveState(0);
+  } finally {
+    stoppingTargetId.value = "";
+  }
 }
 
 function showTargetStatus(status: string) {
@@ -676,6 +735,7 @@ function responsePlaceholderText(status: string) {
   if (normalized === "queued") return "Waiting for this role to start.";
   if (normalized === "claimed") return "Starting role session.";
   if (normalized === "failed") return "No response was produced.";
+  if (normalized === "cancelled") return "Stopped before a response was produced.";
   return "Waiting for response.";
 }
 
@@ -894,8 +954,22 @@ async function scrollThreadToBottom() {
                 <i class="bi" :class="itemIcon(item)"></i>
                 {{ item.role_name }}
               </span>
+              <button
+                v-if="showTargetStatus(item.target_status) && canStopTarget(item)"
+                class="super-target-status super-target-stop"
+                :class="[
+                  `status-${normalizedTargetStatus(item.target_status)}`,
+                  { confirming: stopConfirmationId === item.driver_run_id, stopping: stoppingTargetId === item.driver_run_id },
+                ]"
+                type="button"
+                :disabled="Boolean(stoppingTargetId)"
+                :title="stopConfirmationId === item.driver_run_id ? 'Click again within 2 seconds to stop this agent' : 'Stop this running agent'"
+                @click="requestTargetStop(item)"
+              >
+                {{ targetStatusButtonLabel(item) }}
+              </button>
               <span
-                v-if="showTargetStatus(item.target_status)"
+                v-else-if="showTargetStatus(item.target_status)"
                 class="super-target-status"
                 :class="`status-${normalizedTargetStatus(item.target_status)}`"
               >
@@ -1268,6 +1342,34 @@ async function scrollThreadToBottom() {
   color: var(--color-danger);
 }
 
+.super-target-status.status-cancelled {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+}
+
+.super-target-stop {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.super-target-stop:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-warning) 19%, var(--color-surface));
+  color: var(--color-warning);
+}
+
+.super-target-stop.confirming {
+  background: color-mix(in srgb, var(--color-danger) 13%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--color-danger) 42%, var(--color-border));
+  color: var(--color-danger);
+}
+
+.super-target-stop.stopping,
+.super-target-stop:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
 .super-response-placeholder {
   color: var(--color-text-muted);
   font-size: var(--font-size-ui);
@@ -1376,7 +1478,10 @@ async function scrollThreadToBottom() {
 }
 
 .super-dispatch-menu {
+  --bs-list-group-action-active-bg: var(--color-surface-hover);
+  --bs-list-group-action-active-color: var(--color-text);
   --bs-list-group-action-hover-bg: var(--color-surface-hover);
+  --bs-list-group-action-hover-color: var(--color-text);
   --bs-list-group-bg: transparent;
   --bs-list-group-border-radius: 0;
   --bs-list-group-border-width: 0;
@@ -1416,6 +1521,21 @@ async function scrollThreadToBottom() {
 .super-dispatch-option.selected {
   color: var(--color-accent-hover);
   font-weight: 700;
+}
+
+.super-dispatch-menu-auto:hover,
+.super-dispatch-menu-auto:focus,
+.super-dispatch-option:hover,
+.super-dispatch-option:focus {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.super-dispatch-menu-auto.selected:hover,
+.super-dispatch-menu-auto.selected:focus,
+.super-dispatch-option.selected:hover,
+.super-dispatch-option.selected:focus {
+  color: var(--color-accent-hover);
 }
 
 .super-dispatch-option .bi {

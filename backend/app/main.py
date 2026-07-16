@@ -627,6 +627,11 @@ async def create_super_workspace_run(request: SuperHistoryRunCreate, user: str |
     )
 
 
+@app.post("/api/super-workspace/targets/{task_id}/stop")
+async def stop_super_workspace_target(task_id: str, user: str | None = None):
+    return await super_workspace_runtime.stop_dispatch_task(task_id, user)
+
+
 @app.post("/api/super-workspace/dispatch")
 async def dispatch_super_workspace(request: SuperDispatchRequest, user: str | None = None):
     return await super_workspace_manager.dispatch(request, user)

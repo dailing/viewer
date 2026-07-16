@@ -92,6 +92,7 @@ export interface CodexConfig {
 
 export interface VoiceConfig {
   enabled: boolean;
+  language_model_refine: boolean;
   available_models: string[];
   model: string;
   available_languages: string[];

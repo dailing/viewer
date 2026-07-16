@@ -84,15 +84,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 
 <template>
   <div class="sidebar-panel">
-    <div class="sidebar-section">
-      <button class="btn btn-sm btn-primary panel-command" type="button" @click="emit('create-chat')">
-        <i class="bi bi-chat-left-text"></i>
-        <span>New Chat</span>
-      </button>
-    </div>
-
     <div class="sidebar-section list-section">
-      <div class="section-title">Chats</div>
       <div v-if="!props.chats.length" class="empty-panel">No chats</div>
       <div
         v-for="chat in props.chats"
@@ -125,6 +117,12 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
           </button>
         </div>
       </div>
+    </div>
+
+    <div class="sidebar-action-footer">
+      <button class="sidebar-add-button" type="button" title="New chat" aria-label="New chat" @click="emit('create-chat')">
+        <i class="bi bi-plus-lg"></i>
+      </button>
     </div>
 
     <form v-if="selectedSettingsChat" class="chat-settings" @submit.prevent="save(selectedSettingsChat)">
@@ -206,7 +204,7 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 .dispatch-role-chip {
   align-items: center;
   background: var(--color-canvas);
-  border: 1px solid var(--color-border);
+  border: 0;
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   display: inline-flex;
@@ -219,9 +217,8 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
 }
 
 .dispatch-role-chip.selected {
-  background: var(--color-accent-soft);
-  border-color: var(--color-accent);
-  color: var(--color-accent-hover);
+  background: var(--color-surface-selected);
+  color: var(--color-text);
 }
 
 .dispatch-role-chip span {

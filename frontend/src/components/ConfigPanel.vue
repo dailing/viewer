@@ -674,6 +674,10 @@ async function applyJson() {
               <span>Enabled</span>
               <input v-model="draft.voice.enabled" class="form-check-input" type="checkbox" />
             </label>
+            <label class="compact-field checkbox-field">
+              <span>LLM refine</span>
+              <input v-model="draft.voice.language_model_refine" class="form-check-input" type="checkbox" />
+            </label>
             <label class="compact-field">
               <span>Whisper model</span>
               <input

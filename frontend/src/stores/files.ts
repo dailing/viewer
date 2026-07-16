@@ -76,6 +76,7 @@ export const DEFAULT_CODEX_CONFIG: CodexConfig = {
 
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   enabled: true,
+  language_model_refine: true,
   available_models: ["large-v3-turbo", "small", "medium", "base", "tiny"],
   model: "large-v3-turbo",
   available_languages: ["auto", "en", "zh", "ja", "ko", "fr", "de", "es"],
@@ -228,6 +229,7 @@ function normalizeVoiceConfig(config?: Partial<VoiceConfig>): VoiceConfig {
   const targetLanguage = (config?.target_language?.trim().toLowerCase() || DEFAULT_VOICE_CONFIG.target_language).replace(/^cn$/, "zh");
   return {
     enabled: config?.enabled ?? DEFAULT_VOICE_CONFIG.enabled,
+    language_model_refine: config?.language_model_refine ?? DEFAULT_VOICE_CONFIG.language_model_refine,
     available_models: models.includes(model) ? models : [model, ...models],
     model,
     available_languages: languages.includes(language) ? languages : [language, ...languages],

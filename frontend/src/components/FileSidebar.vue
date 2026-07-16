@@ -258,7 +258,7 @@ async function openPinnedFile(path: string) {
 
 .activity-button.active {
   background: var(--color-surface-selected);
-  color: var(--color-accent-hover);
+  color: var(--color-text);
 }
 
 .activity-button.active::before {
@@ -381,13 +381,15 @@ async function openPinnedFile(path: string) {
   background: var(--color-surface-muted);
   color: var(--color-text);
   display: flex;
-  flex: 0 0 30px;
+  box-sizing: border-box;
+  flex: 0 0 var(--pane-titlebar-height);
   font-size: 12px;
   font-weight: 700;
   gap: 4px;
-  line-height: 30px;
+  height: var(--pane-titlebar-height);
+  line-height: 1.2;
   overflow: hidden;
-  padding: 2px 5px 2px 7px;
+  padding: 2px 4px 2px 7px;
 }
 
 .tool-panel-title span {
@@ -405,11 +407,11 @@ async function openPinnedFile(path: string) {
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   display: inline-flex;
-  flex: 0 0 22px;
-  height: 22px;
+  flex: 0 0 var(--nav-button-size);
+  height: var(--nav-button-size);
   justify-content: center;
   padding: 0;
-  width: 22px;
+  width: var(--nav-button-size);
 }
 
 .panel-title-button:hover {

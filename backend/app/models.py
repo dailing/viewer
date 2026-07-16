@@ -95,6 +95,7 @@ class CodexConfig(BaseModel):
 
 class VoiceConfig(BaseModel):
     enabled: bool = True
+    language_model_refine: bool = True
     available_models: list[str] = Field(default_factory=lambda: ["large-v3-turbo", "small", "medium", "base", "tiny"])
     model: str = "large-v3-turbo"
     available_languages: list[str] = Field(default_factory=lambda: ["auto", "en", "zh", "ja", "ko", "fr", "de", "es"])

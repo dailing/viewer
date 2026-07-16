@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import ConfigPanel from "./components/ConfigPanel.vue";
 import SuperWorkspacePage from "./components/SuperWorkspacePage.vue";
 import { connectEvents } from "./api/events";
 import { DARK_MARKDOWN_THEME, DEFAULT_MARKDOWN_THEME, useFilesStore } from "./stores/files";
 import { useTerminalsStore } from "./stores/terminals";
 import { useUsersStore } from "./stores/users";
+import { useVoiceStore } from "./stores/voice";
 import type { AppearanceConfig, MarkdownConfig } from "./types/files";
 
 const files = useFilesStore();
 const terminals = useTerminalsStore();
 const users = useUsersStore();
+const voice = useVoiceStore();
 
 const appReady = ref(false);
 const selectingUser = ref(false);
@@ -27,6 +29,12 @@ const effectiveColorTheme = computed<"light" | "dark">(() => {
   return effectiveAppearance.value.color_theme;
 });
 const effectiveDensity = computed(() => effectiveAppearance.value.density ?? "compact");
+
+watch(
+  () => files.voiceConfig.language_model_refine,
+  (enabled) => voice.setLanguageModelRefine(enabled),
+  { immediate: true },
+);
 
 const appStyle = computed(() => {
   const titlebarSize = effectiveDensity.value === "comfortable" ? 34 : 28;

@@ -41,15 +41,7 @@ async function closeTerminal(id: string) {
 
 <template>
   <div class="sidebar-panel">
-    <div class="sidebar-section">
-      <button class="btn btn-sm btn-primary panel-command" type="button" @click="newTerminal">
-        <i class="bi bi-terminal"></i>
-        <span>New Terminal</span>
-      </button>
-    </div>
-
     <div class="sidebar-section list-section">
-      <div class="section-title">Terminals</div>
       <div v-if="!terminals.terminals.length" class="empty-panel">No terminals</div>
       <div
         v-for="terminal in terminals.terminals"
@@ -78,6 +70,11 @@ async function closeTerminal(id: string) {
           <i class="bi bi-x"></i>
         </button>
       </div>
+    </div>
+    <div class="sidebar-action-footer">
+      <button class="sidebar-add-button" type="button" title="New terminal" aria-label="New terminal" @click="newTerminal">
+        <i class="bi bi-plus-lg"></i>
+      </button>
     </div>
   </div>
 </template>

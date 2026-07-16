@@ -145,7 +145,6 @@ async function deleteEntry(entry: FileEntry) {
 
     <div class="sidebar-section tree-section">
       <div class="files-header">
-        <div class="section-title">Files</div>
         <button class="btn btn-sm btn-outline-secondary icon-button upload-button" type="button" title="Upload files" :disabled="uploading" @click="chooseFiles">
           <i class="bi" :class="uploading ? 'bi-arrow-repeat' : 'bi-upload'"></i>
         </button>
@@ -190,12 +189,8 @@ async function deleteEntry(entry: FileEntry) {
   align-items: center;
   display: flex;
   gap: 8px;
+  justify-content: flex-end;
   margin-bottom: 6px;
-}
-
-.files-header .section-title {
-  flex: 1 1 auto;
-  margin-bottom: 0;
 }
 
 .upload-button {

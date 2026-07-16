@@ -67,7 +67,6 @@ function statusTitle(file: GitDiffFile) {
     </div>
 
     <div class="sidebar-section list-section">
-      <div class="section-title">Changes</div>
       <div class="current-path" :title="currentCwd || '/'">
         <i class="bi bi-folder2-open"></i>
         <span>{{ currentCwd || "/" }}</span>

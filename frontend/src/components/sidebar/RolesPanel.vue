@@ -36,15 +36,7 @@ function updateProvider(role: SuperRole) {
 
 <template>
   <div class="sidebar-panel">
-    <div class="sidebar-section">
-      <button class="btn btn-sm btn-primary panel-command" type="button" @click="emit('create-role')">
-        <i class="bi bi-person-plus"></i>
-        <span>New Role</span>
-      </button>
-    </div>
-
     <div class="sidebar-section list-section" :class="{ editing: selectedRole }">
-      <div class="section-title">Roles</div>
       <div v-if="!props.roles.length" class="empty-panel">No roles</div>
       <button
         v-for="role in props.roles"
@@ -57,6 +49,12 @@ function updateProvider(role: SuperRole) {
       >
         <i class="bi" :class="role.provider === 'hermes' ? 'bi-lightning' : 'bi-stars'"></i>
         <span class="sidebar-row-name">{{ role.name }}</span>
+      </button>
+    </div>
+
+    <div class="sidebar-action-footer">
+      <button class="sidebar-add-button" type="button" title="New role" aria-label="New role" @click="emit('create-role')">
+        <i class="bi bi-plus-lg"></i>
       </button>
     </div>
 

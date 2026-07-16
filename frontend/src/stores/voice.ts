@@ -35,7 +35,6 @@ type VoiceComposition = {
 const runtimeJobs = new Map<string, VoiceRuntimeJob>();
 const compositions = new Map<string, VoiceComposition>();
 let voiceJobCounter = 0;
-const LANGUAGE_MODEL_REFINE_STORAGE_KEY = "viewer.voice.languageModelRefine";
 
 function defaultState(text = ""): VoiceContextState {
   return { status: "idle", text, error: "", unread: false, updatedAt: Date.now() };
@@ -99,7 +98,7 @@ export const useVoiceStore = defineStore("voice", {
     contexts: {} as Record<string, VoiceContextState>,
     activeRecordingContextId: "",
     activeRecordingJobId: "",
-    languageModelRefine: loadLanguageModelRefine(),
+    languageModelRefine: true,
   }),
   getters: {
     context: (state) => (id: string): VoiceContextState => state.contexts[id] ?? defaultState(),
@@ -132,14 +131,6 @@ export const useVoiceStore = defineStore("voice", {
     },
     setLanguageModelRefine(enabled: boolean) {
       this.languageModelRefine = enabled;
-      try {
-        window.localStorage.setItem(LANGUAGE_MODEL_REFINE_STORAGE_KEY, enabled ? "1" : "0");
-      } catch {
-        // Ignore storage failures; the in-memory toggle still works for this page.
-      }
-    },
-    toggleLanguageModelRefine() {
-      this.setLanguageModelRefine(!this.languageModelRefine);
     },
     async start(id: string, baseText: string) {
       if (this.activeRecordingContextId) {
@@ -320,14 +311,3 @@ export const useVoiceStore = defineStore("voice", {
     },
   },
 });
-
-function loadLanguageModelRefine(): boolean {
-  try {
-    const stored = window.localStorage.getItem(LANGUAGE_MODEL_REFINE_STORAGE_KEY);
-    if (stored === "0") return false;
-    if (stored === "1") return true;
-  } catch {
-    // Ignore storage failures and use the requested default.
-  }
-  return true;
-}

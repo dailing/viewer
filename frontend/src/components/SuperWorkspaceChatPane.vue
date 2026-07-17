@@ -900,7 +900,10 @@ async function scrollThreadToBottom() {
         <div v-if="item.kind === 'query'" class="super-user-turn">
           <div class="super-message-top super-user-message-top">
             <div class="super-message-meta">
-              <span class="super-response-role-label">User</span>
+              <span class="super-response-role-label">
+                <i class="bi bi-person-fill"></i>
+                User
+              </span>
               <div class="super-run-time">{{ formatTime(item.created_at) }}</div>
               <div class="super-route-line">
                 <template v-if="item.dispatch_targets.length">

@@ -2,7 +2,6 @@
 import { computed, ref, watch } from "vue";
 import { useFilesStore } from "../../stores/files";
 import { useLayoutStore } from "../../stores/layout";
-import { useUsersStore } from "../../stores/users";
 import type { FileEntry } from "../../types/files";
 import FileTree from "../FileTree.vue";
 
@@ -16,15 +15,15 @@ const props = defineProps<{
 
 const files = useFilesStore();
 const layout = useLayoutStore();
-const users = useUsersStore();
 
 const pinned = computed(() => files.pinned);
-const currentLabel = computed(() => files.currentPath || users.activeProfile?.home || "/");
+const currentLabel = computed(() => files.currentPath || props.defaultCwd || "/");
 const fileInput = ref<HTMLInputElement | null>(null);
 const dragDepth = ref(0);
 const uploadError = ref("");
 const uploading = ref(false);
 const isDragging = computed(() => dragDepth.value > 0);
+const canEnterParent = computed(() => Boolean(files.currentPath) && files.currentPath !== (props.defaultCwd ?? ""));
 
 watch(
   () => props.defaultCwd ?? "",
@@ -40,15 +39,7 @@ async function enterDefaultDirectory(cwd: string) {
   try {
     await files.enterDirectory(cwd);
   } catch (error) {
-    if (!cwd) {
-      uploadError.value = error instanceof Error ? error.message : String(error);
-      return;
-    }
-    try {
-      await files.enterDirectory("");
-    } catch (fallbackError) {
-      uploadError.value = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-    }
+    uploadError.value = error instanceof Error ? error.message : String(error);
   }
 }
 
@@ -159,7 +150,7 @@ async function deleteEntry(entry: FileEntry) {
         <span>Drop to upload here</span>
       </div>
       <div v-if="uploadError" class="upload-error" role="alert">{{ uploadError }}</div>
-      <button v-if="files.currentPath" class="sidebar-row parent-row" type="button" @click="files.enterParentDirectory()">
+      <button v-if="canEnterParent" class="sidebar-row parent-row" type="button" @click="files.enterParentDirectory()">
         <i class="bi bi-arrow-90deg-up"></i>
         <span class="sidebar-row-name">..</span>
       </button>

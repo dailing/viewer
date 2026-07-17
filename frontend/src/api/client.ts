@@ -1,4 +1,4 @@
-import type { DirectoryListing, FileMeta, TextLineWindow, UserProfile, ViewerConfig } from "../types/files";
+import type { DirectoryListing, FileMeta, TextLineWindow, ViewerConfig } from "../types/files";
 import type { TerminalInfo } from "../types/terminals";
 import type {
   SuperChatCreate,
@@ -13,10 +13,9 @@ import type {
 } from "../types/superWorkspace";
 import type { AgentProviderInfo } from "../types/agents";
 import type { GitDiffText, GitStatus } from "../types/git";
-import { currentUserId } from "../utils/userProfile";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(withUser(url), options);
+  const response = await fetch(url, options);
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || response.statusText);
@@ -26,20 +25,13 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
 function socketUrl(path: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}${withUser(path)}`;
-}
-
-function withUser(url: string): string {
-  const user = currentUserId();
-  if (!user || !url.startsWith("/api/")) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}user=${encodeURIComponent(user)}`;
+  return `${protocol}//${window.location.host}${path}`;
 }
 
 export function rawUrl(path: string, contentHash?: string, base?: string): string {
   const hashQuery = contentHash ? `&h=${encodeURIComponent(contentHash)}` : "";
   const baseQuery = base !== undefined ? `&base=${encodeURIComponent(base)}` : "";
-  return withUser(`/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}${baseQuery}`);
+  return `/api/file/raw?path=${encodeURIComponent(path)}${hashQuery}${baseQuery}`;
 }
 
 function encodePathSegments(path: string): string {
@@ -54,14 +46,10 @@ export function siteUrl(path: string, contentHash?: string): string {
   if (path.startsWith("/")) {
     const params = new URLSearchParams({ path });
     if (contentHash) params.set("h", contentHash);
-    return withUser(`/api/file/site?${params.toString()}`);
+    return `/api/file/site?${params.toString()}`;
   }
   const hashQuery = contentHash ? `?h=${encodeURIComponent(contentHash)}` : "";
-  return withUser(`/api/file/site/${encodePathSegments(path)}${hashQuery}`);
-}
-
-export async function listUsers(): Promise<UserProfile[]> {
-  return request<UserProfile[]>("/api/users");
+  return `/api/file/site/${encodePathSegments(path)}${hashQuery}`;
 }
 
 export async function getTree(path = ""): Promise<DirectoryListing> {
@@ -73,7 +61,7 @@ export async function getMeta(path: string): Promise<FileMeta> {
 }
 
 export async function getText(path: string): Promise<string> {
-  const response = await fetch(withUser(`/api/file/content?path=${encodeURIComponent(path)}`));
+  const response = await fetch(`/api/file/content?path=${encodeURIComponent(path)}`);
   if (!response.ok) throw new Error(await response.text());
   return response.text();
 }
@@ -85,7 +73,7 @@ export async function getTextLines(path: string, start: number, count: number): 
 }
 
 export async function putText(path: string, content: string): Promise<FileMeta> {
-  const response = await fetch(withUser(`/api/file/content?path=${encodeURIComponent(path)}`), {
+  const response = await fetch(`/api/file/content?path=${encodeURIComponent(path)}`, {
     method: "PUT",
     headers: { "Content-Type": "text/plain; charset=utf-8" },
     body: content,
@@ -96,7 +84,7 @@ export async function putText(path: string, content: string): Promise<FileMeta> 
 
 export async function uploadFile(directory: string, file: File): Promise<void> {
   const query = `directory=${encodeURIComponent(directory)}&filename=${encodeURIComponent(file.name)}`;
-  const response = await fetch(withUser(`/api/file/upload?${query}`), {
+  const response = await fetch(`/api/file/upload?${query}`, {
     method: "POST",
     headers: { "Content-Type": file.type || "application/octet-stream" },
     body: file,
@@ -105,7 +93,7 @@ export async function uploadFile(directory: string, file: File): Promise<void> {
 }
 
 export async function deleteFile(path: string): Promise<void> {
-  const response = await fetch(withUser(`/api/file?path=${encodeURIComponent(path)}`), { method: "DELETE" });
+  const response = await fetch(`/api/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
   if (!response.ok) throw new Error(await response.text());
 }
 

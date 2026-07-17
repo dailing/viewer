@@ -2,7 +2,6 @@
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
 import { DARK_MARKDOWN_THEME, DEFAULT_CODEX_CONFIG, DEFAULT_DISPATCH_PROFILES, DEFAULT_DISPATCH_PROMPT_TEMPLATE, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
-import { useUsersStore } from "../stores/users";
 import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, VoiceConfig } from "../types/files";
 
 const emit = defineEmits<{
@@ -10,7 +9,6 @@ const emit = defineEmits<{
   preview: [appearance: AppearanceConfig, markdown: MarkdownConfig];
 }>();
 const files = useFilesStore();
-const users = useUsersStore();
 const saving = ref(false);
 const restarting = ref<"backend" | "all" | "">("");
 const stopping = ref(false);
@@ -22,7 +20,6 @@ const settingsSearch = ref("");
 const activeSettingSection = ref("appearance");
 const settingSections = [
   { id: "appearance", label: "Appearance", icon: "bi-palette" },
-  { id: "users", label: "User Profile", icon: "bi-person" },
   { id: "codex", label: "Codex Models", icon: "bi-cpu" },
   { id: "superWorkspace", label: "Super Workspace", icon: "bi-diagram-3" },
   { id: "voice", label: "Voice", icon: "bi-mic" },
@@ -145,12 +142,6 @@ function selectSettingSection(section: string) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function switchUser(userId: string) {
-  if (!userId || userId === users.activeUserId) return;
-  users.select(userId);
-  window.location.reload();
 }
 
 async function waitForServer(previousPid: number) {
@@ -455,20 +446,6 @@ async function applyJson() {
               </button>
             </div>
             <div v-if="serverNotice" class="server-notice">{{ serverNotice }}</div>
-          </div>
-        </section>
-
-        <section v-show="activeSettingSection === 'users'" class="config-section">
-          <div class="section-heading"><i class="bi bi-person"></i><h2>User Profile</h2></div>
-          <div class="section-body">
-            <label class="compact-field">
-              <span>Active profile</span>
-              <select class="form-select form-select-sm" :value="users.activeUserId" @change="switchUser(($event.target as HTMLSelectElement).value)">
-                <option v-for="profile in users.profiles" :key="profile.id" :value="profile.id">
-                  {{ profile.name || profile.id }} - {{ profile.home || "/" }}
-                </option>
-              </select>
-            </label>
           </div>
         </section>
 

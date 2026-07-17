@@ -18,7 +18,7 @@ from .config import settings
 from .files import resolve_served_directory
 from .models import AgentEventType
 from .storage import HERMES_LOG_DIR
-from .users import normalize_user_id
+from .identity import normalize_user_id
 
 HERMES_BASE_URL = os.environ.get("VIEWER_HERMES_BASE_URL", "http://127.0.0.1:8642").rstrip("/")
 HERMES_API_KEY = os.environ.get("VIEWER_HERMES_API_KEY", "").strip()

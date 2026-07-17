@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import type { LayoutNode, PaneContent, SplitDirection } from "../types/layout";
-import { namespacedStorageKey } from "../utils/userProfile";
+import { storageKey } from "../utils/storage";
 
 const STORAGE_KEY = "viewer.layout.v1";
 
@@ -226,7 +226,7 @@ export const useLayoutStore = defineStore("layout", {
     },
     load(scope?: string) {
       if (scope !== undefined) this.storageScope = scope;
-      const key = namespacedStorageKey(this.storageKey());
+      const key = storageKey(this.storageKey());
       const raw = localStorage.getItem(key);
       if (raw) {
         try {
@@ -242,7 +242,7 @@ export const useLayoutStore = defineStore("layout", {
       this.save();
     },
     save() {
-      localStorage.setItem(namespacedStorageKey(this.storageKey()), JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
+      localStorage.setItem(storageKey(this.storageKey()), JSON.stringify({ root: this.root, activePaneId: this.activePaneId }));
     },
     snapshot() {
       return { root: cloneLayout(this.root), activePaneId: this.activePaneId || firstPaneId(this.root) };

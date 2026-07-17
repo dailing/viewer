@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { namespacedStorageKey } from "../utils/userProfile";
+import { storageKey } from "../utils/storage";
 
 const DISPATCH_SELECTION_STORAGE_KEY = "viewer.superChatDispatchRoles.v2";
 const CANONICAL_CHAT_ID = /^[0-9a-f]{12}$/i;
@@ -10,7 +10,7 @@ function isCanonicalChatId(chatId: string) {
 
 function readSelections(): Record<string, string[]> {
   try {
-    const raw = localStorage.getItem(namespacedStorageKey(DISPATCH_SELECTION_STORAGE_KEY));
+    const raw = localStorage.getItem(storageKey(DISPATCH_SELECTION_STORAGE_KEY));
     const parsed = raw ? JSON.parse(raw) : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const selections: Record<string, string[]> = {};
@@ -26,7 +26,7 @@ function readSelections(): Record<string, string[]> {
 }
 
 function writeSelections(value: Record<string, string[]>) {
-  localStorage.setItem(namespacedStorageKey(DISPATCH_SELECTION_STORAGE_KEY), JSON.stringify(value));
+  localStorage.setItem(storageKey(DISPATCH_SELECTION_STORAGE_KEY), JSON.stringify(value));
 }
 
 export const useSuperChatDispatchStore = defineStore("superChatDispatch", {

@@ -26,7 +26,7 @@ export type SuperChatSummary = {
   name: string;
   type: "group" | "direct";
   pinned: boolean;
-  cwd: string;
+  root: string;
   common_prompt: string;
   member_role_ids: string[];
   created_at: number;
@@ -42,7 +42,7 @@ export type SuperChatCreate = {
   name?: string;
   type?: "group" | "direct";
   pinned?: boolean;
-  cwd?: string;
+  root: string;
   common_prompt?: string;
   member_role_ids?: string[];
 };

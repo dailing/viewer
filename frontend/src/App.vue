@@ -5,17 +5,14 @@ import SuperWorkspacePage from "./components/SuperWorkspacePage.vue";
 import { connectEvents } from "./api/events";
 import { DARK_MARKDOWN_THEME, DEFAULT_MARKDOWN_THEME, useFilesStore } from "./stores/files";
 import { useTerminalsStore } from "./stores/terminals";
-import { useUsersStore } from "./stores/users";
 import { useVoiceStore } from "./stores/voice";
 import type { AppearanceConfig, MarkdownConfig } from "./types/files";
 
 const files = useFilesStore();
 const terminals = useTerminalsStore();
-const users = useUsersStore();
 const voice = useVoiceStore();
 
 const appReady = ref(false);
-const selectingUser = ref(false);
 const activePage = ref<"super" | "settings">("super");
 const systemPrefersDark = ref(false);
 const previewAppearance = ref<AppearanceConfig | null>(null);
@@ -93,19 +90,13 @@ onMounted(async () => {
   colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
   systemPrefersDark.value = colorSchemeQuery.matches;
   colorSchemeQuery.addEventListener("change", handleColorSchemeChange);
-  await users.load();
-  if (users.needsSelection) {
-    selectingUser.value = true;
-    return;
-  }
   await initializeApp();
 });
 
 async function initializeApp() {
   appReady.value = false;
-  files.currentPath = "";
   await files.loadConfig();
-  await Promise.all([files.loadDirectory(""), terminals.load()]);
+  await terminals.load();
   source = connectEvents(async (event) => {
     await files.refreshAffected(event.path, event.is_dir);
     window.dispatchEvent(new CustomEvent("viewer:file-changed", { detail: event }));
@@ -115,13 +106,6 @@ async function initializeApp() {
   }, 15000);
   appReady.value = true;
 }
-
-async function selectUserProfile(userId: string) {
-  users.select(userId);
-  selectingUser.value = false;
-  await initializeApp();
-}
-
 
 onUnmounted(() => {
   colorSchemeQuery?.removeEventListener("change", handleColorSchemeChange);
@@ -146,22 +130,7 @@ function closeSettings() {
 </script>
 
 <template>
-  <div v-if="selectingUser" class="user-select-page">
-    <section class="user-select-panel" aria-label="Select user profile">
-      <h1>Select Profile</h1>
-      <button
-        v-for="profile in users.profiles"
-        :key="profile.id"
-        class="user-profile-button"
-        type="button"
-        @click="selectUserProfile(profile.id)"
-      >
-        <span>{{ profile.name || profile.id }}</span>
-        <small>{{ profile.home || "/" }}</small>
-      </button>
-    </section>
-  </div>
-  <div v-else-if="appReady" class="app-shell" :data-theme="effectiveColorTheme" :data-density="effectiveDensity" :style="appStyle">
+  <div v-if="appReady" class="app-shell" :data-theme="effectiveColorTheme" :data-density="effectiveDensity" :style="appStyle">
     <main v-if="activePage === 'settings'" class="top-level-page">
       <ConfigPanel @close="closeSettings" @preview="previewConfig" />
     </main>

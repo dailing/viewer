@@ -12,7 +12,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "create-chat": [];
+  "create-chat": [root: string, name: string];
   "open-chat": [id: string];
   "update-chat": [chat: SuperChatSummary];
   "delete-chat": [chat: SuperChatSummary];
@@ -21,6 +21,9 @@ const emit = defineEmits<{
 const layout = useLayoutStore();
 const dispatchSelection = useSuperChatDispatchStore();
 const settingsChatId = ref("");
+const creating = ref(false);
+const newChatName = ref("");
+const newChatRoot = ref("");
 const selectedSettingsChat = computed(() => props.chats.find((chat) => chat.id === settingsChatId.value) ?? null);
 const rolesById = computed(() => new Map(props.roles.map((role) => [role.id, role])));
 const focusedChatId = computed(() => (layout.activePane?.type === "pane" ? layout.activePane.chatId ?? "" : ""));
@@ -80,6 +83,15 @@ function isDispatchRoleSelected(chat: SuperChatSummary, roleId: string) {
 function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
   dispatchSelection.toggleRole(chat.id, roleId);
 }
+
+function submitNewChat() {
+  const root = newChatRoot.value.trim();
+  if (!root) return;
+  emit("create-chat", root, newChatName.value.trim());
+  newChatName.value = "";
+  newChatRoot.value = "";
+  creating.value = false;
+}
 </script>
 
 <template>
@@ -120,12 +132,33 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
     </div>
 
     <div class="sidebar-action-footer">
-      <button class="sidebar-add-button" type="button" title="New chat" aria-label="New chat" @click="emit('create-chat')">
+      <button class="sidebar-add-button" type="button" title="New chat" aria-label="New chat" @click="creating = !creating">
         <i class="bi bi-plus-lg"></i>
       </button>
     </div>
 
-    <form v-if="selectedSettingsChat" class="chat-settings" @submit.prevent="save(selectedSettingsChat)">
+    <form v-if="creating" class="chat-settings create-chat-form" @submit.prevent="submitNewChat">
+      <div class="settings-title">
+        <span>New Chat</span>
+        <button class="btn btn-sm icon-button" type="button" title="Cancel" @click="creating = false">
+          <i class="bi bi-x"></i>
+        </button>
+      </div>
+      <label class="field">
+        <span>Name</span>
+        <input v-model="newChatName" class="form-control form-control-sm" placeholder="Optional" />
+      </label>
+      <label class="field">
+        <span>Chat Root</span>
+        <DirectoryPicker v-model="newChatRoot" empty-label="Required" clear-title="Chat root is required" />
+      </label>
+      <button class="btn btn-sm settings-save" type="submit" :disabled="!newChatRoot.trim()">
+        <i class="bi bi-plus-lg"></i>
+        <span>Create Chat</span>
+      </button>
+    </form>
+
+    <form v-else-if="selectedSettingsChat" class="chat-settings" @submit.prevent="save(selectedSettingsChat)">
       <div class="settings-title">
         <span>Chat Settings</span>
         <button class="btn btn-sm icon-button" type="button" title="Close" @click="settingsChatId = ''">
@@ -153,8 +186,8 @@ function toggleDispatchRole(chat: SuperChatSummary, roleId: string) {
         <span>Pinned</span>
       </label>
       <label class="field">
-        <span>Working Directory</span>
-        <DirectoryPicker v-model="selectedSettingsChat.cwd" empty-label="Profile home" clear-title="Leave chat cwd empty" />
+        <span>Chat Root</span>
+        <DirectoryPicker v-model="selectedSettingsChat.root" empty-label="Required" clear-title="Chat root is required" />
       </label>
       <label class="field">
         <span>Chat Prompt</span>

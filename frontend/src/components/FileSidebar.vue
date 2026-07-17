@@ -8,7 +8,7 @@ import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
 import { useTerminalsStore } from "../stores/terminals";
-import { namespacedStorageKey } from "../utils/userProfile";
+import { storageKey } from "../utils/storage";
 import type { AgentProvider } from "../types/agents";
 import type { SuperChatSummary, SuperRole } from "../types/superWorkspace";
 
@@ -30,7 +30,7 @@ const emit = defineEmits<{
   "open-terminal": [id: string];
   "open-diff": [path: string, cwd: string];
   "open-chat": [id: string];
-  "create-chat": [];
+  "create-chat": [root: string, name: string];
   "update-chat": [chat: SuperChatSummary];
   "delete-chat": [chat: SuperChatSummary];
   "create-role": [];
@@ -55,20 +55,20 @@ const layout = useLayoutStore();
 const terminals = useTerminalsStore();
 
 function storedTool(): SidebarTool {
-  const value = localStorage.getItem(namespacedStorageKey(ACTIVE_TOOL_KEY));
+  const value = localStorage.getItem(storageKey(ACTIVE_TOOL_KEY));
   return tools.some((tool) => tool.id === value) ? (value as SidebarTool) : "chats";
 }
 
 const activeTool = ref<SidebarTool>(storedTool());
 const activeTitle = computed(() => tools.find((tool) => tool.id === activeTool.value)?.title ?? "Files");
 const currentChatId = computed(() => (layout.activePane?.type === "pane" ? layout.activePane.chatId ?? "" : "") || props.activeChatId || "");
-const defaultToolCwd = computed(() => (props.chats ?? []).find((chat) => chat.id === currentChatId.value)?.cwd.trim() ?? "");
+const defaultToolCwd = computed(() => (props.chats ?? []).find((chat) => chat.id === currentChatId.value)?.root.trim() ?? "");
 const pinnedChats = computed(() => (props.chats ?? []).filter((chat) => chat.pinned));
 const pinnedFiles = computed(() => files.pinned);
 const pinnedTerminals = computed(() => terminals.pinnedTerminals);
 
 watch(activeTool, (tool) => {
-  localStorage.setItem(namespacedStorageKey(ACTIVE_TOOL_KEY), tool);
+  localStorage.setItem(storageKey(ACTIVE_TOOL_KEY), tool);
 });
 
 function selectTool(tool: SidebarTool) {
@@ -187,7 +187,8 @@ async function openPinnedFile(path: string) {
           <i class="bi bi-x"></i>
         </button>
       </div>
-      <FilesPanel v-if="activeTool === 'files'" :default-cwd="defaultToolCwd" @open-file="emit('open-file', $event)" />
+      <div v-if="['files', 'git', 'terminals'].includes(activeTool) && !defaultToolCwd" class="empty-panel">Open a chat to use this tool</div>
+      <FilesPanel v-else-if="activeTool === 'files'" :default-cwd="defaultToolCwd" @open-file="emit('open-file', $event)" />
       <GitPanel v-else-if="activeTool === 'git'" :default-cwd="defaultToolCwd" @open-diff="(path, cwd) => emit('open-diff', path, cwd)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" :default-cwd="defaultToolCwd" @open-terminal="emit('open-terminal', $event)" />
       <ChatsPanel
@@ -195,7 +196,7 @@ async function openPinnedFile(path: string) {
         :chats="props.chats ?? []"
         :active-chat-id="props.activeChatId ?? ''"
         :roles="props.roles ?? []"
-        @create-chat="emit('create-chat')"
+        @create-chat="(root, name) => emit('create-chat', root, name)"
         @open-chat="emit('open-chat', $event)"
         @update-chat="emit('update-chat', $event)"
         @delete-chat="emit('delete-chat', $event)"

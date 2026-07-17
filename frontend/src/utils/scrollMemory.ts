@@ -1,5 +1,5 @@
 import { nextTick } from "vue";
-import { namespacedStorageKey } from "./userProfile";
+import { storageKey } from "./storage";
 
 const STORAGE_KEY = "viewer.scrollPositions.v2";
 
@@ -16,14 +16,14 @@ export type ScrollMemoryTarget = {
 
 function readAll(): Record<string, ScrollPosition> {
   try {
-    return JSON.parse(localStorage.getItem(namespacedStorageKey(STORAGE_KEY)) || "{}") as Record<string, ScrollPosition>;
+    return JSON.parse(localStorage.getItem(storageKey(STORAGE_KEY)) || "{}") as Record<string, ScrollPosition>;
   } catch {
     return {};
   }
 }
 
 function writeAll(value: Record<string, ScrollPosition>): void {
-  localStorage.setItem(namespacedStorageKey(STORAGE_KEY), JSON.stringify(value));
+  localStorage.setItem(storageKey(STORAGE_KEY), JSON.stringify(value));
 }
 
 function keyFor(target: string | ScrollMemoryTarget): string {

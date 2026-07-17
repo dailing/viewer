@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
 import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, ViewerConfig, VoiceConfig } from "../types/files";
 import { parentPath as resolveParentPath } from "../utils/paths";
-import { namespacedStorageKey } from "../utils/userProfile";
+import { storageKey } from "../utils/storage";
 
 const PINNED_FILES_KEY = "viewer.pinnedFiles.v1";
 
@@ -292,7 +292,7 @@ function normalizeDispatchProfiles(profiles?: Partial<SuperWorkspaceDispatchProf
 
 function readPinnedFiles(): string[] {
   try {
-    const raw = localStorage.getItem(namespacedStorageKey(PINNED_FILES_KEY));
+    const raw = localStorage.getItem(storageKey(PINNED_FILES_KEY));
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const seen = new Set<string>();
@@ -309,7 +309,7 @@ function readPinnedFiles(): string[] {
 }
 
 function writePinnedFiles(paths: string[]) {
-  localStorage.setItem(namespacedStorageKey(PINNED_FILES_KEY), JSON.stringify(paths));
+  localStorage.setItem(storageKey(PINNED_FILES_KEY), JSON.stringify(paths));
 }
 
 export const useFilesStore = defineStore("files", {

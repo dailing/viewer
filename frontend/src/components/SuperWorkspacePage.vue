@@ -15,7 +15,7 @@ import { useAgentsStore } from "../stores/agents";
 import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
 import type { SuperChatSummary, SuperRole } from "../types/superWorkspace";
-import { namespacedStorageKey } from "../utils/userProfile";
+import { storageKey } from "../utils/storage";
 import FileSidebar from "./FileSidebar.vue";
 import Workspace from "./Workspace.vue";
 
@@ -50,9 +50,9 @@ onMounted(async () => {
   mobileQuery = window.matchMedia("(max-width: 767.98px)");
   isMobile.value = mobileQuery.matches;
   mobileQuery.addEventListener("change", handleViewportChange);
-  sidebarPinned.value = localStorage.getItem(namespacedStorageKey(SIDEBAR_PIN_KEY)) !== "false";
+  sidebarPinned.value = localStorage.getItem(storageKey(SIDEBAR_PIN_KEY)) !== "false";
   sidebarOpen.value = sidebarPinned.value && !isMobile.value;
-  sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(namespacedStorageKey(SIDEBAR_WIDTH_KEY))) || sidebarWidth.value);
+  sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(storageKey(SIDEBAR_WIDTH_KEY))) || sidebarWidth.value);
   await agents.loadProviders();
   await loadState();
 });
@@ -63,7 +63,7 @@ onUnmounted(() => {
 });
 
 watch(sidebarPinned, (pinned) => {
-  localStorage.setItem(namespacedStorageKey(SIDEBAR_PIN_KEY), String(pinned));
+  localStorage.setItem(storageKey(SIDEBAR_PIN_KEY), String(pinned));
   if (pinned && !isMobile.value) sidebarOpen.value = true;
 });
 
@@ -93,10 +93,10 @@ async function loadState() {
   }
 }
 
-async function addChat() {
+async function addChat(root: string, name: string) {
   error.value = "";
   try {
-    const data = await createSuperChat({ name: `Chat ${chats.value.length + 1}`, type: "group" });
+    const data = await createSuperChat({ name: name || `Chat ${chats.value.length + 1}`, type: "group", root: root.trim() });
     chats.value = data.chats;
     activeChatId.value = data.active_chat_id;
     notifyChatListChanged();
@@ -132,7 +132,7 @@ async function saveChat(chat: SuperChatSummary) {
       name: chat.name,
       type: chat.type,
       pinned: chat.pinned,
-      cwd: chat.cwd,
+      root: chat.root,
       common_prompt: chat.common_prompt,
       member_role_ids: chat.member_role_ids,
     });
@@ -251,7 +251,7 @@ function startSidebarResize(event: PointerEvent) {
 
   const resize = (moveEvent: PointerEvent) => {
     sidebarWidth.value = clampSidebarWidth(startWidth + moveEvent.clientX - startX);
-    localStorage.setItem(namespacedStorageKey(SIDEBAR_WIDTH_KEY), String(sidebarWidth.value));
+    localStorage.setItem(storageKey(SIDEBAR_WIDTH_KEY), String(sidebarWidth.value));
   };
 
   const stop = () => {

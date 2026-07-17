@@ -13,18 +13,20 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 - Give each role a dispatcher-facing description and a separate Agent-facing prompt.
 - Reuse role sessions per chat or start a new session for each run.
 - Cite earlier messages with `@msg-...` references.
-- Browse, upload, delete, edit, and live-refresh files under the selected user profile.
+- Browse, upload, delete, edit, and live-refresh files under the current Chat Root.
 - Preview Markdown, HTML, images, PDFs, CSV, text, source code, and Git diffs.
 - Render Markdown with KaTeX, Mermaid, Highlight.js, tables, task lists, footnotes, and local links.
 - Stage, revert, commit, and push changes from Git diff panes.
 - Open reconnectable PTY terminals through WebSockets.
 - Use optional voice dictation and LLM refinement.
 - Arrange chats, files, diffs, and terminals in persisted recursive split panes.
-- Configure appearance, Markdown themes, models, dispatcher profiles, voice, users, and server controls.
+- Configure appearance, Markdown themes, models, dispatcher profiles, voice, and server controls.
 
 ## Super Workspace
 
-Each user has one Super Workspace with id `{user}:default`. It contains user-created chats and globally available roles.
+The application has one Super Workspace, persisted under the fixed owner `dailing:default`. It contains user-created chats and globally available roles.
+
+Every chat requires a `root`, relative to the server's `VIEWER_ROOT` filesystem boundary. Files, Git, terminals, Codex, and Hermes use that Chat Root. A role may optionally add a subdirectory beneath it; there is no profile or global-working-directory fallback.
 
 A role has two distinct instruction fields:
 
@@ -43,17 +45,11 @@ Normal message delivery is asynchronous:
 
 Codex work runs through detached background processes, so restarting the Viewer backend does not terminate an active Codex run.
 
-## User profiles
-
-The browser selects a configured soft user profile. Each profile defines a file root and receives its own Super Workspace, chats, roles, browser-local layout, sidebar state, drafts, and pins.
-
-Profiles are a convenience boundary, not an operating-system security boundary. All backend processes run as the same OS user.
-
 ## Persistence
 
 Viewer-owned state is stored under `~/.view`:
 
-- `config.json`: appearance, Markdown, Codex, Voice, dispatcher, and user configuration.
+- `config.json`: appearance, Markdown, Codex, Voice, and dispatcher configuration.
 - `agent-history.sqlite3`: Super Workspace, chats, roles, dispatch tasks, messages, citations, and reusable session mappings.
 - `logs/codex-sessions/`: Viewer metadata and stderr for Codex provider sessions.
 - `logs/hermes-sessions/`: Viewer metadata for Hermes provider sessions.
@@ -62,7 +58,7 @@ Viewer-owned state is stored under `~/.view`:
 
 Lightweight worker and detached process state defaults to `/tmp/viewer_run`.
 
-Browser-local state uses user-namespaced `localStorage` keys for the selected profile, pane layout, sidebar state, pins, drafts, dispatch selection, and scroll positions.
+Browser-local state stores pane layout, sidebar state, pins, drafts, dispatch selection, and scroll positions. Legacy `*.dailing` keys are migrated to their non-namespaced equivalents when first read.
 
 ## Requirements
 

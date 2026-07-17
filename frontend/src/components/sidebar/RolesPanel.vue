@@ -87,7 +87,7 @@ function updateProvider(role: SuperRole) {
       </label>
       <label class="field">
         <span>Working Directory</span>
-        <DirectoryPicker v-model="selectedRole.cwd" empty-label="Inherit chat cwd" clear-title="Leave role cwd empty" />
+        <DirectoryPicker v-model="selectedRole.cwd" empty-label="Chat root" clear-title="Use the chat root" />
       </label>
       <label class="field">
         <span>Model</span>

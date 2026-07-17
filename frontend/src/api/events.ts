@@ -1,5 +1,4 @@
 import type { WatchEvent } from "../types/files";
-import { currentUserId } from "../utils/userProfile";
 
 export type SuperWorkspaceEvent = {
   type?: string;
@@ -11,8 +10,7 @@ export type SuperWorkspaceEvent = {
 };
 
 export function connectEvents(onChange: (event: WatchEvent) => void, onState?: (state: string) => void): EventSource {
-  const user = currentUserId();
-  const source = new EventSource(user ? `/api/events?user=${encodeURIComponent(user)}` : "/api/events");
+  const source = new EventSource("/api/events");
   source.addEventListener("open", () => onState?.("connected"));
   source.addEventListener("error", () => onState?.("reconnecting"));
   source.addEventListener("file-change", (message) => {
@@ -22,8 +20,7 @@ export function connectEvents(onChange: (event: WatchEvent) => void, onState?: (
 }
 
 export function connectSuperWorkspaceEvents(onEvent: (event: SuperWorkspaceEvent) => void, onState?: (state: string) => void): EventSource {
-  const user = currentUserId();
-  const source = new EventSource(user ? `/api/super-workspace/events?user=${encodeURIComponent(user)}` : "/api/super-workspace/events");
+  const source = new EventSource("/api/super-workspace/events");
   source.addEventListener("open", () => onState?.("connected"));
   source.addEventListener("error", () => onState?.("reconnecting"));
   source.addEventListener("super-workspace", (message) => {

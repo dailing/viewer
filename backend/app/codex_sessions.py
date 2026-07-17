@@ -22,7 +22,7 @@ from .files import resolve_served_directory
 from .models import AgentEventType
 from .process_registry import driver_process_name, process_slot_state
 from .storage import AGENT_HISTORY_DB_PATH, CODEX_LOG_DIR, CODEX_RUN_DIR
-from .users import normalize_user_id
+from .identity import normalize_user_id
 
 CODEX_ROLLOUT_ROOT = Path.home() / ".codex" / "sessions"
 PROXY_ENV_KEYS = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY")

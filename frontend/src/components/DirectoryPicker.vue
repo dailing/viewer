@@ -10,7 +10,7 @@ const props = withDefaults(
     clearTitle?: string;
   }>(),
   {
-    emptyLabel: "Profile home",
+    emptyLabel: "Required",
     clearTitle: "Clear working directory",
   },
 );

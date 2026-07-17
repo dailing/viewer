@@ -122,21 +122,12 @@ export interface SuperWorkspaceConfig {
   dispatch_profiles: SuperWorkspaceDispatchProfile[];
 }
 
-export interface UserProfile {
-  id: string;
-  name: string;
-  home: string;
-  home_path?: string;
-}
-
 export interface ViewerConfig {
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
   codex?: CodexConfig;
   voice?: VoiceConfig;
   super_workspace?: SuperWorkspaceConfig;
-  users?: UserProfile[];
-  default_user?: string;
 }
 
 export interface WatchEvent {

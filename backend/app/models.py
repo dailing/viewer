@@ -161,20 +161,12 @@ class SuperWorkspaceConfig(BaseModel):
     )
 
 
-class UserProfile(BaseModel):
-    id: str
-    name: str = ""
-    home: str = ""
-
-
 class ConfigData(BaseModel):
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
     codex: CodexConfig = Field(default_factory=CodexConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     super_workspace: SuperWorkspaceConfig = Field(default_factory=SuperWorkspaceConfig)
-    users: list[UserProfile] = Field(default_factory=list)
-    default_user: str = ""
 
 
 class WatchEvent(BaseModel):
@@ -230,7 +222,7 @@ class TerminalInfo(BaseModel):
 
 
 class TerminalCreate(BaseModel):
-    cwd: str | None = None
+    cwd: str
 
 
 class TerminalSnapshot(TerminalInfo):

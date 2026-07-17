@@ -4,14 +4,14 @@ This document is the working project map for future agents. Read it before chang
 
 ## Purpose
 
-Local Live File Viewer is a private-network file browser and preview app. A FastAPI backend serves files from the active user's configured profile home, watches configured profile homes, exposes file, Git, terminal, voice, and Super Workspace APIs, and serves the built Vue frontend. The app has soft user profiles: each browser chooses a profile, API calls carry `user`, and sidebar/layout state is scoped to that profile while all processes still run as the same trusted OS user with access to the served root. The Vue app provides a Super Workspace shell with chats, roles, files, Git diff panel, terminals, recursive split panes, file viewers, live refresh on filesystem changes, and browser-local layout persistence.
+Local Live File Viewer is a private-network file browser and preview app. A FastAPI backend exposes file, Git, terminal, voice, and Super Workspace APIs and serves the built Vue frontend. `VIEWER_ROOT` is the fixed server-side filesystem boundary; every chat has a required relative Chat Root that supplies the actual working context for Files, Git, terminals, Codex, and Hermes. The application has one fixed persistence owner, `dailing`, and no user-profile selection layer. The Vue app provides chats, roles, recursive split panes, file viewers, live refresh, and browser-local layout persistence.
 
 ## Runtime Flow
 
 1. `run.py` loads project-local `.viewer.env` without overriding existing process variables, parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`.
 2. `backend/app/main.py` creates the FastAPI app, installs CORS, gzip compression, and request logging middleware, starts `watch_root()` and the Super Workspace worker on startup, stops watcher and terminal sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
 3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
-4. `App.vue` loads available user profiles from `/api/users`. If browser storage has no active profile, it shows a profile picker before loading app state. Once selected, the active user id is stored in `localStorage`, API/SSE/WebSocket helpers append it as `user`, and browser-local layout/sidebar/draft keys are namespaced by user. The app then loads file tree/config/terminal state, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event so panes can decide whether indirect dependencies matter. The normal page is the Super Workspace split-pane shell with no global navbar: every viewer pane owns a title bar, while Settings is launched from the sidebar activity bar. The outer app shell and document root suppress top-level overscroll/scroll chaining, while pane-level scroll containers keep their own contained momentum scrolling.
+4. `App.vue` loads config and terminal state directly, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event. Browser-local layout/sidebar/draft keys are no longer user-namespaced; `utils/storage.ts` migrates the former `.dailing` keys on first access. The normal page is the Super Workspace split-pane shell with no global navbar: every viewer pane owns a title bar, while Settings is launched from the sidebar activity bar.
 5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer and oversized Markdown/CSV/text files to the virtualized large text viewer. Each pane renders `PaneTitleBar.vue`, which combines that pane's registered viewer controls with refresh/back/split/clear actions and dispatches `viewer:pane-refresh` for the concrete pane id; file panes clear visible content before refetching metadata and incrementing their pane `version`, diff panes clear and reload their Git diff directly, and terminal panes reconnect through their own viewer. Viewers fetch raw/text content and reload when their `version` prop changes; image and PDF panes include the pane version in raw-file URLs so manual refreshes can bypass browser cache even when the content hash is unchanged. Markdown panes render embedded images with browser lazy loading, track simple relative local image dependencies client-side, use a pane-level version cache key for raw-file URLs, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. PDF panes configure the PDF.js worker explicitly, preload document metadata from `/api/file/raw` for the page count, and render individual pages lazily from the same cache-busted raw URL as page placeholders approach the scroll viewport. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
 7. Codex and Hermes provider sessions are internal runtime primitives for Super Workspace roles. Codex runs are launched through a detached background runner whose pid/stdout/stderr/state files live under `/tmp/viewer_run/codex` by default, so restarting the viewer service does not stop active Codex work. Hermes talks to the local Hermes API server at `VIEWER_HERMES_BASE_URL` / `http://127.0.0.1:8642` and reads canonical session history directly from `VIEWER_HERMES_STATE_DB` / `~/.hermes/state.db`. Provider driver output is written into `super_workspace_messages`; the frontend does not expose low-level provider session panes or `/api/agents/sessions`.
@@ -22,31 +22,28 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - FastAPI application and route table.
 - `log_requests(request, call_next)`: logs failed and slow HTTP requests, while suppressing normal successful hot-path poll noise even in debug mode.
-- `startup()`: ensures the global root and each configured profile home exist, logs runtime config, starts filesystem watcher task.
+- `startup()`: ensures the fixed `VIEWER_ROOT` filesystem boundary exists, logs runtime config, and starts the filesystem watcher task.
 - `shutdown()`: stops watcher task and terminates terminal sessions.
-- `/api/health`: returns health, active root, and current backend PID.
+- `/api/health`: returns health and the current backend PID; the filesystem boundary is not exposed as workspace state.
 - `/api/admin/restart`: launches the detached process manager to stop the current PID and start a replacement server with the manager's default command. When called with `include_worker=true`, it first stops the registered Super Workspace worker and clears `WEAVER_RUN_DIR/worker.pid/json` so backend startup launches a fresh worker process.
 - `/api/admin/stop`: launches the detached process manager to stop the current backend PID.
-- `/api/tree`: calls `list_directory()` under the active user's profile home.
+- `/api/tree`: calls `list_directory()` under the fixed filesystem boundary. Normal sidebar browsing starts at the current Chat Root and cannot navigate above it.
 - `/api/file/upload`: streams one request body into a file under the requested active-user-root-relative directory. The directory must exist, filenames cannot contain path separators, and existing files are overwritten while directories are protected.
 - `/api/file` DELETE: deletes an active-user-root-relative file only; directory deletion is intentionally rejected.
-- `/api/file/meta`: calls `get_meta()` under the active user's profile home.
-- `/api/file/content`: calls `read_text()` under the active user's profile home.
-- `/api/file/text-lines`: calls `read_text_lines()` under the active user's profile home for virtualized large text previews.
-- `/api/file/content` PUT: saves UTF-8 text to an existing file under the active user's profile home and returns updated metadata.
+- `/api/file/meta`, `/api/file/content`, and `/api/file/text-lines`: read metadata/content under the fixed filesystem boundary; normal navigation supplies paths from the current Chat Root.
+- `/api/file/content` PUT: saves UTF-8 text to an existing file under the fixed boundary.
 - `/api/file/raw`: streams a file via inline `FileResponse` and emits `ETag` plus strong immutable browser cache headers. When called with `base`, resolves Markdown-local relative/absolute file links before serving.
 - `/api/file/site/{path:path}` and `/api/file/site?path=...`: serve files as a static-site namespace for HTML preview iframes. The query form preserves absolute filesystem paths for outside-root files and symlink targets. HTML responses inject a `<base>` tag for relative assets and rewrite root-relative HTML/CSS asset URLs to the same `/api/file/site/` prefix; CSS responses rewrite root-relative `url(...)` and `@import` references; other files are returned through inline `FileResponse` so SVG/PDF/image assets render in-browser instead of downloading. Missing `generated/assets/...` requests fall back by searching upward for the nearest existing generated asset directory, which keeps static docs with page-relative generated-asset links working in the iframe preview. Cache headers are `no-cache` so local edits show after pane refreshes.
 - `/api/file/resolve-link`: resolves a Markdown link target against a Markdown file path and returns a served-root-relative file path for viewer navigation, plus a stat-based `content_hash`/version when the target exists as a file. Markdown image rendering no longer calls this for every image during initial render; the frontend resolves simple relative image dependencies locally and lets `/api/file/raw?base=...` resolve actual image requests lazily.
 - `/api/file/resolve-directory-link`: resolves a local link target against a served-root-relative directory, used by Codex session transcript links whose paths are relative to the session cwd.
-- `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git working-tree status, per-file text diffs, and common Git actions rooted at the active user's profile home.
-- `/api/users`: returns configured soft user profiles from `~/.view/config.json`; the bootstrapped profiles are `dailing` and `maomao`. Profile `home` values may be `~`-expanded, absolute, or relative to the OS home directory and define that user's file viewer root, not just a default directory.
-- `/api/config` GET/PUT: reads and writes nav appearance, including `system`/light/dark color theme, compact/comfortable UI density, Codex model options, voice model/language/translation and LLM-refine options, Markdown theme config, user profiles, and default user in `~/.view/config.json`. The frontend resolves `system` through `prefers-color-scheme`, applies the shared semantic design tokens in `frontend/src/styles.css`, and can make Markdown follow the effective app theme or use an explicitly selected Markdown theme. Settings uses a searchable category sidebar, previews appearance/Markdown changes before save, and reports unsaved state. It presents the Codex default model as a dropdown backed by `codex.available_models`, which currently includes the explicit GPT-5.6 model ids `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; role editing uses the same list for Codex role model overrides while leaving non-Codex roles at provider default. Normal settings saves preserve existing user profiles unless the JSON payload explicitly changes them. Super Workspace layout/sidebar/draft state is browser-local and user-namespaced.
+- `/api/git/status`, `/api/git/diff`, `/api/git/stage`, `/api/git/revert`, `/api/git/commit`, and `/api/git/push`: expose Git operations; status and push require the current Chat Root scope.
+- `/api/config` GET/PUT: reads and writes appearance, Markdown, Codex, voice, and Super Workspace dispatcher configuration. User profiles and default-user fields are not part of the schema.
 - `/api/events`: streams Server-Sent Events from `hub.subscribe()`.
-- `/api/terminals`: lists or creates terminal sessions for the `user` query profile; POST accepts an optional relative `cwd`. When `cwd` is omitted, the terminal starts in the profile home directory.
+- `/api/terminals`: lists or creates terminal sessions for the fixed owner. POST requires a non-empty cwd supplied from the active Chat Root.
 - `/api/terminals/{terminal_id}` routes: snapshot, terminate, delete, and WebSocket connect.
 - `/api/agents/providers`: returns registered agent providers with frontend display metadata such as name and Bootstrap icon.
-- `/api/super-workspace` routes: per-user Super Workspace common prompt, role storage, persisted message/query history, and LLM dispatch. Each user has exactly one Super Workspace row in `~/.view/agent-history.sqlite3`, named `Default Super Workspace` with user-scoped id `{user}:default`; `super_workspace_user_state` stores only the active chat. Roles are rows in `super_workspace_roles` with stable role id, non-unique display name, dispatcher-facing `description`, Agent-facing `prompt`, provider, cwd, model, and `session_policy` (`reuse` by default, or `new_each_run`). Dispatch payloads contain descriptions but exclude prompts; new Agent sessions receive prompts but not descriptions. Current provider session ownership is stored per chat+role in `super_workspace_chat_role_sessions`, not on the role, and changing a prompt clears the role's reusable mappings so its next dispatch starts with the new rules. GET `/api/super-workspace/runs` is a display-oriented flat feed backed by the same DB; it returns user query rows and assistant provider rows and accepts `before=<created_at>` for older items plus `after=<updated_at>` for SSE-driven incremental reads. POST `/api/super-workspace/runs` creates a query message, accepts optional structured `role_ids`, parses leading `@Role`/`@msg-...` prefix tokens, and writes one queued DB dispatch task per role id; the HTTP request does not start Codex/Hermes directly. POST `/api/super-workspace/targets/{task_id}/stop` validates ownership of a running dispatch task, marks it `cancelled`, terminates its Codex or Hermes provider session, and emits the normal run-update event; the Chat UI exposes this through a two-click `Running…` → `Stop?` confirmation that expires after two seconds. On backend startup, the Super Workspace runtime ensures an independent `python -m backend.app.super_workspace_worker` process is running and registered under `WEAVER_RUN_DIR/worker.pid`. The worker claims queued dispatch tasks only when the concrete target role id is idle within the same workspace, resolves provider cwd as `role.cwd`, then `chat.cwd`, then the profile home, creates/resumes that chat+role provider session according to `session_policy`, starts the detached provider driver, and updates task/query status from queued to running to completed/failed/cancelled. A reused session is replaced with a clean new session when its recorded context usage reaches the default 70% recycle threshold. Provider output rows are written only by the provider driver process/watcher with `workspace_id` plus query/dispatch/parent lineage fields. `/api/super-workspace/events` streams lightweight Super Workspace SSE notifications for changed query messages, and `SuperWorkspacePage.vue` refreshes runs on events with a 30-second fallback fetch. `/api/super-workspace/dispatch` remains as the raw role-router endpoint and sends a rendered `super_workspace.dispatch_prompt_template` to the active `super_workspace.dispatch_profiles` OpenAI-compatible chat-completions profile in `~/.view/config.json`; available template variables are `{{message}}`, `{{history}}`, `{{roles_json}}`, and `{{roles_table}}`. Dispatch history is bounded by `super_workspace.dispatch_history_word_budget` with a default of 2048 rough tokens to keep local vLLM prefill latency under control. Built-in profiles include local vLLM `http://127.0.0.1:8010/v1/chat/completions` using `qwen3-14b` and DeepSeek `https://api.deepseek.com/v1/chat/completions` using `deepseek-v4-flash`.
-- Super Workspace chats add a scoped conversation layer inside each Super Workspace. Chats are persisted in `super_workspace_chats`, pinned chat shortcuts are persisted separately in `super_workspace_chat_pins`, the active chat id is stored on `super_workspace_user_state`, and message rows use `super_workspace_messages.conversation_id` as `chat_id`. Chats are user-created only: no default chat is seeded, an empty active chat id is valid, and dispatch requires an explicit existing chat. Each chat stores `member_role_ids_json`, `cwd`, and a chat-level `common_prompt`; auto-routing inside a chat only considers assigned member roles, so an empty member list cannot auto-route, while structured `role_ids` and explicit leading `@Role` mentions may target roles directly. Direct chats store exactly one member role and their display name follows that role name. `/api/super-workspace/chats` lists/creates/updates/deletes group or direct chats; `/api/super-workspace/active-chat/{chat_id}` switches the active chat, and `/api/super-workspace/runs` accepts `chat_id` for pane-local feed loading; when no active/explicit chat exists, the runs API returns an empty page instead of creating or selecting a chat. Provider lineage carries `chat_id` through Codex detached drivers and Hermes session metadata so role output rows stay in the originating chat. Chat `common_prompt` is prepended to role prompts as chat-level scoped instructions. The Super Workspace frontend is the only normal workspace shell: `FileSidebar.vue` has Chats, Roles, Files, Changes, and Terminals tools, and pinned file, terminal, and chat shortcut buttons render below the activity tools for direct pane switching. `GitPanel.vue` only lists and opens Git diffs; Auto Commit is modeled as a normal Super Workspace role/chat workflow. `ChatsPanel.vue` owns chat CRUD plus per-chat settings for name, type, pinned state, deletion, cwd, prompt, and role membership; direct chat role membership is a single-select control and group membership is multi-select. When a chat pane is the active focused pane and the Chats side panel is open, `ChatsPanel.vue` expands that chat's member roles as send-icon manual dispatch chips backed by `stores/superChatDispatch.ts`; closing or unfocusing the panel collapses the chip list. `RolesPanel.vue` owns global role CRUD/editing, including role cwd, model, and session management policy. `LayoutNode` panes can contain `chatId`, `ViewerPane.vue` renders `SuperWorkspaceChatPane.vue` for chat panes, and the layout store saves this Super Workspace layout in user-namespaced localStorage.
+- `/api/super-workspace` routes: fixed-owner (`dailing`) Super Workspace role storage, persisted message/query history, chats, and LLM dispatch. Roles have separate dispatcher-facing `description` and Agent-facing `prompt` fields. The independent worker resolves provider cwd as required `chat.root` plus optional `role.cwd`; there is no global-directory fallback. Running targets support two-click stop confirmation in the Chat UI. Dispatch uses the active OpenAI-compatible profile from `~/.view/config.json` and only receives role descriptions, while provider sessions receive role prompts.
+- Super Workspace chats are persisted in `super_workspace_chats`; every chat requires `root`, membership, and a chat-level prompt. `ChatsPanel.vue` owns creation and settings, including a directory picker for the required root. Direct chats have one role; group chats may have multiple roles. The current Chat Root drives Files, Changes, Terminals, and provider execution. Browser layout is stored in non-namespaced localStorage.
 - `/api/voice/ws`: optional voice-input WebSocket endpoint. The browser streams encoded audio chunks while recording. `VIEWER_VOICE_SERVICE_WS` defaults to `ws://127.0.0.1:8765/v1/voice/ws`, so the backend acts as a gateway, sends browser `ready` after connecting upstream, forwards `start`, binary chunks, and `stop` to the standalone voice transaction service, then forwards service `processing` / `partial` / `committed` / `final` / `error` messages back to the browser. If the service URL is explicitly cleared, the backend saves the chunks and runs a single full-file `faster-whisper` transcription after `stop`; a configured upstream ASR WebSocket still bypasses the in-process path.
 - Mounts built frontend static files from `settings.frontend_dist_resolved`.
 
@@ -67,19 +64,19 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `WEAVER_RUN_DIR` defaults to `/tmp/viewer_run/weaver` and can be overridden with `VIEWER_WEAVER_RUN_DIR`; it stores lightweight PID/state registry files for the Super Workspace worker and provider driver processes. Worker files use `worker.pid/json`; Codex driver files use readable names such as `driver.{role_name}.{role_id}.{dispatch_task_id}.pid/json`. Worker and driver startup paths check the matching pid file before spawning: a live pid blocks duplicate startup with an error log, a stale/dead pid is warning-logged and overwritten, and a missing pid file is created normally.
 - `HERMES_LOG_DIR` stores viewer-local Hermes metadata while canonical messages are read from `~/.hermes/state.db`; `HERMES_RUN_DIR` is reserved for Hermes detached-run state if the provider implementation later needs local runner files.
 
-`backend/app/users.py`
+`backend/app/identity.py`
 
-- Soft user profile helpers. Loads `users` and `default_user` from `~/.view/config.json`, validates user ids, normalizes profile homes, supports absolute homes, `~`-expanded homes, and paths relative to the OS home directory, and bootstraps `dailing` and `maomao` when no profiles are configured. The profile home is the user's file viewer root.
+- Defines the single persistence owner `dailing`. Legacy internal metadata columns retain this value, but it is not user-selectable and is not exposed as an API parameter.
 
 `backend/app/files.py`
 
 - File tree, path normalization, metadata, upload/delete helpers, content reading, and `~/.view/config.json` persistence.
 - `normalize_relative(path)`: converts slashes, strips leading/trailing slashes, rejects `..` path segments.
-- `served_root(user_id)`: returns the active user's profile home when a `user` is supplied, otherwise the global `VIEWER_ROOT` fallback.
-- `resolve_path(path, user_id)`: joins normalized relative paths to the active user's profile home and preserves explicit absolute filesystem paths. Symlinks are allowed by current implementation, including symlinks whose targets live outside the profile home.
+- `served_root()`: returns the fixed `VIEWER_ROOT` filesystem boundary.
+- `resolve_path(path)`: joins normalized paths to the fixed boundary and rejects absolute paths or symlink resolutions outside it.
 - `resolve_markdown_link(base_path, target, user_id)`: resolves local Markdown image/link targets relative to the Markdown file, supports absolute/file URLs, strips common editor `:line[:column]` suffixes, and returns absolute paths when targets live outside the active user's root.
 - `resolve_directory_link(base_dir, target, user_id)`: resolves local file links relative to a directory, supports absolute/file URLs, strips common editor `:line[:column]` suffixes, and returns absolute paths when targets live outside the active user's root.
-- `resolve_served_directory(path, label, user_id)`: resolves a working directory for terminal/Codex launches. Explicit absolute paths are allowed; relative paths resolve inside the active user's profile home. Missing directories fall back to the active user's root.
+- `resolve_served_directory(path, label)`: resolves a required working directory for Terminal/Codex/Hermes launches. Empty or missing directories are rejected; there is no fallback.
 - `relative_for(path, user_id)`: returns path relative to the active user's root when possible; symlink targets or external paths may become absolute if outside root.
 - `guess_mime(path)`: MIME type from filename.
 - `preview_kind(path, mime, size)`: maps file extension/MIME to `image`, `markdown`, `html`, `pdf`, `text`, or `unsupported`; `.env`, `.env.*`, and `*.env` files are treated as text even when MIME guessing is inconclusive.
@@ -93,7 +90,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `read_text(path)`: reads UTF-8 with replacement fallback; rejects oversized text previews.
 - `read_text_lines(path, start_line, count)`: validates text-style preview files, builds/caches newline byte offsets by path/mtime/size, and returns a bounded UTF-8 line window for frontend virtual scrolling.
 - `config_path()`: returns `~/.view/config.json`.
-- `read_config()` / `write_config(config)`: load and save nav appearance, Codex model options, voice settings, Markdown theme config, user profiles, and default user.
+- `read_config()` / `write_config(config)`: load and save appearance, Codex, voice, Markdown, and Super Workspace config.
 
 `backend/app/events.py`
 
@@ -118,7 +115,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `backend/app/watcher.py`
 
-- Watches `settings.root_resolved` plus every configured profile home with non-recursive `watchfiles.watch` in a worker thread so scan/setup does not follow large symlinked trees and block FastAPI startup.
+- Watches the fixed `settings.root_resolved` boundary with non-recursive `watchfiles.watch` in a worker thread.
 - `event_type(change)`: converts `watchfiles.Change` enum to API strings.
 - `is_ignored_path(path)`: ignores high-churn `__outputs` directories while the `watchfiles` default filter ignores common development directories such as `.git`, `.venv`, and `node_modules`.
 - `watch_root(stop_event)`: debounced watch loop; publishes `WatchEvent` with type, best-match root-relative path, directory flag, and mtime.
@@ -127,7 +124,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Interactive shell session manager using OS PTYs, async tasks, and WebSockets.
 - `TerminalSession`: PTY process state, buffered output, per-session output log path, current PTY rows/cols, shared layout lock state, connected clients, locks, and tasks.
-- Each terminal records `user_id`; `TerminalManager.list(user_id)` filters summaries to the active profile. New terminals use the profile home as their default cwd when no cwd is supplied.
+- Terminal metadata retains the fixed `dailing` owner. New terminals require an explicit Chat Root cwd.
 - `TerminalSession.snapshot()`: full state fields; reconnect snapshots load output from the per-session on-disk log.
 - `TerminalSession.summary()`: list-friendly state without output.
 - `TerminalManager.list()`: sorted summaries.
@@ -151,7 +148,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Structured Codex session manager using `codex exec --json` subprocesses instead of PTY/TUI rendering.
 - `CodexSession`: viewer-local provider state including title, working directory, Codex thread/session id, rollout path, prompts, parsed rollout JSON events, process status, detached runner pid/Codex pid/run id, and paths for metadata/stderr/run logs.
-- Each Codex session metadata file requires `user_id`; list operations filter by active profile. New sessions use the profile home as their default cwd when no cwd is supplied.
+- Codex metadata retains the fixed `dailing` owner. Super Workspace always supplies Chat Root plus optional Role cwd.
 - Session metadata now stores an optional `model`; when set, runs pass `-m <model>` to `codex exec`.
 - `cli_status()`: scans recent `~/.codex/sessions/**/rollout-*.jsonl` files, parses `token_count` events, and exposes a cached coarse status payload using the newest event timestamp for global 5-hour/weekly rate-limit chips. Codex `rate_limits.*.used_percent` values are treated as percentage points, and the API also exposes `*_remaining_percent` for "usage left" UI.
 - `CodexSessionManager.create(prompt, cwd)`: creates a viewer session and writes metadata. If `prompt` is blank, the session stays `idle`; otherwise it starts a detached background runner for `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -C <cwd> -`.
@@ -181,7 +178,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Structured Hermes session manager using the local Hermes API server and Hermes SQLite state instead of terminal rendering.
 - `HermesSession`: viewer-local provider state including title, working directory, Hermes session id, Hermes run id, prompts, compacted DB events, process-like status, and metadata path.
-- Each Hermes metadata file requires `user_id`; list operations filter by active profile. New sessions use the profile home as their default cwd when no cwd is supplied.
+- Hermes metadata retains the fixed `dailing` owner. Super Workspace always supplies Chat Root plus optional Role cwd.
 - `create(prompt, cwd)`: creates idle viewer metadata with `hermes_session_id` seeded from the viewer session id; a non-empty prompt immediately starts a Hermes `/v1/runs` request.
 - `send(session_id, prompt)`: rejects concurrent running sends, persists the prompt, starts `/v1/runs` with `session_id`, and monitors run status through `/v1/runs/{run_id}` while polling `~/.hermes/state.db` for new messages.
 - Hermes run monitoring also subscribes to `/v1/runs/{run_id}/events` so `approval.request` events become shared `pending_approvals` in viewer snapshots. The shared approval route calls Hermes `/v1/runs/{run_id}/approval` and updates the session after `approval.responded`.
@@ -204,7 +201,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/models.py`
 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, and `TerminalSnapshot`.
-- `ConfigData` stores global appearance, including the app color theme, Markdown, Codex defaults, voice settings, user profiles, and default user.
+- `ConfigData` stores appearance, Markdown, Codex defaults, voice, and Super Workspace settings; it has no user-profile fields.
 - `AgentEventType` is the fixed backend intermediate-representation enum shared by provider parsers. Current values are `message:assistant`, `reasoning`, `tool_call`, `tool_result`, `custom_tool_call`, `exec_command_begin`, `exec_command_end`, `function_call`, `function_call_output`, `custom_tool_call_output`, `view_image_tool_call`, `patch_apply_end`, and fallback `operation` for logged-but-unclassified visible events. Provider drivers convert native logs into these values before writing Super Workspace history.
 - `CodexConfig` stores Codex model options, muted operation-message alpha, and an optional `proxy` for `~/.view/config.json`; `default_model` controls new/resumed Super Workspace Codex runs unless a role specifies a model. The built-in model options include `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; the built-in default model remains `gpt-5.5`, `muted_message_alpha` defaults to `0.56`, and `proxy` defaults to empty/no proxy.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
@@ -282,7 +279,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/App.vue`
 
-- Root shell: profile selection, full-page settings, and the Super Workspace split-pane shell as the normal page. There is no global navbar.
+- Root shell: full-page settings and the Super Workspace split-pane shell as the normal page. There is no global navbar or profile selection screen.
 - Defaults directly to Super Workspace; Settings is opened by the activity-rail button emitted through `FileSidebar.vue` and `SuperWorkspacePage.vue`.
 - Loads config, the root file listing, and terminal lists before mounting the Super Workspace page.
 - Applies appearance and active Markdown theme settings from `stores/files.ts` as CSS variables on the app shell, including pane-titlebar/icon size and Markdown/syntax colors.
@@ -291,15 +288,14 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Dispatches every filesystem SSE as `viewer:file-changed`; individual panes filter these events against their own file path or viewer-specific dependency set.
 - Polls terminal list every 15 seconds with overlap guarded in `stores/terminals.ts`.
 - Pane toolbar rendering and pane navigation actions live in `PaneTitleBar.vue`, not the app shell. `stores/layout.ts` keeps each pane's local content history so a pane can return from a linked file, sidebar-opened file, diff, terminal, or agent session to its previous content.
-- User selection: `useUsersStore` loads `/api/users`, reads/writes `viewer.activeUser.v1`, and blocks normal app startup behind the first-run profile picker when no valid active profile is stored. The Settings page includes a profile selector that stores the new user and reloads the app so all stores reconnect under the new profile.
-- File viewer scroll memory lives in `utils/scrollMemory.ts` and `composables/useScrollMemory.ts`. Scroll positions are browser-local, user-namespaced, and keyed by the user's fixed workspace id, pane id, and file path so two panes can keep different positions for the same file; layout navigation emits `viewer:pane-before-navigate` before replacing pane content so the current viewer can save its last scroll position under the correct key.
+- File viewer scroll memory lives in `utils/scrollMemory.ts` and `composables/useScrollMemory.ts`. Scroll positions are browser-local and keyed by pane id and file path; layout navigation emits `viewer:pane-before-navigate` before replacing pane content.
 - Agent provider/session list is loaded on startup and polled every 15 seconds through `stores/agents.ts`.
 
 `frontend/src/components/SuperWorkspacePage.vue`
 
 - Default full-page Super Workspace split-pane shell.
 - Loads the user's single Super Workspace and its roles through `/api/super-workspace`, chats through `/api/super-workspace/chats`, and agent provider metadata for role editing.
-- Owns the sidebar drawer/pin/resize state and routes `FileSidebar.vue` events into chat, role, file, diff, terminal, and Settings actions. The sidebar's narrow activity rail includes browser-local pinned files and terminals plus backend-persisted pinned chats as quick pane shortcuts, with Settings anchored at the bottom. Sidebar tools use the current chat working directory as their default cwd, preferring the active chat pane's `chatId` and falling back to the backend active chat; empty chat cwd means the profile root.
+- Owns sidebar state and routes actions. Sidebar tools require the current chat's non-empty Root, preferring the active chat pane and otherwise using the backend active chat. Files cannot navigate above it.
 - Chat CRUD opens chats as normal recursive layout panes through `layout.openChat(chatId)`. Role CRUD applies to the user's single Super Workspace; deleting a role also removes it from any chat membership lists. Chat list mutations emit a browser-local `super-workspace:chats-updated` event so already-open chat panes can refresh member-role context without waiting for a history poll.
 
 `frontend/src/components/SuperWorkspaceChatPane.vue`
@@ -307,7 +303,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Chat pane for a single `chatId`; loads flat display feed pages from `/api/super-workspace/runs?chat_id=...`, subscribes to `/api/super-workspace/events`, and incrementally refreshes changed runs.
 - Registers the resolved chat name in `stores/paneToolbar.ts` so its pane title bar follows chat creation/rename updates instead of displaying a generic `Chat` label.
 - The composer creates a persisted run through `/api/super-workspace/runs`. It sends structured `role_ids` from `stores/superChatDispatch.ts` when manual target chips are selected in the Chats side panel or the composer dispatch dropdown selects one or more chat member roles; leaving the dropdown on Auto omits `role_ids` so the backend router LLM chooses among chat members. The composer dispatch button opens the dropdown only when no manual roles are selected; when highlighted with selected roles, clicking it clears back to Auto. Typed leading `@Role` mentions plus `@msg-{message_id}` citation tokens still work.
-- The composer defaults to pinned/open when a chat has no local pin preference, can be expanded with voice focus for mobile input, and has a pin action beside Clear to keep it open across focus loss. Explicit pin/unpin preferences and unsent input draft are owned by `stores/superChatComposer.ts`, keyed by `chatId`, and persisted in user-namespaced `localStorage` so reopening the same chat restores input-vs-reading mode and draft text.
+- The composer defaults to pinned/open when a chat has no local pin preference. Preferences and drafts are stored by `chatId` in non-namespaced localStorage.
 - The composer registers `super-workspace:{chat_id}:composer` with `stores/inputSessions.ts` as a submit-capable input context. If the user presses Send while voice processing is still running, the input session marks a pending send, waits for voice final text, and submits the completed query to the original chat without requiring the pane to remain active.
 - Role response headers are metadata rows: they show the role label, session id, context usage when available, and the cite action.
 - Visible user messages and final role responses have small cite buttons that insert `@msg-{message_id}` into the leading composer prefix. Backend `super_workspace_runtime.py` parses citation tokens, writes citation edges and queued dispatch-task rows, and leaves execution to the independent Super Workspace worker process.
@@ -316,7 +312,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/components/DirectoryPicker.vue`
 
 - Reusable cwd autocomplete backed by `/api/tree`.
-- Shows one path input plus a current-level directory dropdown. The dropdown loads only the current parent directory, filters directories by the typed path segment prefix, selects only directories, and appends a trailing slash in the input after selection so the user can continue typing the next path segment. The emitted cwd remains a served-root-relative path without leading or trailing slash; absolute paths and `..` segments are rejected. Empty cwd labels are supplied by callers because role empty cwd means inherit chat/default, while chat empty cwd means profile home.
+- Shows one path input plus a current-level directory dropdown. Paths are relative to the server boundary; absolute paths and `..` are rejected. Chat Root is required, while an empty Role cwd means the Chat Root itself.
 
 `frontend/src/components/viewers/CsvViewer.vue`
 
@@ -365,7 +361,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Sidebar shell with a VS Code-style activity rail and one active tool panel at a time.
 - Persists the active sidebar tool in `localStorage` under `viewer.sidebarActiveTool.v1`.
 - Tools: Chats, Roles, Files, Changes, and Terminals. Future side tools should be added to this shell instead of mixing unrelated lists into one panel.
-- Computes the default sidebar tool cwd from the current chat and passes it to Files, Changes, and Terminals panels so those tools follow chat scope instead of always using the profile root.
+- Computes the required sidebar tool cwd from the current Chat Root and passes it to Files, Changes, and Terminals.
 - The activity rail stays visible even when the tool panel is closed. Clicking a different tool changes only the active selection; clicking the already-active tool toggles the tool panel open/closed.
 - Settings is a dedicated activity-rail button anchored below tools and pinned shortcuts.
 - On phone-width screens, pinned and unpinned tool panels behave as an overlay beside the always-visible activity rail so the workspace is not narrowed by the saved desktop sidebar width.
@@ -374,13 +370,13 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `frontend/src/components/sidebar/FilesPanel.vue`
 
 - Files tool panel: pinned paths, current folder, parent button, upload button, drag-and-drop upload target, file delete confirmation/error display, and `FileTree`. When opened, it enters the current chat default cwd, falling back to root if that directory is unavailable.
-- Shows the active profile `home` as the current path label when browsing the user's root (`path=""`).
+- Shows the current path relative to the fixed filesystem boundary and prevents parent navigation above Chat Root.
 - `openPinned(path)`: tries to enter pinned path as directory, otherwise emits `open-file`.
 
 `frontend/src/components/sidebar/TerminalsPanel.vue`
 
 - Terminals tool panel: new terminal button plus terminal list.
-- `newTerminal()`: creates terminal in the current chat default cwd and emits `open-terminal`; empty cwd falls back to the profile root on the backend.
+- `newTerminal()`: creates a terminal in the current Chat Root; the backend rejects empty cwd.
 - `closeTerminal(id)`: deletes terminal and clears matching panes.
 
 `frontend/src/components/sidebar/GitPanel.vue`
@@ -394,7 +390,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Full-page configuration UI opened from the sidebar activity-rail Settings button.
 - Edits `~/.view/config.json` through the existing `/api/config` endpoint.
-- Uses a searchable category sidebar rather than nested accordion state; each category renders a direct heading plus Bootstrap form controls. Categories are Server, User Profile, Appearance, Codex Models, Super Workspace, Voice, Markdown, Syntax Highlighting, and raw JSON.
+- Uses a searchable category sidebar. Categories are Server, Appearance, Codex Models, Super Workspace, Voice, Markdown, Syntax Highlighting, and raw JSON.
 - Server section has confirmed backend-only restart, backend+worker restart, and stop buttons. Both restart buttons call `/api/admin/restart`, with the full restart adding `include_worker=true`; the page polls `/api/health` until the PID changes, then reloads. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
 - Appearance controls system/light/dark theme selection and compact/comfortable density; density maps directly to the shared control sizing rather than persisting arbitrary pixel sizes.
 - Codex Models controls the default Codex model, the available model list used by Super Workspace Codex roles, and the optional Codex subprocess proxy.
@@ -524,7 +520,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `terminateTerminal()`, `deleteTerminal()`, and `terminalSocketUrl()`.
 - Agent provider metadata API: `listAgentProviders()`.
 - Super Workspace APIs: `getSuperWorkspace()`, chat/role CRUD helpers, `listSuperWorkspaceRuns()`, and `createSuperWorkspaceRun()` cover the user's workspace data and persisted chat/query flows. Normal role-message delivery and automatic routing are owned by the backend Super Workspace runtime, not by frontend wrappers.
-- `frontend/src/api/client.ts` appends the active user id from `viewer.activeUser.v1` to REST and WebSocket API URLs; `frontend/src/api/events.ts` does the same for the SSE stream.
+- `frontend/src/api/client.ts` and `frontend/src/api/events.ts` call fixed-owner REST/WebSocket/SSE endpoints without user query parameters.
 - Voice API helper: `voiceSocketUrl()` builds the browser WebSocket URL for `/api/voice/ws`, using `wss://` when the page is served over HTTPS.
 
 `frontend/src/api/events.ts`
@@ -533,7 +529,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/stores/files.ts`
 
-- Pinia store for directory listings, current path, expanded dirs, pinned paths, visit timestamps, appearance config, Markdown theme config, Codex config, Super Workspace config, voice config, and loading state. Pinned file paths are persisted in user-namespaced browser `localStorage`; appearance, Markdown themes, Codex config, Super Workspace config, voice config, and profile definitions are persisted in `~/.view/config.json`.
+- Pinia store for directory listings, current path, pins, appearance, Markdown, Codex, Super Workspace, and voice config. Browser state is non-namespaced; persisted runtime config contains no profile definitions.
 - Getters: `currentEntries`, `parentPath`.
 - Actions: `loadConfig()`, `saveConfig()`, `saveFullViewerConfig()`, `loadDirectory()`, `enterDirectory()`, `enterParentDirectory()`, `refreshAffected()`, `togglePin()`. `enterDirectory()` persists the last visited sidebar directory.
 
@@ -547,11 +543,11 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/stores/superChatComposer.ts`
 
-- Pinia store for per-chat Super Workspace composer UI preferences. Persists explicit composer pin/open choices and unsent input draft by `chatId` in user-namespaced `localStorage` so all panes showing the same chat share the same input visibility mode and draft text; chats without a stored pin choice default to pinned/open.
+- Pinia store for per-chat composer UI preferences and drafts in non-namespaced localStorage.
 
 `frontend/src/stores/superChatDispatch.ts`
 
-- Pinia store for per-chat manual Super Workspace dispatch role selection. Persists selected role ids by `chatId` in user-namespaced `localStorage`, so reopening or switching back to a chat restores the last non-Auto role selection unless the role is no longer a chat member.
+- Pinia store for per-chat manual dispatch role selection in non-namespaced localStorage.
 
 `frontend/src/stores/inputSessions.ts`
 
@@ -733,13 +729,9 @@ If a backend field changes, update the matching frontend type and all consumers.
 
 ## Persistence
 
-- `~/.view/config.json`: appearance, Codex model options, voice model/language/translation options, Markdown themes, user profiles, and default user, managed by `/api/config` and `/api/users`.
+- `~/.view/config.json`: appearance, Codex, voice, Markdown, and Super Workspace configuration, managed by `/api/config`.
 - `~/.view/agent-history.sqlite3`: shared agent history index used first by Super Workspace and managed through SQLAlchemy ORM sessions with `NullPool` connection handling. It stores Super Workspace definitions, roles, user messages/runs/targets plus provider driver-written intermediate message rows with full raw JSON, structured IR columns (`workspace_id`, `event_index`, `received_at`, `event_type`, `text`, `patch_text`, and `file_changes` child rows), provider/session/source path/line metadata, and source-derived timestamps. Runtime read/status paths do not resync or reparse provider source files as a fallback.
-- `localStorage viewer.activeUser.v1`: selected soft user profile id.
-- `localStorage viewer.layout.v1.{user}` and `viewer.layout.v1.{user}.super-workspace`: split tree, active pane, and open pane content ids, with the Super Workspace scope used by the normal app shell.
-- `localStorage viewer.superSidebarPinned.v1.{user}` and `viewer.superSidebarWidth.v1.{user}`: Super Workspace sidebar state.
-- `localStorage viewer.sidebarActiveTool.v1.{user}`: selected Super Workspace sidebar tool.
-- `localStorage viewer.scrollPositions.v1.{user}`: per-path scroll positions.
+- `localStorage` layout/sidebar/draft/pin/scroll keys are not user-namespaced. `utils/storage.ts` migrates legacy `.dailing` keys when first read.
 - `~/.view/logs/viewer-*.log`: timestamped runtime logs from `run.py`.
 - `~/.view/logs/codex-sessions/*.stderr.log`: stderr from Codex subprocesses.
 - `~/.view/logs/codex-sessions/*.json`: viewer-local Codex session metadata including prompts, discovered Codex thread id, selected model, status, and matched rollout path.

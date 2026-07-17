@@ -26,7 +26,7 @@ from .hermes_sessions import hermes_session_manager
 from .process_registry import process_slot_state, write_process_state
 from .storage import LOG_DIR
 from .super_workspace import SuperDispatchRequest, SuperRole, super_workspace_manager
-from .users import normalize_user_id
+from .identity import normalize_user_id
 
 
 class SuperWorkspaceMessageCreate(BaseModel):
@@ -561,7 +561,7 @@ class SuperWorkspaceRuntime:
             agent_history_store.summarize_super_run_status(run.id, task.user_id, fallback_error=f"Unsupported provider: {role.provider}")
             return
         chat = super_workspace_manager.chat_for_run(task.user_id, task.workspace_id, run.chat_id)
-        effective_cwd = (role.cwd or "").strip() or (chat.cwd or "").strip()
+        effective_cwd = "/".join(part for part in ((chat.root or "").strip(), (role.cwd or "").strip()) if part)
         effective_model = driver._effective_model(role)
         session_state = agent_history_store.get_chat_role_session(task.user_id, task.workspace_id, run.chat_id, role.id, role.provider or "codex")
         active_session_id = driver.active_session_id(role, session_state, effective_cwd, effective_model)

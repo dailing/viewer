@@ -1,13 +1,13 @@
 import { defineStore } from "pinia";
 import { createTerminal, deleteTerminal, listTerminals, terminateTerminal } from "../api/client";
 import type { TerminalInfo } from "../types/terminals";
-import { namespacedStorageKey } from "../utils/userProfile";
+import { storageKey } from "../utils/storage";
 
 const PINNED_TERMINALS_KEY = "viewer.pinnedTerminals.v1";
 
 function readPinnedTerminals(): string[] {
   try {
-    const raw = localStorage.getItem(namespacedStorageKey(PINNED_TERMINALS_KEY));
+    const raw = localStorage.getItem(storageKey(PINNED_TERMINALS_KEY));
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const seen = new Set<string>();
@@ -24,7 +24,7 @@ function readPinnedTerminals(): string[] {
 }
 
 function writePinnedTerminals(ids: string[]) {
-  localStorage.setItem(namespacedStorageKey(PINNED_TERMINALS_KEY), JSON.stringify(ids));
+  localStorage.setItem(storageKey(PINNED_TERMINALS_KEY), JSON.stringify(ids));
 }
 
 export const useTerminalsStore = defineStore("terminals", {

@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { namespacedStorageKey } from "../utils/userProfile";
+import { storageKey } from "../utils/storage";
 
 const PIN_STORAGE_KEY = "viewer.superChatComposerPins.v1";
 const DRAFT_STORAGE_KEY = "viewer.superChatComposerDrafts.v1";
@@ -9,7 +9,7 @@ let pendingDrafts: Record<string, string> | null = null;
 
 function readPins(): Record<string, boolean> {
   try {
-    const raw = localStorage.getItem(namespacedStorageKey(PIN_STORAGE_KEY));
+    const raw = localStorage.getItem(storageKey(PIN_STORAGE_KEY));
     const parsed = raw ? JSON.parse(raw) : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const pins: Record<string, boolean> = {};
@@ -23,12 +23,12 @@ function readPins(): Record<string, boolean> {
 }
 
 function writePins(value: Record<string, boolean>) {
-  localStorage.setItem(namespacedStorageKey(PIN_STORAGE_KEY), JSON.stringify(value));
+  localStorage.setItem(storageKey(PIN_STORAGE_KEY), JSON.stringify(value));
 }
 
 function readDrafts(): Record<string, string> {
   try {
-    const raw = localStorage.getItem(namespacedStorageKey(DRAFT_STORAGE_KEY));
+    const raw = localStorage.getItem(storageKey(DRAFT_STORAGE_KEY));
     const parsed = raw ? JSON.parse(raw) : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const drafts: Record<string, string> = {};
@@ -42,7 +42,7 @@ function readDrafts(): Record<string, string> {
 }
 
 function writeDrafts(value: Record<string, string>) {
-  localStorage.setItem(namespacedStorageKey(DRAFT_STORAGE_KEY), JSON.stringify(value));
+  localStorage.setItem(storageKey(DRAFT_STORAGE_KEY), JSON.stringify(value));
 }
 
 function flushDrafts() {

@@ -18,7 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from .storage import AGENT_HISTORY_DB_PATH
 from .super_workspace_memory import retain_visible_message_background
-from .users import normalize_user_id
+from .identity import normalize_user_id
 
 DEFAULT_SUPER_WORKSPACE_ID = "default"
 DEFAULT_SUPER_WORKSPACE_NAME = "Default Super Workspace"
@@ -48,13 +48,20 @@ def normalize_relative_cwd(value: Any) -> str:
     if not cwd:
         return ""
     if cwd.startswith("/"):
-        raise ValueError("cwd must be relative to the profile home")
+        raise ValueError("cwd must be relative to the chat root")
     if "\\" in cwd:
         raise ValueError("cwd must use forward slashes")
     parts = [part for part in cwd.split("/") if part]
     if any(part == ".." for part in parts):
         raise ValueError("cwd cannot contain .. path segments")
     return "/".join(parts)
+
+
+def normalize_chat_root(value: Any) -> str:
+    root = normalize_relative_cwd(value)
+    if not root:
+        raise ValueError("Chat root is required")
+    return root
 
 
 class SuperHistoryRunCreate(BaseModel):
@@ -281,7 +288,7 @@ class SuperChatSummary(BaseModel):
     name: str
     type: str = "group"
     pinned: bool = False
-    cwd: str = ""
+    root: str
     common_prompt: str = ""
     member_role_ids: list[str] = Field(default_factory=list)
     created_at: float
@@ -332,7 +339,7 @@ class SuperWorkspaceChatRow(AgentHistoryBase):
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     type: Mapped[str] = mapped_column(String, nullable=False, default="group")
-    cwd: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    root: Mapped[str] = mapped_column(Text, nullable=False)
     common_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     member_role_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
@@ -688,7 +695,7 @@ class AgentHistoryStore:
                     name=self._display_chat_name(row, role_names),
                     type=str(row.type or "group"),
                     pinned=str(row.id) in pinned_chat_ids,
-                    cwd=str(row.cwd or ""),
+                    root=str(row.root),
                     common_prompt=str(row.common_prompt or ""),
                     member_role_ids=[value for value in self._parse_json(row.member_role_ids_json, []) if isinstance(value, str)],
                     created_at=float(row.created_at),
@@ -705,7 +712,7 @@ class AgentHistoryStore:
         name: str,
         chat_type: str = "group",
         pinned: bool = False,
-        cwd: str = "",
+        root: str,
         common_prompt: str = "",
         member_role_ids: list[str] | None = None,
         workspace_id: str | None = None,
@@ -728,7 +735,7 @@ class AgentHistoryStore:
                     user_id=workspace.user_id,
                     name=normalized_name,
                     type=normalized_type,
-                    cwd=normalize_relative_cwd(cwd),
+                    root=normalize_chat_root(root),
                     common_prompt=common_prompt.strip(),
                     member_role_ids_json=self._json(normalized_role_ids),
                     created_at=now,
@@ -808,8 +815,8 @@ class AgentHistoryStore:
                                 SuperWorkspaceChatPinRow.chat_id == chat_id,
                             )
                         )
-                if "cwd" in values:
-                    row.cwd = normalize_relative_cwd(values["cwd"])
+                if "root" in values:
+                    row.root = normalize_chat_root(values["root"])
                 if "common_prompt" in values:
                     row.common_prompt = str(values["common_prompt"] or "").strip()
                 row.updated_at = time.time()

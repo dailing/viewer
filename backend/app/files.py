@@ -10,7 +10,6 @@ from loguru import logger
 from .config import settings
 from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, TextLineWindow
 from .storage import CONFIG_PATH
-from .users import default_user_id, list_user_profiles, user_home_path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
@@ -63,17 +62,23 @@ def normalize_relative(path: str | None) -> str:
 
 
 def served_root(user_id: str | None = None) -> Path:
-    return user_home_path(user_id) if user_id else settings.root_resolved
+    return settings.root_resolved.resolve()
 
 
 def resolve_path(path: str | None, user_id: str | None = None) -> Path:
     raw = (path or "").strip()
+    root = served_root(user_id)
     if raw:
         raw_path = Path(raw).expanduser()
         if raw_path.is_absolute():
-            return raw_path
-    rel = normalize_relative(path)
-    return served_root(user_id).joinpath(rel)
+            target = raw_path.resolve(strict=False)
+        else:
+            target = root.joinpath(normalize_relative(path)).resolve(strict=False)
+    else:
+        target = root
+    if target != root and not target.is_relative_to(root):
+        raise HTTPException(status_code=400, detail="Path is outside the server file boundary")
+    return target
 
 
 def _normalize_link_parts(parts: list[str]) -> str:
@@ -156,36 +161,23 @@ def resolve_directory_link(base_dir: str | None, target: str, user_id: str | Non
 
 def resolve_served_directory(path: str | None, label: str, user_id: str | None = None) -> str:
     raw = (path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail=f"{label} working directory is required")
     requested = normalize_relative(raw)
-    if raw:
-        raw_path = Path(raw).expanduser()
-        if raw_path.is_absolute():
-            try:
-                target = raw_path.resolve()
-                requested = target.as_posix()
-            except OSError:
-                logger.warning("{} cwd '{}' is not available; using root", label, raw)
-                return served_root(user_id).as_posix()
-        else:
-            target = resolve_path(requested, user_id)
-    elif user_id:
-        target = user_home_path(user_id)
-        requested = target.as_posix()
-    else:
-        target = settings.root_resolved
+    target = resolve_path(raw, user_id)
     if not target.exists() or not target.is_dir():
-        if requested:
-            logger.warning("{} cwd '{}' is not available; using root", label, requested)
-        return served_root(user_id).as_posix()
+        raise HTTPException(status_code=400, detail=f"{label} working directory '{requested}' is not available")
     return target.as_posix()
 
 
 def relative_for(path: Path, user_id: str | None = None) -> str:
+    root = served_root(user_id)
+    target = path.resolve(strict=False)
     try:
-        rel = path.relative_to(served_root(user_id)).as_posix()
+        rel = target.relative_to(root).as_posix()
         return "" if rel == "." else rel
-    except ValueError:
-        return path.as_posix()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path is outside the server file boundary") from exc
 
 
 def guess_mime(path: Path) -> str:
@@ -408,22 +400,20 @@ def config_path() -> Path:
 def read_config() -> ConfigData:
     path = config_path()
     if not path.exists():
-        config = ConfigData(users=list_user_profiles(), default_user=default_user_id())
+        config = ConfigData()
         write_config(config)
         return config
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         config = ConfigData.model_validate(raw)
     except Exception:
-        return ConfigData(users=list_user_profiles(), default_user=default_user_id())
+        return ConfigData()
     cleaned = ConfigData(
         appearance=config.appearance,
         markdown=config.markdown,
         codex=config.codex,
         voice=config.voice,
         super_workspace=config.super_workspace,
-        users=list_user_profiles(),
-        default_user=default_user_id(),
     )
     codex_raw = raw.get("codex") if isinstance(raw, dict) else None
     voice_raw = raw.get("voice") if isinstance(raw, dict) else None
@@ -443,12 +433,10 @@ def read_config() -> ConfigData:
         or "dispatch_history_word_budget" not in super_workspace_raw
         or "dispatch_prompt_template" not in super_workspace_raw
     )
-    missing_user_defaults = "users" not in raw or "default_user" not in raw
     if isinstance(raw, dict) and (
         missing_codex_defaults
         or missing_voice_defaults
         or missing_super_workspace_defaults
-        or missing_user_defaults
     ):
         write_config(cleaned)
     return cleaned

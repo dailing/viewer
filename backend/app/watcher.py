@@ -8,7 +8,6 @@ from watchfiles import Change, DefaultFilter, watch
 from .config import settings
 from .events import hub
 from .models import WatchEvent
-from .users import list_user_profiles, user_home_path
 
 IGNORED_WATCH_DIR_NAMES = {"__outputs"}
 DEFAULT_WATCH_FILTER = DefaultFilter(
@@ -31,11 +30,7 @@ def is_ignored_path(path: Path) -> bool:
 
 
 def watch_roots() -> list[Path]:
-    roots = [settings.root_resolved]
-    for profile in list_user_profiles():
-        roots.append(user_home_path(profile.id))
-    unique = {root.resolve(): root.resolve() for root in roots}
-    return sorted(unique.values(), key=lambda item: len(item.parts), reverse=True)
+    return [settings.root_resolved]
 
 
 def relative_for_roots(path: Path, roots: list[Path]) -> str:

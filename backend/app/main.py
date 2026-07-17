@@ -41,7 +41,6 @@ from .restart import request_restart, request_stop
 from .super_workspace import SuperChatCreate, SuperChatPatch, SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
 from .super_workspace_runtime import SuperWorkspaceMessageCreate, super_workspace_runtime
 from .terminals import terminal_manager
-from .users import get_user_profile, list_user_profiles, user_home_path, user_home_relative
 from .voice import connect_voice
 from .watcher import watch_root
 
@@ -98,8 +97,6 @@ async def log_requests(request: Request, call_next):
 async def startup() -> None:
     global watch_stop_event, watch_task
     settings.root_resolved.mkdir(parents=True, exist_ok=True)
-    for profile in list_user_profiles():
-        user_home_path(profile.id).mkdir(parents=True, exist_ok=True)
     logger.info(
         "Starting viewer root={} frontend_dist={} debug={}",
         settings.root_resolved,
@@ -126,21 +123,7 @@ async def shutdown() -> None:
 
 @app.get("/api/health")
 async def health() -> dict[str, str | int]:
-    return {"status": "ok", "root": settings.root_resolved.as_posix(), "pid": os.getpid()}
-
-
-@app.get("/api/users")
-async def users():
-    return [
-        {**profile.model_dump(), "home_path": user_home_relative(profile.id)}
-        for profile in list_user_profiles()
-    ]
-
-
-@app.get("/api/users/current")
-async def current_user(user: str | None = None):
-    profile = get_user_profile(user)
-    return {**profile.model_dump(), "home_path": user_home_relative(profile.id), "cwd": user_home_path(profile.id).as_posix()}
+    return {"status": "ok", "pid": os.getpid()}
 
 
 @app.post("/api/admin/restart", status_code=202)
@@ -160,49 +143,49 @@ async def stop_server():
 
 
 @app.get("/api/tree")
-async def tree(path: str = Query(default=""), user: str | None = None):
-    return list_directory(path, user)
+async def tree(path: str = Query(default="")):
+    return list_directory(path)
 
 
 @app.get("/api/file/meta")
-async def file_meta(path: str, user: str | None = None):
-    return get_meta(path, user)
+async def file_meta(path: str):
+    return get_meta(path)
 
 
 @app.get("/api/file/content", response_class=PlainTextResponse)
-async def file_content(path: str, user: str | None = None):
-    return read_text(path, user)
+async def file_content(path: str):
+    return read_text(path)
 
 
 @app.get("/api/file/text-lines")
-async def file_text_lines(path: str, start: int = Query(default=0, ge=0), count: int = Query(default=200, ge=1, le=500), user: str | None = None):
-    return read_text_lines(path, start, count, user)
+async def file_text_lines(path: str, start: int = Query(default=0, ge=0), count: int = Query(default=200, ge=1, le=500)):
+    return read_text_lines(path, start, count)
 
 
 @app.put("/api/file/content")
-async def file_content_save(request: Request, path: str, user: str | None = None):
+async def file_content_save(request: Request, path: str):
     content = (await request.body()).decode("utf-8")
-    return write_text(path, content, user)
+    return write_text(path, content)
 
 
 @app.post("/api/file/upload")
-async def file_upload(request: Request, directory: str = Query(default=""), filename: str = Query(...), user: str | None = None):
-    target = upload_target(directory, filename, user)
+async def file_upload(request: Request, directory: str = Query(default=""), filename: str = Query(...)):
+    target = upload_target(directory, filename)
     with target.open("wb") as handle:
         async for chunk in request.stream():
             handle.write(chunk)
-    return {"status": "ok", "directory": directory, "entry": entry_for(target, user)}
+    return {"status": "ok", "directory": directory, "entry": entry_for(target)}
 
 
 @app.delete("/api/file")
-async def file_delete(path: str, user: str | None = None):
-    return delete_file(path, user)
+async def file_delete(path: str):
+    return delete_file(path)
 
 
 @app.get("/api/file/raw")
-async def file_raw(path: str, h: str | None = None, base: str | None = None, user: str | None = None):
-    target_path = resolve_markdown_link(base, path, user) if base is not None else path
-    target = resolve_path(target_path, user)
+async def file_raw(path: str, h: str | None = None, base: str | None = None):
+    target_path = resolve_markdown_link(base, path) if base is not None else path
+    target = resolve_path(target_path)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
     if not target.is_file():
@@ -349,19 +332,19 @@ def file_site_response(path: str, h: str | None = None, user: str | None = None)
 
 
 @app.get("/api/file/site")
-async def file_site_query(path: str, h: str | None = None, user: str | None = None):
-    return file_site_response(path, h, user)
+async def file_site_query(path: str, h: str | None = None):
+    return file_site_response(path, h)
 
 
 @app.get("/api/file/site/{path:path}")
-async def file_site(path: str, h: str | None = None, user: str | None = None):
-    return file_site_response(path, h, user)
+async def file_site(path: str, h: str | None = None):
+    return file_site_response(path, h)
 
 
 @app.get("/api/file/resolve-link")
-async def file_resolve_link(base: str, target: str, user: str | None = None):
-    path = resolve_markdown_link(base, target, user)
-    resolved = resolve_path(path, user)
+async def file_resolve_link(base: str, target: str):
+    path = resolve_markdown_link(base, target)
+    resolved = resolve_path(path)
     payload = {"path": path}
     if resolved.exists() and resolved.is_file():
         payload["content_hash"] = metadata_version(resolved, resolved.stat())
@@ -369,38 +352,38 @@ async def file_resolve_link(base: str, target: str, user: str | None = None):
 
 
 @app.get("/api/file/resolve-directory-link")
-async def file_resolve_directory_link(base: str = "", target: str = "", user: str | None = None):
-    return {"path": resolve_directory_link(base, target, user)}
+async def file_resolve_directory_link(base: str = "", target: str = ""):
+    return {"path": resolve_directory_link(base, target)}
 
 
 @app.get("/api/git/status")
-async def git_status_route(scope: str | None = None, user: str | None = None):
-    return git_status(scope, user)
+async def git_status_route(scope: str):
+    return git_status(scope)
 
 
 @app.get("/api/git/diff")
-async def git_diff_route(path: str, user: str | None = None):
-    return git_diff(path, user)
+async def git_diff_route(path: str):
+    return git_diff(path)
 
 
 @app.post("/api/git/stage")
-async def git_stage_route(request: GitStageRequest | None = None, user: str | None = None):
-    return git_stage(request.path if request else None, request.scope if request else None, user)
+async def git_stage_route(request: GitStageRequest | None = None):
+    return git_stage(request.path if request else None, request.scope if request else None)
 
 
 @app.post("/api/git/revert")
-async def git_revert_route(request: GitRevertRequest, user: str | None = None):
-    return git_revert(request.path, user)
+async def git_revert_route(request: GitRevertRequest):
+    return git_revert(request.path)
 
 
 @app.post("/api/git/commit")
-async def git_commit_route(request: GitCommitRequest, user: str | None = None):
-    return git_commit(request, user)
+async def git_commit_route(request: GitCommitRequest):
+    return git_commit(request)
 
 
 @app.post("/api/git/push")
-async def git_push_route(scope: str | None = None, user: str | None = None):
-    return git_push(scope, user)
+async def git_push_route(scope: str):
+    return git_push(scope)
 
 
 @app.get("/api/config")
@@ -410,7 +393,6 @@ async def get_config():
 
 @app.put("/api/config")
 async def put_config(config: ConfigData):
-    current = read_config()
     return write_config(
         ConfigData(
             appearance=config.appearance,
@@ -418,8 +400,6 @@ async def put_config(config: ConfigData):
             codex=config.codex,
             voice=config.voice,
             super_workspace=config.super_workspace,
-            users=config.users or current.users,
-            default_user=config.default_user or current.default_user,
         )
     )
 
@@ -430,15 +410,14 @@ async def events():
 
 
 @app.get("/api/terminals")
-async def terminals(user: str | None = None):
-    return terminal_manager.list(user)
+async def terminals():
+    return terminal_manager.list()
 
 
 @app.post("/api/terminals")
-async def create_terminal(config: TerminalCreate | None = None, user: str | None = None):
-    cwd = config.cwd if config else None
-    logger.info("Creating terminal cwd={}", cwd or "")
-    return await terminal_manager.create(cwd, user)
+async def create_terminal(config: TerminalCreate):
+    logger.info("Creating terminal cwd={}", config.cwd)
+    return await terminal_manager.create(config.cwd)
 
 
 @app.get("/api/terminals/{terminal_id}")
@@ -469,53 +448,53 @@ async def agent_providers():
 
 
 @app.get("/api/super-workspace")
-async def super_workspace(user: str | None = None):
-    return super_workspace_manager.read(user)
+async def super_workspace():
+    return super_workspace_manager.read()
 
 
 @app.put("/api/super-workspace")
-async def update_super_workspace(request: SuperWorkspacePatch, user: str | None = None):
-    return super_workspace_manager.update(request, user)
+async def update_super_workspace(request: SuperWorkspacePatch):
+    return super_workspace_manager.update(request)
 
 
 @app.get("/api/super-workspace/chats")
-async def super_chats(user: str | None = None):
-    return super_workspace_manager.list_chats(user)
+async def super_chats():
+    return super_workspace_manager.list_chats()
 
 
 @app.post("/api/super-workspace/chats")
-async def create_super_chat(request: SuperChatCreate, user: str | None = None):
-    return super_workspace_manager.create_chat(request, user)
+async def create_super_chat(request: SuperChatCreate):
+    return super_workspace_manager.create_chat(request)
 
 
 @app.put("/api/super-workspace/chats/{chat_id}")
-async def update_super_chat(chat_id: str, request: SuperChatPatch, user: str | None = None):
-    return super_workspace_manager.update_chat(chat_id, request, user)
+async def update_super_chat(chat_id: str, request: SuperChatPatch):
+    return super_workspace_manager.update_chat(chat_id, request)
 
 
 @app.delete("/api/super-workspace/chats/{chat_id}")
-async def delete_super_chat(chat_id: str, user: str | None = None):
-    return super_workspace_manager.delete_chat(chat_id, user)
+async def delete_super_chat(chat_id: str):
+    return super_workspace_manager.delete_chat(chat_id)
 
 
 @app.post("/api/super-workspace/active-chat/{chat_id}")
-async def activate_super_chat(chat_id: str, user: str | None = None):
-    return super_workspace_manager.activate_chat(chat_id, user)
+async def activate_super_chat(chat_id: str):
+    return super_workspace_manager.activate_chat(chat_id)
 
 
 @app.post("/api/super-workspace/roles")
-async def create_super_role(request: SuperRoleCreate, user: str | None = None):
-    return super_workspace_manager.create_role(request, user)
+async def create_super_role(request: SuperRoleCreate):
+    return super_workspace_manager.create_role(request)
 
 
 @app.put("/api/super-workspace/roles/{role_id}")
-async def update_super_role(role_id: str, request: SuperRolePatch, user: str | None = None):
-    return super_workspace_manager.update_role(role_id, request, user)
+async def update_super_role(role_id: str, request: SuperRolePatch):
+    return super_workspace_manager.update_role(role_id, request)
 
 
 @app.delete("/api/super-workspace/roles/{role_id}")
-async def delete_super_role(role_id: str, user: str | None = None):
-    return super_workspace_manager.delete_role(role_id, user)
+async def delete_super_role(role_id: str):
+    return super_workspace_manager.delete_role(role_id)
 
 
 @app.get("/api/super-workspace/runs")
@@ -524,14 +503,13 @@ async def super_workspace_runs(
     before: float | None = None,
     after: float | None = None,
     chat_id: str | None = None,
-    user: str | None = None,
 ):
-    return agent_history_store.list_super_display_items(user, limit=limit, before=before, after=after, chat_id=chat_id)
+    return agent_history_store.list_super_display_items(None, limit=limit, before=before, after=after, chat_id=chat_id)
 
 
 @app.get("/api/super-workspace/events")
-async def super_workspace_events(user: str | None = None):
-    return StreamingResponse(super_workspace_runtime.event_hub.subscribe(user), media_type="text/event-stream")
+async def super_workspace_events():
+    return StreamingResponse(super_workspace_runtime.event_hub.subscribe(None), media_type="text/event-stream")
 
 
 @app.post("/internal/super-workspace/notify")
@@ -541,7 +519,7 @@ async def notify_super_workspace(event: dict):
 
 
 @app.post("/api/super-workspace/runs")
-async def create_super_workspace_run(request: SuperHistoryRunCreate, user: str | None = None):
+async def create_super_workspace_run(request: SuperHistoryRunCreate):
     message = request.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required")
@@ -553,18 +531,18 @@ async def create_super_workspace_run(request: SuperHistoryRunCreate, user: str |
             parent_message_id=request.parent_message_id,
             sender_role_id=request.sender_role_id,
         ),
-        user,
+        None,
     )
 
 
 @app.post("/api/super-workspace/targets/{task_id}/stop")
-async def stop_super_workspace_target(task_id: str, user: str | None = None):
-    return await super_workspace_runtime.stop_dispatch_task(task_id, user)
+async def stop_super_workspace_target(task_id: str):
+    return await super_workspace_runtime.stop_dispatch_task(task_id)
 
 
 @app.post("/api/super-workspace/dispatch")
-async def dispatch_super_workspace(request: SuperDispatchRequest, user: str | None = None):
-    return await super_workspace_manager.dispatch(request, user)
+async def dispatch_super_workspace(request: SuperDispatchRequest):
+    return await super_workspace_manager.dispatch(request)
 
 
 @app.websocket("/api/voice/ws")

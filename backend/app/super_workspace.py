@@ -69,7 +69,7 @@ class SuperChatCreate(BaseModel):
     name: str = "New Chat"
     type: str = "group"
     pinned: bool = False
-    cwd: str = ""
+    root: str
     common_prompt: str = ""
     member_role_ids: list[str] = Field(default_factory=list)
 
@@ -78,7 +78,7 @@ class SuperChatPatch(BaseModel):
     name: str | None = None
     type: str | None = None
     pinned: bool | None = None
-    cwd: str | None = None
+    root: str | None = None
     common_prompt: str | None = None
     member_role_ids: list[str] | None = None
 
@@ -138,7 +138,7 @@ class SuperWorkspaceManager:
                 pinned=request.pinned,
                 common_prompt=request.common_prompt,
                 member_role_ids=request.member_role_ids,
-                cwd=request.cwd,
+                root=request.root,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

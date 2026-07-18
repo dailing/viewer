@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Read-only local live file viewer backend"
 requires-python = ">=3.11"
 dependencies = [
+  "agent-client-protocol>=0.9.0,<0.10",
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "watchfiles>=0.24.0",

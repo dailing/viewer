@@ -13,6 +13,7 @@ class FileEntry(BaseModel):
     mime: str | None = None
     is_dir: bool
     is_symlink: bool
+    link_target: str | None = None
 
 
 class DirectoryListing(BaseModel):
@@ -243,4 +244,6 @@ class AgentEventType(StrEnum):
     CUSTOM_TOOL_CALL_OUTPUT = "custom_tool_call_output"
     VIEW_IMAGE_TOOL_CALL = "view_image_tool_call"
     PATCH_APPLY_END = "patch_apply_end"
+    PLAN_UPDATE = "plan_update"
+    SESSION_UPDATE = "session_update"
     OPERATION = "operation"

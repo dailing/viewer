@@ -9,6 +9,7 @@ from loguru import logger
 from .process_registry import clear_process_state, process_slot_state, write_process_state
 from .storage import ensure_view_home
 from .super_workspace_runtime import SuperWorkspaceRuntime
+from .hermes_sessions import hermes_session_manager
 
 
 async def main_async() -> int:
@@ -30,9 +31,14 @@ async def main_async() -> int:
     write_process_state(name, os.getpid(), {"kind": "super_workspace_worker", "notify_url": notify_url})
     logger.info("Super Workspace worker process started pid={} notify_url={}", os.getpid(), notify_url)
     try:
+        try:
+            await hermes_session_manager.start()
+        except Exception:
+            logger.exception("Hermes ACP startup failed; Hermes tasks will retry lazily")
         runtime._stop.clear()
         await runtime._dispatch_worker_loop()
     finally:
+        await hermes_session_manager.shutdown()
         clear_process_state(name, os.getpid())
     return 0
 

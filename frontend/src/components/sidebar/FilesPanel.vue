@@ -23,7 +23,7 @@ const dragDepth = ref(0);
 const uploadError = ref("");
 const uploading = ref(false);
 const isDragging = computed(() => dragDepth.value > 0);
-const canEnterParent = computed(() => Boolean(files.currentPath) && files.currentPath !== (props.defaultCwd ?? ""));
+const canEnterParent = computed(() => files.visitStack.length > 0);
 
 watch(
   () => props.defaultCwd ?? "",
@@ -36,6 +36,8 @@ watch(
 async function enterDefaultDirectory(cwd: string) {
   if (files.currentPath === cwd) return;
   uploadError.value = "";
+  // Clear navigation stack when switching to a new chat root.
+  files.visitStack = [];
   try {
     await files.enterDirectory(cwd);
   } catch (error) {

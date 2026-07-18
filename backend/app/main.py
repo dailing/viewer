@@ -526,6 +526,7 @@ async def create_super_workspace_run(request: SuperHistoryRunCreate):
     return await super_workspace_runtime.submit(
         SuperWorkspaceMessageCreate(
             message=message,
+            content_blocks=request.content_blocks,
             chat_id=request.chat_id,
             role_ids=request.role_ids,
             parent_message_id=request.parent_message_id,

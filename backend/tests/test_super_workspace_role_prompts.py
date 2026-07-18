@@ -60,6 +60,7 @@ class RolePromptSeparationTests(unittest.TestCase):
             chats = store.create_super_chat(
                 "user",
                 name="Chat",
+                root="project",
                 member_role_ids=[role_id],
                 workspace_id=workspace.id,
             )
@@ -79,6 +80,29 @@ class RolePromptSeparationTests(unittest.TestCase):
             self.assertIsNotNone(store.get_chat_role_session("user", workspace.id, chat_id, role_id, "codex"))
             store.update_super_workspace_role("user", role_id, {"prompt": "Updated prompt"})
             self.assertIsNone(store.get_chat_role_session("user", workspace.id, chat_id, role_id, "codex"))
+
+    def test_structured_content_blocks_are_persisted_with_query(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AgentHistoryStore(Path(directory) / "history.sqlite3")
+            workspace = store.ensure_default_workspace("user")
+            chats = store.create_super_chat("user", name="Chat", root="project", workspace_id=workspace.id)
+            blocks = [
+                {
+                    "type": "resource",
+                    "resource": {"uri": "viewer://diff", "mimeType": "text/x-diff", "text": "+changed"},
+                }
+            ]
+
+            run = store.create_super_run(
+                "user",
+                "review this",
+                "queued",
+                chat_id=chats.active_chat_id,
+                content_blocks=blocks,
+            )
+
+            self.assertEqual(run.content_blocks, blocks)
+            self.assertEqual(store.get_super_run(run.id, "user").content_blocks, blocks)
 
 if __name__ == "__main__":
     unittest.main()

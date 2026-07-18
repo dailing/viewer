@@ -66,6 +66,7 @@ def normalize_chat_root(value: Any) -> str:
 
 class SuperHistoryRunCreate(BaseModel):
     message: str
+    content_blocks: list[dict[str, Any]] = Field(default_factory=list)
     chat_id: str | None = None
     role_ids: list[str] | None = None
     parent_message_id: str | None = None
@@ -181,6 +182,7 @@ class SuperHistoryRun(BaseModel):
     message: str
     query: str
     message_id: str
+    content_blocks: list[dict[str, Any]] = Field(default_factory=list)
     role_ids: list[str] = Field(default_factory=list)
     citation_ids: list[str] = Field(default_factory=list)
     status: str
@@ -1196,6 +1198,7 @@ class AgentHistoryStore:
         sender_role_id: str | None = None,
         workspace_id: str | None = None,
         chat_id: str | None = None,
+        content_blocks: list[dict[str, Any]] | None = None,
     ) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)
         workspace = self._workspace_for_run(normalized_user, workspace_id)
@@ -1212,6 +1215,7 @@ class AgentHistoryStore:
             "parent_message_id": parent_message_id,
             "sender_role_id": sender_role_id,
             "chat_id": chat.id,
+            "content_blocks": content_blocks or [],
         }
         with self.session_scope() as db:
             self._validate_citation_ids(db, normalized_user, normalized_citation_ids)
@@ -2059,7 +2063,7 @@ class AgentHistoryStore:
                     "file_changes": file_changes or [],
                 },
             )
-        if role == "assistant" and event_type == "message:assistant" and text.strip():
+        if role == "assistant" and event_type == "message:assistant" and text.strip() and not raw.get("streaming"):
             retain_visible_message_background(
                 user_id=user_id,
                 workspace_id=workspace_id,
@@ -2171,6 +2175,11 @@ class AgentHistoryStore:
             message=query,
             query=query,
             message_id=str(row.id),
+            content_blocks=[
+                value
+                for value in self._parse_json(row.raw_json, {}).get("content_blocks", [])
+                if isinstance(value, dict)
+            ],
             role_ids=target_role_ids or selected_role_ids,
             citation_ids=self.citation_ids_for_message(str(row.id)),
             status=str(row.status or "queued"),

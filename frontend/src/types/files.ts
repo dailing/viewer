@@ -10,6 +10,7 @@ export interface FileEntry {
   mime: string | null;
   is_dir: boolean;
   is_symlink: boolean;
+  link_target: string | null;
 }
 
 export interface DirectoryListing {

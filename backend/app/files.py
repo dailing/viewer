@@ -76,8 +76,6 @@ def resolve_path(path: str | None, user_id: str | None = None) -> Path:
             target = root.joinpath(normalize_relative(path)).resolve(strict=False)
     else:
         target = root
-    if target != root and not target.is_relative_to(root):
-        raise HTTPException(status_code=400, detail="Path is outside the server file boundary")
     return target
 
 
@@ -176,8 +174,8 @@ def relative_for(path: Path, user_id: str | None = None) -> str:
     try:
         rel = target.relative_to(root).as_posix()
         return "" if rel == "." else rel
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Path is outside the server file boundary") from exc
+    except ValueError:
+        return target.as_posix()
 
 
 def guess_mime(path: Path) -> str:
@@ -230,6 +228,13 @@ def entry_for(path: Path, user_id: str | None = None) -> FileEntry:
     else:
         entry_type = "other"
 
+    link_target: str | None = None
+    if is_symlink:
+        try:
+            link_target = relative_for(path.resolve(strict=False), user_id)
+        except Exception:
+            link_target = None
+
     return FileEntry(
         name=path.name,
         path=relative_for(path, user_id),
@@ -239,6 +244,7 @@ def entry_for(path: Path, user_id: str | None = None) -> FileEntry:
         mime=guess_mime(path) if not is_dir else None,
         is_dir=is_dir,
         is_symlink=is_symlink,
+        link_target=link_target,
     )
 
 

@@ -43,7 +43,7 @@ Normal message delivery is asynchronous:
 4. Provider output is persisted in `~/.view/agent-history.sqlite3` and announced through Super Workspace SSE.
 5. The Chat pane incrementally reloads the changed run.
 
-Codex work runs through detached background processes, so restarting the Viewer backend does not terminate an active Codex run.
+Codex work runs through detached background processes, so restarting the Viewer backend does not terminate an active Codex run. Hermes work uses an ACP subprocess for the selected Hermes Profile; the independent worker starts the default Profile's ACP adapter and creates each Hermes session with the Chat Root as its real working directory.
 
 ## Persistence
 
@@ -65,7 +65,7 @@ Browser-local state stores pane layout, sidebar state, pins, drafts, dispatch se
 - Python 3.11 or newer
 - Node.js and npm
 - `codex` on `PATH` for Codex roles
-- A Hermes API server for Hermes roles
+- `hermes` on `PATH` with the ACP optional dependency for Hermes roles
 - An OpenAI-compatible chat-completions endpoint for automatic routing
 
 ## Install
@@ -134,8 +134,10 @@ The main environment variables are:
 - `VIEWER_TERMINAL_SHELL`: terminal shell.
 - `VIEWER_CODEX_RUN_DIR`: detached Codex process state directory.
 - `VIEWER_WEAVER_RUN_DIR`: Super Workspace worker and provider-driver registry directory.
-- `VIEWER_HERMES_BASE_URL`: Hermes API base URL.
-- `VIEWER_HERMES_STATE_DB`: Hermes canonical state database.
+- `VIEWER_HERMES_ACP_ENABLED`: start Hermes ACP with the worker; defaults to `true`.
+- `VIEWER_HERMES_PROFILE`: Hermes Profile used by ACP; defaults to `default`.
+- `VIEWER_HERMES_YOLO`: start only the Viewer-owned Hermes ACP process with `--yolo`; defaults to `true`. Hermes' gateway/profile approval configuration is not changed.
+- `VIEWER_HERMES_COMMAND`: Hermes executable; defaults to `hermes`.
 - `VIEWER_SUPER_DISPATCH_URL`: fallback automatic-dispatch endpoint.
 
 Most user-facing settings are managed from Settings and persisted in `~/.view/config.json`.
@@ -152,10 +154,10 @@ cd frontend && npm run build
 .venv/bin/python3 -m compileall backend/app backend/tests
 ```
 
-Role routing and prompt-boundary tests:
+Role routing, prompt-boundary, and Hermes ACP tests:
 
 ```bash
-.venv/bin/python3 -m unittest backend.tests.test_super_workspace_role_prompts -v
+.venv/bin/python3 -m unittest backend.tests.test_super_workspace_role_prompts backend.tests.test_hermes_acp_sessions -v
 ```
 
 For the detailed module map, data flow, API inventory, and fault locations, see [`architecture.md`](architecture.md).

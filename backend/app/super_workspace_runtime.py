@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import OperationalError
 
 from .agent_history import DEFAULT_CONTEXT_RECYCLE_PERCENT, SuperChatRoleSessionState, SuperDispatchTask, SuperDriverRunCreate, SuperHistoryRun, agent_history_store
@@ -31,6 +31,7 @@ from .identity import normalize_user_id
 
 class SuperWorkspaceMessageCreate(BaseModel):
     message: str
+    content_blocks: list[dict[str, Any]] = Field(default_factory=list)
     chat_id: str | None = None
     role_ids: list[str] | None = None
     parent_message_id: str | None = None
@@ -70,6 +71,7 @@ class SuperWorkspaceEventHub:
 
 class SuperAgentDriver:
     provider = ""
+    supports_content_blocks = False
 
     def active_session_id(
         self,
@@ -102,7 +104,7 @@ class SuperAgentDriver:
         role: SuperRole,
         state: SuperChatRoleSessionState | None,
         user_id: str,
-        prompt: str,
+        prompt: str | list[dict[str, Any]],
         lineage: dict[str, Any],
         effective_cwd: str,
     ) -> dict[str, Any]:
@@ -130,7 +132,12 @@ class SuperAgentDriver:
                         exc,
                     )
         history_prompt = self.chat_history_prompt(user_id, lineage)
-        first_prompt = f"{self.initial_prompt(role, user_id)}\n\n{history_prompt}{prompt}"
+        preamble = f"{self.initial_prompt(role, user_id)}\n\n{history_prompt}"
+        first_prompt: str | list[dict[str, Any]]
+        if isinstance(prompt, list):
+            first_prompt = [{"type": "text", "text": preamble}, *prompt]
+        else:
+            first_prompt = f"{preamble}{prompt}"
         session = await self._create(first_prompt, effective_cwd, self._effective_model(role), user_id, lineage)
         session_ref = f"{self.provider}:{session['id']}"
         reason = "new_each_run" if role.session_policy == "new_each_run" else "new_session"
@@ -182,7 +189,7 @@ class SuperAgentDriver:
 
     @staticmethod
     def usage_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-        provider_session_id = snapshot.get("codex_session_id") or snapshot.get("hermes_session_id")
+        provider_session_id = snapshot.get("provider_session_id") or snapshot.get("codex_session_id")
         driver_pid = snapshot.get("pid")
         driver_state_path = snapshot.get("run_state_path")
         return {
@@ -202,12 +209,12 @@ class SuperAgentDriver:
             if key in usage
         }
 
-    async def _create(self, prompt: str, cwd: str, model: str | None, user_id: str, lineage: dict[str, Any]) -> dict[str, Any]:
+    async def _create(self, prompt: str | list[dict[str, Any]], cwd: str, model: str | None, user_id: str, lineage: dict[str, Any]) -> dict[str, Any]:
         if self.provider == "codex":
             return await self.manager().create(prompt, cwd, model, user_id, lineage=lineage)
         return await self.manager().create(prompt, cwd, model, user_id, lineage=lineage)
 
-    async def _send(self, session_id: str, prompt: str, model: str | None, lineage: dict[str, Any]) -> dict[str, Any]:
+    async def _send(self, session_id: str, prompt: str | list[dict[str, Any]], model: str | None, lineage: dict[str, Any]) -> dict[str, Any]:
         if self.provider == "codex":
             return await self.manager().send(session_id, prompt, model, lineage=lineage)
         return await self.manager().send(session_id, prompt, model, lineage=lineage)
@@ -265,11 +272,20 @@ class CodexSuperDriver(SuperAgentDriver):
         return codex_session_manager
 
 
-class HermesSuperDriver(SuperAgentDriver):
-    provider = "hermes"
+class ACPSuperDriver(SuperAgentDriver):
+    supports_content_blocks = True
+
+    def __init__(self, provider: str, session_manager: Any) -> None:
+        self.provider = provider
+        self._session_manager = session_manager
 
     def manager(self):
-        return hermes_session_manager
+        return self._session_manager
+
+
+class HermesSuperDriver(ACPSuperDriver):
+    def __init__(self) -> None:
+        super().__init__("hermes", hermes_session_manager)
 
 
 class SuperWorkspaceRuntime:
@@ -381,6 +397,7 @@ class SuperWorkspaceRuntime:
                 parent_message_id=request.parent_message_id,
                 sender_role_id=request.sender_role_id,
                 chat_id=chat.id,
+                content_blocks=request.content_blocks,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -569,7 +586,9 @@ class SuperWorkspaceRuntime:
             agent_history_store.update_driver_run_status(task.id, "queued", next_attempt_at=time.time() + 2.0)
             await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
             return
-        prompt = self.role_message_prompt(run, role)
+        prompt: str | list[dict[str, Any]] = self.role_message_prompt(run, role)
+        if driver.supports_content_blocks and run.content_blocks:
+            prompt = [{"type": "text", "text": prompt}, *run.content_blocks]
         lineage = {
             "workspace_id": task.workspace_id,
             "chat_id": run.chat_id,
@@ -583,7 +602,8 @@ class SuperWorkspaceRuntime:
             "cwd": effective_cwd,
         }
         agent_history_store.update_super_run(run.id, task.user_id, status="running")
-        agent_history_store.update_driver_run_status(task.id, "running", agent_prompt=prompt, error="")
+        prompt_preview = prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False)
+        agent_history_store.update_driver_run_status(task.id, "running", agent_prompt=prompt_preview, error="")
         await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
         dispatch_result = await driver.dispatch_task(role, session_state, task.user_id, prompt, lineage, effective_cwd)
         session_ref = str(dispatch_result["session_ref"])
@@ -622,7 +642,7 @@ class SuperWorkspaceRuntime:
             rotation_reason=rotation_reason,
             **driver.chat_role_session_usage(usage),
         )
-        agent_history_store.update_driver_run_status(task.id, "running", session_ref=session_ref, agent_prompt=prompt, **usage)
+        agent_history_store.update_driver_run_status(task.id, "running", session_ref=session_ref, agent_prompt=prompt_preview, **usage)
         completed = await self._wait_for_session(
             driver,
             session_id,
@@ -725,7 +745,8 @@ class SuperWorkspaceRuntime:
                         return self._summarize_run_status(run_id, user_id)
                     if driver_run_id:
                         agent_history_store.update_driver_run_status(driver_run_id, "failed", **usage)
-                    return self._summarize_run_status(run_id, user_id, fallback_error="Role session failed")
+                    session_error = str(snapshot.get("error") or "").strip()
+                    return self._summarize_run_status(run_id, user_id, fallback_error=session_error or "Role session failed")
                 if driver_run_id:
                     agent_history_store.update_driver_run_status(driver_run_id, "completed", **usage)
                 return self._summarize_run_status(run_id, user_id)

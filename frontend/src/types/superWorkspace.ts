@@ -123,6 +123,7 @@ export type SuperHistoryRun = {
   message: string;
   query: string;
   message_id: string;
+  content_blocks?: Record<string, unknown>[];
   role_ids: string[];
   citation_ids?: string[];
   status: "selecting" | "queued" | "running" | "dispatched" | "completed" | "failed" | "cancelled";
@@ -201,6 +202,7 @@ export type SuperDisplayItemsPage = {
 
 export type SuperHistoryRunCreate = {
   message: string;
+  content_blocks?: Record<string, unknown>[];
   chat_id?: string | null;
   role_ids?: string[] | null;
   parent_message_id?: string | null;

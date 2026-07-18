@@ -319,6 +319,7 @@ export const useFilesStore = defineStore("files", {
     expanded: new Set<string>(),
     pinned: readPinnedFiles(),
     visitTimes: {} as Record<string, number>,
+    visitStack: [] as string[],
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
     codexConfig: normalizeCodexConfig(),
@@ -382,6 +383,9 @@ export const useFilesStore = defineStore("files", {
       }
     },
     async enterDirectory(path: string) {
+      if (this.currentPath && this.currentPath !== path) {
+        this.visitStack.push(this.currentPath);
+      }
       await this.loadDirectory(path);
       this.currentPath = path;
       this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
@@ -390,7 +394,15 @@ export const useFilesStore = defineStore("files", {
       this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
     },
     async enterParentDirectory() {
-      await this.enterDirectory(this.parentPath);
+      // Pop the visit stack; every directory entry pushed one, so every
+      // ".." click pops one. This naturally handles symlink targets and
+      // normal subdirectories with the same code path.
+      if (this.visitStack.length > 0) {
+        const previous = this.visitStack.pop()!;
+        await this.enterDirectory(previous);
+        return;
+      }
+      // Stack empty: nowhere to go back to.
     },
     async refreshAffected(path: string, isDir: boolean) {
       if (isDir && this.expanded.has(path)) await this.loadDirectory(path);

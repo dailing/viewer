@@ -1031,6 +1031,7 @@ async function scrollThreadToBottom() {
           min-height="58px"
           max-height="50cqh"
           :auto-grow="true"
+          :explicit-navigation="true"
           @focus="composerExpanded = true"
           @keydown="handleComposerKeydown"
         >

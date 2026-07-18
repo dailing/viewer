@@ -14,6 +14,7 @@ const props = withDefaults(
     maxHeight?: string;
     autoGrow?: boolean;
     trailingActions?: boolean;
+    explicitNavigation?: boolean;
   }>(),
   {
     placeholder: "",
@@ -24,6 +25,7 @@ const props = withDefaults(
     maxHeight: "50vh",
     autoGrow: false,
     trailingActions: false,
+    explicitNavigation: false,
   },
 );
 
@@ -75,6 +77,57 @@ function resizeTextarea() {
   });
 }
 
+function caretPosition(element: HTMLTextAreaElement) {
+  return element.selectionDirection === "backward" ? element.selectionStart : element.selectionEnd;
+}
+
+function moveCaret(element: HTMLTextAreaElement, position: number, extendSelection: boolean) {
+  const nextPosition = Math.max(0, Math.min(position, element.value.length));
+  if (!extendSelection) {
+    element.setSelectionRange(nextPosition, nextPosition);
+    return;
+  }
+  const anchor = element.selectionDirection === "backward" ? element.selectionEnd : element.selectionStart;
+  element.setSelectionRange(
+    Math.min(anchor, nextPosition),
+    Math.max(anchor, nextPosition),
+    nextPosition < anchor ? "backward" : "forward",
+  );
+}
+
+function handleExplicitNavigation(event: KeyboardEvent) {
+  if (!props.explicitNavigation || event.isComposing || event.altKey) return;
+  const element = textarea.value;
+  if (!element) return;
+
+  if (event.key === "Home" || event.key === "End") {
+    const caret = caretPosition(element);
+    const wholeText = event.metaKey || event.ctrlKey;
+    let position: number;
+    if (event.key === "Home") {
+      position = wholeText ? 0 : element.value.slice(0, caret).lastIndexOf("\n") + 1;
+    } else {
+      const lineEnd = element.value.indexOf("\n", caret);
+      position = wholeText || lineEnd < 0 ? element.value.length : lineEnd;
+    }
+    event.preventDefault();
+    moveCaret(element, position, event.shiftKey);
+    return;
+  }
+
+  if ((event.key === "PageUp" || event.key === "PageDown") && !event.metaKey && !event.ctrlKey) {
+    const lineHeight = Number.parseFloat(window.getComputedStyle(element).lineHeight) || 18;
+    const page = Math.max(lineHeight, element.clientHeight - lineHeight * 2);
+    event.preventDefault();
+    element.scrollTop += event.key === "PageUp" ? -page : page;
+  }
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  handleExplicitNavigation(event);
+  emit("keydown", event);
+}
+
 defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
 </script>
 
@@ -89,7 +142,7 @@ defineExpose({ focus: focusTextarea, focusVoice: focusVoiceInput });
       @blur="emit('blur', $event)"
       @focus="emit('focus', $event)"
       @input="resizeTextarea"
-      @keydown="emit('keydown', $event)"
+      @keydown="handleKeydown"
     ></textarea>
     <div class="voice-textarea-actions">
       <div class="voice-textarea-actions-main">

@@ -613,7 +613,7 @@ class ACPSessionManager:
         else:
             return None
 
-        if not text.strip():
+        if (append and text == "") or (not append and not text.strip()):
             return None
         return {
             "event_key": event_key,

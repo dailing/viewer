@@ -161,6 +161,39 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.acp_events[0]["text"], "Hello world")
         self.assertIn("completed", session.acp_events[1]["text"])
 
+    async def test_acp_message_chunks_preserve_markdown_whitespace(self) -> None:
+        manager = self.manager()
+        session = manager.sessions.setdefault(
+            "viewer-1",
+            manager_session("viewer-1", "acp-session-1"),
+        )
+        manager._record_lineage_events = Mock()
+        chunks = [
+            "##",
+            " ",
+            "Title",
+            "\n\n",
+            "| Column | Value |",
+            "\n",
+            "|:---|:---|",
+            "\n",
+            "| A | B |",
+        ]
+
+        for chunk in chunks:
+            await manager._handle_acp_update(
+                "acp-session-1",
+                AgentMessageChunk(
+                    sessionUpdate="agent_message_chunk",
+                    content=TextContentBlock(type="text", text=chunk),
+                ),
+            )
+
+        self.assertEqual(
+            session.acp_events[0]["text"],
+            "## Title\n\n| Column | Value |\n|:---|:---|\n| A | B |",
+        )
+
     async def test_missing_session_rotates_during_same_super_workspace_dispatch(self) -> None:
         manager = SimpleNamespace(
             snapshot=Mock(

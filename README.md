@@ -9,6 +9,7 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 - Create direct or group chats and assign member roles.
 - Route a message automatically through an OpenAI-compatible dispatcher or target roles explicitly.
 - Run Codex and Hermes roles in the background and stream their persisted output into Chat panes.
+- Retain visible Super Workspace chat messages to an optional chat-scoped Hindsight memory bank.
 - Stop a running role with a two-click confirmation.
 - Give each role a dispatcher-facing description and a separate Agent-facing prompt.
 - Reuse role sessions per chat or start a new session for each run.
@@ -59,6 +60,26 @@ Viewer-owned state is stored under `~/.view`:
 Lightweight worker and detached process state defaults to `/tmp/viewer_run`.
 
 Browser-local state stores pane layout, sidebar state, pins, drafts, dispatch selection, and scroll positions. Legacy `*.dailing` keys are migrated to their non-namespaced equivalents when first read.
+
+## Hindsight memory
+
+Hindsight retention is owned by Viewer, not by individual Agent processes. When `super_workspace.hindsight_retain_enabled` is enabled in `~/.view/config.json`, Viewer retains each visible user query and final assistant response into the current chat's bank:
+
+```text
+{hindsight_bank_prefix}::{user_id}::{workspace_id}::chat::{chat_id}
+```
+
+The default prefix is `super-workspace`. Each Viewer message uses a stable document id, so streaming updates and retries upsert the same memory instead of retaining an entire Codex transcript repeatedly.
+
+Codex and Hermes do not need their own Hindsight retain hooks. In particular, do not register Hindsight `SessionStart`, `UserPromptSubmit`, or `Stop` commands in `~/.codex/hooks.json` for Viewer-managed roles. Viewer retention is provider-independent and applies to messages after they enter the Super Workspace history database.
+
+The Hindsight API URL is resolved in this order:
+
+1. `VIEWER_HINDSIGHT_API_URL`
+2. `super_workspace.hindsight_api_url` in `~/.view/config.json`
+3. `hindsightApiUrl` in `~/.hindsight/codex.json`
+
+The API token uses `VIEWER_HINDSIGHT_API_TOKEN`, falling back to `hindsightApiToken` in `~/.hindsight/codex.json`. Retention failures are non-blocking. Viewer currently performs retain only; it does not recall Hindsight memories into provider prompts.
 
 ## Requirements
 
@@ -138,6 +159,8 @@ The main environment variables are:
 - `VIEWER_HERMES_PROFILE`: Hermes Profile used by ACP; defaults to `default`.
 - `VIEWER_HERMES_YOLO`: start only the Viewer-owned Hermes ACP process with `--yolo`; defaults to `true`. Hermes' gateway/profile approval configuration is not changed.
 - `VIEWER_HERMES_COMMAND`: Hermes executable; defaults to `hermes`.
+- `VIEWER_HINDSIGHT_API_URL`: optional Hindsight API URL override for Viewer-managed chat retention.
+- `VIEWER_HINDSIGHT_API_TOKEN`: optional Hindsight API token override.
 - `VIEWER_SUPER_DISPATCH_URL`: fallback automatic-dispatch endpoint.
 
 Most user-facing settings are managed from Settings and persisted in `~/.view/config.json`.

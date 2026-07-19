@@ -16,6 +16,7 @@ DEFAULT_FRONTEND_DIST = FRONTEND_DIR / "dist"
 DEFAULT_ROOT = Path("~/Sync").expanduser()
 DEFAULT_PORT = 18989
 DEFAULT_HOST = "0.0.0.0"
+DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT = 5
 DEFAULT_LOG_DIR = Path(os.environ.get("VIEWER_HOME", "~/.view")).expanduser() / "logs"
 PROJECT_ENV_PATH = PROJECT_ROOT / ".viewer.env"
 DEFAULT_VOICE_SERVICE_WS = "ws://127.0.0.1:8765/v1/voice/ws"
@@ -70,6 +71,12 @@ def parse_args() -> argparse.Namespace:
         "--debug",
         action="store_true",
         help="Enable debug logging and build frontend sourcemaps when --build-frontend is used.",
+    )
+    parser.add_argument(
+        "--graceful-shutdown-timeout",
+        default=DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT,
+        type=int,
+        help="Seconds to wait for active connections and requests during shutdown. Defaults to 5.",
     )
     parser.add_argument(
         "--log-dir",
@@ -209,6 +216,7 @@ def main() -> None:
         reload=args.reload,
         log_config=None,
         log_level="debug" if args.debug else "info",
+        timeout_graceful_shutdown=args.graceful_shutdown_timeout,
     )
 
 

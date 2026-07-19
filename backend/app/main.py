@@ -59,6 +59,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 AGENT_PROVIDERS = {
     "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars"},
+    "codex-app-server": {"id": "codex-app-server", "name": "Codex App Server (Experimental)", "icon": "bi-stars"},
     "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge"},
 }
 

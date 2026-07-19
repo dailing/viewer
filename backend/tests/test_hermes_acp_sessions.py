@@ -82,6 +82,32 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
         manager.acp.ensure_session.assert_awaited_once_with("acp-session-1", "/srv/projects/demo", None)
         manager.acp.prompt.assert_awaited_once_with("acp-session-1", "second")
 
+    async def test_followup_ignores_provider_history_replay_during_session_load(self) -> None:
+        manager = self.manager()
+        created = await manager.create("first", "demo", None, "dailing")
+        await self.wait_for_run(manager, created["id"])
+        session = manager.sessions[created["id"]]
+        manager._record_lineage_events = Mock()
+
+        async def replay_history(*_args, **_kwargs) -> None:
+            await manager._handle_acp_update(
+                "acp-session-1",
+                AgentMessageChunk(
+                    sessionUpdate="agent_message_chunk",
+                    content=TextContentBlock(type="text", text="old response"),
+                ),
+            )
+
+        manager.acp.ensure_session.side_effect = replay_history
+        await manager.send(created["id"], "second")
+        await self.wait_for_run(manager, created["id"])
+
+        self.assertFalse(session.loading_provider_history)
+        self.assertEqual(session.events, [])
+        self.assertEqual(session.acp_events, [])
+        self.assertEqual(session.acp_event_keys, {})
+        manager._record_lineage_events.assert_not_called()
+
     async def test_missing_legacy_session_is_rejected_before_turn_is_accepted(self) -> None:
         manager = self.manager()
         created = await manager.create("first", "demo", None, "dailing")
@@ -329,7 +355,12 @@ class GenericACPAbstractionTests(unittest.TestCase):
             created_at=1,
             updated_at=1,
             provider_session_id="provider-1",
-            lineage={"workspace_id": "workspace-1", "chat_id": "chat-1", "query_message_id": "query-1"},
+            lineage={
+                "workspace_id": "workspace-1",
+                "chat_id": "chat-1",
+                "query_message_id": "query-1",
+                "driver_run_id": "driver-1",
+            },
         )
         event = {
             "event_type": "message:assistant",
@@ -344,7 +375,53 @@ class GenericACPAbstractionTests(unittest.TestCase):
 
         self.assertEqual(record.call_args.kwargs["provider"], "example")
         self.assertIsNone(record.call_args.kwargs["source_path"])
-        self.assertEqual(record.call_args.kwargs["source_event_id"], "example-acp:provider-1:message")
+        self.assertEqual(
+            record.call_args.kwargs["source_event_id"],
+            "dispatch:driver-1:example-acp:provider-1:message",
+        )
+
+    def test_reused_provider_event_ids_are_unique_per_dispatch(self) -> None:
+        runtime = SimpleNamespace(profile="work")
+        manager = ACPSessionManager("example", runtime, Path("/tmp/example-acp-metadata"))
+        manager._notify_lineage = Mock()
+        session = ACPSession(
+            provider="example",
+            id="viewer-1",
+            user_id="dailing",
+            title="test",
+            cwd="/srv/projects/demo",
+            model=None,
+            created_at=1,
+            updated_at=1,
+            provider_session_id="provider-1",
+            lineage={
+                "workspace_id": "workspace-1",
+                "chat_id": "chat-1",
+                "query_message_id": "query-1",
+                "driver_run_id": "driver-1",
+            },
+        )
+        event = {
+            "event_type": "message:assistant",
+            "text": "done",
+            "received_at": 2,
+            "source_event_id": "example-acp:provider-1:agent_message_chunk:1",
+            "streaming": False,
+        }
+
+        with patch("app.agent_history.agent_history_store.record_provider_message") as record:
+            manager._record_lineage_events(session, [event], 0)
+            session.lineage = {**session.lineage, "query_message_id": "query-2", "driver_run_id": "driver-2"}
+            manager._record_lineage_events(session, [event], 0)
+
+        source_ids = [call.kwargs["source_event_id"] for call in record.call_args_list]
+        self.assertEqual(
+            source_ids,
+            [
+                "dispatch:driver-1:example-acp:provider-1:agent_message_chunk:1",
+                "dispatch:driver-2:example-acp:provider-1:agent_message_chunk:1",
+            ],
+        )
 
 
 if __name__ == "__main__":

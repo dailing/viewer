@@ -22,6 +22,7 @@ from sqlalchemy.exc import OperationalError
 
 from .agent_history import DEFAULT_CONTEXT_RECYCLE_PERCENT, SuperChatRoleSessionState, SuperDispatchTask, SuperDriverRunCreate, SuperHistoryRun, agent_history_store
 from .codex_sessions import codex_session_manager
+from .codex_app_server_sessions import codex_app_server_session_manager
 from .hermes_sessions import hermes_session_manager
 from .process_registry import process_slot_state, write_process_state
 from .storage import LOG_DIR
@@ -288,6 +289,11 @@ class HermesSuperDriver(ACPSuperDriver):
         super().__init__("hermes", hermes_session_manager)
 
 
+class CodexAppServerSuperDriver(ACPSuperDriver):
+    def __init__(self) -> None:
+        super().__init__("codex-app-server", codex_app_server_session_manager)
+
+
 class SuperWorkspaceRuntime:
     def __init__(self, notify_url: str | None = None) -> None:
         self.event_hub = SuperWorkspaceEventHub()
@@ -298,6 +304,7 @@ class SuperWorkspaceRuntime:
         self._stop = asyncio.Event()
         self._drivers: dict[str, SuperAgentDriver] = {
             "codex": CodexSuperDriver(),
+            "codex-app-server": CodexAppServerSuperDriver(),
             "hermes": HermesSuperDriver(),
         }
 

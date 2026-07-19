@@ -62,6 +62,7 @@ class ACPSession:
     acp_events: list[dict] = field(default_factory=list)
     acp_event_keys: dict[str, int] = field(default_factory=dict)
     acp_turn_index: int = 0
+    loading_provider_history: bool = False
     available_commands: list[dict] = field(default_factory=list)
     current_mode: str | None = None
     config_options: list[dict] = field(default_factory=list)
@@ -248,6 +249,13 @@ class ACPSessionManager:
         lineage = session.lineage
         for offset, event in enumerate(events):
             absolute_index = start_index + offset
+            source_event_id = str(
+                event.get("source_event_id")
+                or f"{self.provider}:{session.provider_session_id}:{absolute_index}"
+            )
+            dispatch_id = lineage.get("driver_run_id") or lineage.get("query_message_id")
+            if dispatch_id:
+                source_event_id = f"dispatch:{dispatch_id}:{source_event_id}"
             raw = event.get("raw_preview") if isinstance(event.get("raw_preview"), dict) else {"source": self.provider}
             raw = {**raw, "chat_id": lineage.get("chat_id"), "streaming": bool(event.get("streaming", False))}
             event_type = event.get("event_type")
@@ -266,10 +274,7 @@ class ACPSessionManager:
                 event_index=absolute_index,
                 received_at=float(event.get("received_at") or time.time()),
                 source_path=None,
-                source_event_id=str(
-                    event.get("source_event_id")
-                    or f"{self.provider}:{session.provider_session_id}:{absolute_index}"
-                ),
+                source_event_id=source_event_id,
                 source_line=None,
                 role="assistant",
                 event_type=str(event_type or "operation"),
@@ -425,7 +430,14 @@ class ACPSessionManager:
             # here lets the Super Workspace driver rotate
             # to a fresh Viewer/ACP session during the same dispatch instead of
             # returning success and failing later in the background task.
-            await self.acp.ensure_session(session.provider_session_id, session.cwd, model or session.model)
+            session.loading_provider_history = True
+            try:
+                await self.acp.ensure_session(session.provider_session_id, session.cwd, model or session.model)
+            finally:
+                session.loading_provider_history = False
+                session.events.clear()
+                session.acp_events.clear()
+                session.acp_event_keys.clear()
         now = time.time()
         session.prompts.append(
             {"text": cleaned_prompt, "content_blocks": prompt if isinstance(prompt, list) else None, "created_at": now}
@@ -505,6 +517,11 @@ class ACPSessionManager:
             session.config_options = [
                 self._acp_dict(value) for value in (getattr(update, "config_options", None) or [])
             ]
+
+        if session.loading_provider_history:
+            session.updated_at = time.time()
+            self._write_meta(session)
+            return
 
         event = self._normalized_acp_event(session, update_type, update, raw)
         if event is not None:

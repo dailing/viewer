@@ -191,6 +191,7 @@ export type SuperDisplayItem = {
   citation_ids?: string[];
   dispatch_targets: SuperDisplayTarget[];
   raw: Record<string, unknown>;
+  cwd_relative?: string;
 };
 
 export type SuperDisplayItemsPage = {

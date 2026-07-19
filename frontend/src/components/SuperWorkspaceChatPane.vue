@@ -612,7 +612,7 @@ function roleMentionKey(role: SuperRole) {
 }
 
 function itemBaseDirectory(item: SuperDisplayItem) {
-  return typeof item.raw?.cwd_relative === "string" ? item.raw.cwd_relative : "";
+  return item.cwd_relative ?? "";
 }
 
 function renderedItemHtml(item: SuperThreadItem) {

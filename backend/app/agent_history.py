@@ -243,6 +243,7 @@ class SuperDisplayItem(BaseModel):
     citation_ids: list[str] = Field(default_factory=list)
     dispatch_targets: list[SuperDisplayTarget] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
+    cwd_relative: str = ""
 
 
 class SuperDisplayItemsPage(BaseModel):
@@ -2131,7 +2132,8 @@ class AgentHistoryStore:
             error=str(row.error or "") if is_query else "",
             citation_ids=citation_ids_by_query.get(str(row.id), []) if is_query else [],
             dispatch_targets=dispatch_targets,
-            raw=self._parse_json(row.raw_json, {}),
+            raw={},
+            cwd_relative=(self._parse_json(target.role_snapshot_json, {}).get("cwd", "") if target is not None else ""),
         )
 
     def _query_chat_id(self, query_message_id: str) -> str:

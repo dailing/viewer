@@ -796,12 +796,10 @@ async function loadChangedRuns() {
     await loadRuns(true, requestId);
     return;
   }
-  const stickToBottom = isThreadNearBottom();
   const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 0.001), chatId);
   if (requestId !== chatLoadRequest || chatId !== resolvedChatId.value) return;
   for (const item of page.items) upsertDisplayItem(item);
   updateItemsAfterCursor(page.items, page.next_after ?? undefined);
-  if (stickToBottom && page.items.length) await scrollThreadToBottom();
 }
 
 function upsertDisplayItem(item: SuperDisplayItem) {
@@ -864,12 +862,6 @@ function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
     })),
     raw: {},
   };
-}
-
-function isThreadNearBottom() {
-  const element = threadRef.value;
-  if (!element) return true;
-  return element.scrollHeight - element.scrollTop - element.clientHeight < 180;
 }
 
 async function scrollThreadToBottom() {

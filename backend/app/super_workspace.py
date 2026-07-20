@@ -30,6 +30,8 @@ class SuperRole(BaseModel):
     cwd: str = ""
     model: str | None = None
     session_policy: str = "reuse"
+    context_recycle_percent: float | None = None
+    context_recycle_tokens: int | None = None
     created_at: float
     updated_at: float
 
@@ -42,6 +44,8 @@ class SuperRoleCreate(BaseModel):
     cwd: str = ""
     model: str | None = None
     session_policy: str = "reuse"
+    context_recycle_percent: float | None = None
+    context_recycle_tokens: int | None = None
 
 
 class SuperRolePatch(BaseModel):
@@ -52,6 +56,8 @@ class SuperRolePatch(BaseModel):
     cwd: str | None = None
     model: str | None = None
     session_policy: str | None = None
+    context_recycle_percent: float | None = None
+    context_recycle_tokens: int | None = None
 
 
 class SuperWorkspaceData(BaseModel):
@@ -181,6 +187,8 @@ class SuperWorkspaceManager:
                     cwd=role.cwd,
                     model=role.model,
                     session_policy=role.session_policy,
+                    context_recycle_percent=role.context_recycle_percent,
+                    context_recycle_tokens=role.context_recycle_tokens,
                     created_at=role.created_at,
                     updated_at=role.updated_at,
                 )
@@ -205,6 +213,8 @@ class SuperWorkspaceManager:
                 cwd=request.cwd.strip(),
                 model=request.model.strip() if request.model else None,
                 session_policy=request.session_policy,
+                context_recycle_percent=request.context_recycle_percent,
+                context_recycle_tokens=request.context_recycle_tokens,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -236,6 +246,8 @@ class SuperWorkspaceManager:
                     "cwd": role.cwd,
                     "model": role.model,
                     "session_policy": role.session_policy,
+                    "context_recycle_percent": role.context_recycle_percent,
+                    "context_recycle_tokens": role.context_recycle_tokens,
                 },
             )
         except ValueError as exc:

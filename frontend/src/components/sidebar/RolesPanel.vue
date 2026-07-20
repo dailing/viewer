@@ -7,7 +7,7 @@ import DirectoryPicker from "../DirectoryPicker.vue";
 
 const props = defineProps<{
   roles: SuperRole[];
-  providers: { id: AgentProvider; name: string }[];
+  providers: { id: AgentProvider; name: string; context_recycle_percent?: number; context_recycle_tokens?: number | null }[];
 }>();
 
 const emit = defineEmits<{
@@ -23,6 +23,14 @@ const codexModelOptions = computed(() => {
   const selected = selectedRole.value?.model?.trim() || "";
   const models = files.codexConfig.available_models;
   return selected && !models.includes(selected) ? [selected, ...models] : models;
+});
+const providerDefaultPercent = computed(() => {
+  const provider = props.providers.find((p) => p.id === selectedRole.value?.provider);
+  return provider?.context_recycle_percent ?? 70;
+});
+const providerDefaultTokens = computed(() => {
+  const provider = props.providers.find((p) => p.id === selectedRole.value?.provider);
+  return provider?.context_recycle_tokens ?? null;
 });
 
 function selectRole(role: SuperRole) {
@@ -106,6 +114,29 @@ function updateProvider(role: SuperRole) {
           <option value="reuse">Reuse session</option>
           <option value="new_each_run">New session each run</option>
         </select>
+      </label>
+      <label class="field">
+        <span>Context Recycle % (optional, provider default: {{ providerDefaultPercent }}%)</span>
+        <input
+          v-model.number="selectedRole.context_recycle_percent"
+          type="number"
+          min="1"
+          max="100"
+          step="1"
+          class="form-control form-control-sm"
+          placeholder="e.g. 80"
+        />
+      </label>
+      <label class="field">
+        <span>Context Recycle Tokens (optional, provider default: {{ providerDefaultTokens || 'none' }})</span>
+        <input
+          v-model.number="selectedRole.context_recycle_tokens"
+          type="number"
+          min="1000"
+          step="1000"
+          class="form-control form-control-sm"
+          placeholder="e.g. 200000"
+        />
       </label>
       <div class="editor-actions">
         <button class="btn btn-sm btn-primary" type="submit">

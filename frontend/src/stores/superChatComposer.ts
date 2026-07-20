@@ -70,6 +70,7 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
   state: () => ({
     pinnedByChatId: readPins(),
     draftByChatId: readDrafts(),
+    forceNewSessionByChatId: {} as Record<string, boolean>,
   }),
   getters: {
     isPinned:
@@ -80,6 +81,10 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
       (state) =>
       (chatId: string): string =>
         chatId ? state.draftByChatId[chatId] ?? "" : "",
+    forceNewSession:
+      (state) =>
+      (chatId: string): boolean =>
+        chatId ? state.forceNewSessionByChatId[chatId] ?? false : false,
   },
   actions: {
     setPinned(chatId: string, pinned: boolean) {
@@ -106,6 +111,16 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
     clearDraft(chatId: string) {
       this.setDraft(chatId, "");
       flushDrafts();
+    },
+    setForceNewSession(chatId: string, value: boolean) {
+      if (!chatId) return;
+      this.forceNewSessionByChatId = { ...this.forceNewSessionByChatId, [chatId]: value };
+    },
+    clearForceNewSession(chatId: string) {
+      if (!chatId) return;
+      const next = { ...this.forceNewSessionByChatId };
+      delete next[chatId];
+      this.forceNewSessionByChatId = next;
     },
     flushDrafts,
   },

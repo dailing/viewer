@@ -251,13 +251,16 @@ async function dispatchMessage() {
   }
   busy.value = true;
   error.value = "";
+  const forceNewSession = composerState.forceNewSession(resolvedChatId.value);
   composerState.clearDraft(resolvedChatId.value);
+  composerState.clearForceNewSession(resolvedChatId.value);
   if (!composerPinned.value) composerExpanded.value = false;
   try {
     const run = await createSuperWorkspaceRun({
       message,
       chat_id: resolvedChatId.value,
       role_ids: selectedDispatchRoleIds.value.length ? selectedDispatchRoleIds.value : undefined,
+      force_new_session: forceNewSession,
     });
     upsertDisplayItem(displayItemFromRun(run));
     updateItemsAfterCursor([displayItemFromRun(run)]);
@@ -1067,6 +1070,14 @@ async function scrollThreadToBottom() {
                 </button>
               </div>
             </details>
+            <label class="super-force-new-session" title="Start a new agent session for this message, ignoring the existing session context">
+              <input
+                type="checkbox"
+                :checked="composerState.forceNewSession(resolvedChatId)"
+                @change="composerState.setForceNewSession(resolvedChatId, ($event.target as HTMLInputElement).checked)"
+              />
+              <span>New session</span>
+            </label>
             <button class="btn voice-action-button super-send-button" type="button" :disabled="!canDispatch" title="Send message (Cmd/Ctrl+Enter)" aria-label="Send message" @click="dispatchMessage">
               <i class="bi bi-send"></i>
             </button>
@@ -1681,6 +1692,22 @@ async function scrollThreadToBottom() {
   background: var(--color-surface-selected);
   border-color: var(--color-border);
   color: var(--color-text);
+}
+
+.super-force-new-session {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-text-subtle);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.super-force-new-session input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
 }
 
 .super-send-button {

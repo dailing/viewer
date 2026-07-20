@@ -58,9 +58,9 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 AGENT_PROVIDERS = {
-    "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars"},
-    "codex-app-server": {"id": "codex-app-server", "name": "Codex App Server (Experimental)", "icon": "bi-stars"},
-    "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge"},
+    "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars", "context_recycle_percent": 70.0, "context_recycle_tokens": None},
+    "codex-app-server": {"id": "codex-app-server", "name": "Codex App Server (Experimental)", "icon": "bi-stars", "context_recycle_percent": 80.0, "context_recycle_tokens": 200_000},
+    "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge", "context_recycle_percent": 80.0, "context_recycle_tokens": None},
 }
 
 NOISY_SUCCESS_PATHS = {
@@ -532,6 +532,7 @@ async def create_super_workspace_run(request: SuperHistoryRunCreate):
             role_ids=request.role_ids,
             parent_message_id=request.parent_message_id,
             sender_role_id=request.sender_role_id,
+            force_new_session=request.force_new_session,
         ),
         None,
     )

@@ -37,6 +37,7 @@ class SuperWorkspaceMessageCreate(BaseModel):
     role_ids: list[str] | None = None
     parent_message_id: str | None = None
     sender_role_id: str | None = None
+    force_new_session: bool = False
 
 
 class SuperWorkspaceEventHub:
@@ -74,6 +75,23 @@ class SuperAgentDriver:
     provider = ""
     supports_content_blocks = False
 
+    def provider_context_recycle_percent(self) -> float:
+        """Provider-level default context recycle percent threshold."""
+        from .main import AGENT_PROVIDERS
+        config = AGENT_PROVIDERS.get(self.provider, {})
+        value = config.get("context_recycle_percent")
+        return float(value) if isinstance(value, (int, float)) else DEFAULT_CONTEXT_RECYCLE_PERCENT
+
+    def provider_context_recycle_tokens(self) -> int | None:
+        """Provider-level default context recycle token threshold."""
+        from .main import AGENT_PROVIDERS
+        config = AGENT_PROVIDERS.get(self.provider, {})
+        value = config.get("context_recycle_tokens")
+        return int(value) if isinstance(value, int) else None
+
+    def manager(self):
+        raise NotImplementedError
+
     def active_session_id(
         self,
         role: SuperRole,
@@ -108,8 +126,9 @@ class SuperAgentDriver:
         prompt: str | list[dict[str, Any]],
         lineage: dict[str, Any],
         effective_cwd: str,
+        force_new_session: bool = False,
     ) -> dict[str, Any]:
-        if role.session_policy != "new_each_run" and state is not None and state.session_ref:
+        if not force_new_session and role.session_policy != "new_each_run" and state is not None and state.session_ref:
             provider, session_id = self.parse_ref(state.session_ref, role.provider)
             if provider == self.provider and session_id:
                 effective_model = self._effective_model(role)
@@ -119,8 +138,23 @@ class SuperAgentDriver:
                         raise HTTPException(status_code=409, detail="Role session is already running")
                     if not self._snapshot_matches(snapshot, role, effective_cwd, effective_model):
                         raise ValueError("Session cwd/model changed")
-                    if self._snapshot_context_used_percent(snapshot, state) >= DEFAULT_CONTEXT_RECYCLE_PERCENT:
-                        raise ValueError("Session context threshold reached")
+                    # Resolve thresholds: role override -> provider default -> global default
+                    percent_threshold = (
+                        role.context_recycle_percent
+                        if role.context_recycle_percent is not None
+                        else self.provider_context_recycle_percent()
+                    )
+                    token_threshold = (
+                        role.context_recycle_tokens
+                        if role.context_recycle_tokens is not None
+                        else self.provider_context_recycle_tokens()
+                    )
+                    used_percent = self._snapshot_context_used_percent(snapshot, state)
+                    total_tokens = snapshot.get("total_tokens") or (state.total_tokens if state else 0) or 0
+                    if used_percent >= percent_threshold:
+                        raise ValueError(f"Context percent threshold reached ({used_percent:.1f}% >= {percent_threshold}%)")
+                    if token_threshold and total_tokens >= token_threshold:
+                        raise ValueError(f"Context token threshold reached ({total_tokens} >= {token_threshold})")
                     await self._send(session_id, prompt, effective_model, lineage)
                     return {"session_ref": state.session_ref, "rotation_reason": ""}
                 except HTTPException:
@@ -141,9 +175,14 @@ class SuperAgentDriver:
             first_prompt = f"{preamble}{prompt}"
         session = await self._create(first_prompt, effective_cwd, self._effective_model(role), user_id, lineage)
         session_ref = f"{self.provider}:{session['id']}"
-        reason = "new_each_run" if role.session_policy == "new_each_run" else "new_session"
-        if state is not None and state.session_ref and state.context_used_percent is not None and state.context_used_percent >= DEFAULT_CONTEXT_RECYCLE_PERCENT:
+        if force_new_session:
+            reason = "manual_new_session"
+        elif role.session_policy == "new_each_run":
+            reason = "new_each_run"
+        elif state is not None and state.session_ref and state.context_used_percent is not None and state.context_used_percent >= self.provider_context_recycle_percent():
             reason = "context_threshold"
+        else:
+            reason = "new_session"
         return {"session_ref": session_ref, "rotation_reason": reason}
 
     @staticmethod
@@ -302,6 +341,11 @@ class SuperWorkspaceRuntime:
         self._worker_task: asyncio.Task | None = None
         self._active_tasks: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
+        # Leadership handover: when another worker overwrites the pid file, this
+        # worker stops claiming new tasks but keeps in-flight runs alive until
+        # they finish (graceful drain). Only _stop aborts in-flight sessions.
+        self._leadership_lost = asyncio.Event()
+        self._orphan_sweep_done = False
         self._drivers: dict[str, SuperAgentDriver] = {
             "codex": CodexSuperDriver(),
             "codex-app-server": CodexAppServerSuperDriver(),
@@ -328,13 +372,12 @@ class SuperWorkspaceRuntime:
         name = "worker"
         slot = process_slot_state(name)
         if slot["pid_file_exists"] and slot["alive"]:
-            logger.error(
-                "Super Workspace worker pid file already points to a live process; not starting duplicate pid={} pid_file={}",
+            logger.info(
+                "Taking over Super Workspace worker leadership from live pid={} pid_file={}; old worker will drain in-flight runs and exit",
                 slot["pid"],
                 slot["pid_path"],
             )
-            return
-        if slot["pid_file_exists"]:
+        elif slot["pid_file_exists"]:
             logger.warning(
                 "Stale Super Workspace worker pid file found; overwriting pid={} pid_file={}",
                 slot["pid"],
@@ -445,6 +488,7 @@ class SuperWorkspaceRuntime:
                     parent_message_id=run.parent_message_id or run.message_id,
                     sender_role_id=run.sender_role_id,
                     role_snapshot=role.model_dump(),
+                    force_new_session=request.force_new_session,
                 ),
             )
         await self._emit_update({"type": "run-updated", "user_id": normalized_user, "chat_id": run.chat_id, "run_id": run.id})
@@ -539,8 +583,32 @@ class SuperWorkspaceRuntime:
     async def _dispatch_worker_loop(self) -> None:
         logger.info("Super Workspace DB dispatch worker started id={}", self._worker_id)
         while not self._stop.is_set():
+            if self._leadership_lost.is_set():
+                # Another worker took over the pid file. Stop claiming new tasks;
+                # keep looping until all in-flight runs finish, then return so the
+                # worker process can shut down its provider runtimes and exit.
+                self._active_tasks = {task for task in self._active_tasks if not task.done()}
+                if not self._active_tasks:
+                    logger.info(
+                        "Super Workspace worker drained after leadership handover id={}; exiting",
+                        self._worker_id,
+                    )
+                    return
+                await asyncio.sleep(2.0)
+                continue
+            if not self._orphan_sweep_done:
+                self._orphan_sweep_done = True
+                try:
+                    interrupted = agent_history_store.interrupt_orphaned_running_driver_runs()
+                    if interrupted:
+                        logger.warning(
+                            "Marked {} orphaned running driver run(s) as interrupted after worker startup",
+                            interrupted,
+                        )
+                except Exception:
+                    logger.exception("Orphaned driver-run sweep failed; will rely on stale-run cleanup")
             self._active_tasks = {task for task in self._active_tasks if not task.done()}
-            while len(self._active_tasks) < 4:
+            while len(self._active_tasks) < 4 and not self._leadership_lost.is_set():
                 try:
                     task = agent_history_store.claim_next_dispatch_task(self._worker_id)
                 except OperationalError as exc:
@@ -612,7 +680,10 @@ class SuperWorkspaceRuntime:
         prompt_preview = prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False)
         agent_history_store.update_driver_run_status(task.id, "running", agent_prompt=prompt_preview, error="")
         await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
-        dispatch_result = await driver.dispatch_task(role, session_state, task.user_id, prompt, lineage, effective_cwd)
+        dispatch_result = await driver.dispatch_task(
+            role, session_state, task.user_id, prompt, lineage, effective_cwd,
+            force_new_session=task.force_new_session,
+        )
         session_ref = str(dispatch_result["session_ref"])
         rotation_reason = str(dispatch_result.get("rotation_reason") or "")
         provider, session_id = driver.parse_ref(session_ref, role.provider)
@@ -746,6 +817,11 @@ class SuperWorkspaceRuntime:
                 }
             )
             if status != "running":
+                # A draining worker (leadership lost) still finalizes its own run.
+                # Never clobber a user-initiated terminal state (e.g. cancelled).
+                current_task = agent_history_store.get_dispatch_task(driver_run_id) if driver_run_id else None
+                if current_task is not None and current_task.status in {"cancelled", "interrupted"}:
+                    return self._summarize_run_status(run_id, user_id)
                 if status == "failed":
                     if driver_run_id and self._driver_has_final_response(run_id, user_id, driver_run_id):
                         agent_history_store.update_driver_run_status(driver_run_id, "completed", **usage)
@@ -771,9 +847,14 @@ class SuperWorkspaceRuntime:
                 statuses.append(target.status)
         if any(status == "failed" for status in statuses):
             return agent_history_store.update_super_run(run_id, user_id, status="failed", error=fallback_error)
-        if statuses and all(status in {"completed", "cancelled"} for status in statuses):
-            terminal_status = "cancelled" if any(status == "cancelled" for status in statuses) else "completed"
-            return agent_history_store.update_super_run(run_id, user_id, status=terminal_status, error="")
+        if statuses and all(status in {"completed", "cancelled", "interrupted"} for status in statuses):
+            terminal_status = (
+                "cancelled" if any(status == "cancelled" for status in statuses)
+                else "failed" if any(status == "interrupted" for status in statuses)
+                else "completed"
+            )
+            terminal_error = fallback_error if terminal_status == "failed" else ""
+            return agent_history_store.update_super_run(run_id, user_id, status=terminal_status, error=terminal_error)
         return agent_history_store.update_super_run(run_id, user_id, status="running")
 
     def _driver_has_final_response(self, run_id: str, user_id: str, driver_run_id: str) -> bool:

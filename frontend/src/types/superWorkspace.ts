@@ -9,6 +9,8 @@ export type SuperRole = {
   cwd: string;
   model?: string | null;
   session_policy: "reuse" | "new_each_run";
+  context_recycle_percent?: number | null;
+  context_recycle_tokens?: number | null;
   created_at: number;
   updated_at: number;
 };
@@ -57,6 +59,8 @@ export type SuperRoleCreate = {
   cwd?: string;
   model?: string | null;
   session_policy?: "reuse" | "new_each_run";
+  context_recycle_percent?: number | null;
+  context_recycle_tokens?: number | null;
 };
 
 export type SuperRolePatch = Partial<Omit<SuperRole, "id" | "created_at" | "updated_at">>;
@@ -208,4 +212,5 @@ export type SuperHistoryRunCreate = {
   role_ids?: string[] | null;
   parent_message_id?: string | null;
   sender_role_id?: string | null;
+  force_new_session?: boolean;
 };

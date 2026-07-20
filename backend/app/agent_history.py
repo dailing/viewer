@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, event, or_, select, update
+from loguru import logger
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, event, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -71,6 +72,7 @@ class SuperHistoryRunCreate(BaseModel):
     role_ids: list[str] | None = None
     parent_message_id: str | None = None
     sender_role_id: str | None = None
+    force_new_session: bool = False
 
 
 class SuperDriverRunCreate(BaseModel):
@@ -84,6 +86,7 @@ class SuperDriverRunCreate(BaseModel):
     parent_message_id: str | None = None
     sender_role_id: str | None = None
     role_snapshot: dict[str, Any] = Field(default_factory=dict)
+    force_new_session: bool = False
 
 
 class SuperDispatchTask(BaseModel):
@@ -111,6 +114,7 @@ class SuperDispatchTask(BaseModel):
     driver_pid: int | None = None
     driver_state_path: str | None = None
     error: str = ""
+    force_new_session: bool = False
     start_after_occurred_at: float = 0
     created_at: float
     started_at: float | None = None
@@ -378,6 +382,8 @@ class SuperWorkspaceRoleRow(AgentHistoryBase):
     cwd: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model: Mapped[str | None] = mapped_column(String)
     session_policy: Mapped[str] = mapped_column(String, nullable=False, default="reuse")
+    context_recycle_percent: Mapped[float | None] = mapped_column(Float)
+    context_recycle_tokens: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
@@ -491,6 +497,7 @@ class SuperWorkspaceDriverRunRow(AgentHistoryBase):
     driver_pid: Mapped[int | None] = mapped_column(Integer)
     driver_state_path: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    force_new_session: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     start_after_occurred_at: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
     started_at: Mapped[float | None] = mapped_column(Float)
@@ -978,6 +985,8 @@ class AgentHistoryStore:
         cwd: str = "",
         model: str | None = None,
         session_policy: str = "reuse",
+        context_recycle_percent: float | None = None,
+        context_recycle_tokens: int | None = None,
     ) -> None:
         workspace = self.super_workspace(user_id)
         now = time.time()
@@ -995,6 +1004,8 @@ class AgentHistoryStore:
                     cwd=normalize_relative_cwd(cwd),
                     model=model,
                     session_policy=normalized_policy,
+                    context_recycle_percent=context_recycle_percent,
+                    context_recycle_tokens=context_recycle_tokens,
                     created_at=now,
                     updated_at=now,
                 )
@@ -1389,6 +1400,7 @@ class AgentHistoryStore:
                         role_snapshot_json=self._json(request.role_snapshot),
                         attempt_count=0,
                         error="",
+                        force_new_session=request.force_new_session,
                         start_after_occurred_at=float(start.occurred_at) if start else now,
                         created_at=now,
                         updated_at=now,
@@ -1559,6 +1571,59 @@ class AgentHistoryStore:
                 if claimed is not None:
                     return self._dispatch_task_from_row(claimed)
         return None
+
+    def interrupt_orphaned_running_driver_runs(self, now: float | None = None) -> int:
+        """Mark 'running' driver runs whose owning worker/driver is gone as interrupted.
+
+        Covers rows the stale-run cleanup cannot reach: in-process providers
+        (hermes ACP) never set driver_pid/driver_state_path, so when the worker
+        process dies those rows stay 'running' forever with NULL driver_pid.
+        A fresh worker calls this once at startup; any truly live run at that
+        moment is being drained by its old worker, whose completion writes
+        happen after this sweep, so final status is not clobbered.
+        """
+        now = time.time() if now is None else now
+        with self.session_scope() as db:
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceDriverRunRow).where(
+                        SuperWorkspaceDriverRunRow.status == "running",
+                    )
+                ).all()
+            )
+            interrupted_ids: list[str] = []
+            for row in rows:
+                pid = row.driver_pid if isinstance(row.driver_pid, int) else None
+                if pid is not None and pid > 0 and self._pid_alive(pid):
+                    continue
+                state = self._read_driver_state(row.driver_state_path)
+                state_status = str(state.get("status") or "").strip().lower()
+                if state_status in {"running", "started", "in_progress"}:
+                    continue
+                interrupted_ids.append(str(row.id))
+            if not interrupted_ids:
+                return 0
+            db.execute(
+                update(SuperWorkspaceDriverRunRow)
+                .where(
+                    SuperWorkspaceDriverRunRow.id.in_(interrupted_ids),
+                    SuperWorkspaceDriverRunRow.status == "running",
+                )
+                .values(
+                    status="interrupted",
+                    error="Orphaned by worker restart",
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    finished_at=now,
+                    updated_at=now,
+                )
+            )
+        for run_id in interrupted_ids:
+            logger.warning(
+                "Marked orphaned running driver run as interrupted id={} reason=worker-restart",
+                run_id,
+            )
+        return len(interrupted_ids)
 
     def _cleanup_stale_running_driver_runs(self, db: Session, now: float) -> None:
         cutoff = now - STALE_DRIVER_RUN_GRACE_SECONDS

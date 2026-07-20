@@ -433,6 +433,12 @@ class ACPSessionManager:
             session.loading_provider_history = True
             try:
                 await self.acp.ensure_session(session.provider_session_id, session.cwd, model or session.model)
+                # The ACP agent replays session history asynchronously AFTER
+                # load_session returns (hermes schedules it via call_soon), so
+                # replayed updates arrive while the guard below would already
+                # be cleared. Drain until updates stop arriving for a short
+                # quiet window (bounded) before dropping the guard.
+                await self._drain_history_replay(session)
             finally:
                 session.loading_provider_history = False
                 session.events.clear()
@@ -456,6 +462,34 @@ class ACPSessionManager:
         self._write_meta(session)
         session.run_task = asyncio.create_task(self._run(session, prompt, session_loaded=True))
         return session.summary()
+
+    async def _drain_history_replay(
+        self,
+        session: "ACPSession",
+        quiet_window: float = 0.4,
+        timeout: float = 15.0,
+    ) -> None:
+        """Wait until history-replay session updates stop arriving.
+
+        ``_handle_acp_update`` touches ``session.updated_at`` even for updates
+        swallowed by the loading guard, so a quiet ``updated_at`` means the
+        replay stream has drained. Bounded so a chatty agent can never wedge
+        dispatch; leftovers are still keyed by their own turn ids downstream.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            marker = session.updated_at
+            await asyncio.sleep(quiet_window)
+            if session.updated_at == marker:
+                return
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "{} ACP history replay drain timed out session={} after {}s; proceeding anyway",
+                    self.provider,
+                    session.id,
+                    timeout,
+                )
+                return
 
     async def _run(self, session: ACPSession, prompt: str | list[dict[str, Any]], session_loaded: bool = False) -> None:
         try:
@@ -573,7 +607,13 @@ class ACPSessionManager:
             text = self._content_block_text(content)
             if not text:
                 return None
-            message_id = getattr(update, "message_id", None) or session.acp_turn_index
+            # The provider stamps a per-turn UUID as messageId (hermes: live
+            # turns mint one at prompt start; history replay stamps each old
+            # message with its reconstructed turn id). A provider that omits
+            # message ids gets a random uuid per message — chunks without a
+            # stable id must never merge across turns, which is exactly the
+            # bug the old acp_turn_index fallback caused.
+            message_id = getattr(update, "message_id", None) or raw.get("messageId") or uuid.uuid4().hex
             event_key = f"{update_type}:{message_id}"
             event_type = AgentEventType.MESSAGE_ASSISTANT if update_type == "agent_message_chunk" else AgentEventType.REASONING
             append = True

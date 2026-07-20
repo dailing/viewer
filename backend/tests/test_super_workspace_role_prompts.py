@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.app.agent_history import AgentHistoryStore
+from backend.app.agent_history import AgentHistoryStore, SuperDriverRunCreate
 from backend.app.models import SuperWorkspaceConfig
 from backend.app.super_workspace import SuperRole, SuperWorkspaceManager
 from backend.app.super_workspace_runtime import CodexSuperDriver, HermesSuperDriver
@@ -122,6 +122,31 @@ class RolePromptSeparationTests(unittest.TestCase):
 
             self.assertEqual(run.content_blocks, blocks)
             self.assertEqual(store.get_super_run(run.id, "user").content_blocks, blocks)
+
+    def test_dispatch_task_preserves_force_new_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AgentHistoryStore(Path(directory) / "history.sqlite3")
+            workspace = store.ensure_default_workspace("user")
+            chats = store.create_super_chat("user", name="Chat", root="project", workspace_id=workspace.id)
+            run = store.create_super_run("user", "start fresh", "queued", chat_id=chats.active_chat_id)
+            store.create_dispatch_task(
+                "user",
+                run.id,
+                SuperDriverRunCreate(
+                    workspace_id=workspace.id,
+                    chat_id=chats.active_chat_id,
+                    role_id="codex-app-role",
+                    role_name="Codex App",
+                    provider="codex-app-server",
+                    force_new_session=True,
+                ),
+            )
+
+            target = store.get_super_run(run.id, "user").targets[0]
+            task = store.get_dispatch_task(target.id)
+
+            self.assertIsNotNone(task)
+            self.assertTrue(task.force_new_session)
 
 if __name__ == "__main__":
     unittest.main()

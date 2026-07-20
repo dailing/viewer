@@ -482,7 +482,8 @@ class CodexAppServerSessionManager:
             failed = turn_status in {"failed", "interrupted"}
             session.status = "failed" if failed else "exited"
             session.exit_code = 1 if failed else 0
-            session.error = turn.get("error", {}).get("message") if failed else None
+            turn_error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
+            session.error = str(turn_error.get("message") or f"Codex turn {turn_status}") if failed else None
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -507,20 +508,48 @@ class CodexAppServerSessionManager:
         raw = update.get("raw", {})
         event = self._normalized_event(session, method, params, raw)
         if event is not None:
-            session.events.append(event)
+            index = self._upsert_event(session, event)
             if session.lineage:
-                self._record_lineage_events(session, [event], len(session.events) - 1)
+                self._record_lineage_events(session, [session.events[index]], index)
+        if method == "turn/completed":
+            self._finalize_streaming_events(session)
         session.updated_at = time.time()
         self._write_meta(session)
 
+    def _upsert_event(self, session: CodexAppServerSession, event: dict[str, Any]) -> int:
+        source_event_id = str(event.get("source_event_id") or "")
+        if event.get("append") and source_event_id:
+            for index in range(len(session.events) - 1, -1, -1):
+                existing = session.events[index]
+                if existing.get("source_event_id") != source_event_id:
+                    continue
+                event["text"] = f"{existing.get('text', '')}{event.get('text', '')}"
+                event["index"] = index
+                session.events[index] = event
+                return index
+        index = len(session.events)
+        event["index"] = index
+        session.events.append(event)
+        return index
+
+    def _finalize_streaming_events(self, session: CodexAppServerSession) -> None:
+        for index, event in enumerate(session.events):
+            if not event.get("streaming"):
+                continue
+            event["streaming"] = False
+            if session.lineage:
+                self._record_lineage_events(session, [event], index)
+
     def _normalized_event(self, session: CodexAppServerSession, method: str, params: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any] | None:
         now = time.time()
-        if method == "agentMessageDelta":
+        turn_id = str(params.get("turnId") or "unknown-turn")
+        item_id = str(params.get("itemId") or "unknown-item")
+        if method == "item/agentMessage/delta":
             delta = params.get("delta", "")
             if not delta:
                 return None
             return {
-                "source_event_id": f"{self.provider}:{session.provider_session_id}:agentMessageDelta:{now}",
+                "source_event_id": f"{self.provider}:{session.provider_session_id}:{turn_id}:agent-message:{item_id}",
                 "received_at": now,
                 "event_type": AgentEventType.MESSAGE_ASSISTANT,
                 "text": delta,
@@ -528,12 +557,12 @@ class CodexAppServerSessionManager:
                 "streaming": True,
                 "raw_preview": self._raw_preview(raw),
             }
-        if method == "agentThoughtDelta":
+        if method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
             delta = params.get("delta", "")
             if not delta:
                 return None
             return {
-                "source_event_id": f"{self.provider}:{session.provider_session_id}:agentThoughtDelta:{now}",
+                "source_event_id": f"{self.provider}:{session.provider_session_id}:{turn_id}:reasoning:{item_id}",
                 "received_at": now,
                 "event_type": AgentEventType.REASONING,
                 "text": delta,
@@ -541,13 +570,13 @@ class CodexAppServerSessionManager:
                 "streaming": True,
                 "raw_preview": self._raw_preview(raw),
             }
-        if method == "turnCompleted":
+        if method == "turn/completed":
             turn = params.get("turn", {})
             status = turn.get("status", "completed")
             error = turn.get("error", {})
             text = error.get("message", "") if status == "failed" else ""
             return {
-                "source_event_id": f"{self.provider}:{session.provider_session_id}:turnCompleted:{now}",
+                "source_event_id": f"{self.provider}:{session.provider_session_id}:turn-completed:{turn.get('id') or turn_id}",
                 "received_at": now,
                 "event_type": AgentEventType.SESSION_UPDATE,
                 "text": text,
@@ -555,12 +584,12 @@ class CodexAppServerSessionManager:
                 "streaming": False,
                 "raw_preview": self._raw_preview(raw),
             }
-        if method == "commandExecutionOutputDelta":
-            output = params.get("output", "")
+        if method == "item/commandExecution/outputDelta":
+            output = params.get("delta", "")
             if not output:
                 return None
             return {
-                "source_event_id": f"{self.provider}:{session.provider_session_id}:commandExecutionOutputDelta:{now}",
+                "source_event_id": f"{self.provider}:{session.provider_session_id}:{turn_id}:command:{item_id}",
                 "received_at": now,
                 "event_type": AgentEventType.TOOL_CALL,
                 "text": output,
@@ -568,29 +597,45 @@ class CodexAppServerSessionManager:
                 "streaming": True,
                 "raw_preview": self._raw_preview(raw),
             }
-        if method == "fileChangePatchUpdated":
-            patch = params.get("patch", "")
-            path = params.get("path", "")
+        if method == "item/fileChange/patchUpdated":
+            changes = params.get("changes") if isinstance(params.get("changes"), list) else []
+            file_changes = []
+            patches = []
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                path = str(change.get("path") or "")
+                diff = str(change.get("diff") or "")
+                kind = change.get("kind") if isinstance(change.get("kind"), dict) else {}
+                change_type = str(kind.get("type") or "edit")
+                if path:
+                    file_changes.append({"path": path, "change_type": change_type, "diff": diff})
+                if diff:
+                    patches.append(diff)
+            patch = "\n".join(patches)
             return {
-                "source_event_id": f"{self.provider}:{session.provider_session_id}:fileChangePatchUpdated:{now}",
+                "source_event_id": f"{self.provider}:{session.provider_session_id}:{turn_id}:file-change:{item_id}",
                 "received_at": now,
                 "event_type": AgentEventType.PATCH_APPLY_END,
                 "text": patch,
                 "append": False,
                 "streaming": False,
                 "patch_text": patch,
-                "file_changes": [{"path": path, "change_type": "edit", "diff": patch}] if path else [],
+                "file_changes": file_changes,
                 "raw_preview": self._raw_preview(raw),
             }
-        if method == "tokenUsageUpdated":
-            usage = params.get("usage", {})
-            total = usage.get("totalTokens")
+        if method == "thread/tokenUsage/updated":
+            usage = params.get("tokenUsage") if isinstance(params.get("tokenUsage"), dict) else {}
+            total_usage = usage.get("total") if isinstance(usage.get("total"), dict) else {}
+            total = total_usage.get("totalTokens")
             if isinstance(total, int):
                 session.total_tokens = total
-            # Resolve model context window for percentage calculation
-            session.model_context_window = _env_context_window(session.model)
+            context_window = usage.get("modelContextWindow")
+            session.model_context_window = (
+                context_window if isinstance(context_window, int) and context_window > 0 else _env_context_window(session.model)
+            )
             return {
-                "source_event_id": f"{self.provider}:{session.provider_session_id}:tokenUsageUpdated:{now}",
+                "source_event_id": f"{self.provider}:{session.provider_session_id}:token-usage",
                 "received_at": now,
                 "event_type": AgentEventType.SESSION_UPDATE,
                 "text": self._preview_text(usage),

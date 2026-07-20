@@ -170,6 +170,53 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
         finalized_event = manager._record_lineage_events.call_args.args[1][0]
         self.assertFalse(finalized_event["streaming"])
 
+    async def test_hermes_error_message_marks_super_workspace_turn_failed(self) -> None:
+        manager = self.manager()
+        manager._record_lineage_events = Mock()
+
+        async def emit_terminal_error(*_args, **_kwargs):
+            await manager._handle_acp_update(
+                "acp-session-1",
+                AgentMessageChunk(
+                    sessionUpdate="agent_message_chunk",
+                    messageId="turn-model-error",
+                    content=TextContentBlock(
+                        type="text",
+                        text="API call failed after 3 retries: provider overloaded",
+                    ),
+                ),
+            )
+            return SimpleNamespace(stop_reason="end_turn")
+
+        manager.acp.prompt.side_effect = emit_terminal_error
+        created = await manager.create(
+            "hello",
+            "demo",
+            None,
+            "dailing",
+            lineage={"workspace_id": "workspace", "chat_id": "chat"},
+        )
+        await self.wait_for_run(manager, created["id"])
+
+        snapshot = manager.snapshot(created["id"])
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["error"], "API call failed after 3 retries: provider overloaded")
+
+    async def test_empty_hermes_super_workspace_turn_is_failed(self) -> None:
+        manager = self.manager()
+        created = await manager.create(
+            "hello",
+            "demo",
+            None,
+            "dailing",
+            lineage={"workspace_id": "workspace", "chat_id": "chat"},
+        )
+        await self.wait_for_run(manager, created["id"])
+
+        snapshot = manager.snapshot(created["id"])
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["error"], "Hermes ACP completed without an assistant response")
+
     async def test_structured_prompt_is_forwarded_as_acp_content_blocks(self) -> None:
         manager = self.manager()
         blocks = [

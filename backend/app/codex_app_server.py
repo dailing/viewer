@@ -44,7 +44,10 @@ class CodexAppServerRuntime:
         self._stderr_task: asyncio.Task | None = None
         self._request_id = 0
         self._pending_requests: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._turn_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._completed_turns: dict[str, dict[str, Any]] = {}
         self._bound_threads: set[str] = set()
+        self._initialized = False
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
 
@@ -59,10 +62,10 @@ class CodexAppServerRuntime:
     async def start(self) -> None:
         if not self.enabled:
             raise RuntimeError(f"{self.provider} app-server is disabled")
-        if self.running:
+        if self.running and self._initialized:
             return
         async with self._start_lock:
-            if self.running:
+            if self.running and self._initialized:
                 return
             await self._close_process()
             executable = shutil.which(self.command)
@@ -78,7 +81,28 @@ class CodexAppServerRuntime:
             )
             self._reader_task = asyncio.create_task(self._read_loop())
             self._stderr_task = asyncio.create_task(self._drain_stderr())
-            logger.info("{} app-server started pid={}", self.provider, self._process.pid)
+            try:
+                initialize_result = await self._send_request(
+                    "initialize",
+                    {
+                        "clientInfo": {
+                            "name": "viewer_super_workspace",
+                            "title": "Viewer Super Workspace",
+                            "version": "0.1.0",
+                        }
+                    },
+                )
+                await self._send_notification("initialized", {})
+                self._initialized = True
+            except Exception:
+                await self._close_process()
+                raise
+            logger.info(
+                "{} app-server started pid={} user_agent={}",
+                self.provider,
+                self._process.pid,
+                initialize_result.get("userAgent", ""),
+            )
 
     async def _read_loop(self) -> None:
         assert self._process is not None and self._process.stdout is not None
@@ -93,6 +117,12 @@ class CodexAppServerRuntime:
                 continue
             await self._handle_message(message)
         logger.info("{} app-server stdout closed", self.provider)
+        error = RuntimeError(f"{self.provider} app-server stdout closed")
+        for future in (*self._pending_requests.values(), *self._turn_waiters.values()):
+            if not future.done():
+                future.set_exception(error)
+        self._pending_requests.clear()
+        self._turn_waiters.clear()
 
     async def _drain_stderr(self) -> None:
         assert self._process is not None and self._process.stderr is not None
@@ -115,12 +145,45 @@ class CodexAppServerRuntime:
                 else:
                     future.set_result(message.get("result", {}))
             return
+        # Server-initiated requests are not part of Viewer capability support.
+        # Respond explicitly so Codex fails the operation instead of waiting
+        # forever for a client response that will never arrive.
+        if "id" in message and message.get("method"):
+            await self._send_error_response(
+                message["id"],
+                -32601,
+                f"Viewer does not support app-server request: {message['method']}",
+            )
+            return
         # JSON-RPC notification
         method = message.get("method", "")
         params = message.get("params", {})
         thread_id = params.get("threadId") or params.get("thread_id") or ""
         if thread_id:
             await self._update_handler(thread_id, {"method": method, "params": params, "raw": message})
+        if method == "turn/completed":
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            turn_id = str(turn.get("id") or "")
+            if turn_id:
+                waiter = self._turn_waiters.pop(turn_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(turn)
+                else:
+                    self._completed_turns[turn_id] = turn
+
+    async def _write_message(self, payload: dict[str, Any]) -> None:
+        if not self.running or self._process is None or self._process.stdin is None:
+            raise RuntimeError(f"{self.provider} app-server is not running")
+        data = json.dumps(payload, ensure_ascii=False) + "\n"
+        async with self._write_lock:
+            self._process.stdin.write(data.encode("utf-8"))
+            await self._process.stdin.drain()
+
+    async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
+        await self._write_message({"method": method, "params": params})
+
+    async def _send_error_response(self, request_id: Any, code: int, message: str) -> None:
+        await self._write_message({"id": request_id, "error": {"code": code, "message": message}})
 
     async def _send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.running or self._process is None or self._process.stdin is None:
@@ -128,11 +191,8 @@ class CodexAppServerRuntime:
         request_id = self._next_request_id()
         future: asyncio.Future[dict[str, Any]] = asyncio.Future()
         self._pending_requests[request_id] = future
-        payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-        data = json.dumps(payload, ensure_ascii=False) + "\n"
-        async with self._write_lock:
-            self._process.stdin.write(data.encode("utf-8"))
-            await self._process.stdin.drain()
+        payload = {"id": request_id, "method": method, "params": params}
+        await self._write_message(payload)
         try:
             return await asyncio.wait_for(future, timeout=60.0)
         except asyncio.TimeoutError:
@@ -169,7 +229,18 @@ class CodexAppServerRuntime:
         else:
             input_items = prompt
         result = await self._send_request("turn/start", {"threadId": thread_id, "input": input_items})
-        return result
+        turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
+        turn_id = str(turn.get("id") or "")
+        if not turn_id:
+            raise RuntimeError(f"{self.provider} app-server turn/start returned no turn id")
+        if turn.get("status") in {"completed", "failed", "interrupted"}:
+            return {"turn": turn}
+        completed = self._completed_turns.pop(turn_id, None)
+        if completed is None:
+            waiter: asyncio.Future[dict[str, Any]] = asyncio.Future()
+            self._turn_waiters[turn_id] = waiter
+            completed = await waiter
+        return {"turn": completed}
 
     async def turn_interrupt(self, thread_id: str) -> None:
         if not self.running:
@@ -201,11 +272,17 @@ class CodexAppServerRuntime:
         self._reader_task = None
         self._stderr_task = None
         self._process = None
+        self._initialized = False
         self._bound_threads.clear()
         for future in self._pending_requests.values():
             if not future.done():
                 future.set_exception(RuntimeError(f"{self.provider} app-server shutting down"))
         self._pending_requests.clear()
+        for future in self._turn_waiters.values():
+            if not future.done():
+                future.set_exception(RuntimeError(f"{self.provider} app-server shutting down"))
+        self._turn_waiters.clear()
+        self._completed_turns.clear()
         if reader_task is not None:
             if not reader_task.done():
                 reader_task.cancel()

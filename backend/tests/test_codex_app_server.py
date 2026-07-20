@@ -71,9 +71,9 @@ class TestCodexAppServerSessionManager:
         )
         event = manager._normalized_event(
             session,
-            "agentMessageDelta",
+            "item/agentMessage/delta",
             {"delta": "Hello world", "threadId": "thread-123", "turnId": "turn-1", "itemId": "item-1"},
-            {"method": "agentMessageDelta", "params": {"delta": "Hello world"}},
+            {"method": "item/agentMessage/delta", "params": {"delta": "Hello world"}},
         )
         assert event is not None
         assert event["event_type"] == "message:assistant"
@@ -96,9 +96,9 @@ class TestCodexAppServerSessionManager:
         )
         event = manager._normalized_event(
             session,
-            "agentThoughtDelta",
-            {"delta": "Thinking...", "threadId": "thread-123"},
-            {"method": "agentThoughtDelta", "params": {"delta": "Thinking..."}},
+            "item/reasoning/summaryTextDelta",
+            {"delta": "Thinking...", "threadId": "thread-123", "turnId": "turn-1", "itemId": "item-1"},
+            {"method": "item/reasoning/summaryTextDelta", "params": {"delta": "Thinking..."}},
         )
         assert event is not None
         assert event["event_type"] == "reasoning"
@@ -120,9 +120,9 @@ class TestCodexAppServerSessionManager:
         )
         event = manager._normalized_event(
             session,
-            "turnCompleted",
-            {"turn": {"status": "completed", "id": "turn-1"}},
-            {"method": "turnCompleted", "params": {"turn": {"status": "completed"}}},
+            "turn/completed",
+            {"threadId": "thread-123", "turn": {"status": "completed", "id": "turn-1"}},
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
         )
         assert event is not None
         assert event["event_type"] == AgentEventType.SESSION_UPDATE
@@ -143,9 +143,9 @@ class TestCodexAppServerSessionManager:
         )
         event = manager._normalized_event(
             session,
-            "turnCompleted",
-            {"turn": {"status": "failed", "error": {"message": "Something went wrong"}}},
-            {"method": "turnCompleted", "params": {"turn": {"status": "failed"}}},
+            "turn/completed",
+            {"threadId": "thread-123", "turn": {"id": "turn-1", "status": "failed", "error": {"message": "Something went wrong"}}},
+            {"method": "turn/completed", "params": {"turn": {"status": "failed"}}},
         )
         assert event is not None
         assert event["text"] == "Something went wrong"
@@ -165,9 +165,14 @@ class TestCodexAppServerSessionManager:
         )
         event = manager._normalized_event(
             session,
-            "fileChangePatchUpdated",
-            {"patch": "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new", "path": "file.py"},
-            {"method": "fileChangePatchUpdated", "params": {"patch": "--- a/file.py...", "path": "file.py"}},
+            "item/fileChange/patchUpdated",
+            {
+                "threadId": "thread-123",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "changes": [{"path": "file.py", "diff": "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new", "kind": {"type": "update"}}],
+            },
+            {"method": "item/fileChange/patchUpdated", "params": {"changes": []}},
         )
         assert event is not None
         assert event["event_type"] == "patch_apply_end"
@@ -190,12 +195,52 @@ class TestCodexAppServerSessionManager:
         )
         event = manager._normalized_event(
             session,
-            "tokenUsageUpdated",
-            {"usage": {"totalTokens": 1500, "inputTokens": 1000, "outputTokens": 500}},
-            {"method": "tokenUsageUpdated", "params": {"usage": {"totalTokens": 1500}}},
+            "thread/tokenUsage/updated",
+            {
+                "threadId": "thread-123",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "total": {"totalTokens": 1500, "inputTokens": 1000, "outputTokens": 500},
+                    "last": {"totalTokens": 500},
+                    "modelContextWindow": 250000,
+                },
+            },
+            {"method": "thread/tokenUsage/updated", "params": {"tokenUsage": {"total": {"totalTokens": 1500}}}},
         )
         assert event is not None
         assert session.total_tokens == 1500
+        assert session.model_context_window == 250000
+
+    def test_streaming_deltas_upsert_by_codex_item_id(self):
+        manager = CodexAppServerSessionManager()
+        session = CodexAppServerSession(
+            provider="codex-app-server",
+            id="test-id",
+            user_id="dailing",
+            title="test",
+            cwd="/tmp",
+            model=None,
+            created_at=time.time(),
+            updated_at=time.time(),
+            provider_session_id="thread-123",
+        )
+        first = manager._normalized_event(
+            session,
+            "item/agentMessage/delta",
+            {"delta": "Hello ", "threadId": "thread-123", "turnId": "turn-1", "itemId": "item-1"},
+            {},
+        )
+        second = manager._normalized_event(
+            session,
+            "item/agentMessage/delta",
+            {"delta": "world", "threadId": "thread-123", "turnId": "turn-1", "itemId": "item-1"},
+            {},
+        )
+        assert first is not None and second is not None
+        manager._upsert_event(session, first)
+        manager._upsert_event(session, second)
+        assert len(session.events) == 1
+        assert session.events[0]["text"] == "Hello world"
 
     def test_normalized_event_unknown_ignored(self):
         manager = CodexAppServerSessionManager()

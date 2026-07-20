@@ -2356,6 +2356,7 @@ class AgentHistoryStore:
             driver_pid=int(row.driver_pid) if isinstance(row.driver_pid, int) else None,
             driver_state_path=row.driver_state_path if isinstance(row.driver_state_path, str) else None,
             error=str(row.error or ""),
+            force_new_session=bool(row.force_new_session),
             start_after_occurred_at=float(row.start_after_occurred_at or 0),
             created_at=float(row.created_at),
             started_at=float(row.started_at) if isinstance(row.started_at, (int, float)) else None,

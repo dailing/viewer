@@ -492,6 +492,7 @@ class ACPSessionManager:
                 return
 
     async def _run(self, session: ACPSession, prompt: str | list[dict[str, Any]], session_loaded: bool = False) -> None:
+        turn_event_start = len(session.acp_events)
         try:
             if session.provider_session_id and not session_loaded:
                 await self.acp.ensure_session(session.provider_session_id, session.cwd, session.model)
@@ -502,10 +503,11 @@ class ACPSessionManager:
             self._finalize_acp_turn(session)
             stop_reason = getattr(response, "stop_reason", "end_turn")
             stop_value = getattr(stop_reason, "value", stop_reason)
-            failed = str(stop_value) in {"refusal", "error"}
+            provider_error = self._provider_turn_error(session, turn_event_start)
+            failed = str(stop_value) in {"refusal", "error"} or provider_error is not None
             session.status = "failed" if failed else "exited"
             session.exit_code = 1 if failed else 0
-            session.error = f"{self.provider} ACP stopped with {stop_value}" if failed else None
+            session.error = provider_error or (f"{self.provider} ACP stopped with {stop_value}" if failed else None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -524,6 +526,15 @@ class ACPSessionManager:
             session.updated_at = time.time()
             self._write_meta(session)
             session.run_task = None
+
+    def _provider_turn_error(self, session: ACPSession, event_start: int) -> str | None:
+        """Return a provider-adapter error inferred from standard ACP updates.
+
+        Conforming agents should fail the prompt RPC or return a failure stop
+        reason. Thin Viewer provider adapters may override this only when an
+        agent encodes terminal failure as ordinary ACP message output.
+        """
+        return None
 
     async def _handle_acp_update(self, provider_session_id: str, update: Any) -> None:
         self._ensure_loaded()

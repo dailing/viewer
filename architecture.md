@@ -187,11 +187,18 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - ACP `session/update` notifications are the sole provider-event source. Agent/thought chunks are coalesced per message, tool call/update pairs upsert one tool event with structured diff/file-change data, and plan/mode/config/usage/session/command updates refresh session metadata.
 - Every normalized update is written/upserted directly into `~/.view/agent-history.sqlite3` and announced through Super Workspace SSE. The manager never opens or synchronizes a provider-private database; historical chat reads use the Viewer history DB.
 
+`backend/app/codex_app_server.py` and `backend/app/codex_app_server_sessions.py`
+
+- Experimental Codex-native App Server provider over JSONL stdio (not ACP). Each subprocess connection completes `initialize` and the `initialized` acknowledgement before thread methods, then uses `thread/start` / `thread/resume`, `turn/start` / `turn/interrupt`, and waits for `turn/completed` before leaving `running`.
+- Normalizes the current slash-form Codex notifications (`item/agentMessage/delta`, reasoning/command/file-change deltas, `thread/tokenUsage/updated`, and `turn/completed`) into Viewer AgentEvent IR. Deltas with the same Codex `itemId` upsert one streaming event and are finalized when the turn completes.
+- Viewer does not implement Codex App Server client-side approval or interactive-input requests; unsupported server requests receive an explicit JSON-RPC method error instead of hanging. Provider/model retry remains owned by Codex.
+
 `backend/app/hermes_acp.py` and `backend/app/hermes_sessions.py`
 
 - Thin Hermes registration layer over the shared ACP runtime/session manager. It supplies `hermes`, `-p <profile> [--yolo] acp`, the Hermes metadata directory, and legacy Viewer-metadata key migration.
 - ACP is enabled by default through `VIEWER_HERMES_ACP_ENABLED`; `VIEWER_HERMES_PROFILE` defaults to `default`, `VIEWER_HERMES_COMMAND` defaults to `hermes`, and `VIEWER_HERMES_YOLO` defaults to `true`. YOLO affects only the Viewer-owned subprocess and does not change Hermes gateway/profile configuration.
 - `hermes_session_manager` remains the compatibility singleton used by Super Workspace. Hermes private `state.db` is owned solely by Hermes and is never read by Viewer.
+- Hermes itself is not patched by Viewer. Because the current Hermes ACP adapter can encode terminal model failure as an `end_turn` message (or an empty `end_turn`) instead of a failed RPC/stop reason, the thin Viewer Hermes session adapter recognizes those terminal message shapes and marks the turn failed; retry remains entirely inside Hermes.
 - Uses the official `agent-client-protocol` Python SDK pinned to the Hermes-compatible `0.9.x` line.
 
 `backend/app/voice.py`

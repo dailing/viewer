@@ -1070,14 +1070,19 @@ async function scrollThreadToBottom() {
                 </button>
               </div>
             </details>
-            <label class="super-force-new-session" title="Start a new agent session for this message, ignoring the existing session context">
-              <input
-                type="checkbox"
-                :checked="composerState.forceNewSession(resolvedChatId)"
-                @change="composerState.setForceNewSession(resolvedChatId, ($event.target as HTMLInputElement).checked)"
-              />
-              <span>New session</span>
-            </label>
+            <button
+              class="btn btn-sm btn-outline-secondary voice-action-button super-force-new-session"
+              :class="{ active: composerState.forceNewSession(resolvedChatId) }"
+              type="button"
+              :title="composerState.forceNewSession(resolvedChatId)
+                ? 'New session enabled: this message will start a fresh agent session, ignoring existing context (one-shot)'
+                : 'Start a new agent session for this message, ignoring the existing session context (one-shot)'"
+              :aria-label="composerState.forceNewSession(resolvedChatId) ? 'Disable new session for this message' : 'Enable new session for this message'"
+              :aria-pressed="composerState.forceNewSession(resolvedChatId)"
+              @click="composerState.setForceNewSession(resolvedChatId, !composerState.forceNewSession(resolvedChatId))"
+            >
+              <i class="bi" :class="composerState.forceNewSession(resolvedChatId) ? 'bi-plus-square-fill' : 'bi-plus-square'"></i>
+            </button>
             <button class="btn voice-action-button super-send-button" type="button" :disabled="!canDispatch" title="Send message (Cmd/Ctrl+Enter)" aria-label="Send message" @click="dispatchMessage">
               <i class="bi bi-send"></i>
             </button>
@@ -1694,20 +1699,10 @@ async function scrollThreadToBottom() {
   color: var(--color-text);
 }
 
-.super-force-new-session {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--color-text-subtle);
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.super-force-new-session input[type="checkbox"] {
-  margin: 0;
-  cursor: pointer;
+.super-force-new-session.active {
+  background: var(--color-surface-selected);
+  border-color: var(--color-accent, var(--color-border));
+  color: var(--color-accent, var(--color-text));
 }
 
 .super-send-button {

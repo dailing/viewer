@@ -648,10 +648,29 @@ function shortSessionId(item: Pick<SuperDisplayItem, "provider_session_id" | "vi
   return raw.length > 10 ? raw.slice(0, 10) : raw;
 }
 
-function contextUsageLabel(item: Pick<SuperDisplayItem, "context_used_percent" | "total_tokens">) {
-  if (typeof item.context_used_percent === "number") return `${item.context_used_percent.toFixed(1)}% ctx`;
-  if (typeof item.total_tokens === "number") return `${item.total_tokens.toLocaleString()} tokens`;
-  return "";
+function compactTokenCount(value: number) {
+  if (value < 1000) return value.toLocaleString();
+  const units = value >= 1_000_000 ? { size: 1_000_000, suffix: "M" } : { size: 1000, suffix: "K" };
+  const scaled = value / units.size;
+  const digits = scaled >= 100 ? 0 : 1;
+  return `${scaled.toFixed(digits).replace(/\.0$/, "")}${units.suffix}`;
+}
+
+function contextUsageLabel(item: Pick<SuperDisplayItem, "context_used_percent" | "total_tokens" | "model_context_window">) {
+  const parts: string[] = [];
+  if (typeof item.context_used_percent === "number") parts.push(`${item.context_used_percent.toFixed(1)}% ctx`);
+  if (typeof item.total_tokens === "number") {
+    const used = compactTokenCount(item.total_tokens);
+    const limit = typeof item.model_context_window === "number" ? ` / ${compactTokenCount(item.model_context_window)}` : "";
+    parts.push(`${used}${limit}`);
+  }
+  return parts.join(" · ");
+}
+
+function contextUsageTitle(item: Pick<SuperDisplayItem, "context_used_percent" | "total_tokens" | "model_context_window">) {
+  if (typeof item.total_tokens !== "number") return "Context usage";
+  const limit = typeof item.model_context_window === "number" ? ` of ${item.model_context_window.toLocaleString()}` : "";
+  return `${item.total_tokens.toLocaleString()}${limit} context tokens`;
 }
 
 function normalizedTargetStatus(status: string) {
@@ -969,7 +988,7 @@ async function scrollThreadToBottom() {
               <span v-if="shortSessionId(item)" class="super-meta-text super-session-id" :title="item.session_ref || item.viewer_session_id">
                 {{ shortSessionId(item) }}
               </span>
-              <span v-if="contextUsageLabel(item)" class="super-meta-text super-context-usage">
+              <span v-if="contextUsageLabel(item)" class="super-meta-text super-context-usage" :title="contextUsageTitle(item)">
                 {{ contextUsageLabel(item) }}
               </span>
               <span class="super-run-time">{{ formatTime(item.created_at) }}</span>

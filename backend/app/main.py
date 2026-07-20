@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from .agent_history import SuperHistoryRunCreate, agent_history_store
+from .agent_history import DEFAULT_CONTEXT_RECYCLE_PERCENT, SuperHistoryRunCreate, agent_history_store
 from .config import settings
 from .codex_sessions import codex_session_manager
 from .events import hub
@@ -58,9 +58,9 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 AGENT_PROVIDERS = {
-    "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars", "context_recycle_percent": 70.0, "context_recycle_tokens": None},
-    "codex-app-server": {"id": "codex-app-server", "name": "Codex App Server (Experimental)", "icon": "bi-stars", "context_recycle_percent": 80.0, "context_recycle_tokens": 200_000},
-    "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge", "context_recycle_percent": 80.0, "context_recycle_tokens": None},
+    "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars"},
+    "codex-app-server": {"id": "codex-app-server", "name": "Codex App Server (Experimental)", "icon": "bi-stars"},
+    "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge"},
 }
 
 NOISY_SUCCESS_PATHS = {
@@ -445,7 +445,15 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
 
 @app.get("/api/agents/providers")
 async def agent_providers():
-    return list(AGENT_PROVIDERS.values())
+    limits = read_config().super_workspace.provider_context_limits
+    return [
+        {
+            **provider,
+            "context_recycle_percent": limits[provider_id].context_recycle_percent if provider_id in limits else DEFAULT_CONTEXT_RECYCLE_PERCENT,
+            "context_recycle_tokens": limits[provider_id].context_recycle_tokens if provider_id in limits else None,
+        }
+        for provider_id, provider in AGENT_PROVIDERS.items()
+    ]
 
 
 @app.get("/api/super-workspace")

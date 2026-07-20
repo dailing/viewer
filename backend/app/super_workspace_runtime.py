@@ -74,20 +74,31 @@ class SuperWorkspaceEventHub:
 class SuperAgentDriver:
     provider = ""
     supports_content_blocks = False
+    accept_final_response_on_failed_session = True
 
     def provider_context_recycle_percent(self) -> float:
         """Provider-level default context recycle percent threshold."""
-        from .main import AGENT_PROVIDERS
-        config = AGENT_PROVIDERS.get(self.provider, {})
-        value = config.get("context_recycle_percent")
-        return float(value) if isinstance(value, (int, float)) else DEFAULT_CONTEXT_RECYCLE_PERCENT
+        try:
+            from .files import read_config
+
+            limit = read_config().super_workspace.provider_context_limits.get(self.provider)
+            if limit is not None:
+                return float(limit.context_recycle_percent)
+        except Exception:
+            pass
+        return DEFAULT_CONTEXT_RECYCLE_PERCENT
 
     def provider_context_recycle_tokens(self) -> int | None:
         """Provider-level default context recycle token threshold."""
-        from .main import AGENT_PROVIDERS
-        config = AGENT_PROVIDERS.get(self.provider, {})
-        value = config.get("context_recycle_tokens")
-        return int(value) if isinstance(value, int) else None
+        try:
+            from .files import read_config
+
+            limit = read_config().super_workspace.provider_context_limits.get(self.provider)
+            if limit is not None and limit.context_recycle_tokens is not None:
+                return int(limit.context_recycle_tokens)
+        except Exception:
+            pass
+        return None
 
     def manager(self):
         raise NotImplementedError
@@ -314,6 +325,10 @@ class CodexSuperDriver(SuperAgentDriver):
 
 class ACPSuperDriver(SuperAgentDriver):
     supports_content_blocks = True
+    # ACP request failures are authoritative. An agent may have emitted a
+    # partial response or a user-facing error message before the RPC failed;
+    # neither should turn the failed provider call into a completed run.
+    accept_final_response_on_failed_session = False
 
     def __init__(self, provider: str, session_manager: Any) -> None:
         self.provider = provider
@@ -823,7 +838,11 @@ class SuperWorkspaceRuntime:
                 if current_task is not None and current_task.status in {"cancelled", "interrupted"}:
                     return self._summarize_run_status(run_id, user_id)
                 if status == "failed":
-                    if driver_run_id and self._driver_has_final_response(run_id, user_id, driver_run_id):
+                    if (
+                        driver.accept_final_response_on_failed_session
+                        and driver_run_id
+                        and self._driver_has_final_response(run_id, user_id, driver_run_id)
+                    ):
                         agent_history_store.update_driver_run_status(driver_run_id, "completed", **usage)
                         return self._summarize_run_status(run_id, user_id)
                     if driver_run_id:
@@ -838,13 +857,7 @@ class SuperWorkspaceRuntime:
 
     def _summarize_run_status(self, run_id: str, user_id: str, fallback_error: str = "") -> SuperHistoryRun:
         run = agent_history_store.get_super_run(run_id, user_id)
-        statuses: list[str] = []
-        for target in run.targets:
-            if target.status == "failed" and self._target_has_final_response(target):
-                agent_history_store.update_driver_run_status(target.id, "completed")
-                statuses.append("completed")
-            else:
-                statuses.append(target.status)
+        statuses = [target.status for target in run.targets]
         if any(status == "failed" for status in statuses):
             return agent_history_store.update_super_run(run_id, user_id, status="failed", error=fallback_error)
         if statuses and all(status in {"completed", "cancelled", "interrupted"} for status in statuses):

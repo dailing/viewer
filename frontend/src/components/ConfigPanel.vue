@@ -15,6 +15,11 @@ const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
 const dispatchPromptVariables = ["{{message}}", "{{history}}", "{{roles_json}}", "{{roles_table}}"];
+const providerContextOptions = [
+  { id: "codex", name: "Codex" },
+  { id: "codex-app-server", name: "Codex App Server" },
+  { id: "hermes", name: "Hermes" },
+] as const;
 const jsonDraft = ref("");
 const settingsSearch = ref("");
 const activeSettingSection = ref("appearance");
@@ -265,6 +270,13 @@ function resetDispatchPromptTemplate() {
   draft.superWorkspace.dispatch_prompt_template = DEFAULT_DISPATCH_PROMPT_TEMPLATE;
 }
 
+function setProviderContextTokens(providerId: string, value: string) {
+  const limit = draft.superWorkspace.provider_context_limits[providerId];
+  if (!limit) return;
+  const cleaned = value.trim();
+  limit.context_recycle_tokens = cleaned ? Math.max(1000, Math.floor(Number(cleaned) || 0)) : null;
+}
+
 function normalizeVoiceModelList(value: string) {
   const seen = new Set<string>();
   const available = value
@@ -507,6 +519,41 @@ async function applyJson() {
         <section v-show="activeSettingSection === 'superWorkspace'" class="config-section">
           <div class="section-heading"><i class="bi bi-diagram-3"></i><h2>Super Workspace</h2></div>
           <div class="section-body">
+            <div class="context-limit-settings">
+              <div class="context-limit-heading">
+                <strong>Provider context limits</strong>
+                <span>Start a fresh session before the provider context is exhausted. Role settings override these defaults.</span>
+              </div>
+              <div v-for="provider in providerContextOptions" :key="provider.id" class="context-limit-row">
+                <span class="context-limit-provider">{{ provider.name }}</span>
+                <label>
+                  <span>Recycle at</span>
+                  <div class="input-group input-group-sm">
+                    <input
+                      v-model.number="draft.superWorkspace.provider_context_limits[provider.id].context_recycle_percent"
+                      class="form-control"
+                      type="number"
+                      min="1"
+                      max="100"
+                      step="1"
+                    />
+                    <span class="input-group-text">%</span>
+                  </div>
+                </label>
+                <label>
+                  <span>Token limit</span>
+                  <input
+                    class="form-control form-control-sm"
+                    type="number"
+                    min="1000"
+                    step="1000"
+                    :value="draft.superWorkspace.provider_context_limits[provider.id].context_recycle_tokens ?? ''"
+                    placeholder="None"
+                    @input="setProviderContextTokens(provider.id, ($event.target as HTMLInputElement).value)"
+                  />
+                </label>
+              </div>
+            </div>
             <label class="compact-field">
               <span>Dispatch profile</span>
               <select class="form-select form-select-sm" :value="draft.superWorkspace.active_dispatch_profile_id" @change="setActiveDispatchProfile(($event.target as HTMLSelectElement).value)">
@@ -869,6 +916,47 @@ async function applyJson() {
   font-size: 12px;
 }
 
+.context-limit-settings {
+  background: var(--color-surface-muted);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+}
+
+.context-limit-heading {
+  display: grid;
+  gap: 2px;
+}
+
+.context-limit-heading strong {
+  font-size: 12px;
+}
+
+.context-limit-heading span,
+.context-limit-row label > span,
+.context-limit-provider {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.context-limit-row {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 130px minmax(110px, 0.7fr) minmax(130px, 1fr);
+}
+
+.context-limit-row label {
+  display: grid;
+  gap: 3px;
+}
+
+.context-limit-provider {
+  align-self: center;
+  color: var(--color-text);
+}
+
 .config-error {
   color: var(--color-danger);
   margin-right: auto;
@@ -1223,6 +1311,15 @@ async function applyJson() {
   .setting-row,
   .compact-field {
     grid-template-columns: 1fr;
+  }
+
+  .context-limit-row {
+    align-items: stretch;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .context-limit-provider {
+    grid-column: 1 / -1;
   }
 
   .setting-row {

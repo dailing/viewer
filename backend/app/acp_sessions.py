@@ -509,6 +509,11 @@ class ACPSessionManager:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            # A provider may stream partial/final text before the ACP prompt
+            # request itself fails. Finalize that message for persistence, but
+            # keep the session failed: visible output is not proof that the
+            # provider turn completed successfully.
+            self._finalize_acp_turn(session)
             session.status = "failed"
             session.exit_code = 1
             session.error = str(exc) or exc.__class__.__name__

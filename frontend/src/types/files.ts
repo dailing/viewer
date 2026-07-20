@@ -111,6 +111,11 @@ export interface SuperWorkspaceDispatchProfile {
   api_key: string;
 }
 
+export interface ProviderContextLimitConfig {
+  context_recycle_percent: number;
+  context_recycle_tokens: number | null;
+}
+
 export interface SuperWorkspaceConfig {
   hindsight_retain_enabled: boolean;
   hindsight_api_url: string;
@@ -119,6 +124,7 @@ export interface SuperWorkspaceConfig {
   chat_history_bootstrap_tokens: number;
   active_dispatch_profile_id: string;
   dispatch_history_word_budget: number;
+  provider_context_limits: Record<string, ProviderContextLimitConfig>;
   dispatch_prompt_template: string;
   dispatch_profiles: SuperWorkspaceDispatchProfile[];
 }

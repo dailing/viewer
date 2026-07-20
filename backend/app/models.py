@@ -114,6 +114,19 @@ class SuperWorkspaceDispatchProfile(BaseModel):
     api_key: str = ""
 
 
+class ProviderContextLimitConfig(BaseModel):
+    context_recycle_percent: float = Field(default=80.0, ge=1.0, le=100.0)
+    context_recycle_tokens: int | None = Field(default=None, ge=1000)
+
+
+def default_provider_context_limits() -> dict[str, ProviderContextLimitConfig]:
+    return {
+        "codex": ProviderContextLimitConfig(context_recycle_percent=70.0),
+        "codex-app-server": ProviderContextLimitConfig(context_recycle_percent=80.0, context_recycle_tokens=200_000),
+        "hermes": ProviderContextLimitConfig(context_recycle_percent=80.0),
+    }
+
+
 DEFAULT_DISPATCH_PROMPT_TEMPLATE = """You route one user message to persistent agent roles.
 
 Default to exactly one role.
@@ -141,6 +154,7 @@ class SuperWorkspaceConfig(BaseModel):
     chat_history_bootstrap_tokens: int = Field(default=5000, ge=0, le=50000)
     active_dispatch_profile_id: str = "local-vllm"
     dispatch_history_word_budget: int = Field(default=2048, ge=0, le=50000)
+    provider_context_limits: dict[str, ProviderContextLimitConfig] = Field(default_factory=default_provider_context_limits)
     dispatch_prompt_template: str = DEFAULT_DISPATCH_PROMPT_TEMPLATE
     dispatch_profiles: list[SuperWorkspaceDispatchProfile] = Field(
         default_factory=lambda: [

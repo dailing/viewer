@@ -136,6 +136,40 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["status"], "failed")
         self.assertEqual(snapshot["error"], "ACP transport closed")
 
+    async def test_acp_error_finalizes_partial_message_without_masking_failure(self) -> None:
+        manager = self.manager()
+        manager._record_lineage_events = Mock()
+
+        async def stream_then_fail(*_args, **_kwargs):
+            await manager._handle_acp_update(
+                "acp-session-1",
+                AgentMessageChunk(
+                    sessionUpdate="agent_message_chunk",
+                    messageId="turn-failed",
+                    content=TextContentBlock(type="text", text="partial response"),
+                ),
+            )
+            raise RuntimeError("provider overloaded")
+
+        manager.acp.prompt.side_effect = stream_then_fail
+        with patch("app.acp_sessions.logger.exception"):
+            created = await manager.create(
+                "hello",
+                "demo",
+                None,
+                "dailing",
+                lineage={"workspace_id": "workspace", "chat_id": "chat"},
+            )
+            await self.wait_for_run(manager, created["id"])
+
+        session = manager.sessions[created["id"]]
+        self.assertEqual(session.status, "failed")
+        self.assertEqual(session.error, "provider overloaded")
+        self.assertFalse(session.acp_events[0]["streaming"])
+        manager._record_lineage_events.assert_called()
+        finalized_event = manager._record_lineage_events.call_args.args[1][0]
+        self.assertFalse(finalized_event["streaming"])
+
     async def test_structured_prompt_is_forwarded_as_acp_content_blocks(self) -> None:
         manager = self.manager()
         blocks = [
@@ -164,6 +198,7 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
             "acp-session-1",
             AgentMessageChunk(
                 sessionUpdate="agent_message_chunk",
+                messageId="turn-1",
                 content=TextContentBlock(type="text", text="Hello "),
             ),
         )
@@ -171,6 +206,7 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
             "acp-session-1",
             AgentMessageChunk(
                 sessionUpdate="agent_message_chunk",
+                messageId="turn-1",
                 content=TextContentBlock(type="text", text="world"),
             ),
         )
@@ -211,6 +247,7 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
                 "acp-session-1",
                 AgentMessageChunk(
                     sessionUpdate="agent_message_chunk",
+                    messageId="turn-1",
                     content=TextContentBlock(type="text", text=chunk),
                 ),
             )

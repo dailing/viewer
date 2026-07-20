@@ -129,6 +129,11 @@ export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
   chat_history_bootstrap_tokens: 5000,
   active_dispatch_profile_id: "local-vllm",
   dispatch_history_word_budget: 2048,
+  provider_context_limits: {
+    codex: { context_recycle_percent: 70, context_recycle_tokens: null },
+    "codex-app-server": { context_recycle_percent: 80, context_recycle_tokens: 200_000 },
+    hermes: { context_recycle_percent: 80, context_recycle_tokens: null },
+  },
   dispatch_prompt_template: DEFAULT_DISPATCH_PROMPT_TEMPLATE,
   dispatch_profiles: DEFAULT_DISPATCH_PROFILES,
 };
@@ -252,6 +257,30 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
   const activeProfileId = profiles.some((profile) => profile.id === config?.active_dispatch_profile_id)
     ? String(config?.active_dispatch_profile_id)
     : profiles[0]?.id ?? DEFAULT_SUPER_WORKSPACE_CONFIG.active_dispatch_profile_id;
+  const providerIds = new Set([
+    ...Object.keys(DEFAULT_SUPER_WORKSPACE_CONFIG.provider_context_limits),
+    ...Object.keys(config?.provider_context_limits ?? {}),
+  ]);
+  const providerContextLimits = Object.fromEntries(
+    [...providerIds].map((providerId) => {
+      const fallback = DEFAULT_SUPER_WORKSPACE_CONFIG.provider_context_limits[providerId] ?? {
+        context_recycle_percent: 70,
+        context_recycle_tokens: null,
+      };
+      const source = config?.provider_context_limits?.[providerId];
+      const percent = Number(source?.context_recycle_percent ?? fallback.context_recycle_percent);
+      const hasTokenSetting = source != null && Object.prototype.hasOwnProperty.call(source, "context_recycle_tokens");
+      const rawTokens = hasTokenSetting ? source.context_recycle_tokens : fallback.context_recycle_tokens;
+      const tokens = rawTokens == null ? null : Number(rawTokens);
+      return [
+        providerId,
+        {
+          context_recycle_percent: Math.min(100, Math.max(1, Number.isFinite(percent) ? percent : fallback.context_recycle_percent)),
+          context_recycle_tokens: tokens == null || !Number.isFinite(tokens) ? null : Math.max(1000, Math.floor(tokens)),
+        },
+      ];
+    }),
+  );
   return {
     hindsight_retain_enabled: config?.hindsight_retain_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_retain_enabled,
     hindsight_api_url: config?.hindsight_api_url?.trim() ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_api_url,
@@ -260,6 +289,7 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
     chat_history_bootstrap_tokens: Math.min(50000, Math.max(0, Number.isFinite(tokens) ? Math.floor(tokens) : DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens)),
     active_dispatch_profile_id: activeProfileId,
     dispatch_history_word_budget: Math.min(50000, Math.max(0, Number.isFinite(dispatchBudget) ? Math.floor(dispatchBudget) : DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_history_word_budget)),
+    provider_context_limits: providerContextLimits,
     dispatch_prompt_template: config?.dispatch_prompt_template?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_prompt_template,
     dispatch_profiles: profiles,
   };

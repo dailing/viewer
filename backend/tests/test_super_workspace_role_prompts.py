@@ -6,8 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.app.agent_history import AgentHistoryStore
+from backend.app.models import SuperWorkspaceConfig
 from backend.app.super_workspace import SuperRole, SuperWorkspaceManager
-from backend.app.super_workspace_runtime import CodexSuperDriver
+from backend.app.super_workspace_runtime import CodexSuperDriver, HermesSuperDriver
 
 
 def role() -> SuperRole:
@@ -24,6 +25,24 @@ def role() -> SuperRole:
 
 
 class RolePromptSeparationTests(unittest.TestCase):
+    def test_provider_context_limits_have_configurable_defaults(self) -> None:
+        config = SuperWorkspaceConfig()
+        self.assertEqual(config.provider_context_limits["codex"].context_recycle_percent, 70)
+        self.assertEqual(config.provider_context_limits["codex-app-server"].context_recycle_tokens, 200_000)
+        self.assertIsNone(config.provider_context_limits["hermes"].context_recycle_tokens)
+
+    def test_driver_uses_provider_context_limits_from_viewer_config(self) -> None:
+        limit = SimpleNamespace(context_recycle_percent=63.5, context_recycle_tokens=123_000)
+        config = SimpleNamespace(super_workspace=SimpleNamespace(provider_context_limits={"codex": limit}))
+        with patch("backend.app.files.read_config", return_value=config):
+            driver = CodexSuperDriver()
+            self.assertEqual(driver.provider_context_recycle_percent(), 63.5)
+            self.assertEqual(driver.provider_context_recycle_tokens(), 123_000)
+
+    def test_acp_failures_are_not_converted_to_success_by_visible_output(self) -> None:
+        self.assertTrue(CodexSuperDriver.accept_final_response_on_failed_session)
+        self.assertFalse(HermesSuperDriver.accept_final_response_on_failed_session)
+
     def test_dispatch_payload_contains_description_but_not_agent_prompt(self) -> None:
         manager = SuperWorkspaceManager()
         rendered = manager._render_dispatch_prompt(

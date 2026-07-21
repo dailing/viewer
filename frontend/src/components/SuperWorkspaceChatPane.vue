@@ -91,6 +91,8 @@ const citationPreview = ref<{
 } | null>(null);
 let fallbackTimer: number | null = null;
 let refreshTimer: number | null = null;
+let liveRefreshRunning = false;
+let liveRefreshPending = false;
 let citationTimer: number | null = null;
 let superWorkspaceEvents: EventSource | null = null;
 let chatLoadRequest = 0;
@@ -106,8 +108,14 @@ onMounted(async () => {
   superWorkspaceEvents = connectSuperWorkspaceEvents((event) => {
     if (event.chat_id && event.chat_id !== resolvedChatId.value) return;
     scheduleRefreshLiveState(100);
+  }, (state) => {
+    // EventSource reconnects automatically, but events emitted while the
+    // connection was down are not replayed. Always catch up after (re)open.
+    if (state === "connected") scheduleRefreshLiveState(0);
   });
   fallbackTimer = window.setInterval(() => scheduleRefreshLiveState(0), 30000);
+  document.addEventListener("visibilitychange", handleVisibilityRefresh);
+  window.addEventListener("focus", handleWindowFocusRefresh);
   window.addEventListener("super-workspace:add-role-mention", handleExternalRoleMention);
   window.addEventListener("super-workspace:chats-updated", handleChatsUpdated);
 });
@@ -118,6 +126,8 @@ onUnmounted(() => {
   if (citationTimer !== null) window.clearTimeout(citationTimer);
   clearStopConfirmation();
   superWorkspaceEvents?.close();
+  document.removeEventListener("visibilitychange", handleVisibilityRefresh);
+  window.removeEventListener("focus", handleWindowFocusRefresh);
   window.removeEventListener("super-workspace:add-role-mention", handleExternalRoleMention);
   window.removeEventListener("super-workspace:chats-updated", handleChatsUpdated);
   paneToolbar.clearPaneToolbar(props.paneId);
@@ -206,15 +216,45 @@ function hasResolvedChatId(): boolean {
 }
 
 function scheduleRefreshLiveState(delayMs: number) {
+  if (liveRefreshRunning) {
+    liveRefreshPending = true;
+    return;
+  }
   if (refreshTimer !== null) return;
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null;
-    void refreshLiveState();
+    void drainLiveRefreshes();
   }, delayMs);
+}
+
+async function drainLiveRefreshes() {
+  if (liveRefreshRunning) {
+    liveRefreshPending = true;
+    return;
+  }
+  liveRefreshRunning = true;
+  try {
+    do {
+      liveRefreshPending = false;
+      await refreshLiveState();
+    } while (liveRefreshPending);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    liveRefreshRunning = false;
+  }
 }
 
 async function refreshLiveState() {
   await Promise.all([loadRoles(), loadChatContext(), loadChangedRuns()]);
+}
+
+function handleVisibilityRefresh() {
+  if (document.visibilityState === "visible") scheduleRefreshLiveState(0);
+}
+
+function handleWindowFocusRefresh() {
+  scheduleRefreshLiveState(0);
 }
 
 function registerInputContext() {
@@ -815,7 +855,10 @@ async function loadChangedRuns() {
     await loadRuns(true, requestId);
     return;
   }
-  const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 0.001), chatId);
+  // Use an overlap because provider-message ingestion and driver status are
+  // committed separately. Re-reading a small window is safe (items upsert by
+  // id) and prevents a cursor advanced by one write from hiding another.
+  const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 2), chatId);
   if (requestId !== chatLoadRequest || chatId !== resolvedChatId.value) return;
   for (const item of page.items) upsertDisplayItem(item);
   updateItemsAfterCursor(page.items, page.next_after ?? undefined);

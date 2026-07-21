@@ -197,6 +197,11 @@ class CodexAppServerRuntime:
             return await asyncio.wait_for(future, timeout=60.0)
         except asyncio.TimeoutError:
             self._pending_requests.pop(request_id, None)
+            # A timed-out control request leaves the connection state unknown:
+            # app-server may still finish it later, while the client has already
+            # moved on. Never send another request through that process. The next
+            # operation will start a fresh initialized runtime.
+            await self._close_process()
             raise RuntimeError(f"{self.provider} app-server request timed out: {method}")
 
     async def thread_start(self, cwd: str, model: str | None = None) -> str:

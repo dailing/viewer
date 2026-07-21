@@ -63,7 +63,14 @@ class SuperWorkspaceEventHub:
         try:
             yield "event: ready\ndata: {}\n\n"
             while True:
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Keep intermediaries and browsers from silently dropping an
+                    # otherwise idle SSE connection. Comments are ignored by
+                    # EventSource and do not trigger a frontend refresh.
+                    yield ": keepalive\n\n"
+                    continue
                 if event.get("user_id") not in {None, normalized_user}:
                     continue
                 yield f"event: super-workspace\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -845,10 +852,10 @@ class SuperWorkspaceRuntime:
                     ):
                         agent_history_store.update_driver_run_status(driver_run_id, "completed", **usage)
                         return self._summarize_run_status(run_id, user_id)
+                    session_error = str(snapshot.get("error") or "").strip() or "Role session failed"
                     if driver_run_id:
-                        agent_history_store.update_driver_run_status(driver_run_id, "failed", **usage)
-                    session_error = str(snapshot.get("error") or "").strip()
-                    return self._summarize_run_status(run_id, user_id, fallback_error=session_error or "Role session failed")
+                        agent_history_store.update_driver_run_status(driver_run_id, "failed", error=session_error, **usage)
+                    return self._summarize_run_status(run_id, user_id, fallback_error=session_error)
                 if driver_run_id:
                     agent_history_store.update_driver_run_status(driver_run_id, "completed", **usage)
                 return self._summarize_run_status(run_id, user_id)

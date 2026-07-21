@@ -190,6 +190,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/codex_app_server.py` and `backend/app/codex_app_server_sessions.py`
 
 - Experimental Codex-native App Server provider over JSONL stdio (not ACP). Each subprocess connection completes `initialize` and the `initialized` acknowledgement before thread methods, then uses `thread/start` / `thread/resume`, `turn/start` / `turn/interrupt`, and waits for `turn/completed` before leaving `running`.
+- Any JSON-RPC control-request timeout closes and discards the entire App Server subprocess because its request/connection state is no longer trustworthy; the next operation starts and initializes a fresh process instead of cascading the timeout into later requests.
 - Normalizes the current slash-form Codex notifications (`item/agentMessage/delta`, reasoning/command/file-change deltas, `thread/tokenUsage/updated`, and `turn/completed`) into Viewer AgentEvent IR. Deltas with the same Codex `itemId` upsert one streaming event and are finalized when the turn completes.
 - Viewer does not implement Codex App Server client-side approval or interactive-input requests; unsupported server requests receive an explicit JSON-RPC method error instead of hanging. Provider/model retry remains owned by Codex.
 

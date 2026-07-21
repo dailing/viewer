@@ -626,10 +626,15 @@ class CodexAppServerSessionManager:
             }
         if method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage") if isinstance(params.get("tokenUsage"), dict) else {}
-            total_usage = usage.get("total") if isinstance(usage.get("total"), dict) else {}
-            total = total_usage.get("totalTokens")
-            if isinstance(total, int):
-                session.total_tokens = total
+            # App Server's `total` is cumulative across every model call in the
+            # thread/turn. It can exceed the model context window many times and
+            # is not a measure of current context occupancy. `last` describes
+            # the latest model call and is the value Codex exposes for context
+            # window usage.
+            last_usage = usage.get("last") if isinstance(usage.get("last"), dict) else {}
+            context_tokens = last_usage.get("totalTokens")
+            if isinstance(context_tokens, int):
+                session.total_tokens = context_tokens
             context_window = usage.get("modelContextWindow")
             session.model_context_window = (
                 context_window if isinstance(context_window, int) and context_window > 0 else _env_context_window(session.model)

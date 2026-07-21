@@ -1,14 +1,15 @@
+import asyncio
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.app.agent_history import AgentHistoryStore, SuperDriverRunCreate
 from backend.app.models import SuperWorkspaceConfig
 from backend.app.super_workspace import SuperRole, SuperWorkspaceManager
-from backend.app.super_workspace_runtime import CodexSuperDriver, HermesSuperDriver
+from backend.app.super_workspace_runtime import CodexAppServerSuperDriver, CodexSuperDriver, HermesSuperDriver, SuperWorkspaceRuntime
 
 
 def role() -> SuperRole:
@@ -42,6 +43,42 @@ class RolePromptSeparationTests(unittest.TestCase):
     def test_acp_failures_are_not_converted_to_success_by_visible_output(self) -> None:
         self.assertTrue(CodexSuperDriver.accept_final_response_on_failed_session)
         self.assertFalse(HermesSuperDriver.accept_final_response_on_failed_session)
+
+    def test_failed_session_error_is_written_to_driver_target(self) -> None:
+        runtime = SuperWorkspaceRuntime()
+        manager = MagicMock()
+        manager.snapshot.return_value = {"status": "failed", "error": "thread/start timed out"}
+        driver = CodexAppServerSuperDriver()
+        driver._session_manager = manager
+        failed_run = SimpleNamespace(status="failed")
+
+        with (
+            patch("backend.app.super_workspace_runtime.agent_history_store.get_dispatch_task", return_value=SimpleNamespace(status="running")),
+            patch("backend.app.super_workspace_runtime.agent_history_store.update_driver_run_status") as update_status,
+            patch("backend.app.super_workspace_runtime.agent_history_store.upsert_chat_role_session"),
+            patch.object(runtime, "_emit_update", new=AsyncMock()),
+            patch.object(runtime, "_summarize_run_status", return_value=failed_run),
+        ):
+            result = asyncio.run(
+                runtime._wait_for_session(
+                    driver,
+                    "viewer-session",
+                    "user",
+                    "query-run",
+                    "driver-run",
+                    "workspace",
+                    "chat",
+                    role().model_copy(update={"provider": "codex-app-server"}),
+                    "/tmp",
+                    "codex-app-server:viewer-session",
+                    None,
+                )
+            )
+
+        self.assertIs(result, failed_run)
+        failed_calls = [call for call in update_status.call_args_list if call.args[1] == "failed"]
+        self.assertEqual(len(failed_calls), 1)
+        self.assertEqual(failed_calls[0].kwargs["error"], "thread/start timed out")
 
     def test_dispatch_payload_contains_description_but_not_agent_prompt(self) -> None:
         manager = SuperWorkspaceManager()

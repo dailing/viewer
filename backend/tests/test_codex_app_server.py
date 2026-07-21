@@ -4,7 +4,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -32,6 +32,26 @@ class TestCodexAppServerRuntime:
         assert runtime.running is False
         with pytest.raises(RuntimeError):
             asyncio.run(runtime.thread_start("/tmp"))
+
+    def test_request_timeout_discards_runtime_process(self):
+        handler = AsyncMock()
+        runtime = CodexAppServerRuntime(
+            CodexAppServerProcessConfig(provider="codex-app-server", command="codex", arguments=()),
+            handler,
+        )
+        runtime._process = MagicMock(returncode=None, stdin=MagicMock())
+        runtime._write_message = AsyncMock()
+        runtime._close_process = AsyncMock()
+
+        async def run_request():
+            with patch("backend.app.codex_app_server.asyncio.wait_for", new=AsyncMock(side_effect=asyncio.TimeoutError)):
+                with pytest.raises(RuntimeError, match="request timed out: thread/start"):
+                    await runtime._send_request("thread/start", {"cwd": "/tmp"})
+
+        asyncio.run(run_request())
+
+        runtime._close_process.assert_awaited_once()
+        assert runtime._pending_requests == {}
 
 
 class TestCodexAppServerSessionManager:
@@ -200,16 +220,17 @@ class TestCodexAppServerSessionManager:
                 "threadId": "thread-123",
                 "turnId": "turn-1",
                 "tokenUsage": {
-                    "total": {"totalTokens": 1500, "inputTokens": 1000, "outputTokens": 500},
+                    "total": {"totalTokens": 947721, "inputTokens": 942940, "outputTokens": 4781},
                     "last": {"totalTokens": 500},
                     "modelContextWindow": 250000,
                 },
             },
-            {"method": "thread/tokenUsage/updated", "params": {"tokenUsage": {"total": {"totalTokens": 1500}}}},
+            {"method": "thread/tokenUsage/updated", "params": {"tokenUsage": {"total": {"totalTokens": 947721}}}},
         )
         assert event is not None
-        assert session.total_tokens == 1500
+        assert session.total_tokens == 500
         assert session.model_context_window == 250000
+        assert session.summary()["context_used_percent"] == 0.2
 
     def test_streaming_deltas_upsert_by_codex_item_id(self):
         manager = CodexAppServerSessionManager()

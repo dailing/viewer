@@ -32,6 +32,10 @@ class RolePromptSeparationTests(unittest.TestCase):
         self.assertEqual(config.provider_context_limits["codex-app-server"].context_recycle_tokens, 200_000)
         self.assertIsNone(config.provider_context_limits["hermes"].context_recycle_tokens)
 
+    def test_chat_virtual_space_is_enabled_by_default_and_can_be_disabled(self) -> None:
+        self.assertTrue(SuperWorkspaceConfig().chat_virtual_space_enabled)
+        self.assertFalse(SuperWorkspaceConfig(chat_virtual_space_enabled=False).chat_virtual_space_enabled)
+
     def test_driver_uses_provider_context_limits_from_viewer_config(self) -> None:
         limit = SimpleNamespace(context_recycle_percent=63.5, context_recycle_tokens=123_000)
         config = SimpleNamespace(super_workspace=SimpleNamespace(provider_context_limits={"codex": limit}))

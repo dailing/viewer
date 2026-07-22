@@ -59,6 +59,8 @@ def _env_context_window(model: str | None) -> int:
 
 
 RAW_PREVIEW_MAX_BYTES = 16 * 1024
+TOOL_EVENT_MAX_BYTES = 32 * 1024
+TRUNCATION_MARKER = "\n...<viewer tool output truncated>"
 AGENT_DETAIL_FOCUS = "focus"
 AGENT_DETAIL_FULL = "full"
 AGENT_DETAILS = {AGENT_DETAIL_FOCUS, AGENT_DETAIL_FULL}
@@ -156,12 +158,14 @@ class CodexAppServerSessionManager:
     def __init__(self) -> None:
         command = os.environ.get("VIEWER_CODEX_APP_SERVER_COMMAND", "codex").strip() or "codex"
         enabled = os.environ.get("VIEWER_CODEX_APP_SERVER_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+        yolo = os.environ.get("VIEWER_CODEX_APP_SERVER_YOLO", "true").strip().lower() not in {"0", "false", "no", "off"}
         self.runtime = CodexAppServerRuntime(
             CodexAppServerProcessConfig(
                 provider="codex-app-server",
                 command=command,
                 arguments=("app-server", "--stdio"),
                 enabled=enabled,
+                yolo=yolo,
             ),
             self._handle_update,
         )
@@ -278,6 +282,15 @@ class CodexAppServerSessionManager:
                 text = str(value)
         text = text.replace("\r\n", "\n")
         return text if len(text) <= limit else f"{text[:limit]}...<truncated>"
+
+    @staticmethod
+    def _bounded_utf8(text: str, limit: int, marker: str = TRUNCATION_MARKER) -> str:
+        encoded = text.encode("utf-8", errors="replace")
+        if len(encoded) <= limit:
+            return text
+        marker_bytes = marker.encode("utf-8")
+        prefix = encoded[: max(0, limit - len(marker_bytes))].decode("utf-8", errors="ignore")
+        return f"{prefix}{marker}"
 
     def _record_lineage_events(self, session: CodexAppServerSession, events: list[dict], start_index: int) -> None:
         try:
@@ -524,6 +537,8 @@ class CodexAppServerSessionManager:
                 if existing.get("source_event_id") != source_event_id:
                     continue
                 event["text"] = f"{existing.get('text', '')}{event.get('text', '')}"
+                if event.get("event_type") == AgentEventType.TOOL_CALL:
+                    event["text"] = self._bounded_utf8(event["text"], TOOL_EVENT_MAX_BYTES)
                 event["index"] = index
                 session.events[index] = event
                 return index
@@ -592,7 +607,7 @@ class CodexAppServerSessionManager:
                 "source_event_id": f"{self.provider}:{session.provider_session_id}:{turn_id}:command:{item_id}",
                 "received_at": now,
                 "event_type": AgentEventType.TOOL_CALL,
-                "text": output,
+                "text": self._bounded_utf8(str(output), TOOL_EVENT_MAX_BYTES),
                 "append": True,
                 "streaming": True,
                 "raw_preview": self._raw_preview(raw),
@@ -648,8 +663,19 @@ class CodexAppServerSessionManager:
                 "streaming": False,
                 "raw_preview": self._raw_preview(raw),
             }
-        # Unknown notification — log but don't create event
-        logger.debug("Unknown {} notification: {} params={}", self.provider, method, params)
+        # Unknown notifications may include complete command output. Never
+        # mirror the full payload into the worker log, where a later diagnostic
+        # command could recursively ingest it and amplify the event again.
+        raw_bytes = len(json.dumps(raw, ensure_ascii=False, default=str).encode("utf-8", errors="replace"))
+        logger.debug(
+            "Unknown {} notification method={} thread={} turn={} item={} bytes={}",
+            self.provider,
+            method,
+            params.get("threadId", ""),
+            params.get("turnId", ""),
+            params.get("itemId") or (params.get("item", {}) if isinstance(params.get("item"), dict) else {}).get("id", ""),
+            raw_bytes,
+        )
         return None
 
     async def start(self) -> None:

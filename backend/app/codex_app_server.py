@@ -14,12 +14,20 @@ from loguru import logger
 CodexAppServerUpdateHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
+# asyncio subprocess streams default to a 64 KiB line limit. Codex App Server
+# JSONL notifications can legitimately exceed that because item/completed may
+# repeat a command and its aggregated output in one line. Keep a finite limit,
+# but make it large enough for bounded diagnostic output and historical turns.
+APP_SERVER_STREAM_LIMIT_BYTES = 4 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class CodexAppServerProcessConfig:
     provider: str
     command: str
     arguments: tuple[str, ...]
     enabled: bool = True
+    yolo: bool = True
 
 
 class CodexAppServerSessionNotFound(RuntimeError):
@@ -53,7 +61,12 @@ class CodexAppServerRuntime:
 
     @property
     def running(self) -> bool:
-        return self._process is not None and self._process.returncode is None
+        return (
+            self._process is not None
+            and self._process.returncode is None
+            and self._reader_task is not None
+            and not self._reader_task.done()
+        )
 
     def _next_request_id(self) -> int:
         self._request_id += 1
@@ -78,6 +91,7 @@ class CodexAppServerRuntime:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=APP_SERVER_STREAM_LIMIT_BYTES,
             )
             self._reader_task = asyncio.create_task(self._read_loop())
             self._stderr_task = asyncio.create_task(self._drain_stderr())
@@ -105,34 +119,69 @@ class CodexAppServerRuntime:
             )
 
     async def _read_loop(self) -> None:
-        assert self._process is not None and self._process.stdout is not None
-        while True:
-            line = await self._process.stdout.readline()
-            if not line:
-                break
-            try:
-                message = json.loads(line.decode("utf-8"))
-            except json.JSONDecodeError:
-                logger.warning("{} app-server invalid JSON: {}", self.provider, line[:200])
-                continue
-            await self._handle_message(message)
-        logger.info("{} app-server stdout closed", self.provider)
-        error = RuntimeError(f"{self.provider} app-server stdout closed")
+        process = self._process
+        assert process is not None and process.stdout is not None
+        failure: RuntimeError | None = None
+        try:
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    failure = RuntimeError(f"{self.provider} app-server stdout closed")
+                    logger.info("{} app-server stdout closed", self.provider)
+                    break
+                try:
+                    message = json.loads(line.decode("utf-8"))
+                except json.JSONDecodeError:
+                    logger.warning("{} app-server invalid JSON bytes={} preview={!r}", self.provider, len(line), line[:200])
+                    continue
+                await self._handle_message(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure = RuntimeError(f"{self.provider} app-server reader failed: {exc}")
+            logger.exception("{} app-server reader failed", self.provider)
+        finally:
+            if failure is not None:
+                self._initialized = False
+                self._fail_waiters(failure)
+                await self._terminate_process(process)
+
+    def _fail_waiters(self, error: Exception) -> None:
         for future in (*self._pending_requests.values(), *self._turn_waiters.values()):
             if not future.done():
                 future.set_exception(error)
         self._pending_requests.clear()
         self._turn_waiters.clear()
 
+    @staticmethod
+    async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        with suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                with suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
+
     async def _drain_stderr(self) -> None:
-        assert self._process is not None and self._process.stderr is not None
-        while True:
-            line = await self._process.stderr.readline()
-            if not line:
-                return
-            text = line.decode("utf-8", errors="replace").rstrip()
-            if text:
-                logger.debug("{} app-server stderr: {}", self.provider, text)
+        process = self._process
+        assert process is not None and process.stderr is not None
+        try:
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    return
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    logger.debug("{} app-server stderr bytes={} preview={}", self.provider, len(line), text[:2000])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("{} app-server stderr reader failed", self.provider)
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         # JSON-RPC response
@@ -233,7 +282,13 @@ class CodexAppServerRuntime:
             input_items = [{"type": "text", "text": prompt}]
         else:
             input_items = prompt
-        result = await self._send_request("turn/start", {"threadId": thread_id, "input": input_items})
+        params: dict[str, Any] = {"threadId": thread_id, "input": input_items}
+        if self.config.yolo:
+            # App Server has no CLI --yolo flag. These protocol fields are the
+            # native equivalent of --dangerously-bypass-approvals-and-sandbox.
+            params["approvalPolicy"] = "never"
+            params["sandboxPolicy"] = {"type": "dangerFullAccess"}
+        result = await self._send_request("turn/start", params)
         turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
         turn_id = str(turn.get("id") or "")
         if not turn_id:
@@ -279,34 +334,23 @@ class CodexAppServerRuntime:
         self._process = None
         self._initialized = False
         self._bound_threads.clear()
-        for future in self._pending_requests.values():
-            if not future.done():
-                future.set_exception(RuntimeError(f"{self.provider} app-server shutting down"))
-        self._pending_requests.clear()
-        for future in self._turn_waiters.values():
-            if not future.done():
-                future.set_exception(RuntimeError(f"{self.provider} app-server shutting down"))
-        self._turn_waiters.clear()
+        self._fail_waiters(RuntimeError(f"{self.provider} app-server shutting down"))
         self._completed_turns.clear()
-        if reader_task is not None:
-            if not reader_task.done():
-                reader_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await reader_task
-        if stderr_task is not None:
-            if not stderr_task.done():
-                stderr_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await stderr_task
-        if process is not None:
-            with suppress(ProcessLookupError):
-                process.terminate()
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(process.wait(), timeout=5)
-            if process.returncode is None:
-                with suppress(ProcessLookupError):
-                    process.kill()
-                await process.wait()
+        try:
+            for task, label in ((reader_task, "stdout"), (stderr_task, "stderr")):
+                if task is None:
+                    continue
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.warning("{} app-server {} task closed with error: {}", self.provider, label, exc)
+        finally:
+            if process is not None:
+                await self._terminate_process(process)
 
     async def shutdown(self) -> None:
         await self._close_process()

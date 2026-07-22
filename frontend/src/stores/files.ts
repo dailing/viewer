@@ -14,6 +14,7 @@ export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   h3: { font_size: 19, color: "#34383d", font_weight: "700", line_height: 1.3 },
   h4: { font_size: 16, color: "#34383d", font_weight: "700", line_height: 1.35 },
   paragraph: { font_size: 15, color: "#404449", font_weight: null, line_height: 1.65 },
+  strong: { font_size: null, color: "#1f4e79", font_weight: "700", line_height: null },
   code: { font_size: 13, color: "#4a4e53", font_weight: null, line_height: null },
   code_background: "#f5f5f5",
   link_color: "#58749a",
@@ -38,6 +39,7 @@ export const DARK_MARKDOWN_THEME: MarkdownTheme = {
   h3: { font_size: 19, color: "#e5edf7", font_weight: "700", line_height: 1.3 },
   h4: { font_size: 16, color: "#dbe7f3", font_weight: "700", line_height: 1.35 },
   paragraph: { font_size: 15, color: "#d8dee9", font_weight: null, line_height: 1.65 },
+  strong: { font_size: null, color: "#f2d675", font_weight: "700", line_height: null },
   code: { font_size: 13, color: "#e6edf3", font_weight: null, line_height: null },
   code_background: "#161b22",
   link_color: "#79c0ff",
@@ -125,6 +127,7 @@ export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
   hindsight_retain_enabled: true,
   hindsight_api_url: "",
   hindsight_bank_prefix: "super-workspace",
+  chat_virtual_space_enabled: true,
   chat_history_bootstrap_enabled: true,
   chat_history_bootstrap_tokens: 5000,
   active_dispatch_profile_id: "local-vllm",
@@ -151,19 +154,21 @@ function normalizeAppearance(config?: Partial<AppearanceConfig>): AppearanceConf
   };
 }
 
-type MarkdownThemeInput = Partial<Omit<MarkdownTheme, "body" | "h1" | "h2" | "h3" | "h4" | "paragraph" | "code" | "syntax">> & {
+type MarkdownThemeInput = Partial<Omit<MarkdownTheme, "body" | "h1" | "h2" | "h3" | "h4" | "paragraph" | "strong" | "code" | "syntax">> & {
   body?: Partial<MarkdownTheme["body"]>;
   h1?: Partial<MarkdownTheme["h1"]>;
   h2?: Partial<MarkdownTheme["h2"]>;
   h3?: Partial<MarkdownTheme["h3"]>;
   h4?: Partial<MarkdownTheme["h4"]>;
   paragraph?: Partial<MarkdownTheme["paragraph"]>;
+  strong?: Partial<MarkdownTheme["strong"]>;
   code?: Partial<MarkdownTheme["code"]>;
   syntax?: Partial<MarkdownTheme["syntax"]>;
 };
 
 function mergeTheme(theme?: MarkdownThemeInput): MarkdownTheme {
-  const next = cloneTheme(DEFAULT_MARKDOWN_THEME);
+  const fallback = theme?.name === DARK_MARKDOWN_THEME.name ? DARK_MARKDOWN_THEME : DEFAULT_MARKDOWN_THEME;
+  const next = cloneTheme(fallback);
   return {
     ...next,
     ...theme,
@@ -173,6 +178,7 @@ function mergeTheme(theme?: MarkdownThemeInput): MarkdownTheme {
     h3: { ...next.h3, ...theme?.h3 },
     h4: { ...next.h4, ...theme?.h4 },
     paragraph: { ...next.paragraph, ...theme?.paragraph },
+    strong: { ...next.strong, ...theme?.strong },
     code: { ...next.code, ...theme?.code },
     syntax: { ...next.syntax, ...theme?.syntax },
   };
@@ -285,6 +291,7 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
     hindsight_retain_enabled: config?.hindsight_retain_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_retain_enabled,
     hindsight_api_url: config?.hindsight_api_url?.trim() ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_api_url,
     hindsight_bank_prefix: config?.hindsight_bank_prefix?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_bank_prefix,
+    chat_virtual_space_enabled: config?.chat_virtual_space_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.chat_virtual_space_enabled,
     chat_history_bootstrap_enabled: config?.chat_history_bootstrap_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_enabled,
     chat_history_bootstrap_tokens: Math.min(50000, Math.max(0, Number.isFinite(tokens) ? Math.floor(tokens) : DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens)),
     active_dispatch_profile_id: activeProfileId,

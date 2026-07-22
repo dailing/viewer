@@ -519,6 +519,10 @@ async function applyJson() {
         <section v-show="activeSettingSection === 'superWorkspace'" class="config-section">
           <div class="section-heading"><i class="bi bi-diagram-3"></i><h2>Super Workspace</h2></div>
           <div class="section-body">
+            <label class="compact-field checkbox-field" title="Allow scrolling beyond the newest message so it can be positioned higher in the chat pane">
+              <span>Chat virtual reading space</span>
+              <input v-model="draft.superWorkspace.chat_virtual_space_enabled" class="form-check-input" type="checkbox" />
+            </label>
             <div class="context-limit-settings">
               <div class="context-limit-heading">
                 <strong>Provider context limits</strong>
@@ -815,6 +819,23 @@ async function applyJson() {
                   :value="(item[1] as MarkdownElementStyle).font_weight || ''"
                   placeholder="normal"
                   @input="updateStyleText(item[1] as MarkdownElementStyle, 'font_weight', ($event.target as HTMLInputElement).value)"
+                />
+              </label>
+              <label class="style-card">
+                <strong>Strong / Bold</strong>
+                <span>Color</span>
+                <input
+                  class="form-control form-control-sm form-control-color"
+                  type="color"
+                  :value="activeTheme.strong.color || '#1f4e79'"
+                  @input="updateStyleText(activeTheme.strong, 'color', ($event.target as HTMLInputElement).value)"
+                />
+                <span>Weight</span>
+                <input
+                  class="form-control form-control-sm"
+                  :value="activeTheme.strong.font_weight || '700'"
+                  placeholder="700"
+                  @input="updateStyleText(activeTheme.strong, 'font_weight', ($event.target as HTMLInputElement).value)"
                 />
               </label>
             </div>

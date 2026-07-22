@@ -38,6 +38,7 @@ const currentChat = ref<SuperChatSummary | null>(null);
 const resolvedChatId = ref("");
 const items = ref<SuperDisplayItem[]>([]);
 const threadRef = ref<HTMLElement | null>(null);
+const threadMessageEndRef = ref<HTMLElement | null>(null);
 const composerShellRef = ref<HTMLElement | null>(null);
 const composerTextareaRef = ref<InstanceType<typeof VoiceTextarea> | null>(null);
 const composer = computed({
@@ -82,6 +83,7 @@ const renderedItemHtmlById = computed(() => {
 const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value);
 const composerPinned = computed(() => composerState.isPinned(resolvedChatId.value));
 const composerCollapsed = computed(() => !composerPinned.value && !composerExpanded.value && !composer.value.trim());
+const virtualReadingSpaceEnabled = computed(() => files.superWorkspaceConfig.chat_virtual_space_enabled);
 const citationPreview = ref<{
   messageId: string;
   title: string;
@@ -929,7 +931,9 @@ function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
 async function scrollThreadToBottom() {
   await nextTick();
   const element = threadRef.value;
-  if (element) element.scrollTop = element.scrollHeight;
+  const messageEnd = threadMessageEndRef.value;
+  if (!element || !messageEnd) return;
+  element.scrollTop = Math.max(0, messageEnd.offsetTop - element.clientHeight);
 }
 </script>
 
@@ -1049,6 +1053,8 @@ async function scrollThreadToBottom() {
       </article>
       <div v-if="!items.length && !historyLoading" class="super-empty-thread">Write one message and dispatch it into this chat.</div>
       <div v-if="historyLoading && !items.length" class="super-empty-thread">Loading history</div>
+      <div v-if="items.length" ref="threadMessageEndRef" class="super-thread-message-end" aria-hidden="true"></div>
+      <div v-if="items.length && virtualReadingSpaceEnabled" class="super-thread-virtual-space" aria-hidden="true"></div>
     </section>
 
     <div ref="composerShellRef" class="super-composer" :class="{ collapsed: composerCollapsed }" @focusout="handleComposerFocusOut">
@@ -1190,6 +1196,17 @@ async function scrollThreadToBottom() {
   flex-direction: column;
   gap: 5px;
   min-width: 0;
+}
+
+.super-thread-message-end {
+  flex: 0 0 0;
+  height: 0;
+}
+
+.super-thread-virtual-space {
+  flex: 0 0 calc(100% - 20px);
+  min-height: 120px;
+  pointer-events: none;
 }
 
 .super-user-turn,

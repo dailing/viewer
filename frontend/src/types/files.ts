@@ -71,6 +71,7 @@ export interface MarkdownTheme {
   h3: MarkdownElementStyle;
   h4: MarkdownElementStyle;
   paragraph: MarkdownElementStyle;
+  strong: MarkdownElementStyle;
   code: MarkdownElementStyle;
   code_background: string;
   link_color: string;
@@ -120,6 +121,7 @@ export interface SuperWorkspaceConfig {
   hindsight_retain_enabled: boolean;
   hindsight_api_url: string;
   hindsight_bank_prefix: string;
+  chat_virtual_space_enabled: boolean;
   chat_history_bootstrap_enabled: boolean;
   chat_history_bootstrap_tokens: number;
   active_dispatch_profile_id: string;

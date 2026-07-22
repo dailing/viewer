@@ -580,6 +580,12 @@ body {
   line-height: var(--markdown-render-paragraph-line-height, var(--markdown-paragraph-line-height));
 }
 
+.markdown-content strong,
+.markdown-content b {
+  color: var(--markdown-strong-color);
+  font-weight: var(--markdown-strong-font-weight);
+}
+
 .markdown-content a {
   color: var(--markdown-link-color);
 }

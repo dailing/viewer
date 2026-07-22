@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -8,8 +9,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.app.codex_app_server import CodexAppServerRuntime, CodexAppServerProcessConfig
-from backend.app.codex_app_server_sessions import CodexAppServerSessionManager, CodexAppServerSession
+from backend.app.codex_app_server import (
+    APP_SERVER_STREAM_LIMIT_BYTES,
+    CodexAppServerRuntime,
+    CodexAppServerProcessConfig,
+)
+from backend.app.codex_app_server_sessions import (
+    TOOL_EVENT_MAX_BYTES,
+    CodexAppServerSessionManager,
+    CodexAppServerSession,
+)
 from backend.app.models import AgentEventType
 
 
@@ -22,6 +31,107 @@ class TestCodexAppServerRuntime:
         )
         assert config.provider == "codex-app-server"
         assert config.enabled is True
+        assert config.yolo is True
+        assert APP_SERVER_STREAM_LIMIT_BYTES == 4 * 1024 * 1024
+
+    def test_live_process_with_failed_reader_is_not_running(self):
+        runtime = CodexAppServerRuntime(
+            CodexAppServerProcessConfig(provider="codex-app-server", command="codex", arguments=()),
+            AsyncMock(),
+        )
+        runtime._process = MagicMock(returncode=None)
+        runtime._reader_task = MagicMock()
+        runtime._reader_task.done.return_value = True
+
+        assert runtime.running is False
+
+    def test_reader_failure_rejects_waiters_and_terminates_process(self):
+        async def exercise():
+            runtime = CodexAppServerRuntime(
+                CodexAppServerProcessConfig(provider="codex-app-server", command="codex", arguments=()),
+                AsyncMock(),
+            )
+            process = MagicMock(returncode=None)
+            process.stdout.readline = AsyncMock(side_effect=ValueError("Separator is found, but chunk is longer than limit"))
+            runtime._process = process
+            runtime._initialized = True
+            runtime._terminate_process = AsyncMock()
+            request_waiter = asyncio.get_running_loop().create_future()
+            turn_waiter = asyncio.get_running_loop().create_future()
+            runtime._pending_requests[1] = request_waiter
+            runtime._turn_waiters["turn-1"] = turn_waiter
+
+            await runtime._read_loop()
+
+            assert runtime._initialized is False
+            assert runtime._pending_requests == {}
+            assert runtime._turn_waiters == {}
+            with pytest.raises(RuntimeError, match="reader failed"):
+                await request_waiter
+            with pytest.raises(RuntimeError, match="reader failed"):
+                await turn_waiter
+            runtime._terminate_process.assert_awaited_once_with(process)
+
+        asyncio.run(exercise())
+
+    def test_close_process_terminates_child_after_reader_task_failure(self):
+        async def exercise():
+            runtime = CodexAppServerRuntime(
+                CodexAppServerProcessConfig(provider="codex-app-server", command="codex", arguments=()),
+                AsyncMock(),
+            )
+            process = MagicMock(returncode=None)
+            runtime._process = process
+
+            async def failed_reader():
+                raise ValueError("oversized JSONL line")
+
+            runtime._reader_task = asyncio.create_task(failed_reader())
+            await asyncio.sleep(0)
+            runtime._terminate_process = AsyncMock()
+
+            await runtime._close_process()
+
+            runtime._terminate_process.assert_awaited_once_with(process)
+            assert runtime._process is None
+
+        asyncio.run(exercise())
+
+    def test_yolo_turn_bypasses_approvals_and_sandbox(self):
+        runtime = CodexAppServerRuntime(
+            CodexAppServerProcessConfig(provider="codex-app-server", command="codex", arguments=()),
+            AsyncMock(),
+        )
+        runtime.start = AsyncMock()
+        runtime._send_request = AsyncMock(return_value={"turn": {"id": "turn-1", "status": "completed"}})
+
+        result = asyncio.run(runtime.turn_start("thread-1", "run directly"))
+
+        assert result == {"turn": {"id": "turn-1", "status": "completed"}}
+        runtime._send_request.assert_awaited_once_with(
+            "turn/start",
+            {
+                "threadId": "thread-1",
+                "input": [{"type": "text", "text": "run directly"}],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
+            },
+        )
+
+    def test_yolo_can_be_disabled(self):
+        runtime = CodexAppServerRuntime(
+            CodexAppServerProcessConfig(provider="codex-app-server", command="codex", arguments=(), yolo=False),
+            AsyncMock(),
+        )
+        runtime.start = AsyncMock()
+        runtime._send_request = AsyncMock(return_value={"turn": {"id": "turn-1", "status": "completed"}})
+
+        asyncio.run(runtime.turn_start("thread-1", "stay configured"))
+
+        runtime._send_request.assert_awaited_once_with(
+            "turn/start",
+            {"threadId": "thread-1", "input": [{"type": "text", "text": "stay configured"}]},
+        )
 
     def test_not_running_before_start(self):
         handler = AsyncMock()
@@ -40,6 +150,8 @@ class TestCodexAppServerRuntime:
             handler,
         )
         runtime._process = MagicMock(returncode=None, stdin=MagicMock())
+        runtime._reader_task = MagicMock()
+        runtime._reader_task.done.return_value = False
         runtime._write_message = AsyncMock()
         runtime._close_process = AsyncMock()
 
@@ -52,6 +164,55 @@ class TestCodexAppServerRuntime:
 
         runtime._close_process.assert_awaited_once()
         assert runtime._pending_requests == {}
+
+    def test_runtime_accepts_jsonl_notification_larger_than_asyncio_default(self):
+        fake_server = r'''
+import json
+import sys
+
+def receive():
+    return json.loads(sys.stdin.readline())
+
+def send(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+request = receive()
+send({"id": request["id"], "result": {"userAgent": "fake-app-server"}})
+receive()
+request = receive()
+send({"id": request["id"], "result": {"thread": {"id": "thread-1"}}})
+request = receive()
+send({"id": request["id"], "result": {"turn": {"id": "turn-1", "status": "inProgress"}}})
+send({"method": "item/commandExecution/outputDelta", "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "x" * 100000}})
+send({"method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}}})
+'''
+
+        async def exercise():
+            updates = []
+
+            async def handle_update(_thread_id, update):
+                updates.append(update)
+
+            runtime = CodexAppServerRuntime(
+                CodexAppServerProcessConfig(
+                    provider="codex-app-server-test",
+                    command=sys.executable,
+                    arguments=("-u", "-c", fake_server),
+                ),
+                handle_update,
+            )
+            try:
+                thread_id = await runtime.thread_start("/tmp")
+                result = await runtime.turn_start(thread_id, "test")
+            finally:
+                await runtime.shutdown()
+
+            assert result["turn"]["status"] == "completed"
+            output_update = next(update for update in updates if update["method"] == "item/commandExecution/outputDelta")
+            assert len(output_update["params"]["delta"]) == 100000
+
+        asyncio.run(exercise())
 
 
 class TestCodexAppServerSessionManager:
@@ -262,6 +423,33 @@ class TestCodexAppServerSessionManager:
         manager._upsert_event(session, second)
         assert len(session.events) == 1
         assert session.events[0]["text"] == "Hello world"
+
+    def test_command_output_is_bounded_across_streaming_deltas(self):
+        manager = CodexAppServerSessionManager()
+        session = CodexAppServerSession(
+            provider="codex-app-server",
+            id="test-id",
+            user_id="dailing",
+            title="test",
+            cwd="/tmp",
+            model=None,
+            created_at=time.time(),
+            updated_at=time.time(),
+            provider_session_id="thread-123",
+        )
+        for delta in ("x" * 24_000, "y" * 24_000):
+            event = manager._normalized_event(
+                session,
+                "item/commandExecution/outputDelta",
+                {"delta": delta, "threadId": "thread-123", "turnId": "turn-1", "itemId": "command-1"},
+                {},
+            )
+            assert event is not None
+            manager._upsert_event(session, event)
+
+        text = session.events[0]["text"]
+        assert len(text.encode("utf-8")) <= TOOL_EVENT_MAX_BYTES
+        assert text.endswith("...<viewer tool output truncated>")
 
     def test_normalized_event_unknown_ignored(self):
         manager = CodexAppServerSessionManager()

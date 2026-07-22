@@ -190,7 +190,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/codex_app_server.py` and `backend/app/codex_app_server_sessions.py`
 
 - Experimental Codex-native App Server provider over JSONL stdio (not ACP). Each subprocess connection completes `initialize` and the `initialized` acknowledgement before thread methods, then uses `thread/start` / `thread/resume`, `turn/start` / `turn/interrupt`, and waits for `turn/completed` before leaving `running`.
+- `VIEWER_CODEX_APP_SERVER_YOLO` defaults to `true`. In that mode every `turn/start` explicitly sends `approvalPolicy: never` and the App Server `dangerFullAccess` sandbox policy, the protocol-native equivalent of bypassing approvals and sandboxing; setting the environment variable to false leaves permission policy to normal Codex configuration.
 - Any JSON-RPC control-request timeout closes and discards the entire App Server subprocess because its request/connection state is no longer trustworthy; the next operation starts and initializes a fresh process instead of cascading the timeout into later requests.
+- App Server stdio uses a finite 4 MiB JSONL line limit instead of asyncio's 64 KiB default because completion notifications can repeat aggregated command output. A stdout reader failure immediately fails pending RPC/turn waiters, marks the connection unhealthy, and terminates the subprocess; process cleanup still runs when a reader task has already failed. Viewer tool-event text is capped at 32 KiB and unknown-notification/debug logging records identifiers and payload size rather than recursively logging complete tool output.
 - Normalizes the current slash-form Codex notifications (`item/agentMessage/delta`, reasoning/command/file-change deltas, `thread/tokenUsage/updated`, and `turn/completed`) into Viewer AgentEvent IR. Deltas with the same Codex `itemId` upsert one streaming event and are finalized when the turn completes.
 - Viewer does not implement Codex App Server client-side approval or interactive-input requests; unsupported server requests receive an explicit JSON-RPC method error instead of hanging. Provider/model retry remains owned by Codex.
 
@@ -325,6 +327,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Role response headers are metadata rows: they show the role label, session id, context usage as both percentage and compact absolute `used / model window` tokens when available, and the cite action.
 - Visible user messages and final role responses have small cite buttons that insert `@msg-{message_id}` into the leading composer prefix. Backend `super_workspace_runtime.py` parses citation tokens, writes citation edges and queued dispatch-task rows, and leaves execution to the independent Super Workspace worker process.
 - The page renders flat display items directly: user query items show dispatch state and target chips, assistant `message:assistant` items with the same `driver_run_id` are grouped into one response bubble anchored at that run's first visible message even when multiple runs interleave, and reasoning/tool/thinking rows stay hidden at the display-feed query layer.
+- When enabled in Super Workspace settings, the chat thread includes one viewport of virtual space after the final message. Initial loads and newly sent queries scroll to the message-end anchor rather than the absolute scroll-container end, so the latest message starts at the normal lower edge while readers can manually move it toward the middle or top of the pane.
 
 `frontend/src/components/DirectoryPicker.vue`
 
@@ -411,9 +414,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Server section has confirmed backend-only restart, backend+worker restart, and stop buttons. Both restart buttons call `/api/admin/restart`, with the full restart adding `include_worker=true`; the page polls `/api/health` until the PID changes, then reloads. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
 - Appearance controls system/light/dark theme selection and compact/comfortable density; density maps directly to the shared control sizing rather than persisting arbitrary pixel sizes.
 - Codex Models controls the default Codex model, the available model list used by Super Workspace Codex roles, and the optional Codex subprocess proxy.
-- Super Workspace controls provider context recycle percentage/token defaults, chat-level Hindsight retain, optional Hindsight API URL override, chat memory bank prefix, and new-session visible chat-history bootstrap with a rough token budget.
+- Super Workspace controls the optional chat virtual reading space, provider context recycle percentage/token defaults, chat-level Hindsight retain, optional Hindsight API URL override, chat memory bank prefix, and new-session visible chat-history bootstrap with a rough token budget.
 - Voice controls voice enablement, the persisted Whisper model option list, selected model, language code, translation toggle, and target language used by `/api/voice/ws`.
-- Markdown config stores an active theme plus a theme list. The editor can duplicate/reset themes and edit heading/body/paragraph/code font sizes, colors, weights, link/code/border colors, and Highlight.js token colors.
+- Markdown config stores an active theme plus a theme list. The editor can duplicate/reset themes and edit heading/body/paragraph/code font sizes, colors, weights, dedicated Strong/Bold color and weight, link/code/border colors, and Highlight.js token colors. Built-in Light/Default Strong text is dark blue, while Dark Strong text is pale yellow.
 
 `frontend/src/components/FileTree.vue`
 

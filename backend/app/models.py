@@ -1,7 +1,7 @@
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class FileEntry(BaseModel):
@@ -74,11 +74,20 @@ class MarkdownTheme(BaseModel):
     h3: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=19, color="#34383d", font_weight="700", line_height=1.3))
     h4: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=16, color="#34383d", font_weight="700", line_height=1.35))
     paragraph: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=15, color="#404449", line_height=1.65))
+    strong: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(color="#1f4e79", font_weight="700"))
     code: MarkdownElementStyle = Field(default_factory=lambda: MarkdownElementStyle(font_size=13, color="#4a4e53"))
     code_background: str = "#f5f5f5"
     link_color: str = "#58749a"
     border_color: str = "#e3e4e6"
     syntax: MarkdownSyntaxStyle = Field(default_factory=MarkdownSyntaxStyle)
+
+    @model_validator(mode="before")
+    @classmethod
+    def add_theme_aware_strong_default(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "strong" in value:
+            return value
+        color = "#f2d675" if str(value.get("name") or "").strip().casefold() == "dark" else "#1f4e79"
+        return {**value, "strong": {"color": color, "font_weight": "700"}}
 
 
 class MarkdownConfig(BaseModel):
@@ -150,6 +159,7 @@ class SuperWorkspaceConfig(BaseModel):
     hindsight_retain_enabled: bool = True
     hindsight_api_url: str = ""
     hindsight_bank_prefix: str = "super-workspace"
+    chat_virtual_space_enabled: bool = True
     chat_history_bootstrap_enabled: bool = True
     chat_history_bootstrap_tokens: int = Field(default=5000, ge=0, le=50000)
     active_dispatch_profile_id: str = "local-vllm"

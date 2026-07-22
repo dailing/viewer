@@ -67,6 +67,8 @@ const appStyle = computed(() => {
     "--markdown-paragraph-font-size": `${theme.paragraph.font_size ?? 15}px`,
     "--markdown-paragraph-color": theme.paragraph.color ?? "#404449",
     "--markdown-paragraph-line-height": String(theme.paragraph.line_height ?? 1.65),
+    "--markdown-strong-color": theme.strong.color ?? "#1f4e79",
+    "--markdown-strong-font-weight": theme.strong.font_weight ?? "700",
     "--markdown-code-font-size": `${theme.code.font_size ?? 13}px`,
     "--markdown-code-color": theme.code.color ?? "#4a4e53",
     "--markdown-code-background": theme.code_background,

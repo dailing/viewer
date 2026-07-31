@@ -6,6 +6,12 @@ import { storageKey } from "../utils/storage";
 
 const PINNED_FILES_KEY = "viewer.pinnedFiles.v1";
 
+type ChatFileNavigation = {
+  root: string;
+  currentPath: string;
+  visitStack: string[];
+};
+
 export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   name: "Default",
   body: { font_size: 15, color: "#404449", font_weight: null, line_height: 1.65 },
@@ -357,6 +363,9 @@ export const useFilesStore = defineStore("files", {
     pinned: readPinnedFiles(),
     visitTimes: {} as Record<string, number>,
     visitStack: [] as string[],
+    activeNavigationChatId: "",
+    activeNavigationRoot: "",
+    navigationByChat: {} as Record<string, ChatFileNavigation>,
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
     codexConfig: normalizeCodexConfig(),
@@ -419,27 +428,65 @@ export const useFilesStore = defineStore("files", {
         this.loading = false;
       }
     },
-    async enterDirectory(path: string) {
-      if (this.currentPath && this.currentPath !== path) {
-        this.visitStack.push(this.currentPath);
+    persistActiveNavigation() {
+      if (!this.activeNavigationChatId) return;
+      this.navigationByChat = {
+        ...this.navigationByChat,
+        [this.activeNavigationChatId]: {
+          root: this.activeNavigationRoot,
+          currentPath: this.currentPath,
+          visitStack: [...this.visitStack],
+        },
+      };
+    },
+    async activateChatNavigation(chatId: string, root: string) {
+      const normalizedChatId = chatId.trim();
+      const normalizedRoot = root.trim();
+      if (!normalizedChatId || !normalizedRoot) return;
+      if (this.activeNavigationChatId === normalizedChatId && this.activeNavigationRoot === normalizedRoot) {
+        if (!this.listings[this.currentPath]) await this.loadDirectory(this.currentPath || normalizedRoot);
+        return;
       }
+
+      this.persistActiveNavigation();
+      const saved = this.navigationByChat[normalizedChatId];
+      const navigation: ChatFileNavigation = saved?.root === normalizedRoot
+        ? { root: saved.root, currentPath: saved.currentPath || normalizedRoot, visitStack: [...saved.visitStack] }
+        : { root: normalizedRoot, currentPath: normalizedRoot, visitStack: [] };
+      this.activeNavigationChatId = normalizedChatId;
+      this.activeNavigationRoot = normalizedRoot;
+      this.currentPath = navigation.currentPath;
+      this.visitStack = navigation.visitStack;
+      this.persistActiveNavigation();
+      await this.loadDirectory(this.currentPath);
+    },
+    async enterDirectory(path: string, recordHistory = true) {
+      const navigationChatId = this.activeNavigationChatId;
+      const previous = this.currentPath;
       await this.loadDirectory(path);
+      if (navigationChatId !== this.activeNavigationChatId) return;
+      if (recordHistory && previous && previous !== path && this.visitStack[this.visitStack.length - 1] !== previous) {
+        this.visitStack.push(previous);
+      }
       this.currentPath = path;
       this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
+      this.persistActiveNavigation();
     },
     async recordVisit(path: string) {
       this.visitTimes = { ...this.visitTimes, [path]: Date.now() / 1000 };
     },
     async enterParentDirectory() {
-      // Pop the visit stack; every directory entry pushed one, so every
-      // ".." click pops one. This naturally handles symlink targets and
-      // normal subdirectories with the same code path.
-      if (this.visitStack.length > 0) {
-        const previous = this.visitStack.pop()!;
-        await this.enterDirectory(previous);
-        return;
-      }
-      // Stack empty: nowhere to go back to.
+      const navigationChatId = this.activeNavigationChatId;
+      const remaining = [...this.visitStack];
+      while (remaining.length > 0 && remaining[remaining.length - 1] === this.currentPath) remaining.pop();
+      const previous = remaining.pop();
+      if (!previous) return;
+      await this.loadDirectory(previous);
+      if (navigationChatId !== this.activeNavigationChatId) return;
+      this.visitStack = remaining;
+      this.currentPath = previous;
+      this.visitTimes = { ...this.visitTimes, [previous]: Date.now() / 1000 };
+      this.persistActiveNavigation();
     },
     async refreshAffected(path: string, isDir: boolean) {
       if (isDir && this.expanded.has(path)) await this.loadDirectory(path);

@@ -10,6 +10,7 @@ const emit = defineEmits<{
 }>();
 
 const props = defineProps<{
+  chatId: string;
   defaultCwd?: string;
 }>();
 
@@ -26,20 +27,18 @@ const isDragging = computed(() => dragDepth.value > 0);
 const canEnterParent = computed(() => files.visitStack.length > 0);
 
 watch(
-  () => props.defaultCwd ?? "",
-  (cwd) => {
-    void enterDefaultDirectory(cwd);
+  () => [props.chatId, props.defaultCwd ?? ""] as const,
+  ([chatId, cwd]) => {
+    void activateChatDirectory(chatId, cwd);
   },
   { immediate: true },
 );
 
-async function enterDefaultDirectory(cwd: string) {
-  if (files.currentPath === cwd) return;
+async function activateChatDirectory(chatId: string, cwd: string) {
+  if (!chatId || !cwd) return;
   uploadError.value = "";
-  // Clear navigation stack when switching to a new chat root.
-  files.visitStack = [];
   try {
-    await files.enterDirectory(cwd);
+    await files.activateChatNavigation(chatId, cwd);
   } catch (error) {
     uploadError.value = error instanceof Error ? error.message : String(error);
   }

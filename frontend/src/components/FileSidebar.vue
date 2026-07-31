@@ -90,6 +90,7 @@ function fileLabel(path: string) {
 
 async function openPinnedFile(path: string) {
   try {
+    await files.activateChatNavigation(currentChatId.value, defaultToolCwd.value);
     await files.enterDirectory(path);
   } catch {
     emit("open-file", path);
@@ -188,7 +189,12 @@ async function openPinnedFile(path: string) {
         </button>
       </div>
       <div v-if="['files', 'git', 'terminals'].includes(activeTool) && !defaultToolCwd" class="empty-panel">Open a chat to use this tool</div>
-      <FilesPanel v-else-if="activeTool === 'files'" :default-cwd="defaultToolCwd" @open-file="emit('open-file', $event)" />
+      <FilesPanel
+        v-else-if="activeTool === 'files'"
+        :chat-id="currentChatId"
+        :default-cwd="defaultToolCwd"
+        @open-file="emit('open-file', $event)"
+      />
       <GitPanel v-else-if="activeTool === 'git'" :default-cwd="defaultToolCwd" @open-diff="(path, cwd) => emit('open-diff', path, cwd)" />
       <TerminalsPanel v-else-if="activeTool === 'terminals'" :default-cwd="defaultToolCwd" @open-terminal="emit('open-terminal', $event)" />
       <ChatsPanel

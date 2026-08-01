@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from backend.app.agent_history import AgentHistoryStore, SuperDriverRunCreate
 from backend.app.models import SuperWorkspaceConfig
 from backend.app.super_workspace import SuperRole, SuperWorkspaceManager
-from backend.app.super_workspace_runtime import CodexAppServerSuperDriver, CodexSuperDriver, HermesSuperDriver, SuperWorkspaceRuntime
+from backend.app.super_workspace_runtime import CodexAppServerSuperDriver, CodexSuperDriver, HermesSuperDriver, OpenCodeSuperDriver, SuperWorkspaceRuntime
 
 
 def role() -> SuperRole:
@@ -31,6 +31,7 @@ class RolePromptSeparationTests(unittest.TestCase):
         self.assertEqual(config.provider_context_limits["codex"].context_recycle_percent, 70)
         self.assertEqual(config.provider_context_limits["codex-app-server"].context_recycle_tokens, 200_000)
         self.assertIsNone(config.provider_context_limits["hermes"].context_recycle_tokens)
+        self.assertIsNone(config.provider_context_limits["opencode"].context_recycle_tokens)
 
     def test_chat_virtual_space_is_enabled_by_default_and_can_be_disabled(self) -> None:
         self.assertTrue(SuperWorkspaceConfig().chat_virtual_space_enabled)
@@ -47,6 +48,11 @@ class RolePromptSeparationTests(unittest.TestCase):
     def test_acp_failures_are_not_converted_to_success_by_visible_output(self) -> None:
         self.assertTrue(CodexSuperDriver.accept_final_response_on_failed_session)
         self.assertFalse(HermesSuperDriver.accept_final_response_on_failed_session)
+        self.assertFalse(OpenCodeSuperDriver.accept_final_response_on_failed_session)
+
+    def test_runtime_registers_opencode_acp_driver(self) -> None:
+        runtime = SuperWorkspaceRuntime()
+        self.assertIsInstance(runtime._drivers["opencode"], OpenCodeSuperDriver)
 
     def test_failed_session_error_is_written_to_driver_target(self) -> None:
         runtime = SuperWorkspaceRuntime()

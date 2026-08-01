@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from acp.schema import AgentCapabilities, AgentMessageChunk, PromptCapabilities, TextContentBlock, ToolCallProgress, ToolCallStart
+from acp.schema import AgentCapabilities, AgentMessageChunk, PermissionOption, PromptCapabilities, TextContentBlock, ToolCallProgress, ToolCallStart
 
 from app.acp_runtime import ACPProcessConfig, ACPRuntime
 from app.acp_sessions import ACPSession, ACPSessionManager
@@ -403,6 +403,56 @@ class HermesACPRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GenericACPAbstractionTests(unittest.TestCase):
+    def test_permission_requests_prefer_session_wide_auto_approval(self) -> None:
+        runtime = ACPRuntime(
+            ACPProcessConfig(provider="example", command="example-agent", arguments=()),
+            AsyncMock(),
+        )
+        response = asyncio.run(
+            runtime._client.request_permission(
+                "session-1",
+                SimpleNamespace(title="Edit files"),
+                [
+                    PermissionOption(kind="allow_once", name="Allow once", optionId="once"),
+                    PermissionOption(kind="allow_always", name="Always allow", optionId="always"),
+                ],
+            )
+        )
+
+        self.assertEqual(response.outcome.outcome, "selected")
+        self.assertEqual(response.outcome.option_id, "always")
+
+    def test_permission_requests_fall_back_to_one_time_approval(self) -> None:
+        runtime = ACPRuntime(
+            ACPProcessConfig(provider="example", command="example-agent", arguments=()),
+            AsyncMock(),
+        )
+        response = asyncio.run(
+            runtime._client.request_permission(
+                "session-1",
+                SimpleNamespace(title="Run command"),
+                [PermissionOption(kind="allow_once", name="Allow once", optionId="once")],
+            )
+        )
+
+        self.assertEqual(response.outcome.outcome, "selected")
+        self.assertEqual(response.outcome.option_id, "once")
+
+    def test_permission_requests_without_allow_option_are_cancelled(self) -> None:
+        runtime = ACPRuntime(
+            ACPProcessConfig(provider="example", command="example-agent", arguments=()),
+            AsyncMock(),
+        )
+        response = asyncio.run(
+            runtime._client.request_permission(
+                "session-1",
+                SimpleNamespace(title="Blocked tool"),
+                [PermissionOption(kind="reject_once", name="Reject", optionId="reject")],
+            )
+        )
+
+        self.assertEqual(response.outcome.outcome, "cancelled")
+
     def test_runtime_process_start_is_supplied_by_provider_config(self) -> None:
         runtime = ACPRuntime(
             ACPProcessConfig(

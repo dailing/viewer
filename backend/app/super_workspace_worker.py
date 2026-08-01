@@ -10,6 +10,7 @@ from .process_registry import clear_process_state, process_slot_state, write_pro
 from .storage import ensure_view_home
 from .super_workspace_runtime import SuperWorkspaceRuntime
 from .hermes_sessions import hermes_session_manager
+from .opencode_sessions import opencode_session_manager
 
 LEADERSHIP_CHECK_INTERVAL_SECONDS = 5.0
 # Grace window before a fresh worker starts monitoring the pid file. The parent
@@ -66,6 +67,10 @@ async def main_async() -> int:
             await hermes_session_manager.start()
         except Exception:
             logger.exception("Hermes ACP startup failed; Hermes tasks will retry lazily")
+        try:
+            await opencode_session_manager.start()
+        except Exception:
+            logger.exception("OpenCode ACP startup failed; OpenCode tasks will retry lazily")
         runtime._stop.clear()
         await runtime._dispatch_worker_loop()
     finally:
@@ -75,6 +80,7 @@ async def main_async() -> int:
         except asyncio.CancelledError:
             pass
         await hermes_session_manager.shutdown()
+        await opencode_session_manager.shutdown()
         # clear_process_state only removes the pid file if it still points to us,
         # so a newer worker's registration is left untouched.
         clear_process_state(name, os.getpid())

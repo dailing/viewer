@@ -19,6 +19,7 @@ const providerContextOptions = [
   { id: "codex", name: "Codex" },
   { id: "codex-app-server", name: "Codex App Server" },
   { id: "hermes", name: "Hermes" },
+  { id: "opencode", name: "OpenCode" },
 ] as const;
 const jsonDraft = ref("");
 const settingsSearch = ref("");

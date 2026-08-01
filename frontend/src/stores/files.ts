@@ -142,6 +142,7 @@ export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
     codex: { context_recycle_percent: 70, context_recycle_tokens: null },
     "codex-app-server": { context_recycle_percent: 80, context_recycle_tokens: 200_000 },
     hermes: { context_recycle_percent: 80, context_recycle_tokens: null },
+    opencode: { context_recycle_percent: 80, context_recycle_tokens: null },
   },
   dispatch_prompt_template: DEFAULT_DISPATCH_PROMPT_TEMPLATE,
   dispatch_profiles: DEFAULT_DISPATCH_PROFILES,

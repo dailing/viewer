@@ -5,6 +5,7 @@ import type { AgentProvider, AgentProviderInfo } from "../types/agents";
 const DEFAULT_PROVIDERS: AgentProviderInfo[] = [
   { id: "codex", name: "Codex", icon: "bi-stars" },
   { id: "hermes", name: "Hermes", icon: "bi-lightning-charge" },
+  { id: "opencode", name: "OpenCode", icon: "bi-terminal" },
 ];
 
 export const useAgentsStore = defineStore("agents", {

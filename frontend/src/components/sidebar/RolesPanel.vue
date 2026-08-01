@@ -55,7 +55,10 @@ function updateProvider(role: SuperRole) {
         :title="role.name"
         @click="selectRole(role)"
       >
-        <i class="bi" :class="role.provider === 'hermes' ? 'bi-lightning' : 'bi-stars'"></i>
+        <i
+          class="bi"
+          :class="role.provider === 'hermes' ? 'bi-lightning' : role.provider === 'opencode' ? 'bi-terminal' : 'bi-stars'"
+        ></i>
         <span class="sidebar-row-name">{{ role.name }}</span>
       </button>
     </div>

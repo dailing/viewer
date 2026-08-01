@@ -133,6 +133,7 @@ def default_provider_context_limits() -> dict[str, ProviderContextLimitConfig]:
         "codex": ProviderContextLimitConfig(context_recycle_percent=70.0),
         "codex-app-server": ProviderContextLimitConfig(context_recycle_percent=80.0, context_recycle_tokens=200_000),
         "hermes": ProviderContextLimitConfig(context_recycle_percent=80.0),
+        "opencode": ProviderContextLimitConfig(context_recycle_percent=80.0),
     }
 
 

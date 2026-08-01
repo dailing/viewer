@@ -35,6 +35,7 @@ from .files import (
 )
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
 from .hermes_sessions import hermes_session_manager
+from .opencode_sessions import opencode_session_manager
 from .logging import ensure_logging
 from .models import ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate
 from .restart import request_restart, request_stop
@@ -61,6 +62,7 @@ AGENT_PROVIDERS = {
     "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars"},
     "codex-app-server": {"id": "codex-app-server", "name": "Codex App Server (Experimental)", "icon": "bi-stars"},
     "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge"},
+    "opencode": {"id": "opencode", "name": "OpenCode", "icon": "bi-terminal"},
 }
 
 NOISY_SUCCESS_PATHS = {
@@ -120,6 +122,7 @@ async def shutdown() -> None:
     await terminal_manager.shutdown()
     await codex_session_manager.shutdown()
     await hermes_session_manager.shutdown()
+    await opencode_session_manager.shutdown()
 
 
 @app.get("/api/health")

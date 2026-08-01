@@ -24,6 +24,7 @@ from .agent_history import DEFAULT_CONTEXT_RECYCLE_PERCENT, SuperChatRoleSession
 from .codex_sessions import codex_session_manager
 from .codex_app_server_sessions import codex_app_server_session_manager
 from .hermes_sessions import hermes_session_manager
+from .opencode_sessions import opencode_session_manager
 from .process_registry import process_slot_state, write_process_state
 from .storage import LOG_DIR
 from .super_workspace import SuperDispatchRequest, SuperRole, super_workspace_manager
@@ -350,6 +351,11 @@ class HermesSuperDriver(ACPSuperDriver):
         super().__init__("hermes", hermes_session_manager)
 
 
+class OpenCodeSuperDriver(ACPSuperDriver):
+    def __init__(self) -> None:
+        super().__init__("opencode", opencode_session_manager)
+
+
 class CodexAppServerSuperDriver(ACPSuperDriver):
     def __init__(self) -> None:
         super().__init__("codex-app-server", codex_app_server_session_manager)
@@ -372,6 +378,7 @@ class SuperWorkspaceRuntime:
             "codex": CodexSuperDriver(),
             "codex-app-server": CodexAppServerSuperDriver(),
             "hermes": HermesSuperDriver(),
+            "opencode": OpenCodeSuperDriver(),
         }
 
     async def start(self) -> None:

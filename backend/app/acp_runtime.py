@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 
 import acp
 from acp.schema import (
+    AllowedOutcome,
     AudioContentBlock,
     BlobResourceContents,
     ClientCapabilities,
@@ -50,8 +51,21 @@ class ViewerACPClient:
         self.connection = connection
 
     async def request_permission(self, session_id: str, tool_call: Any, options: list[Any], **_: Any) -> RequestPermissionResponse:
+        for preferred_kind in ("allow_always", "allow_once"):
+            option = next((item for item in options if getattr(item, "kind", None) == preferred_kind), None)
+            if option is not None:
+                logger.info(
+                    "{} ACP permission auto-approved session={} tool={} kind={}",
+                    self.provider,
+                    session_id,
+                    getattr(tool_call, "title", None),
+                    preferred_kind,
+                )
+                return RequestPermissionResponse(
+                    outcome=AllowedOutcome(outcome="selected", optionId=str(option.option_id))
+                )
         logger.warning(
-            "{} ACP permission denied because Viewer has no approval UI session={} tool={} options={}",
+            "{} ACP permission request has no allow option; cancelling session={} tool={} options={}",
             self.provider,
             session_id,
             getattr(tool_call, "title", None),

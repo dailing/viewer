@@ -204,7 +204,10 @@ function sendGlobalInput() {
 .pane-titlebar-action.has-label {
   font-size: 10px;
   font-weight: 700;
-  width: 32px;
+  min-width: max-content;
+  padding: 0 6px;
+  white-space: nowrap;
+  width: auto;
 }
 
 .pane-titlebar-action.active {

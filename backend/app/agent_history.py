@@ -130,6 +130,7 @@ class AgentHistoryFileChange(BaseModel):
 
 class AgentHistoryMessage(BaseModel):
     id: str
+    turn_id: str
     workspace_id: str | None = None
     chat_id: str | None = None
     provider: str
@@ -186,6 +187,7 @@ class SuperHistoryRun(BaseModel):
     message: str
     query: str
     message_id: str
+    turn_id: str
     content_blocks: list[dict[str, Any]] = Field(default_factory=list)
     role_ids: list[str] = Field(default_factory=list)
     citation_ids: list[str] = Field(default_factory=list)
@@ -228,6 +230,7 @@ class SuperDisplayItem(BaseModel):
     created_at: float
     updated_at: float
     message_id: str
+    turn_id: str
     query_message_id: str | None = None
     driver_run_id: str | None = None
     parent_message_id: str | None = None
@@ -428,10 +431,12 @@ class SuperWorkspaceMessageRow(AgentHistoryBase):
         Index("idx_super_messages_user_query_time", "user_id", "query", "occurred_at", "id"),
         Index("idx_super_messages_query_message", "query_message_id", "occurred_at", "id"),
         Index("idx_super_messages_driver_time", "driver_run_id", "occurred_at", "id"),
+        Index("idx_super_messages_turn_time", "turn_id", "occurred_at", "id"),
         Index("idx_super_messages_session_time", "provider", "viewer_session_id", "occurred_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    turn_id: Mapped[str] = mapped_column(String, nullable=False)
     workspace_id: Mapped[str | None] = mapped_column(String, ForeignKey("super_workspaces.id", ondelete="CASCADE"))
     user_id: Mapped[str] = mapped_column(String, nullable=False)
     conversation_id: Mapped[str] = mapped_column(String, nullable=False)
@@ -591,6 +596,34 @@ class AgentHistoryStore:
 
     def _ensure_schema(self) -> None:
         AgentHistoryBase.metadata.create_all(self.engine)
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE IF NOT EXISTS agent_history_schema_migrations "
+                "(id VARCHAR PRIMARY KEY, applied_at FLOAT NOT NULL)"
+            )
+            columns = {
+                str(row[1])
+                for row in connection.exec_driver_sql("PRAGMA table_info(super_workspace_messages)")
+            }
+            migration_id = "super_workspace_messages_turn_id_v1"
+            migrated = connection.exec_driver_sql(
+                "SELECT 1 FROM agent_history_schema_migrations WHERE id = ?",
+                (migration_id,),
+            ).first()
+            if migrated is None:
+                if "turn_id" not in columns:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE super_workspace_messages ADD COLUMN turn_id VARCHAR NOT NULL DEFAULT ''"
+                    )
+                connection.exec_driver_sql(
+                    "UPDATE super_workspace_messages SET turn_id = id WHERE turn_id IS NULL OR turn_id = ''"
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO agent_history_schema_migrations (id, applied_at) VALUES (?, ?)",
+                    (migration_id, time.time()),
+                )
+        for index in SuperWorkspaceMessageRow.__table__.indexes:
+            index.create(self.engine, checkfirst=True)
         for index in SuperWorkspaceDriverRunRow.__table__.indexes:
             index.create(self.engine, checkfirst=True)
 
@@ -1235,6 +1268,7 @@ class AgentHistoryStore:
                 db,
                 {
                     "id": message_id,
+                    "turn_id": message_id,
                     "workspace_id": workspace.id,
                     "user_id": normalized_user,
                     "conversation_id": chat.id,
@@ -2068,7 +2102,8 @@ class AgentHistoryStore:
         self,
         *,
         user_id: str,
-            workspace_id: str | None,
+        workspace_id: str | None,
+        turn_id: str,
         provider: str,
         viewer_session_id: str,
         provider_session_id: str | None,
@@ -2096,6 +2131,7 @@ class AgentHistoryStore:
                 db,
                 {
                     "id": row_id,
+                    "turn_id": turn_id,
                     "workspace_id": workspace_id,
                     "user_id": user_id,
                     "conversation_id": str(raw.get("chat_id") or raw.get("conversation_id") or ""),
@@ -2179,6 +2215,7 @@ class AgentHistoryStore:
             created_at=float(row.occurred_at),
             updated_at=updated_at,
             message_id=str(row.id),
+            turn_id=str(row.turn_id),
             query_message_id=query_message_id,
             driver_run_id=driver_run_id,
             parent_message_id=row.parent_message_id if isinstance(row.parent_message_id, str) else None,
@@ -2242,6 +2279,7 @@ class AgentHistoryStore:
             message=query,
             query=query,
             message_id=str(row.id),
+            turn_id=str(row.turn_id),
             content_blocks=[
                 value
                 for value in self._parse_json(row.raw_json, {}).get("content_blocks", [])
@@ -2386,6 +2424,7 @@ class AgentHistoryStore:
         driver_run_id = row.driver_run_id if isinstance(row.driver_run_id, str) else None
         return AgentHistoryMessage(
             id=str(row.id),
+            turn_id=str(row.turn_id),
             workspace_id=row.workspace_id if isinstance(row.workspace_id, str) else None,
             chat_id=str(row.conversation_id or ""),
             provider=str(row.provider),

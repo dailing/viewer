@@ -62,6 +62,7 @@ class ACPSession:
     acp_events: list[dict] = field(default_factory=list)
     acp_event_keys: dict[str, int] = field(default_factory=dict)
     acp_turn_index: int = 0
+    current_turn_id: str = ""
     loading_provider_history: bool = False
     available_commands: list[dict] = field(default_factory=list)
     current_mode: str | None = None
@@ -262,6 +263,7 @@ class ACPSessionManager:
             agent_history_store.record_provider_message(
                 user_id=session.user_id,
                 workspace_id=lineage.get("workspace_id"),
+                turn_id=str(event.get("turn_id") or session.current_turn_id),
                 provider=self.provider,
                 viewer_session_id=session.id,
                 provider_session_id=session.provider_session_id,
@@ -413,6 +415,7 @@ class ACPSessionManager:
         self._write_meta(session)
         if cleaned_prompt:
             session.acp_turn_index += 1
+            session.current_turn_id = str(session.lineage.get("driver_run_id") or uuid.uuid4().hex)
             session.status = "running"
             session.run_task = asyncio.create_task(self._run(session, prompt))
         return session.summary()
@@ -456,6 +459,7 @@ class ACPSessionManager:
             session.title = self._title_for(cleaned_prompt)
         session.status = "running"
         session.acp_turn_index += 1
+        session.current_turn_id = str(session.lineage.get("driver_run_id") or uuid.uuid4().hex)
         session.exit_code = None
         session.error = None
         session.updated_at = now
@@ -526,6 +530,7 @@ class ACPSessionManager:
             session.updated_at = time.time()
             self._write_meta(session)
             session.run_task = None
+            session.current_turn_id = ""
 
     def _provider_turn_error(self, session: ACPSession, event_start: int) -> str | None:
         """Return a provider-adapter error inferred from standard ACP updates.
@@ -611,6 +616,10 @@ class ACPSessionManager:
         raw: dict[str, Any],
     ) -> dict[str, Any] | None:
         now = time.time()
+        turn_id = session.current_turn_id
+        if not turn_id:
+            turn_id = str(session.lineage.get("driver_run_id") or uuid.uuid4().hex)
+            session.current_turn_id = turn_id
         event_type: AgentEventType
         event_key: str
         text = ""
@@ -623,19 +632,14 @@ class ACPSessionManager:
             text = self._content_block_text(content)
             if not text:
                 return None
-            # The provider stamps a per-turn UUID as messageId (hermes: live
-            # turns mint one at prompt start; history replay stamps each old
-            # message with its reconstructed turn id). A provider that omits
-            # message ids gets a random uuid per message — chunks without a
-            # stable id must never merge across turns, which is exactly the
-            # bug the old acp_turn_index fallback caused.
-            message_id = getattr(update, "message_id", None) or raw.get("messageId") or uuid.uuid4().hex
-            event_key = f"{update_type}:{message_id}"
+            # Viewer owns turn boundaries. ACP messageId remains available in
+            # raw protocol data, but never controls semantic aggregation.
+            event_key = f"{update_type}:{turn_id}"
             event_type = AgentEventType.MESSAGE_ASSISTANT if update_type == "agent_message_chunk" else AgentEventType.REASONING
             append = True
         elif update_type in {"tool_call", "tool_call_update"}:
             tool_call_id = str(getattr(update, "tool_call_id", None) or raw.get("toolCallId") or "unknown")
-            event_key = f"tool:{tool_call_id}"
+            event_key = f"tool:{turn_id}:{tool_call_id}"
             existing_index = session.acp_event_keys.get(event_key)
             existing_raw = (
                 session.acp_events[existing_index].get("raw_preview", {})
@@ -664,7 +668,7 @@ class ACPSessionManager:
                     if content_text:
                         text = f"{text}\n{content_text}"
         elif update_type == "plan":
-            event_key = f"plan:{session.acp_turn_index}"
+            event_key = f"plan:{turn_id}"
             event_type = AgentEventType.PLAN_UPDATE
             entries = raw.get("entries") if isinstance(raw.get("entries"), list) else []
             symbols = {"completed": "✓", "in_progress": "●", "pending": "○"}
@@ -689,6 +693,7 @@ class ACPSessionManager:
         if (append and text == "") or (not append and not text.strip()):
             return None
         return {
+            "turn_id": turn_id,
             "event_key": event_key,
             "source_event_id": f"{self.provider}-acp:{session.provider_session_id or session.id}:{event_key}",
             "received_at": now,

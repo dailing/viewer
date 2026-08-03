@@ -67,6 +67,7 @@ export type SuperRolePatch = Partial<Omit<SuperRole, "id" | "created_at" | "upda
 
 export type AgentHistoryMessage = {
   id: string;
+  turn_id: string;
   workspace_id?: string | null;
   chat_id?: string | null;
   provider: AgentProvider;
@@ -127,6 +128,7 @@ export type SuperHistoryRun = {
   message: string;
   query: string;
   message_id: string;
+  turn_id: string;
   content_blocks?: Record<string, unknown>[];
   role_ids: string[];
   citation_ids?: string[];
@@ -176,6 +178,7 @@ export type SuperDisplayItem = {
   created_at: number;
   updated_at: number;
   message_id: string;
+  turn_id: string;
   query_message_id?: string | null;
   driver_run_id?: string | null;
   parent_message_id?: string | null;

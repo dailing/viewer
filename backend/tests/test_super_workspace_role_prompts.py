@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.app.agent_history import AgentHistoryStore, SuperDriverRunCreate
+from backend.app.codex_background_runner import insert_provider_message
 from backend.app.models import SuperWorkspaceConfig
 from backend.app.super_workspace import SuperRole, SuperWorkspaceManager
 from backend.app.super_workspace_runtime import CodexAppServerSuperDriver, CodexSuperDriver, HermesSuperDriver, OpenCodeSuperDriver, SuperWorkspaceRuntime
@@ -168,7 +170,68 @@ class RolePromptSeparationTests(unittest.TestCase):
             )
 
             self.assertEqual(run.content_blocks, blocks)
+            self.assertEqual(run.turn_id, run.message_id)
             self.assertEqual(store.get_super_run(run.id, "user").content_blocks, blocks)
+
+    def test_legacy_messages_are_migrated_to_one_turn_per_message(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = AgentHistoryStore(path)
+            workspace = store.ensure_default_workspace("user")
+            chats = store.create_super_chat("user", name="Chat", root="project", workspace_id=workspace.id)
+            run = store.create_super_run("user", "legacy", "queued", chat_id=chats.active_chat_id)
+            store.engine.dispose()
+
+            with sqlite3.connect(path) as connection:
+                connection.execute("DROP INDEX idx_super_messages_turn_time")
+                connection.execute("ALTER TABLE super_workspace_messages DROP COLUMN turn_id")
+                connection.execute(
+                    "DELETE FROM agent_history_schema_migrations "
+                    "WHERE id = 'super_workspace_messages_turn_id_v1'"
+                )
+
+            migrated = AgentHistoryStore(path)
+            with migrated.engine.connect() as connection:
+                turn_id = connection.exec_driver_sql(
+                    "SELECT turn_id FROM super_workspace_messages WHERE id = ?",
+                    (run.message_id,),
+                ).scalar_one()
+            self.assertEqual(turn_id, run.message_id)
+
+    def test_codex_background_writer_persists_worker_turn_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            store = AgentHistoryStore(path)
+            insert_provider_message(
+                path,
+                user_id="user",
+                workspace_id=None,
+                chat_id=None,
+                provider="codex",
+                viewer_session_id="viewer-1",
+                provider_session_id=None,
+                turn_id="worker-turn-1",
+                query_message_id=None,
+                driver_run_id=None,
+                parent_message_id=None,
+                sender_role_id=None,
+                recipient_role_id=None,
+                role_id=None,
+                event_index=0,
+                received_at=1.0,
+                source_path=None,
+                source_event_id="event-1",
+                source_line=None,
+                role="assistant",
+                event_type="message:assistant",
+                text="done",
+                raw={},
+            )
+            with store.engine.connect() as connection:
+                turn_id = connection.exec_driver_sql(
+                    "SELECT turn_id FROM super_workspace_messages WHERE source_event_id = 'event-1'"
+                ).scalar_one()
+            self.assertEqual(turn_id, "worker-turn-1")
 
     def test_dispatch_task_preserves_force_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

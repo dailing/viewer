@@ -71,7 +71,7 @@ const dispatchPickerTitle = computed(() => {
   return `Dispatch to ${selectedDispatchRoles.value.map((role) => role.name).join(", ")}`;
 });
 const inputContextId = computed(() => `super-workspace:${resolvedChatId.value}:composer`);
-const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByDriverRun(withTargetPlaceholders([...items.value].reverse())));
+const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByTurn(withTargetPlaceholders([...items.value].reverse())));
 const renderedItemHtmlById = computed(() => {
   const rendered = new Map<string, string>();
   for (const item of displayItems.value) {
@@ -488,11 +488,11 @@ function stopCitationPreview() {
   clearCitationPreview();
 }
 
-function mergeMessagesByDriverRun(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
+function mergeMessagesByTurn(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
   const merged: SuperThreadItem[] = [];
   const runIndexes = new Map<string, number>();
   for (const item of orderedItems) {
-    const key = messageDriverRunKey(item);
+    const key = messageTurnKey(item);
     if (!key) {
       merged.push({ ...item, merged_message_ids: item.kind === "message" ? [item.message_id] : undefined });
       continue;
@@ -545,6 +545,7 @@ function displayItemFromTargetPlaceholder(query: SuperDisplayItem, target: Super
     created_at: query.created_at,
     updated_at: query.updated_at,
     message_id: `${query.message_id}:target:${target.id}`,
+    turn_id: target.id,
     query_message_id: query.message_id,
     driver_run_id: target.id,
     parent_message_id: query.parent_message_id ?? query.message_id,
@@ -567,9 +568,9 @@ function displayItemFromTargetPlaceholder(query: SuperDisplayItem, target: Super
   };
 }
 
-function messageDriverRunKey(item: SuperDisplayItem) {
-  if (item.kind !== "message" || !item.driver_run_id) return "";
-  return item.driver_run_id;
+function messageTurnKey(item: SuperDisplayItem) {
+  if (item.kind !== "message") return "";
+  return item.turn_id;
 }
 
 function appendMergedRunMessage(base: SuperThreadItem, item: SuperDisplayItem): SuperThreadItem {
@@ -892,6 +893,7 @@ function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
     created_at: run.created_at,
     updated_at: run.updated_at,
     message_id: run.message_id,
+    turn_id: run.turn_id,
     query_message_id: run.message_id,
     driver_run_id: null,
     parent_message_id: run.parent_message_id ?? null,

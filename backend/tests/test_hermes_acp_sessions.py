@@ -239,13 +239,14 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
             "viewer-1",
             manager_session("viewer-1", "acp-session-1"),
         )
+        session.current_turn_id = "worker-turn-1"
         manager._record_lineage_events = Mock()
 
         await manager._handle_acp_update(
             "acp-session-1",
             AgentMessageChunk(
                 sessionUpdate="agent_message_chunk",
-                messageId="turn-1",
+                messageId="provider-message-1",
                 content=TextContentBlock(type="text", text="Hello "),
             ),
         )
@@ -253,7 +254,7 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
             "acp-session-1",
             AgentMessageChunk(
                 sessionUpdate="agent_message_chunk",
-                messageId="turn-1",
+                messageId="provider-message-2",
                 content=TextContentBlock(type="text", text="world"),
             ),
         )
@@ -267,6 +268,7 @@ class HermesACPSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(session.acp_events), 2)
+        self.assertEqual(session.acp_events[0]["turn_id"], "worker-turn-1")
         self.assertEqual(session.acp_events[0]["text"], "Hello world")
         self.assertIn("completed", session.acp_events[1]["text"])
 

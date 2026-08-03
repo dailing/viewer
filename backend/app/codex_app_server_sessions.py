@@ -302,6 +302,7 @@ class CodexAppServerSessionManager:
                 agent_history_store.record_provider_message(
                     user_id=session.user_id,
                     workspace_id=lineage.get("workspace_id"),
+                    turn_id=str(lineage["turn_id"]),
                     provider=self.provider,
                     viewer_session_id=session.id,
                     provider_session_id=session.provider_session_id,

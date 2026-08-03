@@ -694,6 +694,7 @@ class SuperWorkspaceRuntime:
         if driver.supports_content_blocks and run.content_blocks:
             prompt = [{"type": "text", "text": prompt}, *run.content_blocks]
         lineage = {
+            "turn_id": task.id,
             "workspace_id": task.workspace_id,
             "chat_id": run.chat_id,
             "query_message_id": run.message_id,

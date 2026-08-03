@@ -1175,6 +1175,8 @@ class CodexSessionManager:
             session.user_id,
             "--run-id",
             run_id,
+            "--turn-id",
+            str((lineage or {}).get("turn_id") or run_id),
         ]
         if resume and session.codex_session_id:
             runner_command.extend(["--codex-session-id", session.codex_session_id])

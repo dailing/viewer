@@ -378,6 +378,7 @@ def insert_provider_message(
     provider: str,
     viewer_session_id: str,
     provider_session_id: str | None,
+    turn_id: str,
     query_message_id: str | None,
     driver_run_id: str | None,
     parent_message_id: str | None,
@@ -407,6 +408,7 @@ def insert_provider_message(
             provider=provider,
             viewer_session_id=viewer_session_id,
             provider_session_id=provider_session_id,
+            turn_id=turn_id,
             query_message_id=query_message_id,
             driver_run_id=driver_run_id,
             parent_message_id=parent_message_id,
@@ -436,6 +438,7 @@ def insert_provider_message_row(
     provider: str,
     viewer_session_id: str,
     provider_session_id: str | None,
+    turn_id: str,
     query_message_id: str | None,
     driver_run_id: str | None,
     parent_message_id: str | None,
@@ -459,15 +462,16 @@ def insert_provider_message_row(
     connection.execute(
         """
         INSERT INTO super_workspace_messages (
-          id, workspace_id, user_id, conversation_id, parent_message_id, sender_role_id, recipient_role_id, role_id,
+          id, turn_id, workspace_id, user_id, conversation_id, parent_message_id, sender_role_id, recipient_role_id, role_id,
           query_message_id, driver_run_id, provider, viewer_session_id, provider_session_id,
           event_index, received_at, source_path, source_event_id, source_line, role, event_type,
           text, query, status, rationale, error, requested_role_ids_json, selected_role_ids_json,
           patch_text, raw_json, occurred_at, ingested_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', '[]', '[]', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', '', '[]', '[]', ?, ?, ?, ?)
         ON CONFLICT(provider, viewer_session_id, source_event_id) DO UPDATE SET
           workspace_id=coalesce(super_workspace_messages.workspace_id, excluded.workspace_id),
+          turn_id=excluded.turn_id,
           user_id=excluded.user_id,
           parent_message_id=coalesce(super_workspace_messages.parent_message_id, excluded.parent_message_id),
           sender_role_id=coalesce(super_workspace_messages.sender_role_id, excluded.sender_role_id),
@@ -490,6 +494,7 @@ def insert_provider_message_row(
         """,
         (
             row_id,
+            turn_id,
             workspace_id,
             user_id,
             chat_id or "",
@@ -571,6 +576,7 @@ def record_prompt(
         provider="codex",
         viewer_session_id=viewer_session_id,
         provider_session_id=provider_session_id,
+        turn_id=str(lineage["turn_id"]),
         query_message_id=lineage.get("query_message_id"),
         driver_run_id=lineage.get("driver_run_id"),
         parent_message_id=lineage.get("parent_message_id"),
@@ -638,6 +644,7 @@ def write_rollout_events(db_path: Path, state: dict, rollout_path: Path, new_eve
                 "provider": "codex",
                 "viewer_session_id": str(state["viewer_session_id"]),
                 "provider_session_id": state.get("codex_session_id") if isinstance(state.get("codex_session_id"), str) else None,
+                "turn_id": str(state["turn_id"]),
                 "query_message_id": state.get("query_message_id") if isinstance(state.get("query_message_id"), str) else None,
                 "driver_run_id": state.get("driver_run_id") if isinstance(state.get("driver_run_id"), str) else None,
                 "parent_message_id": state.get("parent_message_id") if isinstance(state.get("parent_message_id"), str) else None,
@@ -701,6 +708,7 @@ def main() -> int:
     parser.add_argument("--viewer-session-id", required=True)
     parser.add_argument("--user-id", required=True)
     parser.add_argument("--run-id")
+    parser.add_argument("--turn-id", required=True)
     parser.add_argument("--codex-session-id")
     parser.add_argument("--workspace-id")
     parser.add_argument("--chat-id")
@@ -721,6 +729,7 @@ def main() -> int:
     command = json.loads(args.command)
     started_at = time.time()
     lineage = {
+        "turn_id": args.turn_id,
         "query_message_id": args.query_message_id,
         "workspace_id": args.workspace_id,
         "chat_id": args.chat_id,

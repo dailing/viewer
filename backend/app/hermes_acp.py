@@ -32,6 +32,14 @@ class HermesACPRuntime(ACPRuntime):
             update_handler,
         )
 
+    async def set_model(self, session_id: str, model: str) -> None:
+        """Use Hermes' dedicated ACP model method instead of configOptions."""
+        await self.start()
+        await self._require_connection().set_session_model(
+            model_id=model,
+            session_id=session_id,
+        )
+
 
 # Compatibility name for callers that previously caught the Hermes-specific type.
 HermesACPSessionNotFound = ACPSessionNotFound

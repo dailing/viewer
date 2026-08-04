@@ -209,7 +209,7 @@ class ACPRuntime:
         session_id = str(response.session_id)
         self._bound_sessions.add(session_id)
         if model:
-            await connection.set_session_model(model_id=model, session_id=session_id)
+            await self.set_model(session_id, model)
         return session_id
 
     async def ensure_session(self, session_id: str, cwd: str, model: str | None = None) -> None:
@@ -228,7 +228,16 @@ class ACPRuntime:
                 raise ACPSessionNotFound(f"{self.provider} ACP session not found: {session_id}")
             self._bound_sessions.add(session_id)
         if model:
-            await self._require_connection().set_session_model(model_id=model, session_id=session_id)
+            await self.set_model(session_id, model)
+
+    async def set_model(self, session_id: str, model: str) -> None:
+        """Apply an opaque model selection through the current ACP config surface."""
+        await self.start()
+        await self._require_connection().set_config_option(
+            config_id="model",
+            session_id=session_id,
+            value=model,
+        )
 
     @staticmethod
     def _content_block(value: Any) -> Any:

@@ -150,6 +150,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Provider-neutral ACP client and stdio process runtime. `ACPProcessConfig` supplies provider id, executable, arguments, enabled state, profile, and YOLO metadata; adding another conforming local ACP agent requires a process adapter rather than another protocol implementation.
 - Performs initialize/capability negotiation and implements new/load/list/fork/resume/prompt/cancel/close/model/mode. It validates ACP ContentBlocks, capability-gates images/audio/resources, drains subprocess stderr, and deliberately declines client-hosted filesystem and terminal capabilities.
+- Exposes one provider-overridable `set_model(session_id, model)` operation. The provider-neutral implementation uses the current ACP `session/set_config_option` model option and treats the selection value as opaque; provider adapters override only when their ACP implementation requires a legacy or dedicated method.
 - The shared ACP client auto-approves Agent permission requests, preferring `allow_always` and falling back to `allow_once`; it cancels only when the Agent supplies no allow option. Provider-side explicit deny rules remain authoritative because they do not produce an approvable request.
 - A missing `session/load` result—including the all-default response object produced when ACP SDK 0.9 deserializes a JSON-RPC null—is treated as missing and is never marked as bound.
 
@@ -178,6 +179,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/hermes_acp.py` and `backend/app/hermes_sessions.py`
 
 - Thin Hermes registration layer over the shared ACP runtime/session manager. It supplies `hermes`, `-p <profile> [--yolo] acp`, the Hermes metadata directory, and legacy Viewer-metadata key migration.
+- Overrides the shared model-selection operation to call Hermes' dedicated `session/set_model` method; Hermes accepts opaque `provider:model` selections there but does not apply its model through the generic ACP config option.
 - ACP is enabled by default through `VIEWER_HERMES_ACP_ENABLED`; `VIEWER_HERMES_PROFILE` defaults to `default`, `VIEWER_HERMES_COMMAND` defaults to `hermes`, and `VIEWER_HERMES_YOLO` defaults to `true`. YOLO affects only the Viewer-owned subprocess and does not change Hermes gateway/profile configuration.
 - `hermes_session_manager` remains the compatibility singleton used by Super Workspace. Hermes private `state.db` is owned solely by Hermes and is never read by Viewer.
 - Hermes itself is not patched by Viewer. Because the current Hermes ACP adapter can encode terminal model failure as an `end_turn` message (or an empty `end_turn`) instead of a failed RPC/stop reason, the thin Viewer Hermes session adapter recognizes those terminal message shapes and marks the turn failed; retry remains entirely inside Hermes.

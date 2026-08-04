@@ -403,6 +403,19 @@ class HermesACPRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("legacy-session", runtime._bound_sessions)
 
+    async def test_model_selection_uses_hermes_dedicated_method(self) -> None:
+        runtime = HermesACPRuntime(AsyncMock())
+        connection = SimpleNamespace(set_session_model=AsyncMock())
+        runtime.start = AsyncMock()
+        runtime._require_connection = Mock(return_value=connection)
+
+        await runtime.set_model("session-1", "openrouter:anthropic/claude-sonnet-4.6")
+
+        connection.set_session_model.assert_awaited_once_with(
+            model_id="openrouter:anthropic/claude-sonnet-4.6",
+            session_id="session-1",
+        )
+
 
 class GenericACPAbstractionTests(unittest.TestCase):
     def test_permission_requests_prefer_session_wide_auto_approval(self) -> None:
@@ -469,6 +482,23 @@ class GenericACPAbstractionTests(unittest.TestCase):
         self.assertEqual(runtime.provider, "example")
         self.assertEqual(runtime.command, "example-agent")
         self.assertEqual(runtime._agent_arguments(), ["serve-acp", "--stdio"])
+
+    def test_model_selection_uses_standard_config_option(self) -> None:
+        runtime = ACPRuntime(
+            ACPProcessConfig(provider="example", command="example-agent", arguments=()),
+            AsyncMock(),
+        )
+        connection = SimpleNamespace(set_config_option=AsyncMock())
+        runtime.start = AsyncMock()
+        runtime._require_connection = Mock(return_value=connection)
+
+        asyncio.run(runtime.set_model("session-1", "provider/model"))
+
+        connection.set_config_option.assert_awaited_once_with(
+            config_id="model",
+            session_id="session-1",
+            value="provider/model",
+        )
 
     def test_session_manager_is_provider_neutral(self) -> None:
         runtime = SimpleNamespace(profile="work")

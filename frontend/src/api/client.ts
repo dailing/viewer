@@ -2,6 +2,7 @@ import type { DirectoryListing, FileMeta, TextLineWindow, ViewerConfig } from ".
 import type { TerminalInfo } from "../types/terminals";
 import type {
   RoutingConfigData,
+  InferenceCatalog,
   SuperChatCreate,
   SuperChatList,
   SuperChatPatch,
@@ -195,6 +196,10 @@ export function terminalSocketUrl(id: string): string {
 
 export async function listAgentProviders(): Promise<AgentProviderInfo[]> {
   return request<AgentProviderInfo[]>("/api/agents/providers");
+}
+
+export async function listInferenceTargets(refresh = false): Promise<InferenceCatalog> {
+  return request<InferenceCatalog>(`/api/agents/inference-targets${refresh ? "?refresh=true" : ""}`);
 }
 
 export async function getSuperWorkspace(): Promise<SuperWorkspaceData> {

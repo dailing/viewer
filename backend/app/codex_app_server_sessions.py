@@ -490,7 +490,7 @@ class CodexAppServerSessionManager:
             elif not session.provider_session_id:
                 session.provider_session_id = await self.runtime.thread_start(session.cwd, session.model)
             self._write_meta(session)
-            result = await self.runtime.turn_start(session.provider_session_id, prompt)
+            result = await self.runtime.turn_start(session.provider_session_id, prompt, session.model)
             turn = result.get("turn", {})
             turn_status = turn.get("status", "completed")
             failed = turn_status in {"failed", "interrupted"}

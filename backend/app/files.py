@@ -417,14 +417,11 @@ def read_config() -> ConfigData:
     cleaned = ConfigData(
         appearance=config.appearance,
         markdown=config.markdown,
-        codex=config.codex,
         voice=config.voice,
         super_workspace=config.super_workspace,
     )
-    codex_raw = raw.get("codex") if isinstance(raw, dict) else None
     voice_raw = raw.get("voice") if isinstance(raw, dict) else None
     super_workspace_raw = raw.get("super_workspace") if isinstance(raw, dict) else None
-    missing_codex_defaults = not isinstance(codex_raw, dict)
     missing_voice_defaults = (
         not isinstance(voice_raw, dict)
         or "available_models" not in voice_raw
@@ -439,12 +436,11 @@ def read_config() -> ConfigData:
         or "dispatch_history_word_budget" not in super_workspace_raw
         or "dispatch_prompt_template" not in super_workspace_raw
         or "routing_policies" not in super_workspace_raw
-        or "provider_accounts" not in super_workspace_raw
+        or super_workspace_raw.get("routing_schema_version") != 3
         or "default_routing_policy_id" not in super_workspace_raw
     )
     if isinstance(raw, dict) and (
-        missing_codex_defaults
-        or missing_voice_defaults
+        missing_voice_defaults
         or missing_super_workspace_defaults
     ):
         write_config(cleaned)

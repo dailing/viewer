@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import OperationalError
 
 from .agent_history import DEFAULT_CONTEXT_RECYCLE_PERCENT, SuperChatRoleSessionState, SuperDispatchTask, SuperDriverRunCreate, SuperHistoryRun, agent_history_store
-from .codex_sessions import codex_session_manager
 from .codex_app_server_sessions import codex_app_server_session_manager
+from .driver_catalog import list_hermes_targets, list_opencode_targets
 from .hermes_sessions import hermes_session_manager
 from .opencode_sessions import opencode_session_manager
 from .process_registry import process_slot_state, write_process_state
@@ -30,6 +30,7 @@ from .storage import LOG_DIR
 from .super_workspace import SuperDispatchRequest, SuperRole, super_workspace_manager
 from .models import RoutingCandidateConfig, RoutingPolicyConfig
 from .identity import normalize_user_id
+from .inference import DriverError, FailureScope, InferenceCatalog, InferenceTarget, inference_target_id
 
 
 class RoutingTargetBusy(RuntimeError):
@@ -88,6 +89,50 @@ class SuperAgentDriver:
     provider = ""
     supports_content_blocks = False
     accept_final_response_on_failed_session = True
+
+    @property
+    def agent_id(self) -> str:
+        return self.provider
+
+    async def list_targets(self) -> tuple[list[InferenceTarget], list[str]]:
+        return [], []
+
+    def normalize_error(self, exc: Exception, candidate: RoutingCandidateConfig) -> DriverError:
+        message = str(exc) or exc.__class__.__name__
+        value = message.casefold()
+        provider_scope = f"{candidate.agent_id}/{candidate.provider_id}"
+        if any(token in value for token in ("refusal", "refused")):
+            return DriverError(message, category="refusal")
+        if any(token in value for token in ("invalid prompt", "invalid request", "bad request", "400")):
+            return DriverError(message, category="request")
+        if any(token in value for token in ("credit", "quota", "402", "insufficient")):
+            return DriverError(
+                message, category="credit", scope=FailureScope.PROVIDER, scope_id=provider_scope,
+                retryable=True, safe_to_failover=True,
+            )
+        if any(token in value for token in ("rate limit", "429", "too many requests")):
+            return DriverError(
+                message, category="rate_limit", scope=FailureScope.PROVIDER, scope_id=provider_scope,
+                retryable=True, safe_to_failover=True,
+            )
+        if any(token in value for token in ("unauthorized", "forbidden", "401", "403", "auth")):
+            return DriverError(
+                message, category="auth", scope=FailureScope.PROVIDER, scope_id=provider_scope,
+                retryable=True, safe_to_failover=True,
+            )
+        if any(token in value for token in ("model not found", "unknown model", "model unavailable", "not available")):
+            return DriverError(
+                message, category="model_unavailable", scope=FailureScope.TARGET,
+                scope_id=candidate.target_id, retryable=True, safe_to_failover=True,
+            )
+        return DriverError(
+            message,
+            category="runtime",
+            scope=FailureScope.AGENT,
+            scope_id=candidate.agent_id,
+            retryable=True,
+            safe_to_failover=False,
+        )
 
     def provider_context_recycle_percent(self) -> float:
         """Provider-level default context recycle percent threshold."""
@@ -212,17 +257,7 @@ class SuperAgentDriver:
     @staticmethod
     def _effective_model(role: SuperRole) -> str | None:
         explicit_model = (role.model or "").strip()
-        if explicit_model:
-            return explicit_model
-        if role.provider != "codex":
-            return None
-        try:
-            from .files import read_config
-
-            default_model = read_config().codex.default_model.strip()
-            return default_model or None
-        except Exception:
-            return None
+        return explicit_model or None
 
     def _snapshot_matches(
         self,
@@ -274,13 +309,9 @@ class SuperAgentDriver:
         }
 
     async def _create(self, prompt: str | list[dict[str, Any]], cwd: str, model: str | None, user_id: str, lineage: dict[str, Any]) -> dict[str, Any]:
-        if self.provider == "codex":
-            return await self.manager().create(prompt, cwd, model, user_id, lineage=lineage)
         return await self.manager().create(prompt, cwd, model, user_id, lineage=lineage)
 
     async def _send(self, session_id: str, prompt: str | list[dict[str, Any]], model: str | None, lineage: dict[str, Any]) -> dict[str, Any]:
-        if self.provider == "codex":
-            return await self.manager().send(session_id, prompt, model, lineage=lineage)
         return await self.manager().send(session_id, prompt, model, lineage=lineage)
 
     def manager(self):
@@ -329,13 +360,6 @@ class SuperAgentDriver:
         raise ValueError("session_ref must use provider:session_id format")
 
 
-class CodexSuperDriver(SuperAgentDriver):
-    provider = "codex"
-
-    def manager(self):
-        return codex_session_manager
-
-
 class ACPSuperDriver(SuperAgentDriver):
     supports_content_blocks = True
     # ACP request failures are authoritative. An agent may have emitted a
@@ -355,15 +379,56 @@ class HermesSuperDriver(ACPSuperDriver):
     def __init__(self) -> None:
         super().__init__("hermes", hermes_session_manager)
 
+    async def list_targets(self) -> tuple[list[InferenceTarget], list[str]]:
+        profile = os.environ.get("VIEWER_HERMES_PROFILE", "default").strip() or "default"
+        return await list_hermes_targets(profile)
+
 
 class OpenCodeSuperDriver(ACPSuperDriver):
     def __init__(self) -> None:
         super().__init__("opencode", opencode_session_manager)
 
+    async def list_targets(self) -> tuple[list[InferenceTarget], list[str]]:
+        command = os.environ.get("VIEWER_OPENCODE_COMMAND", "opencode").strip() or "opencode"
+        return await list_opencode_targets(command)
+
 
 class CodexAppServerSuperDriver(ACPSuperDriver):
     def __init__(self) -> None:
         super().__init__("codex-app-server", codex_app_server_session_manager)
+
+    async def list_targets(self) -> tuple[list[InferenceTarget], list[str]]:
+        try:
+            raw_models = await codex_app_server_session_manager.runtime.model_list()
+        except Exception as exc:
+            return [], [f"Could not list Codex App Server models: {exc}"]
+        targets: list[InferenceTarget] = []
+        for raw in raw_models:
+            model_id = str(raw.get("id") or raw.get("model") or "").strip()
+            if not model_id:
+                continue
+            modalities = raw.get("inputModalities") if isinstance(raw.get("inputModalities"), list) else []
+            targets.append(
+                InferenceTarget(
+                    target_id=inference_target_id(self.agent_id, "openai-subscription", model_id),
+                    agent_id=self.agent_id,
+                    agent_name="Codex App Server",
+                    provider_id="openai-subscription",
+                    provider_name="OpenAI Subscription",
+                    model_id=model_id,
+                    model_name=str(raw.get("displayName") or model_id),
+                    selection_id=model_id,
+                    is_default=bool(raw.get("isDefault")),
+                    authenticated=True,
+                    capabilities={
+                        "tools": True,
+                        "filesystem": True,
+                        "vision": "image" in modalities,
+                    },
+                    source="codex-app-server",
+                )
+            )
+        return targets, []
 
 
 class SuperWorkspaceRuntime:
@@ -379,13 +444,48 @@ class SuperWorkspaceRuntime:
         # they finish (graceful drain). Only _stop aborts in-flight sessions.
         self._leadership_lost = asyncio.Event()
         self._orphan_sweep_done = False
-        self._routing_cooldowns: dict[str, float] = {}
+        self._catalog_cache: tuple[float, list[InferenceTarget], list[str]] | None = None
         self._drivers: dict[str, SuperAgentDriver] = {
-            "codex": CodexSuperDriver(),
             "codex-app-server": CodexAppServerSuperDriver(),
             "hermes": HermesSuperDriver(),
             "opencode": OpenCodeSuperDriver(),
         }
+
+    async def list_inference_targets(
+        self, user_id: str | None = None, *, refresh: bool = False
+    ) -> InferenceCatalog:
+        now = time.time()
+        if refresh or self._catalog_cache is None or now - self._catalog_cache[0] > 300:
+            results = await asyncio.gather(
+                *(driver.list_targets() for driver in self._drivers.values()), return_exceptions=True
+            )
+            targets: list[InferenceTarget] = []
+            warnings: list[str] = []
+            for (agent_id, _driver), result in zip(self._drivers.items(), results, strict=True):
+                if isinstance(result, BaseException):
+                    warnings.append(f"{agent_id}: {result}")
+                    continue
+                discovered, driver_warnings = result
+                targets.extend(discovered)
+                warnings.extend(driver_warnings)
+            targets.sort(key=lambda item: (item.agent_name.casefold(), item.provider_name.casefold(), item.model_name.casefold()))
+            self._catalog_cache = (now, targets, warnings)
+        refreshed_at, cached_targets, warnings = self._catalog_cache
+        workspace_id = super_workspace_manager.read(user_id).id
+        health = agent_history_store.list_target_health(user_id, workspace_id)
+        blocked = {(item.scope_type, item.scope_id) for item in health if item.status != "healthy"}
+        targets = [
+            target.model_copy(
+                update={
+                    "available": target.available
+                    and ("agent", target.agent_id) not in blocked
+                    and ("provider", f"{target.agent_id}/{target.provider_id}") not in blocked
+                    and ("target", target.target_id) not in blocked
+                }
+            )
+            for target in cached_targets
+        ]
+        return InferenceCatalog(targets=targets, health=health, warnings=list(warnings), refreshed_at=refreshed_at)
 
     async def start(self) -> None:
         self._stop.clear()
@@ -516,8 +616,8 @@ class SuperWorkspaceRuntime:
             routed_role = role.model_copy(
                 update={
                     "routing_policy_id": policy.id,
-                    "provider": primary.runtime_id,
-                    "model": primary.model_id,
+                    "provider": primary.agent_id,
+                    "model": primary.selection_id or None,
                 }
             )
             agent_history_store.record_super_target(
@@ -528,7 +628,7 @@ class SuperWorkspaceRuntime:
                     chat_id=run.chat_id,
                     role_id=role.id,
                     role_name=role.name,
-                    provider=primary.runtime_id,
+                    provider=primary.agent_id,
                     parent_message_id=run.parent_message_id or run.message_id,
                     sender_role_id=run.sender_role_id,
                     role_snapshot=routed_role.model_dump(),
@@ -698,25 +798,30 @@ class SuperWorkspaceRuntime:
         attempts: list[dict[str, Any]] = []
         last_error = "Routing policy exhausted"
         for candidate in candidates:
-            cooldown_key = f"{policy.id}:{candidate.id}"
-            cooldown_until = self._routing_cooldowns.get(cooldown_key, 0)
-            if cooldown_until > time.time():
+            blocked_health = self._blocked_health(task, candidate)
+            if blocked_health is not None:
                 attempts.append(
                     {
                         "candidate_id": candidate.id,
-                        "runtime_id": candidate.runtime_id,
+                        "target_id": candidate.target_id,
+                        "agent_id": candidate.agent_id,
+                        "provider_id": candidate.provider_id,
                         "model_id": candidate.model_id,
                         "status": "cooldown",
-                        "cooldown_until": cooldown_until,
+                        "failure_scope": blocked_health.scope_type,
+                        "scope_id": blocked_health.scope_id,
+                        "cooldown_until": blocked_health.retry_after,
                     }
                 )
                 continue
             started_at = time.time()
             target = {
                 "candidate_id": candidate.id,
-                "runtime_id": candidate.runtime_id,
-                "provider_account_id": candidate.provider_account_id,
+                "target_id": candidate.target_id,
+                "agent_id": candidate.agent_id,
+                "provider_id": candidate.provider_id,
                 "model_id": candidate.model_id,
+                "selection_id": candidate.selection_id,
                 "parameters": candidate.parameters,
             }
             try:
@@ -724,6 +829,12 @@ class SuperWorkspaceRuntime:
                     task, run, role, policy, candidate, prompt, effective_cwd, attempts, target
                 )
                 attempts.append({**target, "status": "completed", "started_at": started_at, "finished_at": time.time()})
+                agent_history_store.clear_target_health(
+                    task.user_id, task.workspace_id,
+                    agent_id=candidate.agent_id,
+                    provider_id=candidate.provider_id,
+                    target_id=candidate.target_id,
+                )
                 agent_history_store.update_driver_run_status(
                     task.id,
                     "completed",
@@ -759,19 +870,38 @@ class SuperWorkspaceRuntime:
                 return
             except Exception as exc:
                 last_error = str(exc) or exc.__class__.__name__
-                category = self._routing_error_category(last_error)
+                driver = self._drivers.get(candidate.agent_id)
+                failure = exc if isinstance(exc, DriverError) else (
+                    driver.normalize_error(exc, candidate)
+                    if driver is not None
+                    else DriverError(
+                        last_error, category="agent_unavailable", scope=FailureScope.AGENT,
+                        scope_id=candidate.agent_id, retryable=True, safe_to_failover=True,
+                    )
+                )
                 attempts.append(
                     {
                         **target,
                         "status": "failed",
                         "error": last_error,
-                        "error_category": category,
+                        "error_category": failure.category,
+                        "failure_scope": failure.scope.value,
+                        "scope_id": failure.scope_id,
+                        "safe_to_failover": failure.safe_to_failover,
                         "started_at": started_at,
                         "finished_at": time.time(),
                     }
                 )
-                if policy.cooldown_seconds:
-                    self._routing_cooldowns[cooldown_key] = time.time() + policy.cooldown_seconds
+                if failure.scope is not FailureScope.QUERY and failure.retryable and failure.scope_id:
+                    agent_history_store.record_target_failure(
+                        task.user_id,
+                        task.workspace_id,
+                        scope_type=failure.scope.value,
+                        scope_id=failure.scope_id,
+                        error_category=failure.category,
+                        last_error=last_error,
+                        retry_after=failure.retry_after or time.time() + policy.cooldown_seconds,
+                    )
                 agent_history_store.update_driver_run_status(
                     task.id,
                     "running" if policy.auto_failover else "failed",
@@ -780,7 +910,7 @@ class SuperWorkspaceRuntime:
                     execution_target=target,
                     routing_attempts=attempts,
                 )
-                if not policy.auto_failover or category in {"request", "refusal"}:
+                if not policy.auto_failover or not failure.safe_to_failover:
                     break
         agent_history_store.update_driver_run_status(
             task.id,
@@ -813,17 +943,21 @@ class SuperWorkspaceRuntime:
         attempts: list[dict[str, Any]],
         target: dict[str, Any],
     ) -> SuperHistoryRun:
-        driver = self._drivers.get(candidate.runtime_id)
+        driver = self._drivers.get(candidate.agent_id)
         if driver is None:
-            raise RuntimeError(f"Unsupported runtime: {candidate.runtime_id}")
-        role = base_role.model_copy(update={"provider": candidate.runtime_id, "model": candidate.model_id})
+            raise DriverError(
+                f"Unsupported agent: {candidate.agent_id}", category="agent_unavailable",
+                scope=FailureScope.AGENT, scope_id=candidate.agent_id,
+                retryable=True, safe_to_failover=True,
+            )
+        role = base_role.model_copy(update={"provider": candidate.agent_id, "model": candidate.selection_id or None})
         effective_model = driver._effective_model(role)
         session_state = agent_history_store.get_chat_role_session(
-            task.user_id, task.workspace_id, run.chat_id, role.id, candidate.runtime_id
+            task.user_id, task.workspace_id, run.chat_id, role.id, candidate.agent_id
         )
         active_session_id = driver.active_session_id(role, session_state, effective_cwd, effective_model)
         if active_session_id is not None:
-            raise RoutingTargetBusy(f"Runtime already has an active session: {candidate.runtime_id}")
+            raise RoutingTargetBusy(f"Agent already has an active session: {candidate.agent_id}")
         prompt = base_prompt
         if driver.supports_content_blocks and run.content_blocks and isinstance(base_prompt, str):
             prompt = [{"type": "text", "text": base_prompt}, *run.content_blocks]
@@ -860,7 +994,7 @@ class SuperWorkspaceRuntime:
         )
         session_ref = str(dispatch_result["session_ref"])
         rotation_reason = str(dispatch_result.get("rotation_reason") or "")
-        provider, session_id = driver.parse_ref(session_ref, candidate.runtime_id)
+        provider, session_id = driver.parse_ref(session_ref, candidate.agent_id)
         current_task = agent_history_store.get_dispatch_task(task.id)
         if current_task is not None and current_task.status == "cancelled":
             await driver.manager().terminate(session_id)
@@ -902,21 +1036,14 @@ class SuperWorkspaceRuntime:
         return completed
 
     @staticmethod
-    def _routing_error_category(message: str) -> str:
-        value = message.casefold()
-        if any(token in value for token in ("refusal", "refused")):
-            return "refusal"
-        if any(token in value for token in ("invalid prompt", "invalid request", "bad request", "400")):
-            return "request"
-        if any(token in value for token in ("credit", "quota", "402", "insufficient")):
-            return "credit"
-        if any(token in value for token in ("rate limit", "429", "too many requests")):
-            return "rate_limit"
-        if any(token in value for token in ("unauthorized", "forbidden", "401", "403", "auth")):
-            return "auth"
-        if any(token in value for token in ("model not found", "unavailable", "not available")):
-            return "model_unavailable"
-        return "runtime"
+    def _blocked_health(task: SuperDispatchTask, candidate: RoutingCandidateConfig):
+        health = agent_history_store.list_target_health(task.user_id, task.workspace_id)
+        keys = {
+            (FailureScope.AGENT.value, candidate.agent_id),
+            (FailureScope.PROVIDER.value, f"{candidate.agent_id}/{candidate.provider_id}"),
+            (FailureScope.TARGET.value, candidate.target_id),
+        }
+        return next((item for item in health if (item.scope_type, item.scope_id) in keys), None)
 
     def _role_for_task(self, task: SuperDispatchTask) -> SuperRole:
         data = super_workspace_manager.read(task.user_id)
@@ -926,7 +1053,7 @@ class SuperWorkspaceRuntime:
             raw.update(current.model_dump())
         raw.setdefault("id", task.role_id)
         raw.setdefault("name", task.role_name)
-        raw.setdefault("provider", task.provider or "codex")
+        raw.setdefault("provider", task.provider or "codex-app-server")
         raw.setdefault("description", "")
         raw.setdefault("prompt", "")
         raw.setdefault("cwd", "")

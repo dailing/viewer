@@ -13,6 +13,7 @@ dependencies = [
   "websockets>=13.0",
   "whisperlivekit>=0.2.20.post1",
   "sqlalchemy>=2.0",
+  "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]

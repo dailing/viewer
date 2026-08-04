@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
-import { DARK_MARKDOWN_THEME, DEFAULT_CODEX_CONFIG, DEFAULT_DISPATCH_PROFILES, DEFAULT_DISPATCH_PROMPT_TEMPLATE, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
-import type { AppearanceConfig, CodexConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, VoiceConfig } from "../types/files";
+import { DARK_MARKDOWN_THEME, DEFAULT_DISPATCH_PROFILES, DEFAULT_DISPATCH_PROMPT_TEMPLATE, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
+import type { AppearanceConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, VoiceConfig } from "../types/files";
 
 const emit = defineEmits<{
   close: [];
@@ -16,7 +16,6 @@ const error = ref("");
 const serverNotice = ref("");
 const dispatchPromptVariables = ["{{message}}", "{{history}}", "{{roles_json}}", "{{roles_table}}"];
 const providerContextOptions = [
-  { id: "codex", name: "Codex" },
   { id: "codex-app-server", name: "Codex App Server" },
   { id: "hermes", name: "Hermes" },
   { id: "opencode", name: "OpenCode" },
@@ -26,7 +25,6 @@ const settingsSearch = ref("");
 const activeSettingSection = ref("appearance");
 const settingSections = [
   { id: "appearance", label: "Appearance", icon: "bi-palette" },
-  { id: "codex", label: "Codex Models", icon: "bi-cpu" },
   { id: "superWorkspace", label: "Super Workspace", icon: "bi-diagram-3" },
   { id: "voice", label: "Voice", icon: "bi-mic" },
   { id: "markdown", label: "Markdown", icon: "bi-markdown" },
@@ -36,7 +34,6 @@ const settingSections = [
 ] as const;
 const draft = reactive({
   appearance: clone(files.appearance) as AppearanceConfig,
-  codex: clone(files.codexConfig) as CodexConfig,
   superWorkspace: clone(files.superWorkspaceConfig) as SuperWorkspaceConfig,
   voice: clone(files.voiceConfig) as VoiceConfig,
   markdown: clone(files.markdown) as MarkdownConfig,
@@ -67,7 +64,6 @@ const fullConfigJson = computed(() =>
   JSON.stringify(
     {
       appearance: draft.appearance,
-      codex: draft.codex,
       super_workspace: draft.superWorkspace,
       voice: draft.voice,
       markdown: draft.markdown,
@@ -86,15 +82,6 @@ const filteredSettingSections = computed(() => {
 watch(
   () => files.appearance,
   (appearance) => Object.assign(draft.appearance, clone(appearance)),
-  { deep: true },
-);
-
-watch(
-  () => files.codexConfig,
-  (codex) => {
-    Object.assign(draft.codex, clone(codex));
-    jsonDraft.value = fullConfigJson.value;
-  },
   { deep: true },
 );
 
@@ -201,22 +188,6 @@ async function stop() {
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
     stopping.value = false;
-  }
-}
-
-function normalizeModelList(value: string) {
-  const seen = new Set<string>();
-  const available = value
-    .split(/\r?\n|,/)
-    .map((model) => model.trim())
-    .filter((model) => {
-      if (!model || seen.has(model)) return false;
-      seen.add(model);
-      return true;
-    });
-  draft.codex.available_models = available.length ? available : [...DEFAULT_CODEX_CONFIG.available_models];
-  if (!draft.codex.default_model || !draft.codex.available_models.includes(draft.codex.default_model)) {
-    draft.codex.default_model = draft.codex.available_models[0] ?? DEFAULT_CODEX_CONFIG.default_model;
   }
 }
 
@@ -382,7 +353,7 @@ async function save() {
   saving.value = true;
   error.value = "";
   try {
-    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.codex, draft.voice, draft.superWorkspace);
+    await files.saveFullViewerConfig(draft.appearance, draft.markdown, draft.voice, draft.superWorkspace);
     emit("close");
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -395,7 +366,6 @@ async function applyJson() {
   try {
     const parsed = JSON.parse(jsonDraft.value);
     if (parsed.appearance) Object.assign(draft.appearance, parsed.appearance);
-    if (parsed.codex) Object.assign(draft.codex, parsed.codex);
     if (parsed.super_workspace) Object.assign(draft.superWorkspace, parsed.super_workspace);
     if (parsed.voice) Object.assign(draft.voice, parsed.voice);
     if (parsed.markdown) Object.assign(draft.markdown, parsed.markdown);
@@ -479,40 +449,6 @@ async function applyJson() {
                 <option value="compact">Compact</option>
                 <option value="comfortable">Comfortable</option>
               </select>
-            </label>
-          </div>
-        </section>
-
-        <section v-show="activeSettingSection === 'codex'" class="config-section">
-          <div class="section-heading"><i class="bi bi-cpu"></i><h2>Codex Models</h2></div>
-          <div class="section-body">
-            <label class="compact-field">
-              <span>Default model</span>
-              <select v-model="draft.codex.default_model" class="form-select form-select-sm">
-                <option v-for="model in draft.codex.available_models" :key="model" :value="model">{{ model }}</option>
-              </select>
-            </label>
-            <label class="compact-field model-list-field">
-              <span>Available models</span>
-              <textarea
-                class="form-control form-control-sm model-list"
-                :value="draft.codex.available_models.join('\n')"
-                spellcheck="false"
-                @change="normalizeModelList(($event.target as HTMLTextAreaElement).value)"
-              ></textarea>
-            </label>
-            <label class="setting-row">
-              <span>Muted message alpha</span>
-              <input v-model.number="draft.codex.muted_message_alpha" class="form-range" type="range" min="0.15" max="1" step="0.01" />
-              <input v-model.number="draft.codex.muted_message_alpha" class="form-control form-control-sm number-input" type="number" min="0.15" max="1" step="0.01" />
-            </label>
-            <label class="compact-field">
-              <span>Proxy</span>
-              <input
-                v-model.trim="draft.codex.proxy"
-                class="form-control form-control-sm"
-                placeholder="http://localhost:7890"
-              />
             </label>
           </div>
         </section>

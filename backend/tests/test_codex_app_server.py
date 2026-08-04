@@ -133,6 +133,34 @@ class TestCodexAppServerRuntime:
             {"threadId": "thread-1", "input": [{"type": "text", "text": "stay configured"}]},
         )
 
+    def test_model_list_uses_protocol_catalog(self):
+        runtime = CodexAppServerRuntime(
+            CodexAppServerProcessConfig(provider="codex-app-server", command="codex", arguments=()),
+            AsyncMock(),
+        )
+        runtime.start = AsyncMock()
+        runtime._send_request = AsyncMock(return_value={"data": [{"id": "gpt-test", "isDefault": True}]})
+
+        result = asyncio.run(runtime.model_list())
+
+        assert result == [{"id": "gpt-test", "isDefault": True}]
+        runtime._send_request.assert_awaited_once_with("model/list", {"limit": 100, "includeHidden": False})
+
+    def test_turn_can_override_model(self):
+        runtime = CodexAppServerRuntime(
+            CodexAppServerProcessConfig(provider="codex-app-server", command="codex", arguments=(), yolo=False),
+            AsyncMock(),
+        )
+        runtime.start = AsyncMock()
+        runtime._send_request = AsyncMock(return_value={"turn": {"id": "turn-1", "status": "completed"}})
+
+        asyncio.run(runtime.turn_start("thread-1", "switch", "gpt-test"))
+
+        runtime._send_request.assert_awaited_once_with(
+            "turn/start",
+            {"threadId": "thread-1", "input": [{"type": "text", "text": "switch"}], "model": "gpt-test"},
+        )
+
     def test_not_running_before_start(self):
         handler = AsyncMock()
         runtime = CodexAppServerRuntime(

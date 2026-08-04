@@ -13,7 +13,6 @@ from loguru import logger
 
 from .agent_history import DEFAULT_CONTEXT_RECYCLE_PERCENT, SuperHistoryRunCreate, agent_history_store
 from .config import settings
-from .codex_sessions import codex_session_manager
 from .events import hub
 from .files import (
     content_hash,
@@ -59,8 +58,7 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 AGENT_PROVIDERS = {
-    "codex": {"id": "codex", "name": "Codex", "icon": "bi-stars"},
-    "codex-app-server": {"id": "codex-app-server", "name": "Codex App Server (Experimental)", "icon": "bi-stars"},
+    "codex-app-server": {"id": "codex-app-server", "name": "Codex App Server", "icon": "bi-stars"},
     "hermes": {"id": "hermes", "name": "Hermes", "icon": "bi-lightning-charge"},
     "opencode": {"id": "opencode", "name": "OpenCode", "icon": "bi-terminal"},
 }
@@ -120,7 +118,6 @@ async def shutdown() -> None:
         watch_task.cancel()
     await super_workspace_runtime.shutdown()
     await terminal_manager.shutdown()
-    await codex_session_manager.shutdown()
     await hermes_session_manager.shutdown()
     await opencode_session_manager.shutdown()
 
@@ -401,7 +398,6 @@ async def put_config(config: ConfigData):
         ConfigData(
             appearance=config.appearance,
             markdown=config.markdown,
-            codex=config.codex,
             voice=config.voice,
             super_workspace=config.super_workspace,
         )
@@ -457,6 +453,11 @@ async def agent_providers():
         }
         for provider_id, provider in AGENT_PROVIDERS.items()
     ]
+
+
+@app.get("/api/agents/inference-targets")
+async def inference_targets(refresh: bool = False):
+    return await super_workspace_runtime.list_inference_targets(refresh=refresh)
 
 
 @app.get("/api/super-workspace")

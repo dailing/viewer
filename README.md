@@ -8,11 +8,11 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 
 - Create direct or group chats and assign member roles.
 - Route a message automatically through an OpenAI-compatible dispatcher or target roles explicitly.
-- Run Codex and Hermes roles in the background and stream their persisted output into Chat panes.
+- Run Codex App Server, Hermes, and OpenCode roles in the background and stream their persisted output into Chat panes.
 - Retain visible Super Workspace chat messages to an optional chat-scoped Hindsight memory bank.
 - Stop a running role with a two-click confirmation.
 - Give each role a dispatcher-facing description and a separate Agent-facing prompt.
-- Decouple roles from runtimes/models with reusable routing policies, per-chat overrides, capability filters, and ordered automatic failover.
+- Decouple roles from Agents/providers/models with reusable routing profiles, per-chat overrides, capability filters, and ordered automatic failover.
 - Reuse role sessions per chat or start a new session for each run.
 - Cite earlier messages with `@msg-...` references.
 - Browse, upload, delete, edit, and live-refresh files under the current Chat Root.
@@ -22,7 +22,7 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 - Open reconnectable PTY terminals through WebSockets.
 - Use optional voice dictation and LLM refinement.
 - Arrange chats, files, diffs, and terminals in persisted recursive split panes.
-- Configure appearance, Markdown themes, models, dispatcher profiles, voice, and server controls.
+- Configure appearance, Markdown themes, routing profiles, dispatcher profiles, voice, and server controls.
 
 ## Super Workspace
 
@@ -35,26 +35,26 @@ A role has two distinct instruction fields:
 - `description`: routing metadata for the dispatcher. It describes when the role should be selected, its capabilities, and its dispatch constraints.
 - `prompt`: operating instructions delivered directly to the selected Agent. It defines workflow, standards, style, and execution rules.
 
-The dispatcher receives descriptions but not prompts. A role Agent receives its prompt but not its description. A Role selects a reusable routing policy; a Chat may override that policy for one Role. Policies contain ordered runtime/account/model targets plus tools, filesystem, and context-window declarations. Changing a prompt or route clears that role's reusable chat-session mappings so the next run starts with the new rules.
+The dispatcher receives descriptions but not prompts. A role Agent receives its prompt but not its description. A Role selects a reusable routing profile; a Chat may override it for one Role. Profiles contain ordered targets discovered as Agent/provider/model combinations. Viewer treats each driver's model selection value as opaque and never modifies Agent credentials or Agent-owned configuration. Changing a prompt or route clears that role's reusable chat-session mappings so the next run starts with the new rules.
 
 Normal message delivery is asynchronous:
 
 1. The backend persists the user query and one dispatch task for each selected role.
 2. The independent Super Workspace worker claims queued tasks while serializing work per chat and role.
-3. The worker resolves `Chat override → Role policy → Workspace default`, filters targets against the Role requirements, and attempts eligible targets in order.
-4. A Codex, Codex App Server, Hermes, or OpenCode provider session is created or resumed for the chosen runtime/model. Eligible provider failures can automatically advance to the next target.
+3. The worker resolves `Chat override → Role profile → Workspace default`, filters targets against the Role requirements, and attempts eligible targets in order.
+4. A Codex App Server, Hermes, or OpenCode session is created or resumed for the selected opaque target. Structured target/provider/Agent failures persist a cooldown and may advance safely to the next target; a provider cooldown covers every model under that Agent/provider.
 5. Provider output and the immutable execution target/attempt log are persisted in the configured data directory and announced through Super Workspace SSE.
 6. The Chat pane incrementally reloads the changed run.
 
-Codex work runs through detached background processes, so restarting the Viewer backend does not terminate an active Codex run. Hermes work uses an ACP subprocess for the selected Hermes Profile; the independent worker starts the default Profile's ACP adapter and creates each Hermes session with the Chat Root as its real working directory.
+Codex uses its native App Server protocol; Hermes and OpenCode use ACP. Hermes runs through the user-selected Hermes Profile, preserving Hermes-owned configuration, memory, history, channels, and credentials. Viewer only selects a discovered model when starting or continuing a session.
 
 ## Persistence
 
 Viewer-owned state defaults to `~/.view`, but configuration and mutable data may be isolated with `VIEWER_CONFIG_DIR` and `VIEWER_DATA_DIR` (or the matching CLI flags):
 
-- `config.json`: appearance, Markdown, Codex, Voice, dispatcher, provider-account references, and routing policies.
-- `agent-history.sqlite3`: Super Workspace, chats, roles, route overrides, dispatch tasks, execution attempts, messages, citations, and reusable session mappings.
-- `logs/codex-sessions/`: Viewer metadata and stderr for Codex provider sessions.
+- `config.json`: appearance, Markdown, Voice, dispatcher, and ordered routing profiles. Agent credentials and provider/model configuration stay in each Agent's own files.
+- `agent-history.sqlite3`: Super Workspace, chats, roles, route overrides, dispatch tasks, execution attempts, scoped target health, messages, citations, and reusable session mappings.
+- `logs/codex-app-server-sessions/`: Viewer metadata for Codex App Server sessions.
 - `logs/hermes-sessions/`: Viewer metadata for Hermes provider sessions.
 - `logs/terminals/`: reconnectable terminal output logs.
 - `logs/`: backend, worker, manager, and voice logs.
@@ -87,7 +87,7 @@ The API token uses `VIEWER_HINDSIGHT_API_TOKEN`, falling back to `hindsightApiTo
 
 - Python 3.11 or newer
 - Node.js and npm
-- `codex` on `PATH` for Codex roles
+- `codex` on `PATH` with App Server support for Codex roles
 - `hermes` on `PATH` with the ACP optional dependency for Hermes roles
 - An OpenAI-compatible chat-completions endpoint for automatic routing
 
@@ -158,7 +158,7 @@ The main environment variables are:
 - `VIEWER_MAX_TEXT_PREVIEW_BYTES`: large-text preview threshold.
 - `VIEWER_SHOW_HIDDEN`: whether hidden files appear.
 - `VIEWER_TERMINAL_SHELL`: terminal shell.
-- `VIEWER_CODEX_RUN_DIR`: detached Codex process state directory.
+- `VIEWER_CODEX_APP_SERVER_COMMAND`: Codex executable used for `app-server --stdio`; defaults to `codex`.
 - `VIEWER_WEAVER_RUN_DIR`: Super Workspace worker and provider-driver registry directory.
 - `VIEWER_HERMES_ACP_ENABLED`: start Hermes ACP with the worker; defaults to `true`.
 - `VIEWER_HERMES_PROFILE`: Hermes Profile used by ACP; defaults to `default`.
@@ -186,13 +186,13 @@ cd frontend && npm run build
 ```
 
 ```bash
-.venv/bin/python3 -m compileall backend/app backend/tests
+uv run python -m compileall backend/app
 ```
 
 Role routing, prompt-boundary, and Hermes ACP tests:
 
 ```bash
-.venv/bin/python3 -m unittest backend.tests.test_super_workspace_role_prompts backend.tests.test_hermes_acp_sessions -v
+PYTHONPATH=. uv run pytest -q
 ```
 
 For the detailed module map, data flow, API inventory, and fault locations, see [`architecture.md`](architecture.md).

@@ -85,13 +85,6 @@ export interface MarkdownConfig {
   themes: MarkdownTheme[];
 }
 
-export interface CodexConfig {
-  available_models: string[];
-  default_model: string;
-  proxy: string;
-  muted_message_alpha: number;
-}
-
 export interface VoiceConfig {
   enabled: boolean;
   language_model_refine: boolean;
@@ -117,21 +110,14 @@ export interface ProviderContextLimitConfig {
   context_recycle_tokens: number | null;
 }
 
-export interface ProviderAccountConfig {
-  id: string;
-  name: string;
-  provider: string;
-  credential_ref: string;
-  enabled: boolean;
-  monthly_budget?: number | null;
-}
-
 export interface RoutingCandidateConfig {
   id: string;
   name: string;
-  runtime_id: string;
-  provider_account_id: string;
-  model_id?: string | null;
+  target_id: string;
+  agent_id: string;
+  provider_id: string;
+  model_id: string;
+  selection_id: string;
   enabled: boolean;
   parameters: Record<string, unknown>;
 }
@@ -148,6 +134,7 @@ export interface RoutingPolicyConfig {
 }
 
 export interface SuperWorkspaceConfig {
+  routing_schema_version: number;
   hindsight_retain_enabled: boolean;
   hindsight_api_url: string;
   hindsight_bank_prefix: string;
@@ -158,7 +145,6 @@ export interface SuperWorkspaceConfig {
   dispatch_history_word_budget: number;
   provider_context_limits: Record<string, ProviderContextLimitConfig>;
   default_routing_policy_id: string;
-  provider_accounts: ProviderAccountConfig[];
   routing_policies: RoutingPolicyConfig[];
   dispatch_prompt_template: string;
   dispatch_profiles: SuperWorkspaceDispatchProfile[];
@@ -167,7 +153,6 @@ export interface SuperWorkspaceConfig {
 export interface ViewerConfig {
   appearance: AppearanceConfig;
   markdown: MarkdownConfig;
-  codex?: CodexConfig;
   voice?: VoiceConfig;
   super_workspace?: SuperWorkspaceConfig;
 }

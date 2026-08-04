@@ -687,7 +687,7 @@ async function openItemLink(event: MouseEvent, item: SuperDisplayItem) {
 }
 
 function itemIcon(item: SuperDisplayItem) {
-  return agents.providerById(item.provider || "codex").icon;
+  return agents.providerById(item.provider || "codex-app-server").icon;
 }
 
 function shortSessionId(item: Pick<SuperDisplayItem, "provider_session_id" | "viewer_session_id" | "session_ref">) {
@@ -804,12 +804,12 @@ function responsePlaceholderText(status: string) {
 }
 
 function targetIcon(target: SuperDisplayTarget) {
-  return agents.providerById(target.provider || "codex").icon;
+  return agents.providerById(target.provider || "codex-app-server").icon;
 }
 
 function executionTargetLabel(target: Pick<SuperDisplayTarget, "provider" | "execution_target"> | Pick<SuperDisplayItem, "provider" | "execution_target">) {
-  const runtime = String(target.execution_target?.runtime_id || target.provider || "");
-  const account = String(target.execution_target?.provider_account_id || "");
+  const runtime = String(target.execution_target?.agent_id || target.provider || "");
+  const account = String(target.execution_target?.provider_id || "");
   const model = String(target.execution_target?.model_id || "");
   return [runtime, account, model].filter(Boolean).join(" / ");
 }
@@ -817,8 +817,8 @@ function executionTargetLabel(target: Pick<SuperDisplayTarget, "provider" | "exe
 function routingAttemptsTitle(target: Pick<SuperDisplayTarget, "routing_attempts"> | Pick<SuperDisplayItem, "routing_attempts">) {
   if (!target.routing_attempts?.length) return "";
   return target.routing_attempts.map((attempt, index) => {
-    const runtime = String(attempt.runtime_id || "");
-    const account = String(attempt.provider_account_id || "");
+    const runtime = String(attempt.agent_id || "");
+    const account = String(attempt.provider_id || "");
     const model = String(attempt.model_id || "");
     const status = String(attempt.status || "unknown");
     const detail = [runtime, account, model].filter(Boolean).join(" / ");
@@ -827,7 +827,7 @@ function routingAttemptsTitle(target: Pick<SuperDisplayTarget, "routing_attempts
 }
 
 function roleIcon(role: SuperRole) {
-  return agents.providerById(role.provider || "codex").icon;
+  return agents.providerById(role.provider || "codex-app-server").icon;
 }
 
 function formatTime(value: number) {

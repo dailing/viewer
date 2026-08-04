@@ -7,16 +7,16 @@ import {
   deleteSuperRole,
   deleteSuperChat,
   getSuperWorkspace,
+  listInferenceTargets,
   listSuperChats,
   updateSuperRole,
   updateSuperChat,
   updateSuperWorkspaceRouting,
 } from "../api/client";
-import { useAgentsStore } from "../stores/agents";
 import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
-import type { ProviderAccountConfig, RoutingPolicyConfig } from "../types/files";
-import type { RoutingConfigData, SuperChatSummary, SuperRole } from "../types/superWorkspace";
+import type { RoutingPolicyConfig } from "../types/files";
+import type { InferenceCatalog, RoutingConfigData, SuperChatSummary, SuperRole } from "../types/superWorkspace";
 import { storageKey } from "../utils/storage";
 import FileSidebar from "./FileSidebar.vue";
 import Workspace from "./Workspace.vue";
@@ -29,14 +29,13 @@ const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 640;
 
 const files = useFilesStore();
-const agents = useAgentsStore();
 const layout = useLayoutStore();
 const activeWorkspaceId = ref("");
 const chats = ref<SuperChatSummary[]>([]);
 const activeChatId = ref("");
 const roles = ref<SuperRole[]>([]);
 const routingPolicies = ref<RoutingPolicyConfig[]>([]);
-const providerAccounts = ref<ProviderAccountConfig[]>([]);
+const inferenceCatalog = ref<InferenceCatalog>({ targets: [], health: [], warnings: [], refreshed_at: 0 });
 const defaultRoutingPolicyId = ref("");
 const sidebarOpen = ref(true);
 const sidebarPinned = ref(true);
@@ -58,7 +57,6 @@ onMounted(async () => {
   sidebarPinned.value = localStorage.getItem(storageKey(SIDEBAR_PIN_KEY)) !== "false";
   sidebarOpen.value = sidebarPinned.value && !isMobile.value;
   sidebarWidth.value = clampSidebarWidth(Number(localStorage.getItem(storageKey(SIDEBAR_WIDTH_KEY))) || sidebarWidth.value);
-  await agents.loadProviders();
   await loadState();
 });
 
@@ -91,9 +89,9 @@ async function loadState() {
     activeChatId.value = chatData.active_chat_id;
     roles.value = superData.roles;
     routingPolicies.value = superData.routing_policies;
-    providerAccounts.value = superData.provider_accounts;
     defaultRoutingPolicyId.value = superData.default_routing_policy_id;
     notifyChatListChanged();
+    void refreshInferenceTargets();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -192,9 +190,16 @@ async function saveRouting(config: RoutingConfigData) {
   try {
     const updated = await updateSuperWorkspaceRouting(config);
     routingPolicies.value = updated.routing_policies;
-    providerAccounts.value = updated.provider_accounts;
     defaultRoutingPolicyId.value = updated.default_routing_policy_id;
     await loadState();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function refreshInferenceTargets() {
+  try {
+    inferenceCatalog.value = await listInferenceTargets(true);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -303,9 +308,8 @@ function startSidebarResize(event: PointerEvent) {
         :chats="chats"
         :active-chat-id="activeChatId"
         :roles="roles"
-        :providers="agents.providers"
         :routing-policies="routingPolicies"
-        :provider-accounts="providerAccounts"
+        :inference-catalog="inferenceCatalog"
         :default-routing-policy-id="defaultRoutingPolicyId"
         :panel-open="sidebarOpen"
         :panel-pinned="effectiveSidebarPinned"
@@ -320,6 +324,7 @@ function startSidebarResize(event: PointerEvent) {
         @update-role="saveRole"
         @delete-role="removeRole"
         @save-routing="saveRouting"
+        @refresh-targets="refreshInferenceTargets"
         @toggle-tool-panel="toggleToolPanel"
         @toggle-pin="toggleSidebarPin"
         @close-panel="sidebarOpen = false"

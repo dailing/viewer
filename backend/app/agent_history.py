@@ -20,6 +20,7 @@ from sqlalchemy.pool import NullPool
 from .storage import AGENT_HISTORY_DB_PATH
 from .super_workspace_memory import retain_visible_message_background
 from .identity import normalize_user_id
+from .inference import TargetHealth
 
 DEFAULT_SUPER_WORKSPACE_ID = "default"
 DEFAULT_SUPER_WORKSPACE_NAME = "Default Super Workspace"
@@ -395,7 +396,7 @@ class SuperWorkspaceRoleRow(AgentHistoryBase):
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    provider: Mapped[str] = mapped_column(String, nullable=False, default="codex")
+    provider: Mapped[str] = mapped_column(String, nullable=False, default="codex-app-server")
     cwd: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model: Mapped[str | None] = mapped_column(String)
     routing_policy_id: Mapped[str] = mapped_column(String, nullable=False, default="")
@@ -529,6 +530,24 @@ class SuperWorkspaceDriverRunRow(AgentHistoryBase):
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class SuperWorkspaceTargetHealthRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_target_health"
+    __table_args__ = (
+        Index("idx_super_target_health_retry", "user_id", "workspace_id", "retry_after"),
+    )
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="cooldown")
+    error_category: Mapped[str] = mapped_column(String, nullable=False, default="")
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    retry_after: Mapped[float | None] = mapped_column(Float)
+    last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class SuperWorkspaceMessageFileChangeRow(AgentHistoryBase):
     __tablename__ = "super_workspace_message_file_changes"
 
@@ -641,6 +660,24 @@ class AgentHistoryStore:
                     "INSERT INTO agent_history_schema_migrations (id, applied_at) VALUES (?, ?)",
                     (migration_id, time.time()),
                 )
+            codex_migration_id = "remove_legacy_codex_driver_v1"
+            codex_migrated = connection.exec_driver_sql(
+                "SELECT 1 FROM agent_history_schema_migrations WHERE id = ?",
+                (codex_migration_id,),
+            ).first()
+            if codex_migrated is None:
+                connection.exec_driver_sql(
+                    "UPDATE super_workspace_roles SET provider = 'codex-app-server', updated_at = ? "
+                    "WHERE provider = 'codex'",
+                    (time.time(),),
+                )
+                connection.exec_driver_sql(
+                    "DELETE FROM super_workspace_chat_role_sessions WHERE provider = 'codex'"
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO agent_history_schema_migrations (id, applied_at) VALUES (?, ?)",
+                    (codex_migration_id, time.time()),
+                )
             self._ensure_column(
                 connection,
                 "super_workspace_roles",
@@ -687,6 +724,115 @@ class AgentHistoryStore:
         columns = {str(row[1]) for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")}
         if column not in columns:
             connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    def list_target_health(self, user_id: str | None, workspace_id: str) -> list[TargetHealth]:
+        normalized_user = normalize_user_id(user_id)
+        now = time.time()
+        with self.session_scope() as db:
+            db.execute(
+                delete(SuperWorkspaceTargetHealthRow).where(
+                    SuperWorkspaceTargetHealthRow.user_id == normalized_user,
+                    SuperWorkspaceTargetHealthRow.workspace_id == workspace_id,
+                    SuperWorkspaceTargetHealthRow.retry_after.is_not(None),
+                    SuperWorkspaceTargetHealthRow.retry_after <= now,
+                )
+            )
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceTargetHealthRow).where(
+                        SuperWorkspaceTargetHealthRow.user_id == normalized_user,
+                        SuperWorkspaceTargetHealthRow.workspace_id == workspace_id,
+                    )
+                )
+            )
+        return [
+            TargetHealth(
+                scope_type=row.scope_type,
+                scope_id=row.scope_id,
+                status=row.status,
+                error_category=row.error_category,
+                consecutive_failures=row.consecutive_failures,
+                retry_after=row.retry_after,
+                last_error=row.last_error,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+
+    def record_target_failure(
+        self,
+        user_id: str | None,
+        workspace_id: str,
+        *,
+        scope_type: str,
+        scope_id: str,
+        error_category: str,
+        last_error: str,
+        retry_after: float | None,
+    ) -> TargetHealth:
+        normalized_user = normalize_user_id(user_id)
+        now = time.time()
+        with self.session_scope() as db:
+            row = db.scalar(
+                select(SuperWorkspaceTargetHealthRow).where(
+                    SuperWorkspaceTargetHealthRow.user_id == normalized_user,
+                    SuperWorkspaceTargetHealthRow.workspace_id == workspace_id,
+                    SuperWorkspaceTargetHealthRow.scope_type == scope_type,
+                    SuperWorkspaceTargetHealthRow.scope_id == scope_id,
+                )
+            )
+            if row is None:
+                row = SuperWorkspaceTargetHealthRow(
+                    user_id=normalized_user,
+                    workspace_id=workspace_id,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
+                    consecutive_failures=0,
+                    updated_at=now,
+                )
+                db.add(row)
+            row.status = "cooldown"
+            row.error_category = error_category
+            row.consecutive_failures = int(row.consecutive_failures or 0) + 1
+            row.retry_after = retry_after
+            row.last_error = last_error[:4000]
+            row.updated_at = now
+        return TargetHealth(
+            scope_type=scope_type,
+            scope_id=scope_id,
+            status="cooldown",
+            error_category=error_category,
+            consecutive_failures=row.consecutive_failures,
+            retry_after=retry_after,
+            last_error=last_error[:4000],
+            updated_at=now,
+        )
+
+    def clear_target_health(
+        self,
+        user_id: str | None,
+        workspace_id: str,
+        *,
+        agent_id: str,
+        provider_id: str,
+        target_id: str,
+    ) -> None:
+        normalized_user = normalize_user_id(user_id)
+        scope_pairs = {
+            ("agent", agent_id),
+            ("provider", f"{agent_id}/{provider_id}"),
+            ("target", target_id),
+        }
+        with self.session_scope() as db:
+            for scope_type, scope_id in scope_pairs:
+                db.execute(
+                    delete(SuperWorkspaceTargetHealthRow).where(
+                        SuperWorkspaceTargetHealthRow.user_id == normalized_user,
+                        SuperWorkspaceTargetHealthRow.workspace_id == workspace_id,
+                        SuperWorkspaceTargetHealthRow.scope_type == scope_type,
+                        SuperWorkspaceTargetHealthRow.scope_id == scope_id,
+                    )
+                )
 
     def ensure_default_workspace(self, user_id: str | None) -> SuperWorkspaceRow:
         normalized_user = normalize_user_id(user_id)
@@ -1091,7 +1237,7 @@ class AgentHistoryStore:
         name: str,
         description: str = "",
         prompt: str = "",
-        provider: str = "codex",
+        provider: str = "codex-app-server",
         cwd: str = "",
         model: str | None = None,
         routing_policy_id: str = "",

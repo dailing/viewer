@@ -10,9 +10,8 @@ import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
 import { useTerminalsStore } from "../stores/terminals";
 import { storageKey } from "../utils/storage";
-import type { AgentProvider } from "../types/agents";
-import type { ProviderAccountConfig, RoutingPolicyConfig } from "../types/files";
-import type { RoutingConfigData, SuperChatSummary, SuperRole } from "../types/superWorkspace";
+import type { RoutingPolicyConfig } from "../types/files";
+import type { InferenceCatalog, RoutingConfigData, SuperChatSummary, SuperRole } from "../types/superWorkspace";
 
 type SidebarTool = "files" | "git" | "terminals" | "chats" | "roles" | "routes";
 
@@ -22,9 +21,8 @@ const props = defineProps<{
   chats?: SuperChatSummary[];
   activeChatId?: string;
   roles?: SuperRole[];
-  providers?: { id: AgentProvider; name: string }[];
   routingPolicies?: RoutingPolicyConfig[];
-  providerAccounts?: ProviderAccountConfig[];
+  inferenceCatalog?: InferenceCatalog;
   defaultRoutingPolicyId?: string;
   panelOpen: boolean;
   panelPinned: boolean;
@@ -42,6 +40,7 @@ const emit = defineEmits<{
   "update-role": [role: SuperRole];
   "delete-role": [role: SuperRole];
   "save-routing": [config: RoutingConfigData];
+  "refresh-targets": [];
   "toggle-tool-panel": [];
   "toggle-pin": [];
   "close-panel": [];
@@ -226,10 +225,10 @@ async function openPinnedFile(path: string) {
       <RoutesPanel
         v-else-if="activeTool === 'routes'"
         :policies="props.routingPolicies ?? []"
-        :accounts="props.providerAccounts ?? []"
         :default-policy-id="props.defaultRoutingPolicyId ?? ''"
-        :providers="props.providers ?? []"
+        :catalog="props.inferenceCatalog ?? { targets: [], health: [], warnings: [], refreshed_at: 0 }"
         @save="emit('save-routing', $event)"
+        @refresh="emit('refresh-targets')"
       />
     </section>
   </div>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the routing-policy worktree with isolated state and process registries."""
+"""Run the inference-routing worktree with isolated state and process registries."""
 
 from __future__ import annotations
 
@@ -33,7 +33,6 @@ def main() -> None:
         **os.environ,
         "VIEWER_CONFIG_DIR": config_dir.as_posix(),
         "VIEWER_DATA_DIR": data_dir.as_posix(),
-        "VIEWER_CODEX_RUN_DIR": (run_dir / "codex").as_posix(),
         "VIEWER_HERMES_RUN_DIR": (run_dir / "hermes").as_posix(),
         "VIEWER_WEAVER_RUN_DIR": (run_dir / "weaver").as_posix(),
     }

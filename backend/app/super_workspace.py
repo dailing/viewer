@@ -15,10 +15,10 @@ from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_N
 from .files import read_config, write_config
 from .models import (
     DEFAULT_DISPATCH_PROMPT_TEMPLATE,
-    ProviderAccountConfig,
     RoutingCandidateConfig,
     RoutingPolicyConfig,
 )
+from .inference import inference_target_id
 
 
 DEFAULT_DISPATCH_MODEL = ""
@@ -33,7 +33,7 @@ class SuperRole(BaseModel):
     name: str
     description: str = ""
     prompt: str = ""
-    provider: str = "codex"
+    provider: str = "codex-app-server"
     cwd: str = ""
     model: str | None = None
     routing_policy_id: str = ""
@@ -49,7 +49,7 @@ class SuperRoleCreate(BaseModel):
     name: str
     description: str = ""
     prompt: str = ""
-    provider: str = "codex"
+    provider: str = "codex-app-server"
     cwd: str = ""
     model: str | None = None
     routing_policy_id: str = ""
@@ -78,7 +78,6 @@ class SuperWorkspaceData(BaseModel):
     name: str = DEFAULT_SUPER_WORKSPACE_NAME
     common_prompt: str = ""
     roles: list[SuperRole] = Field(default_factory=list)
-    provider_accounts: list[ProviderAccountConfig] = Field(default_factory=list)
     routing_policies: list[RoutingPolicyConfig] = Field(default_factory=list)
     default_routing_policy_id: str = ""
 
@@ -89,7 +88,6 @@ class SuperWorkspacePatch(BaseModel):
 
 class RoutingConfigData(BaseModel):
     default_routing_policy_id: str = ""
-    provider_accounts: list[ProviderAccountConfig] = Field(default_factory=list)
     routing_policies: list[RoutingPolicyConfig] = Field(default_factory=list)
 
 
@@ -132,7 +130,6 @@ class SuperWorkspaceManager:
         routing = self._ensure_role_routing_migration(user_id)
         return RoutingConfigData(
             default_routing_policy_id=routing.default_routing_policy_id,
-            provider_accounts=routing.provider_accounts,
             routing_policies=routing.routing_policies,
         )
 
@@ -140,26 +137,15 @@ class SuperWorkspaceManager:
         policy_ids = [policy.id.strip() for policy in request.routing_policies]
         if any(not policy_id for policy_id in policy_ids) or len(policy_ids) != len(set(policy_ids)):
             raise HTTPException(status_code=400, detail="Routing policy IDs must be non-empty and unique")
-        account_ids = [account.id.strip() for account in request.provider_accounts]
-        if any(not account_id for account_id in account_ids) or len(account_ids) != len(set(account_ids)):
-            raise HTTPException(status_code=400, detail="Provider account IDs must be non-empty and unique")
         policy_id_set = set(policy_ids)
-        account_id_set = set(account_ids)
         if policy_ids and request.default_routing_policy_id not in policy_id_set:
             raise HTTPException(status_code=400, detail="Workspace default must reference an existing routing policy")
         for policy in request.routing_policies:
             candidate_ids = [candidate.id.strip() for candidate in policy.candidates]
             if any(not candidate_id for candidate_id in candidate_ids) or len(candidate_ids) != len(set(candidate_ids)):
                 raise HTTPException(status_code=400, detail=f"Candidate IDs must be unique in policy: {policy.name}")
-            if any(not candidate.runtime_id.strip() for candidate in policy.candidates):
-                raise HTTPException(status_code=400, detail=f"Every candidate must select a runtime: {policy.name}")
-            unknown_accounts = sorted({
-                candidate.provider_account_id
-                for candidate in policy.candidates
-                if candidate.provider_account_id and candidate.provider_account_id not in account_id_set
-            })
-            if unknown_accounts:
-                raise HTTPException(status_code=400, detail=f"Unknown provider account in policy {policy.name}: {unknown_accounts[0]}")
+            if any(not candidate.agent_id.strip() or not candidate.target_id.strip() for candidate in policy.candidates):
+                raise HTTPException(status_code=400, detail=f"Every candidate must select an inference target: {policy.name}")
         _workspace, roles = agent_history_store.super_workspace_data(user_id)
         orphaned_roles = [str(role.name) for role in roles if role.routing_policy_id and role.routing_policy_id not in policy_id_set]
         if orphaned_roles:
@@ -174,7 +160,6 @@ class SuperWorkspaceManager:
             raise HTTPException(status_code=400, detail=f"Remove Chat overrides before deleting their routing policy: {orphaned_chats[0]}")
         config = read_config()
         config.super_workspace.default_routing_policy_id = request.default_routing_policy_id
-        config.super_workspace.provider_accounts = request.provider_accounts
         config.super_workspace.routing_policies = request.routing_policies
         write_config(config)
         return self.read_routing(user_id)
@@ -285,7 +270,6 @@ class SuperWorkspaceManager:
                 )
                 for role in roles
             ],
-            provider_accounts=routing.provider_accounts,
             routing_policies=routing.routing_policies,
             default_routing_policy_id=routing.default_routing_policy_id,
         )
@@ -299,7 +283,9 @@ class SuperWorkspaceManager:
         for role in roles:
             if str(role.routing_policy_id or "").strip():
                 continue
-            runtime_id = str(role.provider or "codex")
+            runtime_id = str(role.provider or "codex-app-server")
+            if runtime_id == "codex":
+                runtime_id = "codex-app-server"
             model_id = str(role.model or "").strip() or None
             signature = f"{runtime_id}\0{model_id or ''}"
             suffix = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:10]
@@ -314,8 +300,15 @@ class SuperWorkspaceManager:
                         RoutingCandidateConfig(
                             id=f"{policy_id}-primary",
                             name=label,
-                            runtime_id=runtime_id,
-                            model_id=model_id,
+                            target_id=inference_target_id(
+                                runtime_id,
+                                "openai-subscription" if runtime_id == "codex-app-server" else "default",
+                                model_id or "",
+                            ),
+                            agent_id=runtime_id,
+                            provider_id="openai-subscription" if runtime_id == "codex-app-server" else "default",
+                            model_id=model_id or "",
+                            selection_id=model_id or "",
                         )
                     ],
                 )
@@ -344,19 +337,11 @@ class SuperWorkspaceManager:
         policy = next((item for item in data.routing_policies if item.id == policy_id and item.enabled), None)
         if policy is None:
             raise HTTPException(status_code=400, detail=f"No enabled routing policy for role: {role.name}")
-        accounts = {account.id: account for account in data.provider_accounts}
         candidates = [
             candidate
             for candidate in policy.candidates
             if candidate.enabled
             and self._candidate_meets_requirements(candidate, role.capability_requirements)
-            and (
-                not candidate.provider_account_id
-                or (
-                    candidate.provider_account_id in accounts
-                    and accounts[candidate.provider_account_id].enabled
-                )
-            )
         ]
         if not candidates:
             raise HTTPException(status_code=400, detail=f"Routing policy has no eligible candidates for role: {role.name}")
@@ -398,7 +383,7 @@ class SuperWorkspaceManager:
                 name=(request.name or "New Role").strip()[:120] or "New Role",
                 description=request.description.strip(),
                 prompt=request.prompt.strip(),
-                provider=(request.provider or "codex").strip() or "codex",
+                provider=(request.provider or "codex-app-server").strip() or "codex-app-server",
                 cwd=request.cwd.strip(),
                 model=request.model.strip() if request.model else None,
                 routing_policy_id=routing_policy_id,
@@ -428,7 +413,7 @@ class SuperWorkspaceManager:
             if key == "name":
                 value = str(value or "New Role")[:120]
             if key == "provider":
-                value = str(value or "codex")
+                value = str(value or "codex-app-server")
             setattr(role, key, value)
         try:
             agent_history_store.update_super_workspace_role(

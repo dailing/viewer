@@ -96,13 +96,6 @@ class MarkdownConfig(BaseModel):
     themes: list[MarkdownTheme] = Field(default_factory=lambda: [MarkdownTheme()])
 
 
-class CodexConfig(BaseModel):
-    available_models: list[str] = Field(default_factory=lambda: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex", "gpt-5.3-codex-spark"])
-    default_model: str = "gpt-5.5"
-    proxy: str = ""
-    muted_message_alpha: float = Field(default=0.56, ge=0.15, le=1.0)
-
-
 class VoiceConfig(BaseModel):
     enabled: bool = True
     language_model_refine: bool = True
@@ -128,23 +121,39 @@ class ProviderContextLimitConfig(BaseModel):
     context_recycle_tokens: int | None = Field(default=None, ge=1000)
 
 
-class ProviderAccountConfig(BaseModel):
-    id: str
-    name: str
-    provider: str
-    credential_ref: str = ""
-    enabled: bool = True
-    monthly_budget: float | None = Field(default=None, ge=0)
-
-
 class RoutingCandidateConfig(BaseModel):
     id: str
     name: str = ""
-    runtime_id: str
-    provider_account_id: str = ""
-    model_id: str | None = None
+    target_id: str
+    agent_id: str
+    provider_id: str
+    model_id: str
+    selection_id: str
     enabled: bool = True
     parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_runtime_target(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("target_id"):
+            return value
+        runtime_id = str(value.get("runtime_id") or "codex-app-server").strip()
+        if runtime_id == "codex":
+            runtime_id = "codex-app-server"
+        raw_model = str(value.get("model_id") or "").strip()
+        provider_id = str(value.get("provider_account_id") or "").strip()
+        if not provider_id:
+            provider_id = "openai-subscription" if runtime_id == "codex-app-server" else "default"
+        from .inference import inference_target_id
+
+        return {
+            **value,
+            "target_id": inference_target_id(runtime_id, provider_id, raw_model),
+            "agent_id": runtime_id,
+            "provider_id": provider_id,
+            "model_id": raw_model,
+            "selection_id": raw_model,
+        }
 
 
 class RoutingPolicyConfig(BaseModel):
@@ -160,7 +169,6 @@ class RoutingPolicyConfig(BaseModel):
 
 def default_provider_context_limits() -> dict[str, ProviderContextLimitConfig]:
     return {
-        "codex": ProviderContextLimitConfig(context_recycle_percent=70.0),
         "codex-app-server": ProviderContextLimitConfig(context_recycle_percent=80.0, context_recycle_tokens=200_000),
         "hermes": ProviderContextLimitConfig(context_recycle_percent=80.0),
         "opencode": ProviderContextLimitConfig(context_recycle_percent=80.0),
@@ -187,6 +195,7 @@ Current message:
 
 
 class SuperWorkspaceConfig(BaseModel):
+    routing_schema_version: int = 3
     hindsight_retain_enabled: bool = True
     hindsight_api_url: str = ""
     hindsight_bank_prefix: str = "super-workspace"
@@ -197,7 +206,6 @@ class SuperWorkspaceConfig(BaseModel):
     dispatch_history_word_budget: int = Field(default=2048, ge=0, le=50000)
     provider_context_limits: dict[str, ProviderContextLimitConfig] = Field(default_factory=default_provider_context_limits)
     default_routing_policy_id: str = ""
-    provider_accounts: list[ProviderAccountConfig] = Field(default_factory=list)
     routing_policies: list[RoutingPolicyConfig] = Field(default_factory=list)
     dispatch_prompt_template: str = DEFAULT_DISPATCH_PROMPT_TEMPLATE
     dispatch_profiles: list[SuperWorkspaceDispatchProfile] = Field(
@@ -219,11 +227,17 @@ class SuperWorkspaceConfig(BaseModel):
         ]
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_routing_schema(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        return {**value, "routing_schema_version": 3}
+
 
 class ConfigData(BaseModel):
     appearance: AppearanceConfig = Field(default_factory=AppearanceConfig)
     markdown: MarkdownConfig = Field(default_factory=MarkdownConfig)
-    codex: CodexConfig = Field(default_factory=CodexConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     super_workspace: SuperWorkspaceConfig = Field(default_factory=SuperWorkspaceConfig)
 

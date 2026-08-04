@@ -266,6 +266,12 @@ class CodexAppServerRuntime:
         self._bound_threads.add(thread_id)
         return thread_id
 
+    async def model_list(self) -> list[dict[str, Any]]:
+        await self.start()
+        result = await self._send_request("model/list", {"limit": 100, "includeHidden": False})
+        raw_models = result.get("data") if isinstance(result.get("data"), list) else result.get("models")
+        return [item for item in (raw_models or []) if isinstance(item, dict)]
+
     async def thread_resume(self, thread_id: str, cwd: str) -> str:
         await self.start()
         if thread_id in self._bound_threads:
@@ -276,13 +282,15 @@ class CodexAppServerRuntime:
         self._bound_threads.add(resumed_id)
         return resumed_id
 
-    async def turn_start(self, thread_id: str, prompt: str | list[dict[str, Any]]) -> dict[str, Any]:
+    async def turn_start(self, thread_id: str, prompt: str | list[dict[str, Any]], model: str | None = None) -> dict[str, Any]:
         await self.start()
         if isinstance(prompt, str):
             input_items = [{"type": "text", "text": prompt}]
         else:
             input_items = prompt
         params: dict[str, Any] = {"threadId": thread_id, "input": input_items}
+        if model:
+            params["model"] = model
         if self.config.yolo:
             # App Server has no CLI --yolo flag. These protocol fields are the
             # native equivalent of --dangerously-bypass-approvals-and-sandbox.

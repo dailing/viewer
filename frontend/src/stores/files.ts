@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { deleteFile, getConfig, getTree, putConfig, uploadFile } from "../api/client";
-import type { AppearanceConfig, CodexConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, ViewerConfig, VoiceConfig } from "../types/files";
+import type { AppearanceConfig, DirectoryListing, FileEntry, MarkdownConfig, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, ViewerConfig, VoiceConfig } from "../types/files";
 import { parentPath as resolveParentPath } from "../utils/paths";
 import { storageKey } from "../utils/storage";
 
@@ -75,13 +75,6 @@ export const DEFAULT_MARKDOWN_CONFIG: MarkdownConfig = {
   themes: BUILTIN_MARKDOWN_THEMES,
 };
 
-export const DEFAULT_CODEX_CONFIG: CodexConfig = {
-  available_models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex", "gpt-5.3-codex-spark"],
-  default_model: "gpt-5.5",
-  proxy: "",
-  muted_message_alpha: 0.56,
-};
-
 export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   enabled: true,
   language_model_refine: true,
@@ -130,6 +123,7 @@ Current message:
 {{message}}`;
 
 export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
+  routing_schema_version: 3,
   hindsight_retain_enabled: true,
   hindsight_api_url: "",
   hindsight_bank_prefix: "super-workspace",
@@ -139,13 +133,11 @@ export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
   active_dispatch_profile_id: "local-vllm",
   dispatch_history_word_budget: 2048,
   provider_context_limits: {
-    codex: { context_recycle_percent: 70, context_recycle_tokens: null },
     "codex-app-server": { context_recycle_percent: 80, context_recycle_tokens: 200_000 },
     hermes: { context_recycle_percent: 80, context_recycle_tokens: null },
     opencode: { context_recycle_percent: 80, context_recycle_tokens: null },
   },
   default_routing_policy_id: "",
-  provider_accounts: [],
   routing_policies: [],
   dispatch_prompt_template: DEFAULT_DISPATCH_PROMPT_TEMPLATE,
   dispatch_profiles: DEFAULT_DISPATCH_PROFILES,
@@ -207,25 +199,6 @@ function normalizeMarkdown(config?: Partial<MarkdownConfig>): MarkdownConfig {
   };
 }
 
-function normalizeCodexConfig(config?: Partial<CodexConfig>): CodexConfig {
-  const seen = new Set<string>();
-  const sourceModels = [...(config?.available_models?.length ? config.available_models : []), ...DEFAULT_CODEX_CONFIG.available_models];
-  const available = sourceModels
-    .map((model) => model.trim())
-    .filter((model) => {
-      if (!model || seen.has(model)) return false;
-      seen.add(model);
-      return true;
-    });
-  const defaultModel = config?.default_model?.trim() || available[0] || DEFAULT_CODEX_CONFIG.default_model;
-  return {
-    available_models: available.includes(defaultModel) ? available : [defaultModel, ...available],
-    default_model: defaultModel,
-    proxy: config?.proxy?.trim() ?? DEFAULT_CODEX_CONFIG.proxy,
-    muted_message_alpha: normalizeAlpha(config?.muted_message_alpha, DEFAULT_CODEX_CONFIG.muted_message_alpha),
-  };
-}
-
 function uniqueCleanList(items: string[] | undefined, fallback: string[], options?: { lowercase?: boolean }) {
   const seen = new Set<string>();
   const source = items?.length ? items : fallback;
@@ -260,12 +233,6 @@ function normalizeVoiceConfig(config?: Partial<VoiceConfig>): VoiceConfig {
   };
 }
 
-function normalizeAlpha(value: unknown, fallback: number): number {
-  const alpha = Number(value ?? fallback);
-  if (!Number.isFinite(alpha)) return fallback;
-  return Math.min(1, Math.max(0.15, alpha));
-}
-
 function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): SuperWorkspaceConfig {
   const tokens = Number(config?.chat_history_bootstrap_tokens ?? DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens);
   const dispatchBudget = Number(config?.dispatch_history_word_budget ?? DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_history_word_budget);
@@ -298,6 +265,7 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
     }),
   );
   return {
+    routing_schema_version: 3,
     hindsight_retain_enabled: config?.hindsight_retain_enabled ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_retain_enabled,
     hindsight_api_url: config?.hindsight_api_url?.trim() ?? DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_api_url,
     hindsight_bank_prefix: config?.hindsight_bank_prefix?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.hindsight_bank_prefix,
@@ -308,7 +276,6 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
     dispatch_history_word_budget: Math.min(50000, Math.max(0, Number.isFinite(dispatchBudget) ? Math.floor(dispatchBudget) : DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_history_word_budget)),
     provider_context_limits: providerContextLimits,
     default_routing_policy_id: config?.default_routing_policy_id ?? "",
-    provider_accounts: JSON.parse(JSON.stringify(config?.provider_accounts ?? [])),
     routing_policies: JSON.parse(JSON.stringify(config?.routing_policies ?? [])),
     dispatch_prompt_template: config?.dispatch_prompt_template?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_prompt_template,
     dispatch_profiles: profiles,
@@ -375,7 +342,6 @@ export const useFilesStore = defineStore("files", {
     navigationByChat: {} as Record<string, ChatFileNavigation>,
     appearance: normalizeAppearance(),
     markdown: normalizeMarkdown(),
-    codexConfig: normalizeCodexConfig(),
     voiceConfig: normalizeVoiceConfig(),
     superWorkspaceConfig: normalizeSuperWorkspaceConfig(),
     loading: false,
@@ -400,7 +366,6 @@ export const useFilesStore = defineStore("files", {
       const config = await getConfig();
       this.appearance = normalizeAppearance(config.appearance);
       this.markdown = normalizeMarkdown(config.markdown);
-      this.codexConfig = normalizeCodexConfig(config.codex);
       this.voiceConfig = normalizeVoiceConfig(config.voice);
       this.superWorkspaceConfig = normalizeSuperWorkspaceConfig(config.super_workspace);
     },
@@ -408,21 +373,18 @@ export const useFilesStore = defineStore("files", {
       const config: ViewerConfig = {
         appearance: normalizeAppearance(this.appearance),
         markdown: normalizeMarkdown(this.markdown),
-        codex: normalizeCodexConfig(this.codexConfig),
         voice: normalizeVoiceConfig(this.voiceConfig),
         super_workspace: normalizeSuperWorkspaceConfig(this.superWorkspaceConfig),
       };
       const saved = await putConfig(config);
       this.appearance = normalizeAppearance(saved.appearance);
       this.markdown = normalizeMarkdown(saved.markdown);
-      this.codexConfig = normalizeCodexConfig(saved.codex);
       this.voiceConfig = normalizeVoiceConfig(saved.voice);
       this.superWorkspaceConfig = normalizeSuperWorkspaceConfig(saved.super_workspace);
     },
-    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, codex: CodexConfig, voice: VoiceConfig, superWorkspace: SuperWorkspaceConfig) {
+    async saveFullViewerConfig(appearance: AppearanceConfig, markdown: MarkdownConfig, voice: VoiceConfig, superWorkspace: SuperWorkspaceConfig) {
       this.appearance = normalizeAppearance(appearance);
       this.markdown = normalizeMarkdown(markdown);
-      this.codexConfig = normalizeCodexConfig(codex);
       this.voiceConfig = normalizeVoiceConfig(voice);
       this.superWorkspaceConfig = normalizeSuperWorkspaceConfig(superWorkspace);
       await this.saveConfig();

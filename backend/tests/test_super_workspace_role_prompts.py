@@ -8,10 +8,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.app.agent_history import AgentHistoryStore, SuperDriverRunCreate
-from backend.app.codex_background_runner import insert_provider_message
-from backend.app.models import ProviderAccountConfig, RoutingCandidateConfig, RoutingPolicyConfig, SuperWorkspaceConfig
+from backend.app.models import RoutingCandidateConfig, RoutingPolicyConfig, SuperWorkspaceConfig
 from backend.app.super_workspace import SuperRole, SuperWorkspaceManager
-from backend.app.super_workspace_runtime import CodexAppServerSuperDriver, CodexSuperDriver, HermesSuperDriver, OpenCodeSuperDriver, SuperWorkspaceRuntime
+from backend.app.super_workspace_runtime import CodexAppServerSuperDriver, HermesSuperDriver, OpenCodeSuperDriver, SuperWorkspaceRuntime
+
+
+def candidate(candidate_id: str, agent_id: str, provider_id: str = "default", model_id: str = "model") -> RoutingCandidateConfig:
+    return RoutingCandidateConfig(
+        id=candidate_id,
+        target_id=f"target-{candidate_id}",
+        agent_id=agent_id,
+        provider_id=provider_id,
+        model_id=model_id,
+        selection_id=model_id,
+    )
 
 
 def role() -> SuperRole:
@@ -20,7 +30,7 @@ def role() -> SuperRole:
         name="Test Role",
         description="DISPATCH_DESCRIPTION_ONLY",
         prompt="AGENT_PROMPT_ONLY",
-        provider="codex",
+        provider="codex-app-server",
         cwd="project",
         created_at=1.0,
         updated_at=1.0,
@@ -30,7 +40,6 @@ def role() -> SuperRole:
 class RolePromptSeparationTests(unittest.TestCase):
     def test_provider_context_limits_have_configurable_defaults(self) -> None:
         config = SuperWorkspaceConfig()
-        self.assertEqual(config.provider_context_limits["codex"].context_recycle_percent, 70)
         self.assertEqual(config.provider_context_limits["codex-app-server"].context_recycle_tokens, 200_000)
         self.assertIsNone(config.provider_context_limits["hermes"].context_recycle_tokens)
         self.assertIsNone(config.provider_context_limits["opencode"].context_recycle_tokens)
@@ -41,14 +50,14 @@ class RolePromptSeparationTests(unittest.TestCase):
 
     def test_driver_uses_provider_context_limits_from_viewer_config(self) -> None:
         limit = SimpleNamespace(context_recycle_percent=63.5, context_recycle_tokens=123_000)
-        config = SimpleNamespace(super_workspace=SimpleNamespace(provider_context_limits={"codex": limit}))
+        config = SimpleNamespace(super_workspace=SimpleNamespace(provider_context_limits={"codex-app-server": limit}))
         with patch("backend.app.files.read_config", return_value=config):
-            driver = CodexSuperDriver()
+            driver = CodexAppServerSuperDriver()
             self.assertEqual(driver.provider_context_recycle_percent(), 63.5)
             self.assertEqual(driver.provider_context_recycle_tokens(), 123_000)
 
     def test_acp_failures_are_not_converted_to_success_by_visible_output(self) -> None:
-        self.assertTrue(CodexSuperDriver.accept_final_response_on_failed_session)
+        self.assertFalse(CodexAppServerSuperDriver.accept_final_response_on_failed_session)
         self.assertFalse(HermesSuperDriver.accept_final_response_on_failed_session)
         self.assertFalse(OpenCodeSuperDriver.accept_final_response_on_failed_session)
 
@@ -56,27 +65,23 @@ class RolePromptSeparationTests(unittest.TestCase):
         runtime = SuperWorkspaceRuntime()
         self.assertIsInstance(runtime._drivers["opencode"], OpenCodeSuperDriver)
 
-    def test_chat_route_override_wins_and_filters_disabled_accounts(self) -> None:
+    def test_chat_profile_override_wins_and_filters_disabled_targets(self) -> None:
         manager = SuperWorkspaceManager()
         role_value = role().model_copy(update={"routing_policy_id": "role-policy"})
         role_policy = RoutingPolicyConfig(
-            id="role-policy", name="Role", candidates=[RoutingCandidateConfig(id="role-target", runtime_id="codex")]
+            id="role-policy", name="Role", candidates=[candidate("role-target", "codex-app-server")]
         )
         chat_policy = RoutingPolicyConfig(
             id="chat-policy",
             name="Chat",
             candidates=[
-                RoutingCandidateConfig(id="disabled", runtime_id="hermes", provider_account_id="account-off"),
-                RoutingCandidateConfig(id="enabled", runtime_id="codex-app-server", provider_account_id="account-on"),
+                candidate("disabled", "hermes").model_copy(update={"enabled": False}),
+                candidate("enabled", "codex-app-server", "openai-subscription"),
             ],
         )
         data = SimpleNamespace(
             default_routing_policy_id="role-policy",
             routing_policies=[role_policy, chat_policy],
-            provider_accounts=[
-                ProviderAccountConfig(id="account-off", name="Off", provider="hermes", enabled=False),
-                ProviderAccountConfig(id="account-on", name="On", provider="openai", enabled=True),
-            ],
         )
         chat = SimpleNamespace(role_routing_policy_overrides={role_value.id: "chat-policy"})
         with patch.object(manager, "read", return_value=data):
@@ -85,20 +90,19 @@ class RolePromptSeparationTests(unittest.TestCase):
         self.assertEqual([candidate.id for candidate in candidates], ["enabled"])
 
     def test_candidate_capabilities_must_satisfy_role_requirements(self) -> None:
-        candidate = RoutingCandidateConfig(
-            id="target",
-            runtime_id="hermes",
-            parameters={"capabilities": {"tools": True, "filesystem": False}, "context_window": 128_000},
-        )
-        self.assertTrue(SuperWorkspaceManager._candidate_meets_requirements(candidate, {"tools": True, "min_context_window": 100_000}))
-        self.assertFalse(SuperWorkspaceManager._candidate_meets_requirements(candidate, {"filesystem": True}))
-        self.assertFalse(SuperWorkspaceManager._candidate_meets_requirements(candidate, {"min_context_window": 200_000}))
+        target = candidate("target", "hermes").model_copy(update={
+            "parameters": {"capabilities": {"tools": True, "filesystem": False}, "context_window": 128_000},
+        })
+        self.assertTrue(SuperWorkspaceManager._candidate_meets_requirements(target, {"tools": True, "min_context_window": 100_000}))
+        self.assertFalse(SuperWorkspaceManager._candidate_meets_requirements(target, {"filesystem": True}))
+        self.assertFalse(SuperWorkspaceManager._candidate_meets_requirements(target, {"min_context_window": 200_000}))
 
     def test_routing_error_categories_distinguish_credit_and_request_failures(self) -> None:
-        runtime = SuperWorkspaceRuntime()
-        self.assertEqual(runtime._routing_error_category("insufficient credits"), "credit")
-        self.assertEqual(runtime._routing_error_category("429 rate limit exceeded"), "rate_limit")
-        self.assertEqual(runtime._routing_error_category("invalid request payload"), "request")
+        driver = CodexAppServerSuperDriver()
+        target = candidate("target", "codex-app-server", "openai-subscription")
+        self.assertEqual(driver.normalize_error(RuntimeError("insufficient credits"), target).category, "credit")
+        self.assertEqual(driver.normalize_error(RuntimeError("429 rate limit exceeded"), target).category, "rate_limit")
+        self.assertEqual(driver.normalize_error(RuntimeError("invalid request payload"), target).category, "request")
 
     def test_failed_session_error_is_written_to_driver_target(self) -> None:
         runtime = SuperWorkspaceRuntime()
@@ -152,7 +156,7 @@ class RolePromptSeparationTests(unittest.TestCase):
     def test_agent_initial_prompt_contains_role_prompt_but_not_description(self) -> None:
         workspace = SimpleNamespace(common_prompt="COMMON_PROMPT")
         with patch("backend.app.super_workspace_runtime.super_workspace_manager.read", return_value=workspace):
-            rendered = CodexSuperDriver().initial_prompt(role(), "user")
+            rendered = CodexAppServerSuperDriver().initial_prompt(role(), "user")
         self.assertIn("COMMON_PROMPT", rendered)
         self.assertIn("AGENT_PROMPT_ONLY", rendered)
         self.assertNotIn("DISPATCH_DESCRIPTION_ONLY", rendered)
@@ -182,16 +186,16 @@ class RolePromptSeparationTests(unittest.TestCase):
                 workspace_id=workspace.id,
                 chat_id=chat_id,
                 role_id=role_id,
-                provider="codex",
-                session_ref="codex:session-1",
+                provider="codex-app-server",
+                session_ref="codex-app-server:session-1",
                 cwd="",
                 model=None,
                 session_policy="reuse",
             )
             store.update_super_workspace_role("user", role_id, {"description": "Updated description"})
-            self.assertIsNotNone(store.get_chat_role_session("user", workspace.id, chat_id, role_id, "codex"))
+            self.assertIsNotNone(store.get_chat_role_session("user", workspace.id, chat_id, role_id, "codex-app-server"))
             store.update_super_workspace_role("user", role_id, {"prompt": "Updated prompt"})
-            self.assertIsNone(store.get_chat_role_session("user", workspace.id, chat_id, role_id, "codex"))
+            self.assertIsNone(store.get_chat_role_session("user", workspace.id, chat_id, role_id, "codex-app-server"))
 
     def test_structured_content_blocks_are_persisted_with_query(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -242,40 +246,33 @@ class RolePromptSeparationTests(unittest.TestCase):
                 ).scalar_one()
             self.assertEqual(turn_id, run.message_id)
 
-    def test_codex_background_writer_persists_worker_turn_id(self) -> None:
+    def test_legacy_codex_roles_are_migrated_and_old_sessions_removed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
             store = AgentHistoryStore(path)
-            insert_provider_message(
-                path,
-                user_id="user",
-                workspace_id=None,
-                chat_id=None,
-                provider="codex",
-                viewer_session_id="viewer-1",
-                provider_session_id=None,
-                turn_id="worker-turn-1",
-                query_message_id=None,
-                driver_run_id=None,
-                parent_message_id=None,
-                sender_role_id=None,
-                recipient_role_id=None,
-                role_id=None,
-                event_index=0,
-                received_at=1.0,
-                source_path=None,
-                source_event_id="event-1",
-                source_line=None,
-                role="assistant",
-                event_type="message:assistant",
-                text="done",
-                raw={},
+            workspace = store.ensure_default_workspace("user")
+            store.create_super_workspace_role("user", name="Legacy", provider="codex")
+            _, roles = store.super_workspace_data("user")
+            role_id = str(roles[0].id)
+            chats = store.create_super_chat("user", name="Chat", root="project", workspace_id=workspace.id)
+            store.upsert_chat_role_session(
+                "user", workspace_id=workspace.id, chat_id=chats.active_chat_id,
+                role_id=role_id, provider="codex", session_ref="codex:old", cwd="", model=None,
+                session_policy="reuse",
             )
-            with store.engine.connect() as connection:
-                turn_id = connection.exec_driver_sql(
-                    "SELECT turn_id FROM super_workspace_messages WHERE source_event_id = 'event-1'"
-                ).scalar_one()
-            self.assertEqual(turn_id, "worker-turn-1")
+            store.engine.dispose()
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "DELETE FROM agent_history_schema_migrations WHERE id = 'remove_legacy_codex_driver_v1'"
+                )
+
+            migrated = AgentHistoryStore(path)
+            _, migrated_roles = migrated.super_workspace_data("user")
+
+            self.assertEqual(migrated_roles[0].provider, "codex-app-server")
+            self.assertIsNone(
+                migrated.get_chat_role_session("user", workspace.id, chats.active_chat_id, role_id, "codex")
+            )
 
     def test_dispatch_task_preserves_force_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -301,6 +298,22 @@ class RolePromptSeparationTests(unittest.TestCase):
 
             self.assertIsNotNone(task)
             self.assertTrue(task.force_new_session)
+
+    def test_provider_health_applies_to_every_model_in_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AgentHistoryStore(Path(directory) / "history.sqlite3")
+            workspace = store.ensure_default_workspace("user")
+            store.record_target_failure(
+                "user", workspace.id,
+                scope_type="provider", scope_id="hermes/deepseek",
+                error_category="credit", last_error="credits exhausted", retry_after=9_999_999_999,
+            )
+            task = SimpleNamespace(user_id="user", workspace_id=workspace.id)
+            first = candidate("chat", "hermes", "deepseek", "deepseek-chat")
+            second = candidate("reasoner", "hermes", "deepseek", "deepseek-reasoner")
+            with patch("backend.app.super_workspace_runtime.agent_history_store", store):
+                self.assertIsNotNone(SuperWorkspaceRuntime._blocked_health(task, first))
+                self.assertIsNotNone(SuperWorkspaceRuntime._blocked_health(task, second))
 
 if __name__ == "__main__":
     unittest.main()

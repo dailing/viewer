@@ -1,5 +1,5 @@
 import type { AgentProvider } from "./agents";
-import type { ProviderAccountConfig, RoutingPolicyConfig } from "./files";
+import type { RoutingPolicyConfig } from "./files";
 
 export type SuperRole = {
   id: string;
@@ -23,7 +23,6 @@ export type SuperWorkspaceData = {
   name: string;
   common_prompt: string;
   roles: SuperRole[];
-  provider_accounts: ProviderAccountConfig[];
   routing_policies: RoutingPolicyConfig[];
   default_routing_policy_id: string;
 };
@@ -77,8 +76,42 @@ export type SuperRolePatch = Partial<Omit<SuperRole, "id" | "created_at" | "upda
 
 export type RoutingConfigData = {
   default_routing_policy_id: string;
-  provider_accounts: ProviderAccountConfig[];
   routing_policies: RoutingPolicyConfig[];
+};
+
+export type InferenceTarget = {
+  target_id: string;
+  agent_id: string;
+  agent_name: string;
+  provider_id: string;
+  provider_name: string;
+  model_id: string;
+  model_name: string;
+  selection_id: string;
+  is_default: boolean;
+  available: boolean;
+  authenticated?: boolean | null;
+  context_window?: number | null;
+  capabilities: Record<string, boolean>;
+  source: string;
+};
+
+export type TargetHealth = {
+  scope_type: "agent" | "provider" | "target" | string;
+  scope_id: string;
+  status: string;
+  error_category: string;
+  consecutive_failures: number;
+  retry_after?: number | null;
+  last_error: string;
+  updated_at: number;
+};
+
+export type InferenceCatalog = {
+  targets: InferenceTarget[];
+  health: TargetHealth[];
+  warnings: string[];
+  refreshed_at: number;
 };
 
 export type AgentHistoryMessage = {

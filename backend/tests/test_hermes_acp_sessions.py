@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from acp.schema import AgentCapabilities, AgentMessageChunk, PermissionOption, PromptCapabilities, TextContentBlock, ToolCallProgress, ToolCallStart
 
-from app.acp_runtime import ACPProcessConfig, ACPRuntime
+from app.acp_runtime import ACP_STDIO_LINE_LIMIT_BYTES, ACPProcessConfig, ACPRuntime
 from app.acp_sessions import ACPSession, ACPSessionManager
 from app.agent_history import SuperChatRoleSessionState
 from app.hermes_acp import HermesACPRuntime, HermesACPSessionNotFound
@@ -482,6 +482,41 @@ class GenericACPAbstractionTests(unittest.TestCase):
         self.assertEqual(runtime.provider, "example")
         self.assertEqual(runtime.command, "example-agent")
         self.assertEqual(runtime._agent_arguments(), ["serve-acp", "--stdio"])
+
+    def test_runtime_uses_bounded_four_mib_stdio_lines(self) -> None:
+        self.assertEqual(ACP_STDIO_LINE_LIMIT_BYTES, 4 * 1024 * 1024)
+
+    def test_runtime_passes_stdio_line_limit_to_acp_transport(self) -> None:
+        runtime = ACPRuntime(
+            ACPProcessConfig(provider="example", command="example-agent", arguments=("serve-acp",)),
+            AsyncMock(),
+        )
+        connection = SimpleNamespace(
+            initialize=AsyncMock(
+                return_value=SimpleNamespace(agent_info=None, agent_capabilities=None)
+            )
+        )
+        process = SimpleNamespace(pid=123, returncode=None, stderr=None)
+        context = AsyncMock()
+        context.__aenter__.return_value = (connection, process)
+        context.__aexit__.return_value = None
+
+        async def run() -> None:
+            with (
+                patch("app.acp_runtime.shutil.which", return_value="/usr/bin/example-agent"),
+                patch("app.acp_runtime.acp.spawn_agent_process", return_value=context) as spawn,
+            ):
+                await runtime.start()
+                spawn.assert_called_once_with(
+                    runtime._client,
+                    "/usr/bin/example-agent",
+                    "serve-acp",
+                    transport_kwargs={"limit": ACP_STDIO_LINE_LIMIT_BYTES},
+                    use_unstable_protocol=True,
+                )
+                await runtime.shutdown()
+
+        asyncio.run(run())
 
     def test_model_selection_uses_standard_config_option(self) -> None:
         runtime = ACPRuntime(

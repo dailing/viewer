@@ -25,6 +25,7 @@ from loguru import logger
 
 
 ACPUpdateHandler = Callable[[str, Any], Awaitable[None]]
+ACP_STDIO_LINE_LIMIT_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -155,7 +156,13 @@ class ACPRuntime:
             if not executable:
                 raise RuntimeError(f"{self.provider} ACP command was not found: {self.command}")
             arguments = self._agent_arguments()
-            context = acp.spawn_agent_process(self._client, executable, *arguments, use_unstable_protocol=True)
+            context = acp.spawn_agent_process(
+                self._client,
+                executable,
+                *arguments,
+                transport_kwargs={"limit": ACP_STDIO_LINE_LIMIT_BYTES},
+                use_unstable_protocol=True,
+            )
             try:
                 connection, process = await context.__aenter__()
                 self._process_context = context

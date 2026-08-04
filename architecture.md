@@ -149,6 +149,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/acp_runtime.py`
 
 - Provider-neutral ACP client and stdio process runtime. `ACPProcessConfig` supplies provider id, executable, arguments, enabled state, profile, and YOLO metadata; adding another conforming local ACP agent requires a process adapter rather than another protocol implementation.
+- ACP subprocess stdout uses a finite 4 MiB JSONL line limit, large enough for patch/edit permission payloads while remaining bounded; compact event persistence and log-output limits are applied separately after protocol parsing.
 - Performs initialize/capability negotiation and implements new/load/list/fork/resume/prompt/cancel/close/model/mode. It validates ACP ContentBlocks, capability-gates images/audio/resources, drains subprocess stderr, and deliberately declines client-hosted filesystem and terminal capabilities.
 - Exposes one provider-overridable `set_model(session_id, model)` operation. The provider-neutral implementation uses the current ACP `session/set_config_option` model option and treats the selection value as opaque; provider adapters override only when their ACP implementation requires a legacy or dedicated method.
 - The shared ACP client auto-approves Agent permission requests, preferring `allow_always` and falling back to `allow_once`; it cancels only when the Agent supplies no allow option. Provider-side explicit deny rules remain authoritative because they do not produce an approvable request.

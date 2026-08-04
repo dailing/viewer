@@ -144,6 +144,9 @@ export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
     hermes: { context_recycle_percent: 80, context_recycle_tokens: null },
     opencode: { context_recycle_percent: 80, context_recycle_tokens: null },
   },
+  default_routing_policy_id: "",
+  provider_accounts: [],
+  routing_policies: [],
   dispatch_prompt_template: DEFAULT_DISPATCH_PROMPT_TEMPLATE,
   dispatch_profiles: DEFAULT_DISPATCH_PROFILES,
 };
@@ -304,6 +307,9 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
     active_dispatch_profile_id: activeProfileId,
     dispatch_history_word_budget: Math.min(50000, Math.max(0, Number.isFinite(dispatchBudget) ? Math.floor(dispatchBudget) : DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_history_word_budget)),
     provider_context_limits: providerContextLimits,
+    default_routing_policy_id: config?.default_routing_policy_id ?? "",
+    provider_accounts: JSON.parse(JSON.stringify(config?.provider_accounts ?? [])),
+    routing_policies: JSON.parse(JSON.stringify(config?.routing_policies ?? [])),
     dispatch_prompt_template: config?.dispatch_prompt_template?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_prompt_template,
     dispatch_profiles: profiles,
   };

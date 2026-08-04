@@ -98,6 +98,9 @@ class SuperDispatchTask(BaseModel):
     role_id: str
     role_name: str
     provider: str
+    routing_policy_id: str = ""
+    execution_target: dict[str, Any] = Field(default_factory=dict)
+    routing_attempts: list[dict[str, Any]] = Field(default_factory=list)
     viewer_session_id: str = ""
     provider_session_id: str | None = None
     session_ref: str = ""
@@ -166,6 +169,9 @@ class SuperHistoryTarget(BaseModel):
     role_id: str
     role_name: str
     provider: str
+    routing_policy_id: str = ""
+    execution_target: dict[str, Any] = Field(default_factory=dict)
+    routing_attempts: list[dict[str, Any]] = Field(default_factory=list)
     viewer_session_id: str
     provider_session_id: str | None = None
     session_ref: str
@@ -212,6 +218,9 @@ class SuperDisplayTarget(BaseModel):
     provider_session_id: str | None = None
     session_ref: str
     status: str
+    routing_policy_id: str = ""
+    execution_target: dict[str, Any] = Field(default_factory=dict)
+    routing_attempts: list[dict[str, Any]] = Field(default_factory=list)
     model_context_window: int | None = None
     total_tokens: int | None = None
     context_used_percent: float | None = None
@@ -245,6 +254,9 @@ class SuperDisplayItem(BaseModel):
     total_tokens: int | None = None
     context_used_percent: float | None = None
     target_status: str = ""
+    routing_policy_id: str = ""
+    execution_target: dict[str, Any] = Field(default_factory=dict)
+    routing_attempts: list[dict[str, Any]] = Field(default_factory=list)
     run_status: str = ""
     error: str = ""
     citation_ids: list[str] = Field(default_factory=list)
@@ -301,6 +313,7 @@ class SuperChatSummary(BaseModel):
     root: str
     common_prompt: str = ""
     member_role_ids: list[str] = Field(default_factory=list)
+    role_routing_policy_overrides: dict[str, str] = Field(default_factory=dict)
     created_at: float
     updated_at: float
 
@@ -352,6 +365,7 @@ class SuperWorkspaceChatRow(AgentHistoryBase):
     root: Mapped[str] = mapped_column(Text, nullable=False)
     common_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     member_role_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    role_routing_policy_overrides_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
@@ -384,6 +398,8 @@ class SuperWorkspaceRoleRow(AgentHistoryBase):
     provider: Mapped[str] = mapped_column(String, nullable=False, default="codex")
     cwd: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model: Mapped[str | None] = mapped_column(String)
+    routing_policy_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    capability_requirements_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     session_policy: Mapped[str] = mapped_column(String, nullable=False, default="reuse")
     context_recycle_percent: Mapped[float | None] = mapped_column(Float)
     context_recycle_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -483,6 +499,9 @@ class SuperWorkspaceDriverRunRow(AgentHistoryBase):
     role_id: Mapped[str] = mapped_column(String, nullable=False)
     role_name: Mapped[str] = mapped_column(String, nullable=False)
     provider: Mapped[str] = mapped_column(String, nullable=False)
+    routing_policy_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    execution_target_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    routing_attempts_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     viewer_session_id: Mapped[str] = mapped_column(String, nullable=False, default="")
     provider_session_id: Mapped[str | None] = mapped_column(String)
     session_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
@@ -622,10 +641,52 @@ class AgentHistoryStore:
                     "INSERT INTO agent_history_schema_migrations (id, applied_at) VALUES (?, ?)",
                     (migration_id, time.time()),
                 )
+            self._ensure_column(
+                connection,
+                "super_workspace_roles",
+                "routing_policy_id",
+                "VARCHAR NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "super_workspace_roles",
+                "capability_requirements_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                connection,
+                "super_workspace_chats",
+                "role_routing_policy_overrides_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                connection,
+                "super_workspace_driver_runs",
+                "routing_policy_id",
+                "VARCHAR NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "super_workspace_driver_runs",
+                "execution_target_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                connection,
+                "super_workspace_driver_runs",
+                "routing_attempts_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
         for index in SuperWorkspaceMessageRow.__table__.indexes:
             index.create(self.engine, checkfirst=True)
         for index in SuperWorkspaceDriverRunRow.__table__.indexes:
             index.create(self.engine, checkfirst=True)
+
+    @staticmethod
+    def _ensure_column(connection: Any, table: str, column: str, declaration: str) -> None:
+        columns = {str(row[1]) for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def ensure_default_workspace(self, user_id: str | None) -> SuperWorkspaceRow:
         normalized_user = normalize_user_id(user_id)
@@ -741,6 +802,11 @@ class AgentHistoryStore:
                     root=str(row.root),
                     common_prompt=str(row.common_prompt or ""),
                     member_role_ids=[value for value in self._parse_json(row.member_role_ids_json, []) if isinstance(value, str)],
+                    role_routing_policy_overrides={
+                        str(key): str(value)
+                        for key, value in self._parse_json(row.role_routing_policy_overrides_json, {}).items()
+                        if isinstance(key, str) and isinstance(value, str)
+                    },
                     created_at=float(row.created_at),
                     updated_at=float(row.updated_at),
                 )
@@ -758,6 +824,7 @@ class AgentHistoryStore:
         root: str,
         common_prompt: str = "",
         member_role_ids: list[str] | None = None,
+        role_routing_policy_overrides: dict[str, str] | None = None,
         workspace_id: str | None = None,
     ) -> SuperChatList:
         workspace = self._workspace_for_run(normalize_user_id(user_id), workspace_id)
@@ -781,6 +848,7 @@ class AgentHistoryStore:
                     root=normalize_chat_root(root),
                     common_prompt=common_prompt.strip(),
                     member_role_ids_json=self._json(normalized_role_ids),
+                    role_routing_policy_overrides_json=self._json(role_routing_policy_overrides or {}),
                     created_at=now,
                     updated_at=now,
                 )
@@ -834,6 +902,15 @@ class AgentHistoryStore:
                 row.name = normalized_name
                 row.type = normalized_type
                 row.member_role_ids_json = self._json(normalized_role_ids)
+                if "role_routing_policy_overrides" in values:
+                    overrides = values["role_routing_policy_overrides"] or {}
+                    row.role_routing_policy_overrides_json = self._json(
+                        {
+                            str(role_id): str(policy_id)
+                            for role_id, policy_id in overrides.items()
+                            if role_id in normalized_role_ids and str(policy_id).strip()
+                        }
+                    )
                 if "pinned" in values:
                     now = time.time()
                     if values["pinned"]:
@@ -1017,6 +1094,8 @@ class AgentHistoryStore:
         provider: str = "codex",
         cwd: str = "",
         model: str | None = None,
+        routing_policy_id: str = "",
+        capability_requirements: dict[str, Any] | None = None,
         session_policy: str = "reuse",
         context_recycle_percent: float | None = None,
         context_recycle_tokens: int | None = None,
@@ -1036,6 +1115,8 @@ class AgentHistoryStore:
                     provider=provider,
                     cwd=normalize_relative_cwd(cwd),
                     model=model,
+                    routing_policy_id=routing_policy_id,
+                    capability_requirements_json=self._json(capability_requirements or {}),
                     session_policy=normalized_policy,
                     context_recycle_percent=context_recycle_percent,
                     context_recycle_tokens=context_recycle_tokens,
@@ -1053,6 +1134,8 @@ class AgentHistoryStore:
             cleaned["session_policy"] = "reuse"
         if "cwd" in cleaned:
             cleaned["cwd"] = normalize_relative_cwd(cleaned["cwd"])
+        if "capability_requirements" in cleaned:
+            cleaned["capability_requirements_json"] = self._json(cleaned.pop("capability_requirements") or {})
         cleaned["updated_at"] = time.time()
         with self.session_scope() as db:
             role = db.scalar(
@@ -1064,10 +1147,16 @@ class AgentHistoryStore:
             )
             if role is None:
                 raise KeyError(role_id)
-            prompt_changed = "prompt" in cleaned and str(cleaned["prompt"] or "") != str(role.prompt or "")
+            session_binding_changed = (
+                ("prompt" in cleaned and str(cleaned["prompt"] or "") != str(role.prompt or ""))
+                or (
+                    "routing_policy_id" in cleaned
+                    and str(cleaned["routing_policy_id"] or "") != str(role.routing_policy_id or "")
+                )
+            )
             for key, value in cleaned.items():
                 setattr(role, key, value)
-            if prompt_changed:
+            if session_binding_changed:
                 db.execute(
                     delete(SuperWorkspaceChatRoleSessionRow).where(
                         SuperWorkspaceChatRoleSessionRow.role_id == role_id,
@@ -1423,6 +1512,9 @@ class AgentHistoryStore:
                         role_id=request.role_id,
                         role_name=request.role_name,
                         provider=provider,
+                        routing_policy_id=request.role_snapshot.get("routing_policy_id", ""),
+                        execution_target_json="{}",
+                        routing_attempts_json="[]",
                         viewer_session_id=viewer_session_id,
                         provider_session_id=provider_session_id,
                         session_ref=request.session_ref,
@@ -1457,6 +1549,9 @@ class AgentHistoryStore:
         model_context_window: int | None = None,
         total_tokens: int | None = None,
         context_used_percent: float | None = None,
+        routing_policy_id: str | None = None,
+        execution_target: dict[str, Any] | None = None,
+        routing_attempts: list[dict[str, Any]] | None = None,
     ) -> None:
         values: dict[str, Any] = {"status": status, "updated_at": time.time()}
         if session_ref is not None:
@@ -1473,6 +1568,12 @@ class AgentHistoryStore:
             values["total_tokens"] = total_tokens
         if context_used_percent is not None:
             values["context_used_percent"] = context_used_percent
+        if routing_policy_id is not None:
+            values["routing_policy_id"] = routing_policy_id
+        if execution_target is not None:
+            values["execution_target_json"] = self._json(execution_target)
+        if routing_attempts is not None:
+            values["routing_attempts_json"] = self._json(routing_attempts)
         if agent_prompt is not None:
             values["agent_prompt"] = agent_prompt
         if error is not None:
@@ -2230,6 +2331,9 @@ class AgentHistoryStore:
             total_tokens=int(target.total_tokens) if target is not None and isinstance(target.total_tokens, int) else None,
             context_used_percent=float(target.context_used_percent) if target is not None and isinstance(target.context_used_percent, (int, float)) else None,
             target_status=str(target.status) if target is not None else "",
+            routing_policy_id=str(target.routing_policy_id or "") if target is not None else "",
+            execution_target=self._parse_json(target.execution_target_json, {}) if target is not None else {},
+            routing_attempts=self._parse_json(target.routing_attempts_json, []) if target is not None else [],
             run_status=str(row.status or "") if is_query else "",
             error=str(row.error or "") if is_query else "",
             citation_ids=citation_ids_by_query.get(str(row.id), []) if is_query else [],
@@ -2260,6 +2364,9 @@ class AgentHistoryStore:
             provider_session_id=row.provider_session_id if isinstance(row.provider_session_id, str) else None,
             session_ref=str(row.session_ref),
             status=str(row.status),
+            routing_policy_id=str(row.routing_policy_id or ""),
+            execution_target=self._parse_json(row.execution_target_json, {}),
+            routing_attempts=self._parse_json(row.routing_attempts_json, []),
             model_context_window=int(row.model_context_window) if isinstance(row.model_context_window, int) else None,
             total_tokens=int(row.total_tokens) if isinstance(row.total_tokens, int) else None,
             context_used_percent=float(row.context_used_percent) if isinstance(row.context_used_percent, (int, float)) else None,
@@ -2355,6 +2462,9 @@ class AgentHistoryStore:
             role_id=str(row.role_id),
             role_name=str(row.role_name),
             provider=provider,
+            routing_policy_id=str(row.routing_policy_id or ""),
+            execution_target=self._parse_json(row.execution_target_json, {}),
+            routing_attempts=self._parse_json(row.routing_attempts_json, []),
             viewer_session_id=viewer_session_id,
             provider_session_id=row.provider_session_id if isinstance(row.provider_session_id, str) else None,
             session_ref=str(row.session_ref),
@@ -2378,6 +2488,9 @@ class AgentHistoryStore:
             role_id=str(row.role_id),
             role_name=str(row.role_name),
             provider=str(row.provider),
+            routing_policy_id=str(row.routing_policy_id or ""),
+            execution_target=self._parse_json(row.execution_target_json, {}),
+            routing_attempts=self._parse_json(row.routing_attempts_json, []),
             viewer_session_id=str(row.viewer_session_id or ""),
             provider_session_id=row.provider_session_id if isinstance(row.provider_session_id, str) else None,
             session_ref=str(row.session_ref or ""),

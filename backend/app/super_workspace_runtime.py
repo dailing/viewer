@@ -28,7 +28,12 @@ from .opencode_sessions import opencode_session_manager
 from .process_registry import process_slot_state, write_process_state
 from .storage import LOG_DIR
 from .super_workspace import SuperDispatchRequest, SuperRole, super_workspace_manager
+from .models import RoutingCandidateConfig, RoutingPolicyConfig
 from .identity import normalize_user_id
+
+
+class RoutingTargetBusy(RuntimeError):
+    pass
 
 
 class SuperWorkspaceMessageCreate(BaseModel):
@@ -374,6 +379,7 @@ class SuperWorkspaceRuntime:
         # they finish (graceful drain). Only _stop aborts in-flight sessions.
         self._leadership_lost = asyncio.Event()
         self._orphan_sweep_done = False
+        self._routing_cooldowns: dict[str, float] = {}
         self._drivers: dict[str, SuperAgentDriver] = {
             "codex": CodexSuperDriver(),
             "codex-app-server": CodexAppServerSuperDriver(),
@@ -505,6 +511,15 @@ class SuperWorkspaceRuntime:
             role = roles_by_id.get(role_id)
             if role is None:
                 continue
+            policy, candidates = super_workspace_manager.routing_candidates_for(role, chat)
+            primary = candidates[0]
+            routed_role = role.model_copy(
+                update={
+                    "routing_policy_id": policy.id,
+                    "provider": primary.runtime_id,
+                    "model": primary.model_id,
+                }
+            )
             agent_history_store.record_super_target(
                 normalized_user,
                 run.id,
@@ -513,10 +528,10 @@ class SuperWorkspaceRuntime:
                     chat_id=run.chat_id,
                     role_id=role.id,
                     role_name=role.name,
-                    provider=role.provider or "codex",
+                    provider=primary.runtime_id,
                     parent_message_id=run.parent_message_id or run.message_id,
                     sender_role_id=run.sender_role_id,
-                    role_snapshot=role.model_dump(),
+                    role_snapshot=routed_role.model_dump(),
                     force_new_session=request.force_new_session,
                 ),
             )
@@ -676,23 +691,142 @@ class SuperWorkspaceRuntime:
     async def _dispatch_task(self, task: SuperDispatchTask) -> None:
         run = agent_history_store.get_super_run(task.query_message_id, task.user_id)
         role = self._role_for_task(task)
-        driver = self._drivers.get(role.provider or "codex")
-        if driver is None:
-            agent_history_store.update_driver_run_status(task.id, "failed", error=f"Unsupported provider: {role.provider}")
-            agent_history_store.summarize_super_run_status(run.id, task.user_id, fallback_error=f"Unsupported provider: {role.provider}")
-            return
         chat = super_workspace_manager.chat_for_run(task.user_id, task.workspace_id, run.chat_id)
+        policy, candidates = super_workspace_manager.routing_candidates_for(role, chat)
         effective_cwd = "/".join(part for part in ((chat.root or "").strip(), (role.cwd or "").strip()) if part)
+        prompt: str | list[dict[str, Any]] = self.role_message_prompt(run, role)
+        attempts: list[dict[str, Any]] = []
+        last_error = "Routing policy exhausted"
+        for candidate in candidates:
+            cooldown_key = f"{policy.id}:{candidate.id}"
+            cooldown_until = self._routing_cooldowns.get(cooldown_key, 0)
+            if cooldown_until > time.time():
+                attempts.append(
+                    {
+                        "candidate_id": candidate.id,
+                        "runtime_id": candidate.runtime_id,
+                        "model_id": candidate.model_id,
+                        "status": "cooldown",
+                        "cooldown_until": cooldown_until,
+                    }
+                )
+                continue
+            started_at = time.time()
+            target = {
+                "candidate_id": candidate.id,
+                "runtime_id": candidate.runtime_id,
+                "provider_account_id": candidate.provider_account_id,
+                "model_id": candidate.model_id,
+                "parameters": candidate.parameters,
+            }
+            try:
+                completed = await self._dispatch_candidate(
+                    task, run, role, policy, candidate, prompt, effective_cwd, attempts, target
+                )
+                attempts.append({**target, "status": "completed", "started_at": started_at, "finished_at": time.time()})
+                agent_history_store.update_driver_run_status(
+                    task.id,
+                    "completed",
+                    routing_policy_id=policy.id,
+                    execution_target=target,
+                    routing_attempts=attempts,
+                )
+                await self._emit_update(
+                    {
+                        "type": "run-updated",
+                        "user_id": task.user_id,
+                        "chat_id": run.chat_id,
+                        "run_id": run.id,
+                        "status": completed.status,
+                        "updated_at": time.time(),
+                    }
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except RoutingTargetBusy:
+                agent_history_store.update_driver_run_status(
+                    task.id,
+                    "queued",
+                    error="",
+                    routing_policy_id=policy.id,
+                    routing_attempts=attempts,
+                    next_attempt_at=time.time() + 2.0,
+                )
+                await self._emit_update(
+                    {"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id}
+                )
+                return
+            except Exception as exc:
+                last_error = str(exc) or exc.__class__.__name__
+                category = self._routing_error_category(last_error)
+                attempts.append(
+                    {
+                        **target,
+                        "status": "failed",
+                        "error": last_error,
+                        "error_category": category,
+                        "started_at": started_at,
+                        "finished_at": time.time(),
+                    }
+                )
+                if policy.cooldown_seconds:
+                    self._routing_cooldowns[cooldown_key] = time.time() + policy.cooldown_seconds
+                agent_history_store.update_driver_run_status(
+                    task.id,
+                    "running" if policy.auto_failover else "failed",
+                    error=last_error,
+                    routing_policy_id=policy.id,
+                    execution_target=target,
+                    routing_attempts=attempts,
+                )
+                if not policy.auto_failover or category in {"request", "refusal"}:
+                    break
+        agent_history_store.update_driver_run_status(
+            task.id,
+            "failed",
+            error=last_error,
+            routing_policy_id=policy.id,
+            routing_attempts=attempts,
+        )
+        completed = agent_history_store.summarize_super_run_status(run.id, task.user_id, fallback_error=last_error)
+        await self._emit_update(
+            {
+                "type": "run-updated",
+                "user_id": task.user_id,
+                "chat_id": run.chat_id,
+                "run_id": run.id,
+                "status": completed.status,
+                "updated_at": time.time(),
+            }
+        )
+
+    async def _dispatch_candidate(
+        self,
+        task: SuperDispatchTask,
+        run: SuperHistoryRun,
+        base_role: SuperRole,
+        policy: RoutingPolicyConfig,
+        candidate: RoutingCandidateConfig,
+        base_prompt: str | list[dict[str, Any]],
+        effective_cwd: str,
+        attempts: list[dict[str, Any]],
+        target: dict[str, Any],
+    ) -> SuperHistoryRun:
+        driver = self._drivers.get(candidate.runtime_id)
+        if driver is None:
+            raise RuntimeError(f"Unsupported runtime: {candidate.runtime_id}")
+        role = base_role.model_copy(update={"provider": candidate.runtime_id, "model": candidate.model_id})
         effective_model = driver._effective_model(role)
-        session_state = agent_history_store.get_chat_role_session(task.user_id, task.workspace_id, run.chat_id, role.id, role.provider or "codex")
+        session_state = agent_history_store.get_chat_role_session(
+            task.user_id, task.workspace_id, run.chat_id, role.id, candidate.runtime_id
+        )
         active_session_id = driver.active_session_id(role, session_state, effective_cwd, effective_model)
         if active_session_id is not None:
-            agent_history_store.update_driver_run_status(task.id, "queued", next_attempt_at=time.time() + 2.0)
-            await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
-            return
-        prompt: str | list[dict[str, Any]] = self.role_message_prompt(run, role)
-        if driver.supports_content_blocks and run.content_blocks:
-            prompt = [{"type": "text", "text": prompt}, *run.content_blocks]
+            raise RoutingTargetBusy(f"Runtime already has an active session: {candidate.runtime_id}")
+        prompt = base_prompt
+        if driver.supports_content_blocks and run.content_blocks and isinstance(base_prompt, str):
+            prompt = [{"type": "text", "text": base_prompt}, *run.content_blocks]
         lineage = {
             "turn_id": task.id,
             "workspace_id": task.workspace_id,
@@ -705,10 +839,20 @@ class SuperWorkspaceRuntime:
             "role_id": role.id,
             "role_name": role.name,
             "cwd": effective_cwd,
+            "routing_policy_id": policy.id,
+            "routing_candidate_id": candidate.id,
         }
-        agent_history_store.update_super_run(run.id, task.user_id, status="running")
+        agent_history_store.update_super_run(run.id, task.user_id, status="running", error="")
         prompt_preview = prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False)
-        agent_history_store.update_driver_run_status(task.id, "running", agent_prompt=prompt_preview, error="")
+        agent_history_store.update_driver_run_status(
+            task.id,
+            "running",
+            agent_prompt=prompt_preview,
+            error="",
+            routing_policy_id=policy.id,
+            execution_target=target,
+            routing_attempts=attempts,
+        )
         await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
         dispatch_result = await driver.dispatch_task(
             role, session_state, task.user_id, prompt, lineage, effective_cwd,
@@ -716,23 +860,11 @@ class SuperWorkspaceRuntime:
         )
         session_ref = str(dispatch_result["session_ref"])
         rotation_reason = str(dispatch_result.get("rotation_reason") or "")
-        provider, session_id = driver.parse_ref(session_ref, role.provider)
+        provider, session_id = driver.parse_ref(session_ref, candidate.runtime_id)
         current_task = agent_history_store.get_dispatch_task(task.id)
         if current_task is not None and current_task.status == "cancelled":
             await driver.manager().terminate(session_id)
-            agent_history_store.summarize_super_run_status(run.id, task.user_id)
-            await self._emit_update(
-                {
-                    "type": "run-updated",
-                    "user_id": task.user_id,
-                    "chat_id": run.chat_id,
-                    "run_id": run.id,
-                    "driver_run_id": task.id,
-                    "status": "cancelled",
-                    "updated_at": time.time(),
-                }
-            )
-            return
+            raise asyncio.CancelledError()
         snapshot = driver.manager().snapshot(session_id, "focus")
         usage = driver.usage_from_snapshot(snapshot)
         agent_history_store.upsert_chat_role_session(
@@ -750,30 +882,41 @@ class SuperWorkspaceRuntime:
             rotation_reason=rotation_reason,
             **driver.chat_role_session_usage(usage),
         )
-        agent_history_store.update_driver_run_status(task.id, "running", session_ref=session_ref, agent_prompt=prompt_preview, **usage)
-        completed = await self._wait_for_session(
-            driver,
-            session_id,
-            task.user_id,
-            run.id,
+        agent_history_store.update_driver_run_status(
             task.id,
-            task.workspace_id,
-            run.chat_id,
-            role,
-            effective_cwd,
-            session_ref,
-            effective_model,
+            "running",
+            session_ref=session_ref,
+            agent_prompt=prompt_preview,
+            routing_policy_id=policy.id,
+            execution_target=target,
+            routing_attempts=attempts,
+            **usage,
         )
-        await self._emit_update(
-            {
-                "type": "run-updated",
-                "user_id": task.user_id,
-                "chat_id": run.chat_id,
-                "run_id": run.id,
-                "status": completed.status,
-                "updated_at": time.time(),
-            }
+        completed = await self._wait_for_session(
+            driver, session_id, task.user_id, run.id, task.id, task.workspace_id,
+            run.chat_id, role, effective_cwd, session_ref, effective_model,
         )
+        current_task = agent_history_store.get_dispatch_task(task.id)
+        if current_task is not None and current_task.status == "failed":
+            raise RuntimeError(current_task.error or "Role session failed")
+        return completed
+
+    @staticmethod
+    def _routing_error_category(message: str) -> str:
+        value = message.casefold()
+        if any(token in value for token in ("refusal", "refused")):
+            return "refusal"
+        if any(token in value for token in ("invalid prompt", "invalid request", "bad request", "400")):
+            return "request"
+        if any(token in value for token in ("credit", "quota", "402", "insufficient")):
+            return "credit"
+        if any(token in value for token in ("rate limit", "429", "too many requests")):
+            return "rate_limit"
+        if any(token in value for token in ("unauthorized", "forbidden", "401", "403", "auth")):
+            return "auth"
+        if any(token in value for token in ("model not found", "unavailable", "not available")):
+            return "model_unavailable"
+        return "runtime"
 
     def _role_for_task(self, task: SuperDispatchTask) -> SuperRole:
         data = super_workspace_manager.read(task.user_id)

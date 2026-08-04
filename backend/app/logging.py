@@ -6,7 +6,9 @@ from pathlib import Path
 from loguru import logger
 
 
-DEFAULT_LOG_DIR = Path(os.environ.get("VIEWER_HOME", Path.home() / ".view")).expanduser() / "logs"
+DEFAULT_LOG_DIR = Path(
+    os.environ.get("VIEWER_DATA_DIR", os.environ.get("VIEWER_HOME", Path.home() / ".view"))
+).expanduser() / "logs"
 _configured = False
 
 

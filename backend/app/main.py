@@ -39,7 +39,7 @@ from .opencode_sessions import opencode_session_manager
 from .logging import ensure_logging
 from .models import ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate
 from .restart import request_restart, request_stop
-from .super_workspace import SuperChatCreate, SuperChatPatch, SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
+from .super_workspace import RoutingConfigData, SuperChatCreate, SuperChatPatch, SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
 from .super_workspace_runtime import SuperWorkspaceMessageCreate, super_workspace_runtime
 from .terminals import terminal_manager
 from .voice import connect_voice
@@ -502,6 +502,16 @@ async def create_super_role(request: SuperRoleCreate):
 @app.put("/api/super-workspace/roles/{role_id}")
 async def update_super_role(role_id: str, request: SuperRolePatch):
     return super_workspace_manager.update_role(role_id, request)
+
+
+@app.get("/api/super-workspace/routing")
+async def get_super_workspace_routing():
+    return super_workspace_manager.read_routing()
+
+
+@app.put("/api/super-workspace/routing")
+async def update_super_workspace_routing(request: RoutingConfigData):
+    return super_workspace_manager.update_routing(request)
 
 
 @app.delete("/api/super-workspace/roles/{role_id}")

@@ -4,15 +4,17 @@ import ChatsPanel from "./sidebar/ChatsPanel.vue";
 import FilesPanel from "./sidebar/FilesPanel.vue";
 import GitPanel from "./sidebar/GitPanel.vue";
 import RolesPanel from "./sidebar/RolesPanel.vue";
+import RoutesPanel from "./sidebar/RoutesPanel.vue";
 import TerminalsPanel from "./sidebar/TerminalsPanel.vue";
 import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
 import { useTerminalsStore } from "../stores/terminals";
 import { storageKey } from "../utils/storage";
 import type { AgentProvider } from "../types/agents";
-import type { SuperChatSummary, SuperRole } from "../types/superWorkspace";
+import type { ProviderAccountConfig, RoutingPolicyConfig } from "../types/files";
+import type { RoutingConfigData, SuperChatSummary, SuperRole } from "../types/superWorkspace";
 
-type SidebarTool = "files" | "git" | "terminals" | "chats" | "roles";
+type SidebarTool = "files" | "git" | "terminals" | "chats" | "roles" | "routes";
 
 const ACTIVE_TOOL_KEY = "viewer.sidebarActiveTool.v1";
 
@@ -21,6 +23,9 @@ const props = defineProps<{
   activeChatId?: string;
   roles?: SuperRole[];
   providers?: { id: AgentProvider; name: string }[];
+  routingPolicies?: RoutingPolicyConfig[];
+  providerAccounts?: ProviderAccountConfig[];
+  defaultRoutingPolicyId?: string;
   panelOpen: boolean;
   panelPinned: boolean;
 }>();
@@ -36,6 +41,7 @@ const emit = defineEmits<{
   "create-role": [];
   "update-role": [role: SuperRole];
   "delete-role": [role: SuperRole];
+  "save-routing": [config: RoutingConfigData];
   "toggle-tool-panel": [];
   "toggle-pin": [];
   "close-panel": [];
@@ -45,6 +51,7 @@ const emit = defineEmits<{
 const tools: Array<{ id: SidebarTool; title: string; icon: string }> = [
   { id: "chats", title: "Chats", icon: "bi-chat-left-text" },
   { id: "roles", title: "Roles", icon: "bi-person-lines-fill" },
+  { id: "routes", title: "Routes", icon: "bi-signpost-split" },
   { id: "files", title: "Files", icon: "bi-files" },
   { id: "git", title: "Changes", icon: "bi-git" },
   { id: "terminals", title: "Terminals", icon: "bi-terminal" },
@@ -202,6 +209,7 @@ async function openPinnedFile(path: string) {
         :chats="props.chats ?? []"
         :active-chat-id="props.activeChatId ?? ''"
         :roles="props.roles ?? []"
+        :routing-policies="props.routingPolicies ?? []"
         @create-chat="(root, name) => emit('create-chat', root, name)"
         @open-chat="emit('open-chat', $event)"
         @update-chat="emit('update-chat', $event)"
@@ -210,10 +218,18 @@ async function openPinnedFile(path: string) {
       <RolesPanel
         v-else-if="activeTool === 'roles'"
         :roles="props.roles ?? []"
-        :providers="props.providers ?? []"
+        :routing-policies="props.routingPolicies ?? []"
         @create-role="emit('create-role')"
         @update-role="emit('update-role', $event)"
         @delete-role="emit('delete-role', $event)"
+      />
+      <RoutesPanel
+        v-else-if="activeTool === 'routes'"
+        :policies="props.routingPolicies ?? []"
+        :accounts="props.providerAccounts ?? []"
+        :default-policy-id="props.defaultRoutingPolicyId ?? ''"
+        :providers="props.providers ?? []"
+        @save="emit('save-routing', $event)"
       />
     </section>
   </div>

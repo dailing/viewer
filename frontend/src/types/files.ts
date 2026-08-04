@@ -117,6 +117,36 @@ export interface ProviderContextLimitConfig {
   context_recycle_tokens: number | null;
 }
 
+export interface ProviderAccountConfig {
+  id: string;
+  name: string;
+  provider: string;
+  credential_ref: string;
+  enabled: boolean;
+  monthly_budget?: number | null;
+}
+
+export interface RoutingCandidateConfig {
+  id: string;
+  name: string;
+  runtime_id: string;
+  provider_account_id: string;
+  model_id?: string | null;
+  enabled: boolean;
+  parameters: Record<string, unknown>;
+}
+
+export interface RoutingPolicyConfig {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  auto_failover: boolean;
+  max_attempts: number;
+  cooldown_seconds: number;
+  candidates: RoutingCandidateConfig[];
+}
+
 export interface SuperWorkspaceConfig {
   hindsight_retain_enabled: boolean;
   hindsight_api_url: string;
@@ -127,6 +157,9 @@ export interface SuperWorkspaceConfig {
   active_dispatch_profile_id: string;
   dispatch_history_word_budget: number;
   provider_context_limits: Record<string, ProviderContextLimitConfig>;
+  default_routing_policy_id: string;
+  provider_accounts: ProviderAccountConfig[];
+  routing_policies: RoutingPolicyConfig[];
   dispatch_prompt_template: string;
   dispatch_profiles: SuperWorkspaceDispatchProfile[];
 }

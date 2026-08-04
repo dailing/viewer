@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { useFilesStore } from "../../stores/files";
-import type { AgentProvider } from "../../types/agents";
+import type { RoutingPolicyConfig } from "../../types/files";
 import type { SuperRole } from "../../types/superWorkspace";
 import DirectoryPicker from "../DirectoryPicker.vue";
 
 const props = defineProps<{
   roles: SuperRole[];
-  providers: { id: AgentProvider; name: string; context_recycle_percent?: number; context_recycle_tokens?: number | null }[];
+  routingPolicies: RoutingPolicyConfig[];
 }>();
 
 const emit = defineEmits<{
@@ -17,29 +16,13 @@ const emit = defineEmits<{
 }>();
 
 const selectedRoleId = ref("");
-const files = useFilesStore();
 const selectedRole = computed(() => props.roles.find((role) => role.id === selectedRoleId.value) ?? null);
-const codexModelOptions = computed(() => {
-  const selected = selectedRole.value?.model?.trim() || "";
-  const models = files.codexConfig.available_models;
-  return selected && !models.includes(selected) ? [selected, ...models] : models;
-});
-const providerDefaultPercent = computed(() => {
-  const provider = props.providers.find((p) => p.id === selectedRole.value?.provider);
-  return provider?.context_recycle_percent ?? 70;
-});
-const providerDefaultTokens = computed(() => {
-  const provider = props.providers.find((p) => p.id === selectedRole.value?.provider);
-  return provider?.context_recycle_tokens ?? null;
-});
+const selectedPolicy = computed(() => props.routingPolicies.find((policy) => policy.id === selectedRole.value?.routing_policy_id));
 
 function selectRole(role: SuperRole) {
   selectedRoleId.value = selectedRoleId.value === role.id ? "" : role.id;
 }
 
-function updateProvider(role: SuperRole) {
-  if (role.provider !== "codex") role.model = null;
-}
 </script>
 
 <template>
@@ -55,10 +38,7 @@ function updateProvider(role: SuperRole) {
         :title="role.name"
         @click="selectRole(role)"
       >
-        <i
-          class="bi"
-          :class="role.provider === 'hermes' ? 'bi-lightning' : role.provider === 'opencode' ? 'bi-terminal' : 'bi-stars'"
-        ></i>
+        <i class="bi bi-person-gear"></i>
         <span class="sidebar-row-name">{{ role.name }}</span>
       </button>
     </div>
@@ -81,10 +61,11 @@ function updateProvider(role: SuperRole) {
         <input v-model="selectedRole.name" class="form-control form-control-sm" />
       </label>
       <label class="field">
-        <span>Provider</span>
-        <select v-model="selectedRole.provider" class="form-select form-select-sm" @change="updateProvider(selectedRole)">
-          <option v-for="provider in props.providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
+        <span>Routing Policy</span>
+        <select v-model="selectedRole.routing_policy_id" class="form-select form-select-sm">
+          <option v-for="policy in props.routingPolicies" :key="policy.id" :value="policy.id">{{ policy.name }}</option>
         </select>
+        <small>{{ selectedPolicy?.description || 'Runtime, account, and model are resolved when each turn starts.' }}</small>
       </label>
       <label class="field">
         <span>Description</span>
@@ -100,17 +81,12 @@ function updateProvider(role: SuperRole) {
         <span>Working Directory</span>
         <DirectoryPicker v-model="selectedRole.cwd" empty-label="Chat root" clear-title="Use the chat root" />
       </label>
-      <label class="field">
-        <span>Model</span>
-        <select
-          v-model="selectedRole.model"
-          class="form-select form-select-sm"
-          :disabled="selectedRole.provider !== 'codex'"
-        >
-          <option :value="null">Provider Default</option>
-          <option v-for="model in codexModelOptions" :key="model" :value="model">{{ model }}</option>
-        </select>
-      </label>
+      <div class="field">
+        <span>Capability Requirements</span>
+        <label class="setting-check"><input v-model="selectedRole.capability_requirements.tools" type="checkbox" class="form-check-input" /><span>Tool calls</span></label>
+        <label class="setting-check"><input v-model="selectedRole.capability_requirements.filesystem" type="checkbox" class="form-check-input" /><span>Filesystem access</span></label>
+        <label class="field compact-field"><span>Minimum context tokens</span><input v-model.number="selectedRole.capability_requirements.min_context_window" type="number" min="0" step="1000" class="form-control form-control-sm" /></label>
+      </div>
       <label class="field">
         <span>Session Management</span>
         <select v-model="selectedRole.session_policy" class="form-select form-select-sm">
@@ -119,7 +95,7 @@ function updateProvider(role: SuperRole) {
         </select>
       </label>
       <label class="field">
-        <span>Context Recycle % (optional, provider default: {{ providerDefaultPercent }}%)</span>
+        <span>Context Recycle % (optional)</span>
         <input
           v-model.number="selectedRole.context_recycle_percent"
           type="number"
@@ -131,7 +107,7 @@ function updateProvider(role: SuperRole) {
         />
       </label>
       <label class="field">
-        <span>Context Recycle Tokens (optional, provider default: {{ providerDefaultTokens || 'none' }})</span>
+        <span>Context Recycle Tokens (optional)</span>
         <input
           v-model.number="selectedRole.context_recycle_tokens"
           type="number"

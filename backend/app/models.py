@@ -128,6 +128,36 @@ class ProviderContextLimitConfig(BaseModel):
     context_recycle_tokens: int | None = Field(default=None, ge=1000)
 
 
+class ProviderAccountConfig(BaseModel):
+    id: str
+    name: str
+    provider: str
+    credential_ref: str = ""
+    enabled: bool = True
+    monthly_budget: float | None = Field(default=None, ge=0)
+
+
+class RoutingCandidateConfig(BaseModel):
+    id: str
+    name: str = ""
+    runtime_id: str
+    provider_account_id: str = ""
+    model_id: str | None = None
+    enabled: bool = True
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class RoutingPolicyConfig(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    enabled: bool = True
+    auto_failover: bool = True
+    max_attempts: int = Field(default=3, ge=1, le=20)
+    cooldown_seconds: int = Field(default=600, ge=0, le=86400)
+    candidates: list[RoutingCandidateConfig] = Field(default_factory=list)
+
+
 def default_provider_context_limits() -> dict[str, ProviderContextLimitConfig]:
     return {
         "codex": ProviderContextLimitConfig(context_recycle_percent=70.0),
@@ -166,6 +196,9 @@ class SuperWorkspaceConfig(BaseModel):
     active_dispatch_profile_id: str = "local-vllm"
     dispatch_history_word_budget: int = Field(default=2048, ge=0, le=50000)
     provider_context_limits: dict[str, ProviderContextLimitConfig] = Field(default_factory=default_provider_context_limits)
+    default_routing_policy_id: str = ""
+    provider_accounts: list[ProviderAccountConfig] = Field(default_factory=list)
+    routing_policies: list[RoutingPolicyConfig] = Field(default_factory=list)
     dispatch_prompt_template: str = DEFAULT_DISPATCH_PROMPT_TEMPLATE
     dispatch_profiles: list[SuperWorkspaceDispatchProfile] = Field(
         default_factory=lambda: [

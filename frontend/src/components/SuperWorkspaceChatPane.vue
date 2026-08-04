@@ -560,6 +560,9 @@ function displayItemFromTargetPlaceholder(query: SuperDisplayItem, target: Super
     total_tokens: target.total_tokens ?? null,
     context_used_percent: target.context_used_percent ?? null,
     target_status: target.status,
+    routing_policy_id: target.routing_policy_id,
+    execution_target: target.execution_target,
+    routing_attempts: target.routing_attempts,
     run_status: "",
     error: "",
     citation_ids: [],
@@ -589,6 +592,9 @@ function appendMergedRunMessage(base: SuperThreadItem, item: SuperDisplayItem): 
     total_tokens: item.total_tokens,
     context_used_percent: item.context_used_percent,
     target_status: item.target_status,
+    routing_policy_id: item.routing_policy_id,
+    execution_target: item.execution_target,
+    routing_attempts: item.routing_attempts,
     merged_message_ids: ids,
   };
 }
@@ -801,6 +807,25 @@ function targetIcon(target: SuperDisplayTarget) {
   return agents.providerById(target.provider || "codex").icon;
 }
 
+function executionTargetLabel(target: Pick<SuperDisplayTarget, "provider" | "execution_target"> | Pick<SuperDisplayItem, "provider" | "execution_target">) {
+  const runtime = String(target.execution_target?.runtime_id || target.provider || "");
+  const account = String(target.execution_target?.provider_account_id || "");
+  const model = String(target.execution_target?.model_id || "");
+  return [runtime, account, model].filter(Boolean).join(" / ");
+}
+
+function routingAttemptsTitle(target: Pick<SuperDisplayTarget, "routing_attempts"> | Pick<SuperDisplayItem, "routing_attempts">) {
+  if (!target.routing_attempts?.length) return "";
+  return target.routing_attempts.map((attempt, index) => {
+    const runtime = String(attempt.runtime_id || "");
+    const account = String(attempt.provider_account_id || "");
+    const model = String(attempt.model_id || "");
+    const status = String(attempt.status || "unknown");
+    const detail = [runtime, account, model].filter(Boolean).join(" / ");
+    return `${index + 1}. ${detail}: ${status}`;
+  }).join("\n");
+}
+
 function roleIcon(role: SuperRole) {
   return agents.providerById(role.provider || "codex").icon;
 }
@@ -908,6 +933,9 @@ function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
     total_tokens: null,
     context_used_percent: null,
     target_status: "",
+    routing_policy_id: "",
+    execution_target: {},
+    routing_attempts: [],
     run_status: run.status,
     error: run.error,
     citation_ids: run.citation_ids ?? [],
@@ -922,6 +950,9 @@ function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
       provider_session_id: target.provider_session_id ?? null,
       session_ref: target.session_ref,
       status: target.status,
+      routing_policy_id: target.routing_policy_id,
+      execution_target: target.execution_target,
+      routing_attempts: target.routing_attempts,
       model_context_window: target.model_context_window ?? null,
       total_tokens: target.total_tokens ?? null,
       context_used_percent: target.context_used_percent ?? null,
@@ -974,6 +1005,7 @@ async function scrollThreadToBottom() {
                   <span v-for="target in item.dispatch_targets" :key="target.id" class="super-route-chip">
                     <i class="bi" :class="targetIcon(target)"></i>
                     {{ target.role_name }}
+                    <small v-if="executionTargetLabel(target)" :title="routingAttemptsTitle(target)">{{ executionTargetLabel(target) }}</small>
                   </span>
                 </template>
                 <span v-else-if="item.run_status === 'selecting'" class="super-route-pending">selecting role to dispatch...</span>
@@ -1036,6 +1068,9 @@ async function scrollThreadToBottom() {
               </span>
               <span v-if="shortSessionId(item)" class="super-meta-text super-session-id" :title="item.session_ref || item.viewer_session_id">
                 {{ shortSessionId(item) }}
+              </span>
+              <span v-if="executionTargetLabel(item)" class="super-meta-text super-execution-target" :title="routingAttemptsTitle(item)">
+                {{ executionTargetLabel(item) }}
               </span>
               <span v-if="contextUsageLabel(item)" class="super-meta-text super-context-usage" :title="contextUsageTitle(item)">
                 {{ contextUsageLabel(item) }}
@@ -1650,6 +1685,12 @@ async function scrollThreadToBottom() {
   gap: 4px;
   line-height: 1.2;
   padding: 2px 6px;
+}
+
+.super-route-chip small {
+  color: var(--color-text-muted);
+  font-size: 10px;
+  font-weight: 500;
 }
 
 .super-citation-chip {

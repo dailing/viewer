@@ -17,7 +17,7 @@ DEFAULT_ROOT = Path("~/Sync").expanduser()
 DEFAULT_PORT = 18989
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT = 5
-DEFAULT_LOG_DIR = Path(os.environ.get("VIEWER_HOME", "~/.view")).expanduser() / "logs"
+DEFAULT_VIEW_HOME = Path(os.environ.get("VIEWER_HOME", "~/.view")).expanduser()
 PROJECT_ENV_PATH = PROJECT_ROOT / ".viewer.env"
 DEFAULT_VOICE_SERVICE_WS = "ws://127.0.0.1:8765/v1/voice/ws"
 
@@ -79,10 +79,22 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for active connections and requests during shutdown. Defaults to 5.",
     )
     parser.add_argument(
-        "--log-dir",
-        default=DEFAULT_LOG_DIR,
+        "--config-dir",
+        default=None,
         type=Path,
-        help="Directory for timestamped log files. Defaults to ./logs.",
+        help="Viewer configuration directory containing config.json. Defaults to VIEWER_CONFIG_DIR, VIEWER_HOME, or ~/.view.",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        type=Path,
+        help="Viewer database, logs, and provider-session data directory. Defaults to VIEWER_DATA_DIR, VIEWER_HOME, or ~/.view.",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        type=Path,
+        help="Directory for timestamped log files. Defaults to <data-dir>/logs.",
     )
     parser.add_argument(
         "--log-file",
@@ -181,7 +193,12 @@ def main() -> None:
     if not root.is_dir():
         raise SystemExit(f"Root path is not a directory: {root}")
 
+    view_home = Path(os.environ.get("VIEWER_HOME", DEFAULT_VIEW_HOME)).expanduser()
+    config_dir = args.config_dir or Path(os.environ.get("VIEWER_CONFIG_DIR", view_home)).expanduser()
+    data_dir = args.data_dir or Path(os.environ.get("VIEWER_DATA_DIR", view_home)).expanduser()
     os.environ["VIEWER_ROOT"] = root.as_posix()
+    os.environ["VIEWER_CONFIG_DIR"] = resolve_project_path(config_dir).as_posix()
+    os.environ["VIEWER_DATA_DIR"] = resolve_project_path(data_dir).as_posix()
     os.environ["VIEWER_HOST"] = args.host
     os.environ["VIEWER_PORT"] = str(args.port)
     os.environ["VIEWER_DEBUG"] = "1" if args.debug else "0"
@@ -192,7 +209,8 @@ def main() -> None:
     os.environ["VIEWER_VOICE_SERVICE_WS"] = os.environ.get("VIEWER_VOICE_SERVICE_WS", args.voice_service_ws)
     os.environ["VIEWER_VOICE_BACKEND"] = os.environ.get("VIEWER_VOICE_BACKEND", "faster-whisper")
     os.environ["VIEWER_VOICE_BACKEND_POLICY"] = os.environ.get("VIEWER_VOICE_BACKEND_POLICY", "localagreement")
-    log_file = resolve_project_path(args.log_file) if args.log_file else default_log_file(args.log_dir)
+    log_dir = args.log_dir if args.log_dir is not None else data_dir / "logs"
+    log_file = resolve_project_path(args.log_file) if args.log_file else default_log_file(log_dir)
     os.environ["VIEWER_LOG_FILE"] = log_file.as_posix()
     if args.frontend_dist is not None:
         os.environ["VIEWER_FRONTEND_DIST"] = resolve_project_path(args.frontend_dist).as_posix()

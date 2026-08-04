@@ -10,11 +10,13 @@ import {
   listSuperChats,
   updateSuperRole,
   updateSuperChat,
+  updateSuperWorkspaceRouting,
 } from "../api/client";
 import { useAgentsStore } from "../stores/agents";
 import { useFilesStore } from "../stores/files";
 import { useLayoutStore } from "../stores/layout";
-import type { SuperChatSummary, SuperRole } from "../types/superWorkspace";
+import type { ProviderAccountConfig, RoutingPolicyConfig } from "../types/files";
+import type { RoutingConfigData, SuperChatSummary, SuperRole } from "../types/superWorkspace";
 import { storageKey } from "../utils/storage";
 import FileSidebar from "./FileSidebar.vue";
 import Workspace from "./Workspace.vue";
@@ -33,6 +35,9 @@ const activeWorkspaceId = ref("");
 const chats = ref<SuperChatSummary[]>([]);
 const activeChatId = ref("");
 const roles = ref<SuperRole[]>([]);
+const routingPolicies = ref<RoutingPolicyConfig[]>([]);
+const providerAccounts = ref<ProviderAccountConfig[]>([]);
+const defaultRoutingPolicyId = ref("");
 const sidebarOpen = ref(true);
 const sidebarPinned = ref(true);
 const sidebarWidth = ref(320);
@@ -85,6 +90,9 @@ async function loadState() {
     chats.value = chatData.chats;
     activeChatId.value = chatData.active_chat_id;
     roles.value = superData.roles;
+    routingPolicies.value = superData.routing_policies;
+    providerAccounts.value = superData.provider_accounts;
+    defaultRoutingPolicyId.value = superData.default_routing_policy_id;
     notifyChatListChanged();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -135,6 +143,7 @@ async function saveChat(chat: SuperChatSummary) {
       root: chat.root,
       common_prompt: chat.common_prompt,
       member_role_ids: chat.member_role_ids,
+      role_routing_policy_overrides: chat.role_routing_policy_overrides,
     });
     chats.value = data.chats;
     activeChatId.value = data.active_chat_id;
@@ -147,7 +156,11 @@ async function saveChat(chat: SuperChatSummary) {
 async function addRole() {
   error.value = "";
   try {
-    const data = await createSuperRole({ name: `Role ${roles.value.length + 1}`, provider: "codex" });
+    const data = await createSuperRole({
+      name: `Role ${roles.value.length + 1}`,
+      routing_policy_id: defaultRoutingPolicyId.value,
+      capability_requirements: {},
+    });
     roles.value = data.roles;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -161,12 +174,27 @@ async function saveRole(role: SuperRole) {
       name: role.name,
       description: role.description,
       prompt: role.prompt,
-      provider: role.provider,
       cwd: role.cwd,
-      model: role.model ?? null,
+      routing_policy_id: role.routing_policy_id,
+      capability_requirements: role.capability_requirements,
       session_policy: role.session_policy,
+      context_recycle_percent: role.context_recycle_percent ?? null,
+      context_recycle_tokens: role.context_recycle_tokens ?? null,
     });
     roles.value = data.roles;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function saveRouting(config: RoutingConfigData) {
+  error.value = "";
+  try {
+    const updated = await updateSuperWorkspaceRouting(config);
+    routingPolicies.value = updated.routing_policies;
+    providerAccounts.value = updated.provider_accounts;
+    defaultRoutingPolicyId.value = updated.default_routing_policy_id;
+    await loadState();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   }
@@ -276,6 +304,9 @@ function startSidebarResize(event: PointerEvent) {
         :active-chat-id="activeChatId"
         :roles="roles"
         :providers="agents.providers"
+        :routing-policies="routingPolicies"
+        :provider-accounts="providerAccounts"
+        :default-routing-policy-id="defaultRoutingPolicyId"
         :panel-open="sidebarOpen"
         :panel-pinned="effectiveSidebarPinned"
         @open-file="openFile"
@@ -288,6 +319,7 @@ function startSidebarResize(event: PointerEvent) {
         @create-role="addRole"
         @update-role="saveRole"
         @delete-role="removeRole"
+        @save-routing="saveRouting"
         @toggle-tool-panel="toggleToolPanel"
         @toggle-pin="toggleSidebarPin"
         @close-panel="sidebarOpen = false"

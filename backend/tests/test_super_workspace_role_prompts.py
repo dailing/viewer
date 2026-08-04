@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.app.agent_history import AgentHistoryStore, SuperDriverRunCreate
 from backend.app.codex_background_runner import insert_provider_message
-from backend.app.models import SuperWorkspaceConfig
+from backend.app.models import ProviderAccountConfig, RoutingCandidateConfig, RoutingPolicyConfig, SuperWorkspaceConfig
 from backend.app.super_workspace import SuperRole, SuperWorkspaceManager
 from backend.app.super_workspace_runtime import CodexAppServerSuperDriver, CodexSuperDriver, HermesSuperDriver, OpenCodeSuperDriver, SuperWorkspaceRuntime
 
@@ -55,6 +55,50 @@ class RolePromptSeparationTests(unittest.TestCase):
     def test_runtime_registers_opencode_acp_driver(self) -> None:
         runtime = SuperWorkspaceRuntime()
         self.assertIsInstance(runtime._drivers["opencode"], OpenCodeSuperDriver)
+
+    def test_chat_route_override_wins_and_filters_disabled_accounts(self) -> None:
+        manager = SuperWorkspaceManager()
+        role_value = role().model_copy(update={"routing_policy_id": "role-policy"})
+        role_policy = RoutingPolicyConfig(
+            id="role-policy", name="Role", candidates=[RoutingCandidateConfig(id="role-target", runtime_id="codex")]
+        )
+        chat_policy = RoutingPolicyConfig(
+            id="chat-policy",
+            name="Chat",
+            candidates=[
+                RoutingCandidateConfig(id="disabled", runtime_id="hermes", provider_account_id="account-off"),
+                RoutingCandidateConfig(id="enabled", runtime_id="codex-app-server", provider_account_id="account-on"),
+            ],
+        )
+        data = SimpleNamespace(
+            default_routing_policy_id="role-policy",
+            routing_policies=[role_policy, chat_policy],
+            provider_accounts=[
+                ProviderAccountConfig(id="account-off", name="Off", provider="hermes", enabled=False),
+                ProviderAccountConfig(id="account-on", name="On", provider="openai", enabled=True),
+            ],
+        )
+        chat = SimpleNamespace(role_routing_policy_overrides={role_value.id: "chat-policy"})
+        with patch.object(manager, "read", return_value=data):
+            policy, candidates = manager.routing_candidates_for(role_value, chat)
+        self.assertEqual(policy.id, "chat-policy")
+        self.assertEqual([candidate.id for candidate in candidates], ["enabled"])
+
+    def test_candidate_capabilities_must_satisfy_role_requirements(self) -> None:
+        candidate = RoutingCandidateConfig(
+            id="target",
+            runtime_id="hermes",
+            parameters={"capabilities": {"tools": True, "filesystem": False}, "context_window": 128_000},
+        )
+        self.assertTrue(SuperWorkspaceManager._candidate_meets_requirements(candidate, {"tools": True, "min_context_window": 100_000}))
+        self.assertFalse(SuperWorkspaceManager._candidate_meets_requirements(candidate, {"filesystem": True}))
+        self.assertFalse(SuperWorkspaceManager._candidate_meets_requirements(candidate, {"min_context_window": 200_000}))
+
+    def test_routing_error_categories_distinguish_credit_and_request_failures(self) -> None:
+        runtime = SuperWorkspaceRuntime()
+        self.assertEqual(runtime._routing_error_category("insufficient credits"), "credit")
+        self.assertEqual(runtime._routing_error_category("429 rate limit exceeded"), "rate_limit")
+        self.assertEqual(runtime._routing_error_category("invalid request payload"), "request")
 
     def test_failed_session_error_is_written_to_driver_target(self) -> None:
         runtime = SuperWorkspaceRuntime()

@@ -1,6 +1,7 @@
 import type { DirectoryListing, FileMeta, TextLineWindow, ViewerConfig } from "../types/files";
 import type { TerminalInfo } from "../types/terminals";
 import type {
+  RoutingConfigData,
   SuperChatCreate,
   SuperChatList,
   SuperChatPatch,
@@ -198,6 +199,18 @@ export async function listAgentProviders(): Promise<AgentProviderInfo[]> {
 
 export async function getSuperWorkspace(): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>("/api/super-workspace");
+}
+
+export async function getSuperWorkspaceRouting(): Promise<RoutingConfigData> {
+  return request<RoutingConfigData>("/api/super-workspace/routing");
+}
+
+export async function updateSuperWorkspaceRouting(config: RoutingConfigData): Promise<RoutingConfigData> {
+  return request<RoutingConfigData>("/api/super-workspace/routing", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
 }
 
 export async function listSuperChats(): Promise<SuperChatList> {

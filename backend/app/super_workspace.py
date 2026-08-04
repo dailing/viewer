@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -11,7 +12,13 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, agent_history_store
-from .models import DEFAULT_DISPATCH_PROMPT_TEMPLATE
+from .files import read_config, write_config
+from .models import (
+    DEFAULT_DISPATCH_PROMPT_TEMPLATE,
+    ProviderAccountConfig,
+    RoutingCandidateConfig,
+    RoutingPolicyConfig,
+)
 
 
 DEFAULT_DISPATCH_MODEL = ""
@@ -29,6 +36,8 @@ class SuperRole(BaseModel):
     provider: str = "codex"
     cwd: str = ""
     model: str | None = None
+    routing_policy_id: str = ""
+    capability_requirements: dict[str, Any] = Field(default_factory=dict)
     session_policy: str = "reuse"
     context_recycle_percent: float | None = None
     context_recycle_tokens: int | None = None
@@ -43,6 +52,8 @@ class SuperRoleCreate(BaseModel):
     provider: str = "codex"
     cwd: str = ""
     model: str | None = None
+    routing_policy_id: str = ""
+    capability_requirements: dict[str, Any] = Field(default_factory=dict)
     session_policy: str = "reuse"
     context_recycle_percent: float | None = None
     context_recycle_tokens: int | None = None
@@ -55,6 +66,8 @@ class SuperRolePatch(BaseModel):
     provider: str | None = None
     cwd: str | None = None
     model: str | None = None
+    routing_policy_id: str | None = None
+    capability_requirements: dict[str, Any] | None = None
     session_policy: str | None = None
     context_recycle_percent: float | None = None
     context_recycle_tokens: int | None = None
@@ -65,10 +78,19 @@ class SuperWorkspaceData(BaseModel):
     name: str = DEFAULT_SUPER_WORKSPACE_NAME
     common_prompt: str = ""
     roles: list[SuperRole] = Field(default_factory=list)
+    provider_accounts: list[ProviderAccountConfig] = Field(default_factory=list)
+    routing_policies: list[RoutingPolicyConfig] = Field(default_factory=list)
+    default_routing_policy_id: str = ""
 
 
 class SuperWorkspacePatch(BaseModel):
     common_prompt: str | None = None
+
+
+class RoutingConfigData(BaseModel):
+    default_routing_policy_id: str = ""
+    provider_accounts: list[ProviderAccountConfig] = Field(default_factory=list)
+    routing_policies: list[RoutingPolicyConfig] = Field(default_factory=list)
 
 
 class SuperChatCreate(BaseModel):
@@ -78,6 +100,7 @@ class SuperChatCreate(BaseModel):
     root: str
     common_prompt: str = ""
     member_role_ids: list[str] = Field(default_factory=list)
+    role_routing_policy_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 class SuperChatPatch(BaseModel):
@@ -87,6 +110,7 @@ class SuperChatPatch(BaseModel):
     root: str | None = None
     common_prompt: str | None = None
     member_role_ids: list[str] | None = None
+    role_routing_policy_overrides: dict[str, str] | None = None
 
 
 class SuperDispatchRequest(BaseModel):
@@ -104,6 +128,57 @@ class SuperDispatchResponse(BaseModel):
 
 
 class SuperWorkspaceManager:
+    def read_routing(self, user_id: str | None = None) -> RoutingConfigData:
+        routing = self._ensure_role_routing_migration(user_id)
+        return RoutingConfigData(
+            default_routing_policy_id=routing.default_routing_policy_id,
+            provider_accounts=routing.provider_accounts,
+            routing_policies=routing.routing_policies,
+        )
+
+    def update_routing(self, request: RoutingConfigData, user_id: str | None = None) -> RoutingConfigData:
+        policy_ids = [policy.id.strip() for policy in request.routing_policies]
+        if any(not policy_id for policy_id in policy_ids) or len(policy_ids) != len(set(policy_ids)):
+            raise HTTPException(status_code=400, detail="Routing policy IDs must be non-empty and unique")
+        account_ids = [account.id.strip() for account in request.provider_accounts]
+        if any(not account_id for account_id in account_ids) or len(account_ids) != len(set(account_ids)):
+            raise HTTPException(status_code=400, detail="Provider account IDs must be non-empty and unique")
+        policy_id_set = set(policy_ids)
+        account_id_set = set(account_ids)
+        if policy_ids and request.default_routing_policy_id not in policy_id_set:
+            raise HTTPException(status_code=400, detail="Workspace default must reference an existing routing policy")
+        for policy in request.routing_policies:
+            candidate_ids = [candidate.id.strip() for candidate in policy.candidates]
+            if any(not candidate_id for candidate_id in candidate_ids) or len(candidate_ids) != len(set(candidate_ids)):
+                raise HTTPException(status_code=400, detail=f"Candidate IDs must be unique in policy: {policy.name}")
+            if any(not candidate.runtime_id.strip() for candidate in policy.candidates):
+                raise HTTPException(status_code=400, detail=f"Every candidate must select a runtime: {policy.name}")
+            unknown_accounts = sorted({
+                candidate.provider_account_id
+                for candidate in policy.candidates
+                if candidate.provider_account_id and candidate.provider_account_id not in account_id_set
+            })
+            if unknown_accounts:
+                raise HTTPException(status_code=400, detail=f"Unknown provider account in policy {policy.name}: {unknown_accounts[0]}")
+        _workspace, roles = agent_history_store.super_workspace_data(user_id)
+        orphaned_roles = [str(role.name) for role in roles if role.routing_policy_id and role.routing_policy_id not in policy_id_set]
+        if orphaned_roles:
+            raise HTTPException(status_code=400, detail=f"Reassign Roles before deleting their routing policy: {orphaned_roles[0]}")
+        chats = agent_history_store.list_super_chats(user_id).chats
+        orphaned_chats = [
+            chat.name
+            for chat in chats
+            if any(policy_id not in policy_id_set for policy_id in chat.role_routing_policy_overrides.values())
+        ]
+        if orphaned_chats:
+            raise HTTPException(status_code=400, detail=f"Remove Chat overrides before deleting their routing policy: {orphaned_chats[0]}")
+        config = read_config()
+        config.super_workspace.default_routing_policy_id = request.default_routing_policy_id
+        config.super_workspace.provider_accounts = request.provider_accounts
+        config.super_workspace.routing_policies = request.routing_policies
+        write_config(config)
+        return self.read_routing(user_id)
+
     def list_chats(self, user_id: str | None = None) -> SuperChatList:
         return agent_history_store.list_super_chats(user_id)
 
@@ -136,6 +211,7 @@ class SuperWorkspaceManager:
         return active
 
     def create_chat(self, request: SuperChatCreate, user_id: str | None = None) -> SuperChatList:
+        self._validate_chat_routing_overrides(request.role_routing_policy_overrides, user_id)
         try:
             return agent_history_store.create_super_chat(
                 user_id,
@@ -144,18 +220,30 @@ class SuperWorkspaceManager:
                 pinned=request.pinned,
                 common_prompt=request.common_prompt,
                 member_role_ids=request.member_role_ids,
+                role_routing_policy_overrides=request.role_routing_policy_overrides,
                 root=request.root,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def update_chat(self, chat_id: str, patch: SuperChatPatch, user_id: str | None = None) -> SuperChatList:
+        if patch.role_routing_policy_overrides is not None:
+            self._validate_chat_routing_overrides(patch.role_routing_policy_overrides, user_id)
         try:
             return agent_history_store.update_super_chat(user_id, chat_id, patch.model_dump(exclude_unset=True))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Chat not found") from exc
+
+    def _validate_chat_routing_overrides(self, overrides: dict[str, str], user_id: str | None) -> None:
+        if not overrides:
+            return
+        routing = self.read_routing(user_id)
+        policy_ids = {policy.id for policy in routing.routing_policies}
+        unknown = next((policy_id for policy_id in overrides.values() if policy_id not in policy_ids), "")
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Chat routing policy does not exist: {unknown}")
 
     def delete_chat(self, chat_id: str, user_id: str | None = None) -> SuperChatList:
         try:
@@ -172,6 +260,7 @@ class SuperWorkspaceManager:
             raise HTTPException(status_code=404, detail="Chat not found") from exc
 
     def read(self, user_id: str | None = None) -> SuperWorkspaceData:
+        routing = self._ensure_role_routing_migration(user_id)
         workspace, roles = agent_history_store.super_workspace_data(user_id)
         return SuperWorkspaceData(
             id=workspace.id,
@@ -186,6 +275,8 @@ class SuperWorkspaceManager:
                     provider=role.provider,
                     cwd=role.cwd,
                     model=role.model,
+                    routing_policy_id=str(role.routing_policy_id or ""),
+                    capability_requirements=agent_history_store._parse_json(role.capability_requirements_json, {}),
                     session_policy=role.session_policy,
                     context_recycle_percent=role.context_recycle_percent,
                     context_recycle_tokens=role.context_recycle_tokens,
@@ -194,7 +285,101 @@ class SuperWorkspaceManager:
                 )
                 for role in roles
             ],
+            provider_accounts=routing.provider_accounts,
+            routing_policies=routing.routing_policies,
+            default_routing_policy_id=routing.default_routing_policy_id,
         )
+
+    def _ensure_role_routing_migration(self, user_id: str | None) -> Any:
+        config = read_config()
+        routing = config.super_workspace
+        _workspace, roles = agent_history_store.super_workspace_data(user_id)
+        policies = {policy.id: policy for policy in routing.routing_policies}
+        config_changed = False
+        for role in roles:
+            if str(role.routing_policy_id or "").strip():
+                continue
+            runtime_id = str(role.provider or "codex")
+            model_id = str(role.model or "").strip() or None
+            signature = f"{runtime_id}\0{model_id or ''}"
+            suffix = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:10]
+            policy_id = f"migrated-{suffix}"
+            if policy_id not in policies:
+                label = f"{runtime_id} / {model_id or 'default'}"
+                policy = RoutingPolicyConfig(
+                    id=policy_id,
+                    name=label,
+                    description="Migrated from the former Role provider/model binding.",
+                    candidates=[
+                        RoutingCandidateConfig(
+                            id=f"{policy_id}-primary",
+                            name=label,
+                            runtime_id=runtime_id,
+                            model_id=model_id,
+                        )
+                    ],
+                )
+                routing.routing_policies.append(policy)
+                policies[policy_id] = policy
+                config_changed = True
+            agent_history_store.update_super_workspace_role(user_id, str(role.id), {"routing_policy_id": policy_id})
+        if not routing.default_routing_policy_id and routing.routing_policies:
+            routing.default_routing_policy_id = routing.routing_policies[0].id
+            config_changed = True
+        if config_changed:
+            write_config(config)
+        return routing
+
+    def routing_policy_for(self, role: SuperRole, chat: SuperChatSummary) -> RoutingPolicyConfig:
+        data = self.read(None)
+        policy_id = chat.role_routing_policy_overrides.get(role.id) or role.routing_policy_id or data.default_routing_policy_id
+        policy = next((item for item in data.routing_policies if item.id == policy_id and item.enabled), None)
+        if policy is None:
+            raise HTTPException(status_code=400, detail=f"No enabled routing policy for role: {role.name}")
+        return policy
+
+    def routing_candidates_for(self, role: SuperRole, chat: SuperChatSummary) -> tuple[RoutingPolicyConfig, list[RoutingCandidateConfig]]:
+        data = self.read(None)
+        policy_id = chat.role_routing_policy_overrides.get(role.id) or role.routing_policy_id or data.default_routing_policy_id
+        policy = next((item for item in data.routing_policies if item.id == policy_id and item.enabled), None)
+        if policy is None:
+            raise HTTPException(status_code=400, detail=f"No enabled routing policy for role: {role.name}")
+        accounts = {account.id: account for account in data.provider_accounts}
+        candidates = [
+            candidate
+            for candidate in policy.candidates
+            if candidate.enabled
+            and self._candidate_meets_requirements(candidate, role.capability_requirements)
+            and (
+                not candidate.provider_account_id
+                or (
+                    candidate.provider_account_id in accounts
+                    and accounts[candidate.provider_account_id].enabled
+                )
+            )
+        ]
+        if not candidates:
+            raise HTTPException(status_code=400, detail=f"Routing policy has no eligible candidates for role: {role.name}")
+        return policy, candidates[: policy.max_attempts]
+
+    @staticmethod
+    def _candidate_meets_requirements(candidate: RoutingCandidateConfig, requirements: dict[str, Any]) -> bool:
+        if not requirements:
+            return True
+        declared = candidate.parameters.get("capabilities", {})
+        if isinstance(declared, list):
+            declared = {str(value): True for value in declared}
+        if not isinstance(declared, dict):
+            declared = {}
+        for capability in ("tools", "filesystem"):
+            if requirements.get(capability) and not declared.get(capability):
+                return False
+        minimum_context = requirements.get("min_context_window")
+        if isinstance(minimum_context, (int, float)) and minimum_context > 0:
+            context_window = candidate.parameters.get("context_window")
+            if not isinstance(context_window, (int, float)) or context_window < minimum_context:
+                return False
+        return True
 
     def update(self, patch: SuperWorkspacePatch, user_id: str | None = None) -> SuperWorkspaceData:
         update = patch.model_dump(exclude_unset=True)
@@ -203,6 +388,10 @@ class SuperWorkspaceManager:
         return self.read(user_id)
 
     def create_role(self, request: SuperRoleCreate, user_id: str | None = None) -> SuperWorkspaceData:
+        routing = self.read_routing(user_id)
+        routing_policy_id = request.routing_policy_id.strip() or routing.default_routing_policy_id
+        if routing_policy_id and routing_policy_id not in {policy.id for policy in routing.routing_policies}:
+            raise HTTPException(status_code=400, detail="Role routing policy does not exist")
         try:
             agent_history_store.create_super_workspace_role(
                 user_id,
@@ -212,6 +401,8 @@ class SuperWorkspaceManager:
                 provider=(request.provider or "codex").strip() or "codex",
                 cwd=request.cwd.strip(),
                 model=request.model.strip() if request.model else None,
+                routing_policy_id=routing_policy_id,
+                capability_requirements=request.capability_requirements,
                 session_policy=request.session_policy,
                 context_recycle_percent=request.context_recycle_percent,
                 context_recycle_tokens=request.context_recycle_tokens,
@@ -224,6 +415,11 @@ class SuperWorkspaceManager:
         data = self.read(user_id)
         role = self._find_role(data, role_id)
         update = patch.model_dump(exclude_unset=True)
+        if "routing_policy_id" in update:
+            requested_policy_id = str(update.get("routing_policy_id") or "").strip() or data.default_routing_policy_id
+            if requested_policy_id not in {policy.id for policy in data.routing_policies}:
+                raise HTTPException(status_code=400, detail="Role routing policy does not exist")
+            update["routing_policy_id"] = requested_policy_id
         for key, value in update.items():
             if isinstance(value, str):
                 value = value.strip()
@@ -245,6 +441,8 @@ class SuperWorkspaceManager:
                     "provider": role.provider,
                     "cwd": role.cwd,
                     "model": role.model,
+                    "routing_policy_id": role.routing_policy_id,
+                    "capability_requirements": role.capability_requirements,
                     "session_policy": role.session_policy,
                     "context_recycle_percent": role.context_recycle_percent,
                     "context_recycle_tokens": role.context_recycle_tokens,

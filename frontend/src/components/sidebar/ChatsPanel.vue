@@ -3,12 +3,14 @@ import { computed, ref } from "vue";
 import { useLayoutStore } from "../../stores/layout";
 import { useSuperChatDispatchStore } from "../../stores/superChatDispatch";
 import type { SuperChatSummary, SuperRole } from "../../types/superWorkspace";
+import type { RoutingPolicyConfig } from "../../types/files";
 import DirectoryPicker from "../DirectoryPicker.vue";
 
 const props = defineProps<{
   chats: SuperChatSummary[];
   activeChatId: string;
   roles: SuperRole[];
+  routingPolicies: RoutingPolicyConfig[];
 }>();
 
 const emit = defineEmits<{
@@ -49,6 +51,7 @@ function toggleRole(chat: SuperChatSummary, roleId: string) {
   const next = new Set(chat.member_role_ids ?? []);
   if (next.has(roleId)) {
     next.delete(roleId);
+    delete chat.role_routing_policy_overrides[roleId];
     dispatchSelection.clearRole(chat.id, roleId);
   } else {
     next.add(roleId);
@@ -205,6 +208,13 @@ function submitNewChat() {
             @change="toggleRole(selectedSettingsChat, role.id)"
           />
           <span>{{ role.name }}</span>
+        </label>
+        <label v-for="role in chatMemberRoles(selectedSettingsChat)" :key="`route:${role.id}`" class="field role-route-override">
+          <span>{{ role.name }} route</span>
+          <select v-model="selectedSettingsChat.role_routing_policy_overrides[role.id]" class="form-select form-select-sm" @change="save(selectedSettingsChat)">
+            <option value="">Role default</option>
+            <option v-for="policy in props.routingPolicies" :key="policy.id" :value="policy.id">{{ policy.name }}</option>
+          </select>
         </label>
       </div>
       <div class="settings-actions">

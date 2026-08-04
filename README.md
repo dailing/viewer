@@ -12,6 +12,7 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 - Retain visible Super Workspace chat messages to an optional chat-scoped Hindsight memory bank.
 - Stop a running role with a two-click confirmation.
 - Give each role a dispatcher-facing description and a separate Agent-facing prompt.
+- Decouple roles from runtimes/models with reusable routing policies, per-chat overrides, capability filters, and ordered automatic failover.
 - Reuse role sessions per chat or start a new session for each run.
 - Cite earlier messages with `@msg-...` references.
 - Browse, upload, delete, edit, and live-refresh files under the current Chat Root.
@@ -34,24 +35,25 @@ A role has two distinct instruction fields:
 - `description`: routing metadata for the dispatcher. It describes when the role should be selected, its capabilities, and its dispatch constraints.
 - `prompt`: operating instructions delivered directly to the selected Agent. It defines workflow, standards, style, and execution rules.
 
-The dispatcher receives descriptions but not prompts. A role Agent receives its prompt but not its description. Changing a prompt clears that role's reusable chat-session mappings so the next run starts with the new rules.
+The dispatcher receives descriptions but not prompts. A role Agent receives its prompt but not its description. A Role selects a reusable routing policy; a Chat may override that policy for one Role. Policies contain ordered runtime/account/model targets plus tools, filesystem, and context-window declarations. Changing a prompt or route clears that role's reusable chat-session mappings so the next run starts with the new rules.
 
 Normal message delivery is asynchronous:
 
 1. The backend persists the user query and one dispatch task for each selected role.
 2. The independent Super Workspace worker claims queued tasks while serializing work per chat and role.
-3. A Codex or Hermes provider session is created or resumed according to the role policy.
-4. Provider output is persisted in `~/.view/agent-history.sqlite3` and announced through Super Workspace SSE.
-5. The Chat pane incrementally reloads the changed run.
+3. The worker resolves `Chat override → Role policy → Workspace default`, filters targets against the Role requirements, and attempts eligible targets in order.
+4. A Codex, Codex App Server, Hermes, or OpenCode provider session is created or resumed for the chosen runtime/model. Eligible provider failures can automatically advance to the next target.
+5. Provider output and the immutable execution target/attempt log are persisted in the configured data directory and announced through Super Workspace SSE.
+6. The Chat pane incrementally reloads the changed run.
 
 Codex work runs through detached background processes, so restarting the Viewer backend does not terminate an active Codex run. Hermes work uses an ACP subprocess for the selected Hermes Profile; the independent worker starts the default Profile's ACP adapter and creates each Hermes session with the Chat Root as its real working directory.
 
 ## Persistence
 
-Viewer-owned state is stored under `~/.view`:
+Viewer-owned state defaults to `~/.view`, but configuration and mutable data may be isolated with `VIEWER_CONFIG_DIR` and `VIEWER_DATA_DIR` (or the matching CLI flags):
 
-- `config.json`: appearance, Markdown, Codex, Voice, and dispatcher configuration.
-- `agent-history.sqlite3`: Super Workspace, chats, roles, dispatch tasks, messages, citations, and reusable session mappings.
+- `config.json`: appearance, Markdown, Codex, Voice, dispatcher, provider-account references, and routing policies.
+- `agent-history.sqlite3`: Super Workspace, chats, roles, route overrides, dispatch tasks, execution attempts, messages, citations, and reusable session mappings.
 - `logs/codex-sessions/`: Viewer metadata and stderr for Codex provider sessions.
 - `logs/hermes-sessions/`: Viewer metadata for Hermes provider sessions.
 - `logs/terminals/`: reconnectable terminal output logs.
@@ -137,6 +139,7 @@ Useful options:
 uv run python run.py --host 127.0.0.1
 uv run python run.py --reload
 uv run python run.py --debug
+uv run python run.py --config-dir ~/.viewer-test/config --data-dir ~/.viewer-test/data --port 19089
 uv run python run.py --log-dir ~/.view/logs
 uv run python run.py --log-file /tmp/viewer.log
 ```
@@ -148,6 +151,8 @@ uv run python run.py --log-file /tmp/viewer.log
 The main environment variables are:
 
 - `VIEWER_ROOT`: fallback served root.
+- `VIEWER_CONFIG_DIR`: directory containing `config.json`; defaults through `VIEWER_HOME` to `~/.view`.
+- `VIEWER_DATA_DIR`: directory containing SQLite state, logs, and session metadata; defaults through `VIEWER_HOME` to `~/.view`.
 - `VIEWER_FRONTEND_DIST`: built frontend directory.
 - `VIEWER_LOG_FILE`: backend log file.
 - `VIEWER_MAX_TEXT_PREVIEW_BYTES`: large-text preview threshold.
@@ -163,7 +168,14 @@ The main environment variables are:
 - `VIEWER_HINDSIGHT_API_TOKEN`: optional Hindsight API token override.
 - `VIEWER_SUPER_DISPATCH_URL`: fallback automatic-dispatch endpoint.
 
-Most user-facing settings are managed from Settings and persisted in `~/.view/config.json`.
+Most user-facing settings are managed from Settings and persisted in the configured `config.json` (legacy default `~/.view/config.json`).
+
+For a non-polluting worktree test, copy the current config and database into `.test-instance`, then launch on the isolated default port `19089`:
+
+```bash
+uv run python scripts/prepare_isolated_instance.py --replace
+uv run python scripts/run_isolated_instance.py --build-frontend --debug
+```
 
 ## Standard checks
 

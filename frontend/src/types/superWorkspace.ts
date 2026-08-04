@@ -1,4 +1,5 @@
 import type { AgentProvider } from "./agents";
+import type { ProviderAccountConfig, RoutingPolicyConfig } from "./files";
 
 export type SuperRole = {
   id: string;
@@ -8,6 +9,8 @@ export type SuperRole = {
   provider: AgentProvider;
   cwd: string;
   model?: string | null;
+  routing_policy_id: string;
+  capability_requirements: Record<string, unknown>;
   session_policy: "reuse" | "new_each_run";
   context_recycle_percent?: number | null;
   context_recycle_tokens?: number | null;
@@ -20,6 +23,9 @@ export type SuperWorkspaceData = {
   name: string;
   common_prompt: string;
   roles: SuperRole[];
+  provider_accounts: ProviderAccountConfig[];
+  routing_policies: RoutingPolicyConfig[];
+  default_routing_policy_id: string;
 };
 
 export type SuperChatSummary = {
@@ -31,6 +37,7 @@ export type SuperChatSummary = {
   root: string;
   common_prompt: string;
   member_role_ids: string[];
+  role_routing_policy_overrides: Record<string, string>;
   created_at: number;
   updated_at: number;
 };
@@ -47,6 +54,7 @@ export type SuperChatCreate = {
   root: string;
   common_prompt?: string;
   member_role_ids?: string[];
+  role_routing_policy_overrides?: Record<string, string>;
 };
 
 export type SuperChatPatch = Partial<SuperChatCreate>;
@@ -58,12 +66,20 @@ export type SuperRoleCreate = {
   provider?: AgentProvider;
   cwd?: string;
   model?: string | null;
+  routing_policy_id?: string;
+  capability_requirements?: Record<string, unknown>;
   session_policy?: "reuse" | "new_each_run";
   context_recycle_percent?: number | null;
   context_recycle_tokens?: number | null;
 };
 
 export type SuperRolePatch = Partial<Omit<SuperRole, "id" | "created_at" | "updated_at">>;
+
+export type RoutingConfigData = {
+  default_routing_policy_id: string;
+  provider_accounts: ProviderAccountConfig[];
+  routing_policies: RoutingPolicyConfig[];
+};
 
 export type AgentHistoryMessage = {
   id: string;
@@ -107,6 +123,9 @@ export type SuperHistoryTarget = {
   role_id: string;
   role_name: string;
   provider: AgentProvider;
+  routing_policy_id: string;
+  execution_target: Record<string, unknown>;
+  routing_attempts: Record<string, unknown>[];
   viewer_session_id: string;
   provider_session_id?: string | null;
   session_ref: string;
@@ -160,6 +179,9 @@ export type SuperDisplayTarget = {
   provider_session_id?: string | null;
   session_ref: string;
   status: string;
+  routing_policy_id: string;
+  execution_target: Record<string, unknown>;
+  routing_attempts: Record<string, unknown>[];
   model_context_window?: number | null;
   total_tokens?: number | null;
   context_used_percent?: number | null;
@@ -193,6 +215,9 @@ export type SuperDisplayItem = {
   total_tokens?: number | null;
   context_used_percent?: number | null;
   target_status: string;
+  routing_policy_id: string;
+  execution_target: Record<string, unknown>;
+  routing_attempts: Record<string, unknown>[];
   run_status: string;
   error: string;
   citation_ids?: string[];

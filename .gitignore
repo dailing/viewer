@@ -18,6 +18,7 @@ frontend/dist/
 
 # Local viewer/user state
 .viewer.env
+.test-instance/
 .codex
 
 # Logs and local editor/OS files

@@ -438,6 +438,9 @@ def read_config() -> ConfigData:
         or "active_dispatch_profile_id" not in super_workspace_raw
         or "dispatch_history_word_budget" not in super_workspace_raw
         or "dispatch_prompt_template" not in super_workspace_raw
+        or "routing_policies" not in super_workspace_raw
+        or "provider_accounts" not in super_workspace_raw
+        or "default_routing_policy_id" not in super_workspace_raw
     )
     if isinstance(raw, dict) and (
         missing_codex_defaults

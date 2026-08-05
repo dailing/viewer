@@ -40,11 +40,23 @@
 html,
 body,
 #app {
-  height: 100%;
   margin: 0;
   min-height: 0;
   overscroll-behavior: none;
   overflow: hidden;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+#app {
+  height: var(--viewer-viewport-height, 100dvh);
+  left: var(--viewer-viewport-offset-left, 0);
+  position: absolute;
+  top: var(--viewer-viewport-offset-top, 0);
+  width: var(--viewer-viewport-width, 100%);
 }
 
 body {

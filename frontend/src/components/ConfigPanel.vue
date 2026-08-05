@@ -10,7 +10,7 @@ const emit = defineEmits<{
 }>();
 const files = useFilesStore();
 const saving = ref(false);
-const restarting = ref<"backend" | "all" | "">("");
+const restarting = ref(false);
 const stopping = ref(false);
 const error = ref("");
 const serverNotice = ref("");
@@ -155,30 +155,27 @@ async function waitForServer(previousPid: number) {
     await sleep(1000);
   }
   error.value = "Restart was requested, but the server did not come back within 60 seconds.";
-  restarting.value = "";
+  restarting.value = false;
 }
 
-async function restart(includeWorker: boolean) {
+async function restart() {
   if (restarting.value) return;
-  const message = includeWorker
-    ? "Restart the viewer server and Super Workspace worker now?"
-    : "Restart only the viewer backend server now?";
-  if (!window.confirm(message)) return;
-  restarting.value = includeWorker ? "all" : "backend";
+  if (!window.confirm("Gracefully restart Viewer now? Running Agent turns will continue draining on their old workers.")) return;
+  restarting.value = true;
   error.value = "";
   serverNotice.value = "";
   try {
-    const response = await restartServer(includeWorker);
+    const response = await restartServer();
     await waitForServer(response.pid);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
-    restarting.value = "";
+    restarting.value = false;
   }
 }
 
 async function stop() {
   if (stopping.value) return;
-  if (!window.confirm("Stop the viewer server now? Use scripts/manage_viewer.py start to bring it back.")) return;
+  if (!window.confirm("Stop the complete Viewer service now? Use systemctl --user start viewer.service to bring it back.")) return;
   stopping.value = true;
   error.value = "";
   serverNotice.value = "";
@@ -412,17 +409,12 @@ async function applyJson() {
           <div class="section-heading"><i class="bi bi-hdd-rack"></i><h2>Server</h2></div>
           <div class="section-body">
             <div class="server-actions">
-              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="!!restarting || stopping" @click="restart(false)">
-                <span v-if="restarting === 'backend'" class="spinner-border spinner-border-sm"></span>
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="restarting || stopping" @click="restart()">
+                <span v-if="restarting" class="spinner-border spinner-border-sm"></span>
                 <i v-else class="bi bi-arrow-clockwise"></i>
-                <span>{{ restarting === "backend" ? "Restarting" : "Restart backend" }}</span>
+                <span>{{ restarting ? "Restarting" : "Graceful restart" }}</span>
               </button>
-              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="!!restarting || stopping" @click="restart(true)">
-                <span v-if="restarting === 'all'" class="spinner-border spinner-border-sm"></span>
-                <i v-else class="bi bi-arrow-repeat"></i>
-                <span>{{ restarting === "all" ? "Restarting all" : "Restart all" }}</span>
-              </button>
-              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="stopping || !!restarting" @click="stop">
+              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="stopping || restarting" @click="stop">
                 <span v-if="stopping" class="spinner-border spinner-border-sm"></span>
                 <i v-else class="bi bi-stop-fill"></i>
                 <span>{{ stopping ? "Stopping" : "Stop server" }}</span>

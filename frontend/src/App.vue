@@ -87,8 +87,14 @@ const appStyle = computed(() => {
 
 let source: EventSource | null = null;
 let terminalRefresh: number | null = null;
+let visualViewport: VisualViewport | null = null;
 
 onMounted(async () => {
+  visualViewport = window.visualViewport;
+  syncViewportMetrics();
+  visualViewport?.addEventListener("resize", syncViewportMetrics);
+  visualViewport?.addEventListener("scroll", syncViewportMetrics);
+  window.addEventListener("resize", syncViewportMetrics);
   colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
   systemPrefersDark.value = colorSchemeQuery.matches;
   colorSchemeQuery.addEventListener("change", handleColorSchemeChange);
@@ -110,10 +116,25 @@ async function initializeApp() {
 }
 
 onUnmounted(() => {
+  visualViewport?.removeEventListener("resize", syncViewportMetrics);
+  visualViewport?.removeEventListener("scroll", syncViewportMetrics);
+  window.removeEventListener("resize", syncViewportMetrics);
+  document.documentElement.style.removeProperty("--viewer-viewport-height");
+  document.documentElement.style.removeProperty("--viewer-viewport-width");
+  document.documentElement.style.removeProperty("--viewer-viewport-offset-top");
+  document.documentElement.style.removeProperty("--viewer-viewport-offset-left");
   colorSchemeQuery?.removeEventListener("change", handleColorSchemeChange);
   source?.close();
   if (terminalRefresh !== null) window.clearInterval(terminalRefresh);
 });
+
+function syncViewportMetrics() {
+  const viewport = window.visualViewport;
+  document.documentElement.style.setProperty("--viewer-viewport-height", `${Math.round(viewport?.height ?? window.innerHeight)}px`);
+  document.documentElement.style.setProperty("--viewer-viewport-width", `${Math.round(viewport?.width ?? window.innerWidth)}px`);
+  document.documentElement.style.setProperty("--viewer-viewport-offset-top", `${Math.round(viewport?.offsetTop ?? 0)}px`);
+  document.documentElement.style.setProperty("--viewer-viewport-offset-left", `${Math.round(viewport?.offsetLeft ?? 0)}px`);
+}
 
 function handleColorSchemeChange(event: MediaQueryListEvent) {
   systemPrefersDark.value = event.matches;

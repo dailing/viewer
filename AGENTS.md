@@ -6,4 +6,6 @@ Use `architecture.md` as the project map for finding backend APIs, frontend stor
 
 Do not start the frontend dev server for verification; the user will test the server manually. Use `npm run build` and `python -m compileall backend/app` as the standard implementation checks.
 
+Do not run `systemctl` against `viewer.service`, and do not stop or restart Viewer directly, unless the user explicitly requests that exact operational action. When a user explicitly requests a normal development restart, call `POST /api/admin/restart`; the supervisor replaces the backend generation while old workers drain running turns. `systemctl --user restart viewer.service` is reserved for an explicitly requested hard restart of the complete cgroup.
+
 Hermes may modify code directly when the user explicitly instructs "改下agents.md 可以你直接修改执行" or equivalent. In such cases, Hermes should implement the agreed plan, run `npm run build` and `python -m compileall backend/app`, and report results. The user retains final review and testing responsibility.

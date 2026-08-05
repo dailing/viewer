@@ -6,11 +6,17 @@ import os
 
 from loguru import logger
 
-from .process_registry import clear_process_state, process_slot_state, write_process_state
+from .process_registry import (
+    clear_process_state,
+    process_slot_state,
+    worker_owner_process_name,
+    write_process_state,
+)
 from .storage import ensure_view_home
 from .super_workspace_runtime import SuperWorkspaceRuntime
 from .hermes_sessions import hermes_session_manager
 from .opencode_sessions import opencode_session_manager
+from .codex_app_server_sessions import codex_app_server_session_manager
 
 LEADERSHIP_CHECK_INTERVAL_SECONDS = 5.0
 # Grace window before a fresh worker starts monitoring the pid file. The parent
@@ -45,6 +51,7 @@ async def main_async() -> int:
     ensure_view_home()
     notify_url = os.environ.get("VIEWER_SUPER_WORKSPACE_NOTIFY_URL") or None
     runtime = SuperWorkspaceRuntime(notify_url=notify_url)
+    owner_name = worker_owner_process_name(runtime._worker_id)
     name = "worker"
     slot = process_slot_state(name)
     current_pid = os.getpid()
@@ -60,6 +67,11 @@ async def main_async() -> int:
     elif slot["pid_file_exists"] and not slot["alive"]:
         logger.warning("Stale Super Workspace worker pid file found; overwriting pid={} pid_file={}", slot["pid"], slot["pid_path"])
     write_process_state(name, os.getpid(), {"kind": "super_workspace_worker", "notify_url": notify_url})
+    write_process_state(
+        owner_name,
+        os.getpid(),
+        {"kind": "super_workspace_worker_owner", "worker_id": runtime._worker_id},
+    )
     logger.info("Super Workspace worker process started pid={} notify_url={}", os.getpid(), notify_url)
     leadership_watcher = asyncio.create_task(_watch_leadership(runtime, name))
     try:
@@ -79,10 +91,12 @@ async def main_async() -> int:
             await leadership_watcher
         except asyncio.CancelledError:
             pass
+        await codex_app_server_session_manager.shutdown()
         await hermes_session_manager.shutdown()
         await opencode_session_manager.shutdown()
         # clear_process_state only removes the pid file if it still points to us,
         # so a newer worker's registration is left untouched.
+        clear_process_state(owner_name, os.getpid())
         clear_process_state(name, os.getpid())
     return 0
 

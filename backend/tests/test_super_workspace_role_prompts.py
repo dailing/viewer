@@ -299,6 +299,60 @@ class RolePromptSeparationTests(unittest.TestCase):
             self.assertIsNotNone(task)
             self.assertTrue(task.force_new_session)
 
+    def test_orphan_sweep_preserves_run_owned_by_live_draining_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AgentHistoryStore(Path(directory) / "history.sqlite3")
+            workspace = store.ensure_default_workspace("user")
+            chats = store.create_super_chat("user", name="Chat", root="project", workspace_id=workspace.id)
+            run = store.create_super_run("user", "keep draining", "queued", chat_id=chats.active_chat_id)
+            store.create_dispatch_task(
+                "user",
+                run.id,
+                SuperDriverRunCreate(
+                    workspace_id=workspace.id,
+                    chat_id=chats.active_chat_id,
+                    role_id="hermes-role",
+                    role_name="Hermes",
+                    provider="hermes",
+                ),
+            )
+            task = store.claim_next_dispatch_task("backend:old-worker")
+            self.assertIsNotNone(task)
+            store.update_driver_run_status(task.id, "running")
+
+            with patch("backend.app.agent_history.process_slot_state", return_value={"alive": True}):
+                interrupted = store.interrupt_orphaned_running_driver_runs()
+
+            self.assertEqual(interrupted, 0)
+            self.assertEqual(store.get_dispatch_task(task.id).status, "running")
+
+    def test_orphan_sweep_interrupts_run_after_owning_worker_dies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AgentHistoryStore(Path(directory) / "history.sqlite3")
+            workspace = store.ensure_default_workspace("user")
+            chats = store.create_super_chat("user", name="Chat", root="project", workspace_id=workspace.id)
+            run = store.create_super_run("user", "orphan me", "queued", chat_id=chats.active_chat_id)
+            store.create_dispatch_task(
+                "user",
+                run.id,
+                SuperDriverRunCreate(
+                    workspace_id=workspace.id,
+                    chat_id=chats.active_chat_id,
+                    role_id="hermes-role",
+                    role_name="Hermes",
+                    provider="hermes",
+                ),
+            )
+            task = store.claim_next_dispatch_task("backend:dead-worker")
+            self.assertIsNotNone(task)
+            store.update_driver_run_status(task.id, "running")
+
+            with patch("backend.app.agent_history.process_slot_state", return_value={"alive": False}):
+                interrupted = store.interrupt_orphaned_running_driver_runs()
+
+            self.assertEqual(interrupted, 1)
+            self.assertEqual(store.get_dispatch_task(task.id).status, "interrupted")
+
     def test_provider_health_applies_to_every_model_in_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = AgentHistoryStore(Path(directory) / "history.sqlite3")

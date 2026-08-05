@@ -38,6 +38,7 @@ from .opencode_sessions import opencode_session_manager
 from .logging import ensure_logging
 from .models import ConfigData, GitCommitRequest, GitRevertRequest, GitStageRequest, TerminalCreate
 from .restart import request_restart, request_stop
+from .codex_app_server_sessions import codex_app_server_session_manager
 from .super_workspace import RoutingConfigData, SuperChatCreate, SuperChatPatch, SuperDispatchRequest, SuperRoleCreate, SuperRolePatch, SuperWorkspacePatch, super_workspace_manager
 from .super_workspace_runtime import SuperWorkspaceMessageCreate, super_workspace_runtime
 from .terminals import terminal_manager
@@ -118,6 +119,7 @@ async def shutdown() -> None:
         watch_task.cancel()
     await super_workspace_runtime.shutdown()
     await terminal_manager.shutdown()
+    await codex_app_server_session_manager.shutdown()
     await hermes_session_manager.shutdown()
     await opencode_session_manager.shutdown()
 
@@ -128,9 +130,9 @@ async def health() -> dict[str, str | int]:
 
 
 @app.post("/api/admin/restart", status_code=202)
-async def restart_server(include_worker: bool = False):
+async def restart_server():
     try:
-        return request_restart(include_worker=include_worker)
+        return request_restart()
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

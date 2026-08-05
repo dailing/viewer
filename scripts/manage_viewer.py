@@ -20,7 +20,16 @@ STATE_DIR = Path(tempfile.gettempdir()) / "viewer-process-manager" / PROJECT_KEY
 PID_FILE = STATE_DIR / "viewer.pid"
 STATE_FILE = STATE_DIR / "viewer.json"
 LOG_FILE = STATE_DIR / "viewer.log"
-DEFAULT_COMMAND = ["uv", "run", RUN_SCRIPT.name, "--build-frontend", "--debug", "-p", "18989"]
+DEFAULT_COMMAND = [
+    sys.executable,
+    RUN_SCRIPT.as_posix(),
+    "--serve-dir",
+    PROJECT_ROOT.parent.as_posix(),
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "18989",
+]
 GRACEFUL_TIMEOUT_SECONDS = 30.0
 FORCED_TIMEOUT_SECONDS = 5.0
 
@@ -214,14 +223,24 @@ def status() -> dict[str, Any]:
     }
 
 
+def signal_supervisor(pid: int | None, signal_name: str) -> dict[str, Any]:
+    if not pid or not pid_exists(pid):
+        raise RuntimeError(f"Viewer supervisor is not running: pid={pid}")
+    requested_signal = {"HUP": signal.SIGHUP, "TERM": signal.SIGTERM}[signal_name]
+    os.kill(pid, requested_signal)
+    log(f"Sent SIG{signal_name} to viewer supervisor pid={pid}")
+    return {"status": "signalled", "pid": pid, "signal": signal_name}
+
+
 def print_result(result: dict[str, Any]) -> None:
     print(json.dumps(result, indent=2), flush=True)
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description="Manage the local live file viewer backend.")
-    parser.add_argument("command", choices=["start", "stop", "restart", "status"])
+    parser.add_argument("command", choices=["start", "stop", "restart", "status", "signal"])
     parser.add_argument("--pid", type=int, default=None, help="Explicit process id to stop before stop/restart.")
+    parser.add_argument("--signal", choices=["HUP", "TERM"], default="HUP", help="Signal for the supervisor control command.")
     parser.add_argument("--delay", type=float, default=0.0, help="Seconds to wait before running the command.")
     args, extra = parser.parse_known_args()
     return args, extra
@@ -239,6 +258,8 @@ def main() -> int:
         print_result(stop(args.pid))
     elif args.command == "restart":
         print_result(restart(extra, args.pid))
+    elif args.command == "signal":
+        print_result(signal_supervisor(args.pid, args.signal))
     else:
         print_result(status())
     return 0

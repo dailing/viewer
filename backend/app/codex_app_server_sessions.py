@@ -754,6 +754,7 @@ class CodexAppServerSessionManager:
             if session.run_task:
                 with suppress(asyncio.CancelledError):
                     await session.run_task
+        await self.runtime.shutdown()
 
 
 codex_app_server_session_manager = CodexAppServerSessionManager()

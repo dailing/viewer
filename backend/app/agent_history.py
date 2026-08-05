@@ -21,6 +21,7 @@ from .storage import AGENT_HISTORY_DB_PATH
 from .super_workspace_memory import retain_visible_message_background
 from .identity import normalize_user_id
 from .inference import TargetHealth
+from .process_registry import process_slot_state, worker_owner_process_name
 
 DEFAULT_SUPER_WORKSPACE_ID = "default"
 DEFAULT_SUPER_WORKSPACE_NAME = "Default Super Workspace"
@@ -1859,9 +1860,10 @@ class AgentHistoryStore:
         Covers rows the stale-run cleanup cannot reach: in-process providers
         (hermes ACP) never set driver_pid/driver_state_path, so when the worker
         process dies those rows stay 'running' forever with NULL driver_pid.
-        A fresh worker calls this once at startup; any truly live run at that
-        moment is being drained by its old worker, whose completion writes
-        happen after this sweep, so final status is not clobbered.
+        A fresh worker calls this once at startup. Runs owned by a still-live
+        worker are left alone so leadership handover can drain them and persist
+        their terminal state, including in-process Hermes ACP turns that do not
+        have a separate driver pid.
         """
         now = time.time() if now is None else now
         with self.session_scope() as db:
@@ -1874,6 +1876,9 @@ class AgentHistoryStore:
             )
             interrupted_ids: list[str] = []
             for row in rows:
+                owner = str(row.claimed_by or "").strip()
+                if owner and process_slot_state(worker_owner_process_name(owner))["alive"]:
+                    continue
                 pid = row.driver_pid if isinstance(row.driver_pid, int) else None
                 if pid is not None and pid > 0 and self._pid_alive(pid):
                     continue

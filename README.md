@@ -146,6 +146,14 @@ uv run python run.py --log-file /tmp/viewer.log
 
 `--debug` enables verbose backend logging and frontend source maps when used with `--build-frontend`.
 
+### systemd and graceful restart
+
+`deploy/systemd/viewer.service` runs a stable supervisor as systemd's MainPID. Install that unit in the user systemd directory and reload systemd before the first supervised start. The backend inherits the exact command embedded in `ExecStart`.
+
+- `POST /api/admin/restart` (or the Settings button) gracefully replaces the backend generation. The old Super Workspace worker remains alive until its running turns finish and persist their terminal status; the replacement worker owns new work.
+- `systemctl --user restart viewer.service` is a hard restart of the complete cgroup. It is reserved for an explicitly requested clean reset and can interrupt active turns.
+- The first migration from the former direct-backend unit to the supervisor requires one hard systemd restart. Subsequent development restarts should use the API.
+
 ## Configuration
 
 The main environment variables are:

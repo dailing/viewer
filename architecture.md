@@ -8,9 +8,9 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 ## Runtime Flow
 
-1. `run.py` loads project-local `.viewer.env` without overriding existing process variables, parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`; `--config-dir` and `--data-dir` isolate configuration from mutable databases/logs while preserving the legacy `~/.view` default. Active requests and connections receive a configurable graceful-shutdown window (`--graceful-shutdown-timeout`, default 5 seconds) before Uvicorn cancels them.
-2. `backend/app/main.py` creates the FastAPI app, installs CORS, gzip compression, and request logging middleware, starts `watch_root()` and the Super Workspace worker on startup, stops watcher and terminal sessions on shutdown, registers all REST/WebSocket/SSE routes, and mounts `frontend/dist` if it exists.
-3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`.
+1. In the systemd deployment, `scripts/supervise_viewer.py` is the stable service MainPID and launches `run.py` with the unit's canonical backend arguments. A normal `POST /api/admin/restart` sends SIGHUP to that supervisor: it gracefully stops only the backend generation and launches a replacement with the same arguments, leaving old workers in the same cgroup to drain in-flight turns while the replacement worker claims new work. An explicit `systemctl --user restart viewer.service` remains a hard whole-cgroup restart.
+2. `run.py` loads project-local `.viewer.env` without overriding existing process variables, parses CLI flags, sets `VIEWER_*` environment variables including optional WhisperLiveKit voice settings, optionally builds the frontend, configures logging, and starts `uvicorn` on `app.main:app`; `--config-dir` and `--data-dir` isolate configuration from mutable databases/logs while preserving the legacy `~/.view` default. Active requests and connections receive a configurable graceful-shutdown window (`--graceful-shutdown-timeout`, default 5 seconds) before Uvicorn cancels them. `backend/app/main.py` creates the FastAPI app, installs middleware, starts `watch_root()` and a Super Workspace worker generation, registers routes, and mounts `frontend/dist` if it exists.
+3. The frontend starts in `frontend/src/main.ts`, installs global client error logging, creates Pinia, and mounts `App.vue`. `App.vue` keeps the application height, width, and top/left position synchronized with the browser visual viewport (falling back to the window/dynamic viewport) so mobile virtual keyboards resize and reposition the application shell instead of exposing the layout viewport behind it when Safari pans a focused input.
 4. `App.vue` loads config and terminal state directly, applies visual config as CSS variables, connects to `/api/events`, refreshes affected file listings, and dispatches every filesystem SSE as a `viewer:file-changed` browser event. Browser-local layout/sidebar/draft keys are no longer user-namespaced; `utils/storage.ts` migrates the former `.dailing` keys on first access. The normal page is the Super Workspace split-pane shell with no global navbar: every viewer pane owns a title bar, while Settings is launched from the sidebar activity bar.
 5. `ViewerPane.vue` fetches file metadata and chooses the correct viewer component, including routing `.csv` text files to the CSV table viewer and oversized Markdown/CSV/text files to the virtualized large text viewer. Each pane renders `PaneTitleBar.vue`, which combines that pane's registered viewer controls with refresh/back/split/clear actions and dispatches `viewer:pane-refresh` for the concrete pane id; file panes clear visible content before refetching metadata and incrementing their pane `version`, diff panes clear and reload their Git diff directly, and terminal panes reconnect through their own viewer. Viewers fetch raw/text content and reload when their `version` prop changes; image and PDF panes include the pane version in raw-file URLs so manual refreshes can bypass browser cache even when the content hash is unchanged. Markdown panes render embedded images with browser lazy loading, track simple relative local image dependencies client-side, use a pane-level version cache key for raw-file URLs, reload/cache-bust embedded images when those image files change, and can switch into a split textarea/live-preview edit mode that saves through `/api/file/content` PUT. PDF panes configure the PDF.js worker explicitly, preload document metadata from `/api/file/raw` for the page count, and render individual pages lazily from the same cache-busted raw URL as page placeholders approach the scroll viewport. HTML panes load documents through an iframe-backed static-site route so relative scripts, stylesheets, images, and links resolve like a browser-served folder; inactive HTML panes render a transparent activation shield above the iframe so a first click can select the pane before iframe content consumes pointer events.
 6. Terminal panes use REST for lifecycle operations and WebSocket `/api/terminals/{id}/ws` for interactive PTY input/output.
@@ -25,7 +25,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `startup()`: ensures the fixed `VIEWER_ROOT` filesystem boundary exists, logs runtime config, and starts the filesystem watcher task.
 - `shutdown()`: stops watcher task and terminates terminal sessions.
 - `/api/health`: returns health and the current backend PID; the filesystem boundary is not exposed as workspace state.
-- `/api/admin/restart`: launches the detached process manager to stop the current PID and start a replacement server with the manager's default command. When called with `include_worker=true`, it first stops the registered Super Workspace worker and clears `WEAVER_RUN_DIR/worker.pid/json` so backend startup launches a fresh worker process.
+- `/api/admin/restart`: requests one supervisor-controlled graceful generation replacement. There is no separate backend-only versus backend-plus-worker API mode: the replacement backend starts a new worker generation, while the old worker drains any in-flight turns and then exits through leadership handover.
 - `/api/admin/stop`: launches the detached process manager to stop the current backend PID.
 - `/api/tree`: calls `list_directory()` under the fixed filesystem boundary. Normal sidebar browsing starts at the current Chat Root and cannot navigate above it.
 - `/api/file/upload`: streams one request body into a file under the requested active-user-root-relative directory. The directory must exist, filenames cannot contain path separators, and existing files are overwritten while directories are protected.
@@ -62,7 +62,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Central viewer-local paths split between `VIEWER_CONFIG_DIR` and `VIEWER_DATA_DIR`; each falls back through `VIEWER_HOME` to `~/.view`. Configuration is read from the config directory, while SQLite state, logs, and provider session metadata live under the data directory. This permits isolated worktree/test instances without copying secrets into a database directory or touching the active instance.
 - Defines `CONFIG_DIR`, `DATA_DIR`, `CONFIG_PATH`, `LOG_DIR`, `CODEX_APP_SERVER_LOG_DIR`, `HERMES_LOG_DIR`, `OPENCODE_LOG_DIR`, `TERMINAL_LOG_DIR`, `HERMES_RUN_DIR`, and `WEAVER_RUN_DIR`.
-- `WEAVER_RUN_DIR` defaults to `/tmp/viewer_run/weaver` and can be overridden with `VIEWER_WEAVER_RUN_DIR`; it stores lightweight PID/state registry files for the Super Workspace worker and provider driver processes. Worker files use `worker.pid/json`; Codex driver files use readable names such as `driver.{role_name}.{role_id}.{dispatch_task_id}.pid/json`. Worker startup uses graceful leadership handover: a new worker always spawns and overwrites `worker.pid`, even if the pid file points to a live old worker; the old worker's 5s leadership monitor notices the overwrite, stops claiming new dispatch tasks, lets its in-flight agent runs finish writing their final status, and only then shuts down its provider runtimes and exits (Codex driver startup is unchanged — a live driver pid still blocks duplicate startup). On its first dispatch-loop iteration a fresh worker sweeps `super_workspace_driver_runs` for orphaned `running` rows whose driver pid/state file is dead or absent (the hermes ACP provider never sets those) and marks them `interrupted`; a legitimately draining old worker finalizes its own run afterward and never clobbers `cancelled`/`interrupted` terminal states.
+- `WEAVER_RUN_DIR` defaults to `/tmp/viewer_run/weaver` and can be overridden with `VIEWER_WEAVER_RUN_DIR`; it stores the active `worker.pid/json`, a per-worker-owner PID/state slot keyed by the DB `claimed_by` id, and provider driver process state. Worker startup uses graceful leadership handover: a new worker overwrites the active slot, while the old worker stops claiming and drains its in-flight Agent runs before exiting. The startup orphan sweep first checks whether each run's owning worker PID is alive; this protects in-process Hermes turns, which have no separate driver PID, from being marked interrupted while an old worker is legitimately draining.
 - `HERMES_LOG_DIR` stores viewer-local Hermes-to-ACP session metadata only; message history lives in `~/.view/agent-history.sqlite3`. `HERMES_RUN_DIR` is reserved for Hermes detached-run state if the provider implementation later needs local runner files.
 - `OPENCODE_LOG_DIR` stores viewer-local OpenCode-to-ACP session metadata only; OpenCode's own session storage remains provider-owned and is not read by Viewer.
 
@@ -259,11 +259,19 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `backend/app/restart.py`
 
-- Thin admin bridge from FastAPI to the detached process manager.
-- `_terminate_worker()`: stops the registered Super Workspace worker process and clears its process-registry files before a full restart.
-- `_run_manager(command, include_worker=False)`: starts `scripts/manage_viewer.py` in a new session with the current backend PID and a short delay so the HTTP response can flush before the server is signaled; optionally stops the Super Workspace worker first.
-- `request_restart(include_worker=False)`: asks the manager to stop the current backend PID and start the default managed server command; `include_worker=True` makes the replacement backend spawn a fresh worker on startup.
-- `request_stop()`: asks the manager to stop the current backend PID without starting a replacement.
+- Thin admin bridge from FastAPI to the Viewer supervisor or the standalone fallback manager.
+- Under the supervisor, restart/stop launches a delayed control helper so the HTTP response can flush, then sends SIGHUP/SIGTERM to the stable supervisor PID inherited through `VIEWER_SUPERVISOR_PID`.
+- Outside the supervisor, restart preserves the active Python executable and `run.py` argv instead of falling back to debug/reload/build parameters.
+
+`scripts/supervise_viewer.py`
+
+- Stable systemd MainPID for the single Viewer cgroup.
+- Starts the backend with the exact command supplied after `--` and exports its own PID to the child.
+- SIGHUP gracefully stops only the backend child and launches a replacement generation; worker processes stay alive for leadership drain. SIGTERM stops the child and exits so systemd can clean the complete cgroup.
+
+`deploy/systemd/viewer.service`
+
+- Canonical user-service template for the single Viewer cgroup. Its `ExecStart` runs the supervisor followed by the production backend command, and `KillMode=control-group` keeps an explicit systemd restart as the hard whole-generation cleanup path.
 
 `backend/app/__init__.py`
 
@@ -399,7 +407,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Full-page configuration UI opened from the sidebar activity-rail Settings button.
 - Edits `~/.view/config.json` through the existing `/api/config` endpoint.
 - Uses a searchable category sidebar. Categories are Server, Appearance, Codex Models, Super Workspace, Voice, Markdown, Syntax Highlighting, and raw JSON.
-- Server section has confirmed backend-only restart, backend+worker restart, and stop buttons. Both restart buttons call `/api/admin/restart`, with the full restart adding `include_worker=true`; the page polls `/api/health` until the PID changes, then reloads. Stop calls `/api/admin/stop` and leaves a command-line restart hint.
+- Server settings expose one confirmed graceful restart button backed by `/api/admin/restart`; the page polls `/api/health` until the backend-generation PID changes, then reloads. Stop calls `/api/admin/stop`.
 - Appearance controls system/light/dark theme selection and compact/comfortable density; density maps directly to the shared control sizing rather than persisting arbitrary pixel sizes.
 - Codex Models controls the default Codex model, the available model list used by Super Workspace Codex roles, and the optional Codex subprocess proxy.
 - Super Workspace controls the optional chat virtual reading space, provider context recycle percentage/token defaults, chat-level Hindsight retain, optional Hindsight API URL override, chat memory bank prefix, and new-session visible chat-history bootstrap with a rough token budget.
@@ -524,7 +532,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `request<T>()`: JSON request with error text on non-2xx.
 - File APIs: `rawUrl(path, contentHash?)`, `getTree()`, `getMeta()`, `getText()`, `getConfig()`, `putConfig()`.
 - Git APIs: `getGitStatus()`, `getGitDiff()`, `stageGitPath()`, `revertGitPath()`, `commitGit()`, and `pushGit()`.
-- Admin APIs: `restartServer(includeWorker?)` and `stopServer()`.
+- Admin APIs: `restartServer()` and `stopServer()`.
 - Terminal APIs: `listTerminals()`, `createTerminal(cwd)`, `terminateTerminal()`, `deleteTerminal()`, and `terminalSocketUrl()`.
 - Agent provider metadata API: `listAgentProviders()`.
 - Super Workspace APIs: `getSuperWorkspace()`, chat/role CRUD helpers, `listSuperWorkspaceRuns()`, and `createSuperWorkspaceRun()` cover the user's workspace data and persisted chat/query flows. Normal role-message delivery and automatic routing are owned by the backend Super Workspace runtime, not by frontend wrappers.
@@ -653,7 +661,7 @@ Implementation checks:
 
 - Lightweight CLI process manager with `start`, `stop`, `restart`, and `status` commands.
 - Stores `viewer.pid`, `viewer.json`, and `viewer.log` under the system temp directory at `viewer-process-manager/<project-hash>/`.
-- Default start command is `uv run run.py --build-frontend --debug -p 18989`, matching the project default server port.
+- Default standalone start command uses the current Python executable and the same serve-dir/host/port shape as the systemd backend command, without debug, reload, or frontend build flags.
 - `stop` sends `SIGTERM` to the target's detached process group when possible, waits for exit, escalates to `SIGKILL` after a timeout, also handles the recorded manager parent PID when an explicit backend child PID is supplied, and clears the pid/state files.
 - `restart` stops the active or explicitly supplied service process group, then starts the default or override command in a detached session.
 

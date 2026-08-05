@@ -65,6 +65,11 @@ def driver_process_name(role_name: str | None, role_id: str | None, dispatch_tas
     return f"driver.{safe_role_name}.{safe_role_id}.{safe_task_id}"
 
 
+def worker_owner_process_name(worker_id: str | None) -> str:
+    """Return the per-worker registry slot used to validate DB task ownership."""
+    return f"worker-owner.{safe_process_name(worker_id or 'unknown')}"
+
+
 def write_process_state(name: str, pid: int, metadata: dict[str, Any] | None = None) -> None:
     pid_path, state_path = registry_paths(name)
     payload = {

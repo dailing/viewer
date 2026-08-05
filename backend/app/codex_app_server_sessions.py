@@ -174,6 +174,7 @@ class CodexAppServerSessionManager:
         self._loaded = False
         self._notify_payloads: dict[str, tuple[str, dict[str, Any]]] = {}
         self._notify_tasks: dict[str, asyncio.Task] = {}
+        self._raw_event_indexes: dict[str, int] = {}
 
     def _paths(self, session_id: str) -> Path:
         return self.metadata_dir / f"{session_id}.json"
@@ -520,6 +521,7 @@ class CodexAppServerSessionManager:
         method = update.get("method", "")
         params = update.get("params", {})
         raw = update.get("raw", {})
+        self._record_raw_update(session, str(method), params, raw)
         event = self._normalized_event(session, method, params, raw)
         if event is not None:
             index = self._upsert_event(session, event)
@@ -530,8 +532,48 @@ class CodexAppServerSessionManager:
         session.updated_at = time.time()
         self._write_meta(session)
 
+    def _record_raw_update(
+        self,
+        session: CodexAppServerSession,
+        method: str,
+        params: dict[str, Any],
+        raw: dict[str, Any],
+    ) -> None:
+        try:
+            index = self._raw_event_indexes.get(session.id, 0)
+            self._raw_event_indexes[session.id] = index + 1
+            lineage = session.lineage
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            turn_id = str(params.get("turnId") or turn.get("id") or lineage.get("driver_run_id") or "")
+            payload = raw if isinstance(raw, dict) and raw else {"method": method, "params": params}
+            agent_history_store.record_provider_raw_event(
+                user_id=session.user_id,
+                workspace_id=lineage.get("workspace_id"),
+                chat_id=lineage.get("chat_id"),
+                query_message_id=lineage.get("query_message_id"),
+                driver_run_id=lineage.get("driver_run_id"),
+                turn_id=turn_id,
+                provider=self.provider,
+                viewer_session_id=session.id,
+                provider_session_id=session.provider_session_id,
+                event_index=index,
+                event_method=method,
+                source_event_id=uuid.uuid4().hex,
+                received_at=time.time(),
+                raw=payload,
+            )
+        except Exception:
+            logger.exception("Failed to archive raw {} event session={} method={}", self.provider, session.id, method)
+
     def _upsert_event(self, session: CodexAppServerSession, event: dict[str, Any]) -> int:
         source_event_id = str(event.get("source_event_id") or "")
+        if event.get("replace") and source_event_id:
+            for index in range(len(session.events) - 1, -1, -1):
+                if session.events[index].get("source_event_id") != source_event_id:
+                    continue
+                event["index"] = index
+                session.events[index] = event
+                return index
         if event.get("append") and source_event_id:
             for index in range(len(session.events) - 1, -1, -1):
                 existing = session.events[index]
@@ -638,6 +680,22 @@ class CodexAppServerSessionManager:
                 "streaming": False,
                 "patch_text": patch,
                 "file_changes": file_changes,
+                "raw_preview": self._raw_preview(raw),
+            }
+        if method == "turn/diff/updated":
+            patch = str(params.get("diff") or "")
+            if not patch:
+                return None
+            return {
+                "source_event_id": f"{self.provider}:{session.provider_session_id}:{turn_id}:turn-diff",
+                "received_at": now,
+                "event_type": AgentEventType.PATCH_APPLY_END,
+                "text": patch,
+                "append": False,
+                "replace": True,
+                "streaming": False,
+                "patch_text": patch,
+                "file_changes": [],
                 "raw_preview": self._raw_preview(raw),
             }
         if method == "thread/tokenUsage/updated":

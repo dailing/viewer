@@ -528,8 +528,16 @@ async def super_workspace_runs(
     before: float | None = None,
     after: float | None = None,
     chat_id: str | None = None,
+    detail: str = Query(default="focus", pattern="^(focus|full)$"),
 ):
-    return agent_history_store.list_super_display_items(None, limit=limit, before=before, after=after, chat_id=chat_id)
+    return agent_history_store.list_super_display_items(
+        None,
+        limit=limit,
+        before=before,
+        after=after,
+        chat_id=chat_id,
+        detail=detail,
+    )
 
 
 @app.get("/api/super-workspace/events")

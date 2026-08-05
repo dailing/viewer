@@ -48,6 +48,10 @@ class RolePromptSeparationTests(unittest.TestCase):
         self.assertTrue(SuperWorkspaceConfig().chat_virtual_space_enabled)
         self.assertFalse(SuperWorkspaceConfig(chat_virtual_space_enabled=False).chat_virtual_space_enabled)
 
+    def test_agent_activity_is_hidden_by_default_and_can_be_enabled(self) -> None:
+        self.assertFalse(SuperWorkspaceConfig().chat_show_agent_activity)
+        self.assertTrue(SuperWorkspaceConfig(chat_show_agent_activity=True).chat_show_agent_activity)
+
     def test_driver_uses_provider_context_limits_from_viewer_config(self) -> None:
         limit = SimpleNamespace(context_recycle_percent=63.5, context_recycle_tokens=123_000)
         config = SimpleNamespace(super_workspace=SimpleNamespace(provider_context_limits={"codex-app-server": limit}))

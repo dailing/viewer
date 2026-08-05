@@ -265,11 +265,18 @@ export async function deleteSuperRole(id: string): Promise<SuperWorkspaceData> {
   return request<SuperWorkspaceData>(`/api/super-workspace/roles/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function listSuperWorkspaceRuns(limit = 30, before?: number, after?: number, chatId?: string | null): Promise<SuperDisplayItemsPage> {
+export async function listSuperWorkspaceRuns(
+  limit = 30,
+  before?: number,
+  after?: number,
+  chatId?: string | null,
+  detail: "focus" | "full" = "focus",
+): Promise<SuperDisplayItemsPage> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (before !== undefined) params.set("before", String(before));
   if (after !== undefined) params.set("after", String(after));
   if (chatId) params.set("chat_id", chatId);
+  params.set("detail", detail);
   return request<SuperDisplayItemsPage>(`/api/super-workspace/runs?${params.toString()}`);
 }
 

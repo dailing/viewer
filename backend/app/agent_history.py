@@ -31,6 +31,21 @@ ROLE_SESSION_POLICIES = {"reuse", "new_each_run"}
 DEFAULT_CONTEXT_RECYCLE_PERCENT = 70.0
 STALE_DRIVER_RUN_GRACE_SECONDS = 120.0
 TOKENISH_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+DISPLAY_ACTIVITY_EVENT_TYPES = {
+    "reasoning",
+    "tool_call",
+    "tool_result",
+    "custom_tool_call",
+    "exec_command_begin",
+    "exec_command_end",
+    "function_call",
+    "function_call_output",
+    "custom_tool_call_output",
+    "view_image_tool_call",
+    "patch_apply_end",
+    "plan_update",
+    "operation",
+}
 
 
 def rough_token_count(value: str) -> int:
@@ -263,6 +278,8 @@ class SuperDisplayItem(BaseModel):
     error: str = ""
     citation_ids: list[str] = Field(default_factory=list)
     dispatch_targets: list[SuperDisplayTarget] = Field(default_factory=list)
+    file_changes: list[AgentHistoryFileChange] = Field(default_factory=list)
+    patch_text: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
     cwd_relative: str = ""
 
@@ -484,6 +501,34 @@ class SuperWorkspaceMessageRow(AgentHistoryBase):
     patch_text: Mapped[str | None] = mapped_column(Text)
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)
     occurred_at: Mapped[float] = mapped_column(Float, nullable=False)
+    ingested_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class SuperWorkspaceProviderRawEventRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_provider_raw_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "viewer_session_id", "source_event_id"),
+        Index("idx_super_raw_events_driver_time", "driver_run_id", "received_at", "id"),
+        Index("idx_super_raw_events_session_time", "provider", "viewer_session_id", "received_at", "id"),
+        Index("idx_super_raw_events_provider_method", "provider", "event_method", "received_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(String)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    query_message_id: Mapped[str | None] = mapped_column(String)
+    driver_run_id: Mapped[str | None] = mapped_column(String)
+    turn_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    viewer_session_id: Mapped[str] = mapped_column(String, nullable=False)
+    provider_session_id: Mapped[str | None] = mapped_column(String)
+    event_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_method: Mapped[str] = mapped_column(String, nullable=False, default="")
+    source_event_id: Mapped[str] = mapped_column(String, nullable=False)
+    received_at: Mapped[float] = mapped_column(Float, nullable=False)
+    payload_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
     ingested_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
@@ -2080,6 +2125,7 @@ class AgentHistoryStore:
         before: float | None = None,
         after: float | None = None,
         chat_id: str | None = None,
+        detail: str = "focus",
     ) -> SuperDisplayItemsPage:
         normalized_user = normalize_user_id(user_id)
         workspace = self.super_workspace(normalized_user)
@@ -2102,9 +2148,20 @@ class AgentHistoryStore:
             SuperWorkspaceMessageRow.text != "",
             ~self._agent_message_event_condition(),
         )
+        activity_condition = and_(
+            SuperWorkspaceMessageRow.workspace_id == workspace.id,
+            SuperWorkspaceMessageRow.conversation_id == chat.id,
+            SuperWorkspaceMessageRow.role == "assistant",
+            SuperWorkspaceMessageRow.event_type.in_(DISPLAY_ACTIVITY_EVENT_TYPES),
+            or_(
+                SuperWorkspaceMessageRow.text != "",
+                SuperWorkspaceMessageRow.patch_text.is_not(None),
+            ),
+        )
+        message_condition = or_(assistant_condition, activity_condition) if detail == "full" else assistant_condition
         statement = select(SuperWorkspaceMessageRow).where(
             SuperWorkspaceMessageRow.user_id == normalized_user,
-            or_(query_condition, assistant_condition),
+            or_(query_condition, message_condition),
         )
         if after is not None:
             changed_query_driver_runs = select(SuperWorkspaceDriverRunRow.query_message_id).where(
@@ -2433,6 +2490,54 @@ class AgentHistoryStore:
                 recipient_role_id=recipient_role_id,
             )
 
+    def record_provider_raw_event(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str | None,
+        chat_id: str | None,
+        query_message_id: str | None,
+        driver_run_id: str | None,
+        turn_id: str,
+        provider: str,
+        viewer_session_id: str,
+        provider_session_id: str | None,
+        event_index: int,
+        event_method: str,
+        source_event_id: str,
+        received_at: float,
+        raw: dict[str, Any],
+    ) -> None:
+        raw_json = self._json(raw)
+        row_id = f"{provider}:{viewer_session_id}:raw:{source_event_id}"
+        values = {
+            "id": row_id,
+            "workspace_id": workspace_id,
+            "user_id": normalize_user_id(user_id),
+            "conversation_id": str(chat_id or ""),
+            "query_message_id": query_message_id,
+            "driver_run_id": driver_run_id,
+            "turn_id": turn_id,
+            "provider": provider,
+            "viewer_session_id": viewer_session_id,
+            "provider_session_id": provider_session_id,
+            "event_index": event_index,
+            "event_method": event_method,
+            "source_event_id": source_event_id,
+            "received_at": received_at,
+            "payload_bytes": len(raw_json.encode("utf-8")),
+            "raw_json": raw_json,
+            "ingested_at": time.time(),
+        }
+        with self.session_scope() as db:
+            statement = sqlite_insert(SuperWorkspaceProviderRawEventRow).values(**values)
+            db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["provider", "viewer_session_id", "source_event_id"],
+                    set_={key: statement.excluded[key] for key in values.keys() if key != "id"},
+                )
+            )
+
     def _display_item_from_row(
         self,
         row: SuperWorkspaceMessageRow,
@@ -2489,6 +2594,8 @@ class AgentHistoryStore:
             error=str(row.error or "") if is_query else "",
             citation_ids=citation_ids_by_query.get(str(row.id), []) if is_query else [],
             dispatch_targets=dispatch_targets,
+            file_changes=self._file_changes_for_message(str(row.id)) if not is_query else [],
+            patch_text=row.patch_text if not is_query and isinstance(row.patch_text, str) else None,
             raw={},
             cwd_relative=(self._parse_json(target.role_snapshot_json, {}).get("cwd", "") if target is not None else ""),
         )

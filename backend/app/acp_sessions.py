@@ -120,6 +120,7 @@ class ACPSessionManager:
         self._loaded = False
         self._notify_payloads: dict[str, tuple[str, dict[str, Any]]] = {}
         self._notify_tasks: dict[str, asyncio.Task] = {}
+        self._raw_event_indexes: dict[str, int] = {}
 
     def _paths(self, session_id: str) -> Path:
         return self.metadata_dir / f"{session_id}.json"
@@ -578,6 +579,7 @@ class ACPSessionManager:
             self._write_meta(session)
             return
 
+        self._record_raw_update(session, str(update_type), raw)
         event = self._normalized_acp_event(session, update_type, update, raw)
         if event is not None:
             index, changed = self._upsert_acp_event(session, event)
@@ -586,6 +588,33 @@ class ACPSessionManager:
             session.events = list(session.acp_events)
         session.updated_at = time.time()
         self._write_meta(session)
+
+    def _record_raw_update(self, session: ACPSession, update_type: str, raw: dict[str, Any]) -> None:
+        try:
+            from .agent_history import agent_history_store
+
+            index = self._raw_event_indexes.get(session.id, 0)
+            self._raw_event_indexes[session.id] = index + 1
+            lineage = session.lineage
+            turn_id = str(session.current_turn_id or lineage.get("driver_run_id") or "")
+            agent_history_store.record_provider_raw_event(
+                user_id=session.user_id,
+                workspace_id=lineage.get("workspace_id"),
+                chat_id=lineage.get("chat_id"),
+                query_message_id=lineage.get("query_message_id"),
+                driver_run_id=lineage.get("driver_run_id"),
+                turn_id=turn_id,
+                provider=self.provider,
+                viewer_session_id=session.id,
+                provider_session_id=session.provider_session_id,
+                event_index=index,
+                event_method=update_type,
+                source_event_id=uuid.uuid4().hex,
+                received_at=time.time(),
+                raw=raw,
+            )
+        except Exception:
+            logger.exception("Failed to archive raw {} ACP event session={} method={}", self.provider, session.id, update_type)
 
     @staticmethod
     def _acp_dict(value: Any) -> dict[str, Any]:

@@ -139,6 +139,7 @@ export interface SuperWorkspaceConfig {
   hindsight_api_url: string;
   hindsight_bank_prefix: string;
   chat_virtual_space_enabled: boolean;
+  chat_show_agent_activity: boolean;
   chat_history_bootstrap_enabled: boolean;
   chat_history_bootstrap_tokens: number;
   active_dispatch_profile_id: string;

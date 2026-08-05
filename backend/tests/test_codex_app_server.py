@@ -389,6 +389,39 @@ class TestCodexAppServerSessionManager:
         assert len(event["file_changes"]) == 1
         assert event["file_changes"][0]["path"] == "file.py"
 
+    def test_normalized_event_turn_diff_updated_replaces_aggregated_patch(self):
+        manager = CodexAppServerSessionManager()
+        session = CodexAppServerSession(
+            provider="codex-app-server",
+            id="test-id",
+            user_id="dailing",
+            title="test",
+            cwd="/tmp",
+            model=None,
+            created_at=time.time(),
+            updated_at=time.time(),
+            provider_session_id="thread-123",
+        )
+        first = manager._normalized_event(
+            session,
+            "turn/diff/updated",
+            {"threadId": "thread-123", "turnId": "turn-1", "diff": "--- a/file.py\n+++ b/file.py\n+first"},
+            {},
+        )
+        second = manager._normalized_event(
+            session,
+            "turn/diff/updated",
+            {"threadId": "thread-123", "turnId": "turn-1", "diff": "--- a/file.py\n+++ b/file.py\n+second"},
+            {},
+        )
+        assert first is not None and second is not None
+        assert first["event_type"] == AgentEventType.PATCH_APPLY_END
+        assert first["replace"] is True
+        manager._upsert_event(session, first)
+        manager._upsert_event(session, second)
+        assert len(session.events) == 1
+        assert session.events[0]["patch_text"].endswith("+second")
+
     def test_normalized_event_token_usage_updated(self):
         manager = CodexAppServerSessionManager()
         session = CodexAppServerSession(
@@ -499,6 +532,32 @@ class TestCodexAppServerSessionManager:
             {"method": "unknownMethod", "params": {"foo": "bar"}},
         )
         assert event is None
+
+    def test_handle_update_archives_unknown_raw_notification(self):
+        manager = CodexAppServerSessionManager()
+        session = CodexAppServerSession(
+            provider="codex-app-server",
+            id="viewer-1",
+            user_id="dailing",
+            title="test",
+            cwd="/tmp",
+            model=None,
+            created_at=time.time(),
+            updated_at=time.time(),
+            provider_session_id="thread-123",
+            lineage={"workspace_id": "workspace-1", "chat_id": "chat-1", "driver_run_id": "driver-1"},
+        )
+        manager.sessions[session.id] = session
+        manager._loaded = True
+        raw = {"method": "future/event", "params": {"threadId": "thread-123", "turnId": "turn-1", "value": {"future": True}}}
+
+        with patch("backend.app.codex_app_server_sessions.agent_history_store.record_provider_raw_event") as record:
+            asyncio.run(manager._handle_update("thread-123", {"method": "future/event", "params": raw["params"], "raw": raw}))
+
+        assert record.call_count == 1
+        assert record.call_args.kwargs["event_method"] == "future/event"
+        assert record.call_args.kwargs["raw"] == raw
+        assert record.call_args.kwargs["driver_run_id"] == "driver-1"
 
     def test_raw_preview_small(self):
         manager = CodexAppServerSessionManager()

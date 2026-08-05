@@ -200,6 +200,7 @@ class SuperWorkspaceConfig(BaseModel):
     hindsight_api_url: str = ""
     hindsight_bank_prefix: str = "super-workspace"
     chat_virtual_space_enabled: bool = True
+    chat_show_agent_activity: bool = False
     chat_history_bootstrap_enabled: bool = True
     chat_history_bootstrap_tokens: int = Field(default=5000, ge=0, le=50000)
     active_dispatch_profile_id: str = "local-vllm"

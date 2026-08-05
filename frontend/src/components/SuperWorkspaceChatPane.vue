@@ -21,7 +21,10 @@ import type { SuperChatSummary, SuperDisplayItem, SuperDisplayTarget, SuperHisto
 import { renderMarkdown } from "../utils/markdownRender";
 import VoiceTextarea from "./VoiceTextarea.vue";
 
-type SuperThreadItem = SuperDisplayItem & { merged_message_ids?: string[] };
+type SuperThreadItem = SuperDisplayItem & {
+  merged_message_ids?: string[];
+  timeline_items?: SuperDisplayItem[];
+};
 type SuperChatCachePayload = { chats: SuperChatSummary[]; activeChatId: string };
 
 const props = defineProps<{ chatId: string; paneId: string }>();
@@ -71,12 +74,19 @@ const dispatchPickerTitle = computed(() => {
   return `Dispatch to ${selectedDispatchRoles.value.map((role) => role.name).join(", ")}`;
 });
 const inputContextId = computed(() => `super-workspace:${resolvedChatId.value}:composer`);
-const displayItems = computed<SuperThreadItem[]>(() => mergeMessagesByTurn(withTargetPlaceholders([...items.value].reverse())));
+const orderedDisplayItems = computed(() => withTargetPlaceholders([...items.value].reverse()));
+const displayItems = computed<SuperThreadItem[]>(() =>
+  agentActivityDetail.value === "full"
+    ? groupMessagesIntoTimelines(orderedDisplayItems.value)
+    : mergeMessagesByTurn(orderedDisplayItems.value),
+);
 const renderedItemHtmlById = computed(() => {
   const rendered = new Map<string, string>();
   for (const item of displayItems.value) {
-    if (item.kind !== "message" || !item.text) continue;
-    rendered.set(item.id, renderMarkdown(item.text.trim(), { baseDirectory: itemBaseDirectory(item) }));
+    for (const segment of item.timeline_items ?? [item]) {
+      if (segment.kind !== "message" || segment.event_type !== "message:assistant" || !segment.text) continue;
+      rendered.set(segment.id, renderMarkdown(segment.text.trim(), { baseDirectory: itemBaseDirectory(segment) }));
+    }
   }
   return rendered;
 });
@@ -84,6 +94,9 @@ const canDispatch = computed(() => Boolean(composer.value.trim()) && !busy.value
 const composerPinned = computed(() => composerState.isPinned(resolvedChatId.value));
 const composerCollapsed = computed(() => !composerPinned.value && !composerExpanded.value && !composer.value.trim());
 const virtualReadingSpaceEnabled = computed(() => files.superWorkspaceConfig.chat_virtual_space_enabled);
+const agentActivityDetail = computed<"focus" | "full">(() =>
+  files.superWorkspaceConfig.chat_show_agent_activity ? "full" : "focus",
+);
 const citationPreview = ref<{
   messageId: string;
   title: string;
@@ -509,6 +522,52 @@ function mergeMessagesByTurn(orderedItems: SuperDisplayItem[]): SuperThreadItem[
   return merged;
 }
 
+function groupMessagesIntoTimelines(orderedItems: SuperDisplayItem[]): SuperThreadItem[] {
+  const grouped: SuperThreadItem[] = [];
+  const runIndexes = new Map<string, number>();
+  for (const item of orderedItems) {
+    if (item.kind === "query") {
+      grouped.push({ ...item });
+      continue;
+    }
+    const key = `${item.role_id ?? ""}:${item.driver_run_id || item.turn_id || item.message_id}`;
+    const existingIndex = runIndexes.get(key);
+    if (existingIndex === undefined) {
+      runIndexes.set(key, grouped.length);
+      grouped.push({
+        ...item,
+        event_type: "message:timeline",
+        text: item.event_type === "message:assistant" ? item.text : "",
+        merged_message_ids: [item.message_id],
+        timeline_items: [item],
+      });
+      continue;
+    }
+    const current = grouped[existingIndex];
+    const timeline = [...(current.timeline_items ?? []), item];
+    const messageSegments = timeline.filter((segment) => segment.event_type === "message:assistant" && segment.text.trim());
+    const latestMessage = messageSegments[messageSegments.length - 1];
+    grouped[existingIndex] = {
+      ...current,
+      provider_session_id: item.provider_session_id,
+      session_ref: item.session_ref,
+      model_context_window: item.model_context_window,
+      total_tokens: item.total_tokens,
+      context_used_percent: item.context_used_percent,
+      target_status: item.target_status,
+      routing_policy_id: item.routing_policy_id,
+      execution_target: item.execution_target,
+      routing_attempts: item.routing_attempts,
+      updated_at: Math.max(current.updated_at, item.updated_at),
+      message_id: latestMessage?.message_id ?? current.message_id,
+      text: messageSegments.map((segment) => segment.text.trim()).join("\n\n"),
+      merged_message_ids: timeline.map((segment) => segment.message_id),
+      timeline_items: timeline,
+    };
+  }
+  return grouped;
+}
+
 function withTargetPlaceholders(orderedItems: SuperDisplayItem[]): SuperDisplayItem[] {
   const messageDriverIds = new Set(
     orderedItems
@@ -567,12 +626,14 @@ function displayItemFromTargetPlaceholder(query: SuperDisplayItem, target: Super
     error: "",
     citation_ids: [],
     dispatch_targets: [],
+    file_changes: [],
+    patch_text: null,
     raw: {},
   };
 }
 
 function messageTurnKey(item: SuperDisplayItem) {
-  if (item.kind !== "message") return "";
+  if (item.kind !== "message" || item.event_type !== "message:assistant") return "";
   return item.turn_id;
 }
 
@@ -688,6 +749,71 @@ async function openItemLink(event: MouseEvent, item: SuperDisplayItem) {
 
 function itemIcon(item: SuperDisplayItem) {
   return agents.providerById(item.provider || "codex-app-server").icon;
+}
+
+const agentActivityTypes = new Set([
+  "reasoning",
+  "tool_call",
+  "tool_result",
+  "custom_tool_call",
+  "exec_command_begin",
+  "exec_command_end",
+  "function_call",
+  "function_call_output",
+  "custom_tool_call_output",
+  "view_image_tool_call",
+  "patch_apply_end",
+  "plan_update",
+  "operation",
+]);
+
+function isAgentActivity(item: SuperDisplayItem) {
+  return item.kind === "message" && agentActivityTypes.has(item.event_type);
+}
+
+function agentActivityLabel(item: SuperDisplayItem) {
+  return ({
+    reasoning: "Reasoning",
+    tool_call: "Tool call",
+    tool_result: "Tool result",
+    custom_tool_call: "Custom tool",
+    exec_command_begin: "Command",
+    exec_command_end: "Command result",
+    function_call: "Function call",
+    function_call_output: "Function result",
+    custom_tool_call_output: "Custom result",
+    view_image_tool_call: "View image",
+    patch_apply_end: "Edit",
+    plan_update: "Plan",
+    operation: "Operation",
+  } as Record<string, string>)[item.event_type] ?? "Activity";
+}
+
+function agentActivityIcon(item: SuperDisplayItem) {
+  if (item.event_type === "reasoning") return "bi-lightbulb";
+  if (item.event_type === "patch_apply_end") return "bi-pencil-square";
+  if (item.event_type === "plan_update") return "bi-list-check";
+  if (["exec_command_begin", "function_call"].includes(item.event_type)) return "bi-terminal";
+  if (["tool_result", "exec_command_end", "function_call_output", "custom_tool_call_output"].includes(item.event_type)) {
+    return "bi-check-circle";
+  }
+  if (item.event_type === "view_image_tool_call") return "bi-image";
+  return "bi-tools";
+}
+
+function agentActivitySummary(item: SuperDisplayItem) {
+  const text = item.text.replace(/\s+/g, " ").trim();
+  if (text) return text;
+  const paths = item.file_changes.map((change) => change.path).filter(Boolean);
+  return paths.length ? paths.join(", ") : agentActivityLabel(item);
+}
+
+function timelineSegments(item: SuperThreadItem) {
+  return item.timeline_items ?? [item];
+}
+
+function timelineHasVisibleContent(item: SuperThreadItem) {
+  return timelineSegments(item).some((segment) => isAgentActivity(segment) || segment.text.trim());
 }
 
 function shortSessionId(item: Pick<SuperDisplayItem, "provider_session_id" | "viewer_session_id" | "session_ref">) {
@@ -844,7 +970,14 @@ async function loadRuns(reset: boolean, requestId = chatLoadRequest) {
   const previousScrollTop = thread?.scrollTop ?? 0;
   try {
     const limit = reset ? Math.min(100, Math.max(30, items.value.length || 30)) : 30;
-    const page = await listSuperWorkspaceRuns(limit, reset ? undefined : nextBefore.value ?? undefined, undefined, chatId);
+    const requestedLimit = agentActivityDetail.value === "full" ? 100 : limit;
+    const page = await listSuperWorkspaceRuns(
+      requestedLimit,
+      reset ? undefined : nextBefore.value ?? undefined,
+      undefined,
+      chatId,
+      agentActivityDetail.value,
+    );
     if (requestId !== chatLoadRequest || chatId !== resolvedChatId.value) return;
     if (reset) {
       items.value = page.items;
@@ -886,7 +1019,7 @@ async function loadChangedRuns() {
   // Use an overlap because provider-message ingestion and driver status are
   // committed separately. Re-reading a small window is safe (items upsert by
   // id) and prevents a cursor advanced by one write from hiding another.
-  const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 2), chatId);
+  const page = await listSuperWorkspaceRuns(100, undefined, Math.max(0, after - 2), chatId, agentActivityDetail.value);
   if (requestId !== chatLoadRequest || chatId !== resolvedChatId.value) return;
   for (const item of page.items) upsertDisplayItem(item);
   updateItemsAfterCursor(page.items, page.next_after ?? undefined);
@@ -957,6 +1090,8 @@ function displayItemFromRun(run: SuperHistoryRun): SuperDisplayItem {
       total_tokens: target.total_tokens ?? null,
       context_used_percent: target.context_used_percent ?? null,
     })),
+    file_changes: [],
+    patch_text: null,
     raw: {},
   };
 }
@@ -1082,9 +1217,35 @@ async function scrollThreadToBottom() {
               <span>Cite</span>
             </button>
           </div>
-          <div class="super-role-response" @click="openItemLink($event, item)">
-            <div v-if="item.text.trim()" class="markdown-body markdown-content super-response-body" v-html="renderedItemHtml(item)"></div>
-            <div v-else class="super-response-placeholder">{{ responsePlaceholderText(item.target_status) }}</div>
+          <div class="super-role-response super-response-timeline">
+            <template v-for="segment in timelineSegments(item)" :key="segment.id">
+              <div v-if="isAgentActivity(segment)" class="super-agent-activity">
+                <details class="super-agent-activity-details">
+                  <summary class="super-agent-activity-summary">
+                    <i class="bi super-agent-activity-icon" :class="agentActivityIcon(segment)"></i>
+                    <span class="super-agent-activity-label">{{ agentActivityLabel(segment) }}</span>
+                    <span class="super-agent-activity-text">{{ agentActivitySummary(segment) }}</span>
+                    <span class="super-run-time">{{ formatTime(segment.created_at) }}</span>
+                    <i class="bi bi-chevron-right super-agent-activity-chevron" aria-hidden="true"></i>
+                  </summary>
+                  <div class="super-agent-activity-body">
+                    <pre v-if="segment.text">{{ segment.text }}</pre>
+                    <div v-for="(change, index) in segment.file_changes" :key="`${change.path}:${index}`" class="super-agent-file-change">
+                      <div class="super-agent-file-change-title">{{ change.change_type }} · {{ change.path }}</div>
+                      <pre v-if="change.diff">{{ change.diff }}</pre>
+                    </div>
+                    <pre v-if="!segment.file_changes.length && segment.patch_text">{{ segment.patch_text }}</pre>
+                  </div>
+                </details>
+              </div>
+              <div
+                v-else-if="segment.text.trim()"
+                class="markdown-body markdown-content super-response-body super-response-segment"
+                @click="openItemLink($event, segment)"
+                v-html="renderedItemHtml(segment)"
+              ></div>
+            </template>
+            <div v-if="!timelineHasVisibleContent(item)" class="super-response-placeholder">{{ responsePlaceholderText(item.target_status) }}</div>
           </div>
         </div>
       </article>
@@ -1235,6 +1396,105 @@ async function scrollThreadToBottom() {
   min-width: 0;
 }
 
+.super-agent-activity {
+  min-width: 0;
+}
+
+.super-agent-activity-details {
+  background: color-mix(in srgb, var(--color-surface-muted) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  min-width: 0;
+}
+
+.super-agent-activity-summary {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  font-size: var(--font-size-ui-small);
+  gap: 6px;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  line-height: 1.3;
+  list-style: none;
+  min-height: 26px;
+  min-width: 0;
+  padding: 3px 8px;
+  user-select: none;
+}
+
+.super-agent-activity-summary::-webkit-details-marker {
+  display: none;
+}
+
+.super-agent-activity-summary:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.super-agent-activity-icon {
+  color: var(--color-accent);
+}
+
+.super-agent-activity-label {
+  color: var(--color-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.super-agent-activity-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.super-agent-activity-chevron {
+  font-size: 10px;
+  transition: transform 120ms ease;
+}
+
+.super-agent-activity-details[open] .super-agent-activity-chevron {
+  transform: rotate(90deg);
+}
+
+.super-agent-activity-body {
+  border-top: 1px solid var(--color-border);
+  max-height: min(420px, 55vh);
+  overflow: auto;
+  padding: 8px;
+  user-select: text;
+}
+
+.super-agent-activity-body pre {
+  background: var(--color-surface-raised);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: var(--font-size-ui-small);
+  margin: 0 0 8px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.super-agent-activity-body pre:last-child {
+  margin-bottom: 0;
+}
+
+.super-agent-file-change + .super-agent-file-change {
+  margin-top: 8px;
+}
+
+.super-agent-file-change-title {
+  color: var(--color-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: var(--font-size-ui-small);
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
 .super-thread-message-end {
   flex: 0 0 0;
   height: 0;
@@ -1330,6 +1590,16 @@ async function scrollThreadToBottom() {
   background: var(--color-surface-muted);
   overflow-x: auto;
   overflow-y: visible;
+}
+
+.super-response-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.super-response-segment {
+  flex: 0 0 auto;
 }
 
 .super-message-text {

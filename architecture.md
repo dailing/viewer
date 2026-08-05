@@ -160,7 +160,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - Provider-neutral Viewer session manager layered over `ACPRuntime`. It owns Viewer/provider session-id mapping, cwd/model validation, local metadata, prompt submission, list/fork/resume/cancel, status, usage, and structured ACP update normalization.
 - ACP prompt/RPC failures are terminal provider failures: partial or error text remains visible and is finalized in history, while the Viewer session, driver target, and parent run leave `running` as `failed`. The Viewer ACP layer does not retry or replay provider prompts; retry policy remains owned by each Agent.
 - ACP `session/update` notifications are the sole provider-event source. Agent/thought chunks are coalesced per message, tool call/update pairs upsert one tool event with structured diff/file-change data, and plan/mode/config/usage/session/command updates refresh session metadata.
-- Every normalized update is written/upserted directly into `~/.view/agent-history.sqlite3` and announced through Super Workspace SSE. The manager never opens or synchronizes a provider-private database; historical chat reads use the Viewer history DB.
+- Every live raw ACP update is archived before parsing, and every normalized update is written/upserted directly into `~/.view/agent-history.sqlite3` and announced through Super Workspace SSE. Provider-history replay during `session/load` is not re-archived. The manager never opens or synchronizes a provider-private database; historical chat reads use the Viewer history DB.
 
 `backend/app/codex_app_server.py` and `backend/app/codex_app_server_sessions.py`
 
@@ -174,7 +174,8 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `VIEWER_CODEX_APP_SERVER_YOLO` defaults to `true`. In that mode every `turn/start` explicitly sends `approvalPolicy: never` and the App Server `dangerFullAccess` sandbox policy, the protocol-native equivalent of bypassing approvals and sandboxing; setting the environment variable to false leaves permission policy to normal Codex configuration.
 - Any JSON-RPC control-request timeout closes and discards the entire App Server subprocess because its request/connection state is no longer trustworthy; the next operation starts and initializes a fresh process instead of cascading the timeout into later requests.
 - App Server stdio uses a finite 16 MiB JSONL line limit instead of asyncio's 64 KiB default because completion notifications can repeat aggregated command output. A stdout reader failure immediately fails pending RPC/turn waiters, marks the connection unhealthy, and terminates the subprocess; process cleanup still runs when a reader task has already failed. Viewer tool-event text is capped at 32 KiB and unknown-notification/debug logging records identifiers and payload size rather than recursively logging complete tool output.
-- Normalizes the current slash-form Codex notifications (`item/agentMessage/delta`, reasoning/command/file-change deltas, `thread/tokenUsage/updated`, and `turn/completed`) into Viewer AgentEvent IR. Deltas with the same Codex `itemId` upsert one streaming event and are finalized when the turn completes.
+- Normalizes the current slash-form Codex notifications (`item/agentMessage/delta`, reasoning/command deltas, aggregated `turn/diff/updated` patches, `thread/tokenUsage/updated`, and `turn/completed`) into Viewer AgentEvent IR while retaining the older item-level file-change notification for compatibility. Deltas with the same Codex `itemId` upsert one streaming event; repeated turn-diff snapshots replace the prior patch event and streaming events are finalized when the turn completes.
+- Archives every complete Codex App Server notification, including unknown methods and payloads larger than the normalized-message preview limit, before attempting event normalization so later parsers can replay historical raw data from the Viewer DB.
 - Viewer does not implement Codex App Server client-side approval or interactive-input requests; unsupported server requests receive an explicit JSON-RPC method error instead of hanging. Provider/model retry remains owned by Codex.
 
 `backend/app/hermes_acp.py` and `backend/app/hermes_sessions.py`
@@ -206,7 +207,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/models.py`
 
 - Pydantic API schemas: `FileEntry`, `DirectoryListing`, `FileMeta`, `ConfigData`, `AppearanceConfig`, `MarkdownConfig`, `MarkdownTheme`, `WatchEvent`, `TerminalInfo`, `TerminalCreate`, and `TerminalSnapshot`.
-- `ConfigData` stores appearance, Markdown, voice, and Super Workspace settings; it has no Agent credential/model configuration or user-profile fields. `SuperWorkspaceConfig.provider_context_limits` stores Agent-level context recycle percentage/token defaults, with optional Role settings taking precedence.
+- `ConfigData` stores appearance, Markdown, voice, and Super Workspace settings; it has no Agent credential/model configuration or user-profile fields. `SuperWorkspaceConfig.provider_context_limits` stores Agent-level context recycle percentage/token defaults, with optional Role settings taking precedence. `SuperWorkspaceConfig.chat_show_agent_activity` controls whether the chat requests compact tool/reasoning/edit activity rows in addition to user and final assistant messages.
 - `AgentEventType` is the fixed backend intermediate-representation enum shared by provider parsers. Current values are `message:assistant`, `reasoning`, `tool_call`, `tool_result`, `custom_tool_call`, `exec_command_begin`, `exec_command_end`, `function_call`, `function_call_output`, `custom_tool_call_output`, `view_image_tool_call`, `patch_apply_end`, and fallback `operation` for logged-but-unclassified visible events. Provider drivers convert native logs into these values before writing Super Workspace history.
 - These should stay aligned with TypeScript interfaces under `frontend/src/types/`.
 
@@ -238,6 +239,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 `backend/app/agent_history.py`
 
 - SQLite-backed agent history index stored at `VIEWER_DATA_DIR/agent-history.sqlite3` (legacy default `~/.view/agent-history.sqlite3`). It is the history source for Super Workspace chats.
+- `super_workspace_provider_raw_events` is an append-oriented replay archive for complete provider notifications. Rows retain provider/session/turn and workspace/chat/query/driver lineage, event method/order/time, payload byte size, and the full JSON before normalization; normalized visible messages remain in `super_workspace_messages`.
 - The viewer-owned history DB is accessed through SQLAlchemy ORM mapped rows and per-operation sessions in `AgentHistoryStore`; its SQLite engine uses `NullPool` so each session closes its DB connection after use. Provider-private history stores are not Viewer data sources.
 - Defines `super_workspaces`, `super_workspace_user_state`, `super_workspace_roles`, `super_workspace_chats`, `super_workspace_chat_pins`, `super_workspace_chat_role_sessions`, `super_workspace_messages`, `super_workspace_driver_runs`, `super_workspace_target_health`, `super_workspace_message_file_changes`, `super_workspace_message_citations`, and `super_workspace_driver_checkpoints`. Roles store profile ids and capability requirements; chats store per-Role profile overrides. Driver runs store the effective profile id, immutable execution-target JSON, and ordered attempt JSON. Target health uses Agent/provider/target scoped keys and expiry timestamps.
 - Super Workspace lineage is stored directly on messages: messages carry `parent_message_id`, `sender_role_id`, and `recipient_role_id`; provider output rows associated with a driver run also carry `query_message_id` and `driver_run_id`. Current UI presents non-empty `query` messages as runs, but the persisted shape can evolve into a query/message graph without a separate query table.
@@ -315,7 +317,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `frontend/src/components/SuperWorkspaceChatPane.vue`
 
-- Chat pane for a single `chatId`; loads flat display feed pages from `/api/super-workspace/runs?chat_id=...`, subscribes to `/api/super-workspace/events`, and incrementally refreshes changed runs.
+- Chat pane for a single `chatId`; loads flat display feed pages from `/api/super-workspace/runs?chat_id=...`, subscribes to `/api/super-workspace/events`, and incrementally refreshes changed runs. The default `detail=focus` feed contains user and final assistant messages; the optional Settings toggle requests `detail=full`, groups each Agent run into one response box, and interleaves persisted assistant text with one-line expandable reasoning/tool/command/edit rows by event time.
 - Registers the resolved chat name in `stores/paneToolbar.ts` so its pane title bar follows chat creation/rename updates instead of displaying a generic `Chat` label.
 - The composer creates a persisted run through `/api/super-workspace/runs`. It sends structured `role_ids` from `stores/superChatDispatch.ts` when manual target chips are selected in the Chats side panel or the composer dispatch dropdown selects one or more chat member roles; leaving the dropdown on Auto omits `role_ids` so the backend router LLM chooses among chat members. The composer dispatch button opens the dropdown only when no manual roles are selected; when highlighted with selected roles, clicking it clears back to Auto. Typed leading `@Role` mentions plus `@msg-{message_id}` citation tokens still work.
 - The composer defaults to pinned/open when a chat has no local pin preference. Preferences and drafts are stored by `chatId` in non-namespaced localStorage.
@@ -668,6 +670,10 @@ Implementation checks:
 `scripts/prepare_isolated_instance.py`
 
 - Creates a worktree-local `.test-instance` by copying the current config and taking an online SQLite backup of the active Viewer history DB. `--replace` intentionally refreshes only that isolated target.
+
+`scripts/migrate_codex_app_patches.py`
+
+- Idempotent one-time backfill for Codex App Server turns whose historical patch notifications were ignored by Viewer. It reads structured `patch_apply_end` records from Codex rollout JSONL, maps provider session/turn ids to persisted driver runs, and inserts normalized patch text and file-change rows; dry-run is the default and `--apply` performs the write.
 
 `scripts/run_isolated_instance.py`
 

@@ -452,6 +452,10 @@ async function applyJson() {
               <span>Chat virtual reading space</span>
               <input v-model="draft.superWorkspace.chat_virtual_space_enabled" class="form-check-input" type="checkbox" />
             </label>
+            <label class="compact-field checkbox-field" title="Show compact, expandable reasoning, tool call, tool result, and file edit events in chats">
+              <span>Show Agent activity</span>
+              <input v-model="draft.superWorkspace.chat_show_agent_activity" class="form-check-input" type="checkbox" />
+            </label>
             <div class="context-limit-settings">
               <div class="context-limit-heading">
                 <strong>Provider context limits</strong>

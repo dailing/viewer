@@ -255,6 +255,12 @@ export type SuperDisplayItem = {
   error: string;
   citation_ids?: string[];
   dispatch_targets: SuperDisplayTarget[];
+  file_changes: {
+    path: string;
+    change_type: string;
+    diff?: string | null;
+  }[];
+  patch_text?: string | null;
   raw: Record<string, unknown>;
   cwd_relative?: string;
 };

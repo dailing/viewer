@@ -18,7 +18,7 @@ CodexAppServerUpdateHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 # JSONL notifications can legitimately exceed that because item/completed may
 # repeat a command and its aggregated output in one line. Keep a finite limit,
 # but make it large enough for bounded diagnostic output and historical turns.
-APP_SERVER_STREAM_LIMIT_BYTES = 4 * 1024 * 1024
+APP_SERVER_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)

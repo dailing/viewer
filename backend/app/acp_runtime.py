@@ -25,7 +25,7 @@ from loguru import logger
 
 
 ACPUpdateHandler = Callable[[str, Any], Awaitable[None]]
-ACP_STDIO_LINE_LIMIT_BYTES = 4 * 1024 * 1024
+ACP_STDIO_LINE_LIMIT_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -118,6 +118,7 @@ class ACPRuntime:
         self._connection: Any | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._process_context: Any | None = None
+        self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._bound_sessions: set[str] = set()
         self.agent_capabilities: Any | None = None
@@ -126,7 +127,12 @@ class ACPRuntime:
 
     @property
     def running(self) -> bool:
-        return self._connection is not None and self._process is not None and self._process.returncode is None
+        return (
+            self._connection is not None
+            and self._process is not None
+            and self._process.returncode is None
+            and (self._reader_task is None or not self._reader_task.done())
+        )
 
     def capabilities_snapshot(self) -> dict[str, Any]:
         capabilities = self.agent_capabilities
@@ -168,6 +174,7 @@ class ACPRuntime:
                 self._process_context = context
                 self._connection = connection
                 self._process = process
+                self._reader_task = getattr(connection, "_recv_task", None)
                 self._stderr_task = asyncio.create_task(self._drain_stderr(process))
                 initialized = await asyncio.wait_for(
                     connection.initialize(
@@ -349,10 +356,12 @@ class ACPRuntime:
 
     async def _close_process(self) -> None:
         context = self._process_context
+        reader_task = self._reader_task
         stderr_task = self._stderr_task
         self._connection = None
         self._process = None
         self._process_context = None
+        self._reader_task = None
         self._stderr_task = None
         self._bound_sessions.clear()
         self.agent_capabilities = None
@@ -360,6 +369,11 @@ class ACPRuntime:
         if context is not None:
             with suppress(Exception):
                 await context.__aexit__(None, None, None)
+        elif reader_task is not None:
+            if not reader_task.done():
+                reader_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await reader_task
         if stderr_task is not None:
             if not stderr_task.done():
                 stderr_task.cancel()

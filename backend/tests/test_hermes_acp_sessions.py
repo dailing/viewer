@@ -483,8 +483,20 @@ class GenericACPAbstractionTests(unittest.TestCase):
         self.assertEqual(runtime.command, "example-agent")
         self.assertEqual(runtime._agent_arguments(), ["serve-acp", "--stdio"])
 
-    def test_runtime_uses_bounded_four_mib_stdio_lines(self) -> None:
-        self.assertEqual(ACP_STDIO_LINE_LIMIT_BYTES, 4 * 1024 * 1024)
+    def test_runtime_uses_bounded_sixteen_mib_stdio_lines(self) -> None:
+        self.assertEqual(ACP_STDIO_LINE_LIMIT_BYTES, 16 * 1024 * 1024)
+
+    def test_runtime_is_not_running_after_acp_reader_exits(self) -> None:
+        runtime = ACPRuntime(
+            ACPProcessConfig(provider="example", command="example-agent", arguments=()),
+            AsyncMock(),
+        )
+        runtime._connection = SimpleNamespace()
+        runtime._process = SimpleNamespace(returncode=None)
+        runtime._reader_task = Mock()
+        runtime._reader_task.done.return_value = True
+
+        self.assertFalse(runtime.running)
 
     def test_runtime_passes_stdio_line_limit_to_acp_transport(self) -> None:
         runtime = ACPRuntime(

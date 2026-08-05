@@ -32,7 +32,7 @@ class TestCodexAppServerRuntime:
         assert config.provider == "codex-app-server"
         assert config.enabled is True
         assert config.yolo is True
-        assert APP_SERVER_STREAM_LIMIT_BYTES == 4 * 1024 * 1024
+        assert APP_SERVER_STREAM_LIMIT_BYTES == 16 * 1024 * 1024
 
     def test_live_process_with_failed_reader_is_not_running(self):
         runtime = CodexAppServerRuntime(

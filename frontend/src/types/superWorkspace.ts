@@ -280,4 +280,5 @@ export type SuperHistoryRunCreate = {
   parent_message_id?: string | null;
   sender_role_id?: string | null;
   force_new_session?: boolean;
+  parallel_dispatch?: boolean;
 };

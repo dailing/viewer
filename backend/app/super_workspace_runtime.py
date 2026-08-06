@@ -45,6 +45,7 @@ class SuperWorkspaceMessageCreate(BaseModel):
     parent_message_id: str | None = None
     sender_role_id: str | None = None
     force_new_session: bool = False
+    parallel_dispatch: bool = False
 
 
 class SuperWorkspaceEventHub:
@@ -632,7 +633,8 @@ class SuperWorkspaceRuntime:
                     parent_message_id=run.parent_message_id or run.message_id,
                     sender_role_id=run.sender_role_id,
                     role_snapshot=routed_role.model_dump(),
-                    force_new_session=request.force_new_session,
+                    force_new_session=request.force_new_session or request.parallel_dispatch,
+                    parallel_dispatch=request.parallel_dispatch,
                 ),
             )
         await self._emit_update({"type": "run-updated", "user_id": normalized_user, "chat_id": run.chat_id, "run_id": run.id})
@@ -956,7 +958,7 @@ class SuperWorkspaceRuntime:
             task.user_id, task.workspace_id, run.chat_id, role.id, candidate.agent_id
         )
         active_session_id = driver.active_session_id(role, session_state, effective_cwd, effective_model)
-        if active_session_id is not None:
+        if active_session_id is not None and not task.parallel_dispatch:
             raise RoutingTargetBusy(f"Agent already has an active session: {candidate.agent_id}")
         prompt = base_prompt
         if driver.supports_content_blocks and run.content_blocks and isinstance(base_prompt, str):
@@ -989,8 +991,8 @@ class SuperWorkspaceRuntime:
         )
         await self._emit_update({"type": "run-updated", "user_id": task.user_id, "chat_id": run.chat_id, "run_id": run.id})
         dispatch_result = await driver.dispatch_task(
-            role, session_state, task.user_id, prompt, lineage, effective_cwd,
-            force_new_session=task.force_new_session,
+            role, None if task.parallel_dispatch else session_state, task.user_id, prompt, lineage, effective_cwd,
+            force_new_session=task.force_new_session or task.parallel_dispatch,
         )
         session_ref = str(dispatch_result["session_ref"])
         rotation_reason = str(dispatch_result.get("rotation_reason") or "")
@@ -1103,6 +1105,7 @@ class SuperWorkspaceRuntime:
                     session_policy=role.session_policy,
                     driver_run_id=driver_run_id,
                     message_id=run_id,
+                    replace_session=False,
                     **driver.chat_role_session_usage(usage),
                 )
             await self._emit_update(

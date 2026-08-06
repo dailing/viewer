@@ -71,6 +71,7 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
     pinnedByChatId: readPins(),
     draftByChatId: readDrafts(),
     forceNewSessionByChatId: {} as Record<string, boolean>,
+    parallelDispatchByChatId: {} as Record<string, boolean>,
   }),
   getters: {
     isPinned:
@@ -85,6 +86,10 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
       (state) =>
       (chatId: string): boolean =>
         chatId ? state.forceNewSessionByChatId[chatId] ?? false : false,
+    parallelDispatch:
+      (state) =>
+      (chatId: string): boolean =>
+        chatId ? state.parallelDispatchByChatId[chatId] ?? false : false,
   },
   actions: {
     setPinned(chatId: string, pinned: boolean) {
@@ -121,6 +126,17 @@ export const useSuperChatComposerStore = defineStore("superChatComposer", {
       const next = { ...this.forceNewSessionByChatId };
       delete next[chatId];
       this.forceNewSessionByChatId = next;
+    },
+    setParallelDispatch(chatId: string, value: boolean) {
+      if (!chatId) return;
+      this.parallelDispatchByChatId = { ...this.parallelDispatchByChatId, [chatId]: value };
+      if (value) this.setForceNewSession(chatId, true);
+    },
+    clearParallelDispatch(chatId: string) {
+      if (!chatId) return;
+      const next = { ...this.parallelDispatchByChatId };
+      delete next[chatId];
+      this.parallelDispatchByChatId = next;
     },
     flushDrafts,
   },

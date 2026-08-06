@@ -307,8 +307,10 @@ async function dispatchMessage() {
   busy.value = true;
   error.value = "";
   const forceNewSession = composerState.forceNewSession(resolvedChatId.value);
+  const parallelDispatch = composerState.parallelDispatch(resolvedChatId.value);
   composerState.clearDraft(resolvedChatId.value);
   composerState.clearForceNewSession(resolvedChatId.value);
+  composerState.clearParallelDispatch(resolvedChatId.value);
   if (!composerPinned.value) composerExpanded.value = false;
   try {
     const run = await createSuperWorkspaceRun({
@@ -316,6 +318,7 @@ async function dispatchMessage() {
       chat_id: resolvedChatId.value,
       role_ids: selectedDispatchRoleIds.value.length ? selectedDispatchRoleIds.value : undefined,
       force_new_session: forceNewSession,
+      parallel_dispatch: parallelDispatch,
     });
     upsertDisplayItem(displayItemFromRun(run));
     updateItemsAfterCursor([displayItemFromRun(run)]);
@@ -343,6 +346,19 @@ function expandComposer() {
 function toggleComposerPinned() {
   const pinned = composerState.togglePinned(resolvedChatId.value);
   if (pinned) composerExpanded.value = true;
+}
+
+function toggleForceNewSession() {
+  const enabled = !composerState.forceNewSession(resolvedChatId.value);
+  composerState.setForceNewSession(resolvedChatId.value, enabled);
+  if (!enabled) composerState.setParallelDispatch(resolvedChatId.value, false);
+}
+
+function toggleParallelDispatch() {
+  composerState.setParallelDispatch(
+    resolvedChatId.value,
+    !composerState.parallelDispatch(resolvedChatId.value),
+  );
 }
 
 function isDispatchRoleSelected(roleId: string) {
@@ -1337,9 +1353,22 @@ async function scrollThreadToBottom() {
                 : 'Start a new agent session for this message, ignoring the existing session context (one-shot)'"
               :aria-label="composerState.forceNewSession(resolvedChatId) ? 'Disable new session for this message' : 'Enable new session for this message'"
               :aria-pressed="composerState.forceNewSession(resolvedChatId)"
-              @click="composerState.setForceNewSession(resolvedChatId, !composerState.forceNewSession(resolvedChatId))"
+              @click="toggleForceNewSession"
             >
               <i class="bi" :class="composerState.forceNewSession(resolvedChatId) ? 'bi-plus-square-fill' : 'bi-plus-square'"></i>
+            </button>
+            <button
+              class="btn btn-sm btn-outline-secondary voice-action-button super-parallel-dispatch"
+              :class="{ active: composerState.parallelDispatch(resolvedChatId) }"
+              type="button"
+              :title="composerState.parallelDispatch(resolvedChatId)
+                ? 'Immediate parallel dispatch enabled: send in a fresh temporary session without waiting for this role (one-shot)'
+                : 'Immediately dispatch in a fresh temporary session, even while the same role is running (one-shot)'"
+              :aria-label="composerState.parallelDispatch(resolvedChatId) ? 'Disable immediate parallel dispatch' : 'Enable immediate parallel dispatch'"
+              :aria-pressed="composerState.parallelDispatch(resolvedChatId)"
+              @click="toggleParallelDispatch"
+            >
+              <i class="bi" :class="composerState.parallelDispatch(resolvedChatId) ? 'bi-lightning-charge-fill' : 'bi-lightning-charge'"></i>
             </button>
             <button class="btn voice-action-button super-send-button" type="button" :disabled="!canDispatch" title="Send message (Cmd/Ctrl+Enter)" aria-label="Send message" @click="dispatchMessage">
               <i class="bi bi-send"></i>
@@ -1401,8 +1430,8 @@ async function scrollThreadToBottom() {
 }
 
 .super-agent-activity-details {
-  background: color-mix(in srgb, var(--color-surface-muted) 72%, transparent);
-  border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  background: color-mix(in srgb, var(--color-surface-muted) 45%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   min-width: 0;
@@ -1412,14 +1441,14 @@ async function scrollThreadToBottom() {
   align-items: center;
   cursor: pointer;
   display: grid;
-  font-size: var(--font-size-ui-small);
-  gap: 6px;
+  font-size: 10.5px;
+  gap: 5px;
   grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   line-height: 1.3;
   list-style: none;
-  min-height: 26px;
+  min-height: 22px;
   min-width: 0;
-  padding: 3px 8px;
+  padding: 2px 6px;
   user-select: none;
 }
 
@@ -1433,12 +1462,12 @@ async function scrollThreadToBottom() {
 }
 
 .super-agent-activity-icon {
-  color: var(--color-accent);
+  color: var(--color-text-muted);
 }
 
 .super-agent-activity-label {
-  color: var(--color-text);
-  font-weight: 600;
+  color: var(--color-text-muted);
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -1459,22 +1488,22 @@ async function scrollThreadToBottom() {
 }
 
 .super-agent-activity-body {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
   max-height: min(420px, 55vh);
   overflow: auto;
-  padding: 8px;
+  padding: 6px;
   user-select: text;
 }
 
 .super-agent-activity-body pre {
   background: var(--color-surface-raised);
   border-radius: var(--radius-sm);
-  color: var(--color-text);
+  color: var(--color-text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: var(--font-size-ui-small);
-  margin: 0 0 8px;
+  font-size: 10.5px;
+  margin: 0 0 6px;
   overflow: auto;
-  padding: 8px;
+  padding: 6px;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1595,7 +1624,7 @@ async function scrollThreadToBottom() {
 .super-response-timeline {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .super-response-segment {
@@ -2083,7 +2112,8 @@ async function scrollThreadToBottom() {
   color: var(--color-text);
 }
 
-.super-force-new-session.active {
+.super-force-new-session.active,
+.super-parallel-dispatch.active {
   background: var(--color-surface-selected);
   border-color: var(--color-accent, var(--color-border));
   color: var(--color-accent, var(--color-text));

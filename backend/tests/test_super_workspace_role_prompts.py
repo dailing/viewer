@@ -144,6 +144,71 @@ class RolePromptSeparationTests(unittest.TestCase):
         self.assertEqual(len(failed_calls), 1)
         self.assertEqual(failed_calls[0].kwargs["error"], "thread/start timed out")
 
+    def test_session_waiter_only_updates_the_session_it_owns(self) -> None:
+        runtime = SuperWorkspaceRuntime()
+        manager = MagicMock()
+        manager.snapshot.return_value = {"status": "completed"}
+        driver = CodexAppServerSuperDriver()
+        driver._session_manager = manager
+        completed_run = SimpleNamespace(status="completed")
+
+        with (
+            patch("backend.app.super_workspace_runtime.agent_history_store.get_dispatch_task", return_value=SimpleNamespace(status="running")),
+            patch("backend.app.super_workspace_runtime.agent_history_store.update_driver_run_status"),
+            patch("backend.app.super_workspace_runtime.agent_history_store.upsert_chat_role_session") as upsert_session,
+            patch.object(runtime, "_emit_update", new=AsyncMock()),
+            patch.object(runtime, "_summarize_run_status", return_value=completed_run),
+        ):
+            result = asyncio.run(
+                runtime._wait_for_session(
+                    driver,
+                    "parallel-session",
+                    "user",
+                    "query-run",
+                    "driver-run",
+                    "workspace",
+                    "chat",
+                    role().model_copy(update={"provider": "codex-app-server"}),
+                    "/tmp",
+                    "codex-app-server:parallel-session",
+                    None,
+                )
+            )
+
+        self.assertIs(result, completed_run)
+        upsert_session.assert_called_once()
+        self.assertFalse(upsert_session.call_args.kwargs["replace_session"])
+
+    def test_stale_session_usage_cannot_replace_new_primary_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AgentHistoryStore(Path(directory) / "history.sqlite3")
+            workspace = store.ensure_default_workspace("user")
+            chats = store.create_super_chat("user", name="Chat", root="project", workspace_id=workspace.id)
+            common = {
+                "workspace_id": workspace.id,
+                "chat_id": chats.active_chat_id,
+                "role_id": "same-role",
+                "provider": "codex-app-server",
+                "cwd": "/tmp",
+                "model": None,
+                "session_policy": "reuse",
+            }
+            store.upsert_chat_role_session("user", session_ref="codex-app-server:old", driver_run_id="old-run", **common)
+            store.upsert_chat_role_session("user", session_ref="codex-app-server:lightning", driver_run_id="lightning-run", **common)
+
+            state = store.upsert_chat_role_session(
+                "user",
+                session_ref="codex-app-server:old",
+                driver_run_id="old-run",
+                total_tokens=123,
+                replace_session=False,
+                **common,
+            )
+
+            self.assertEqual(state.session_ref, "codex-app-server:lightning")
+            self.assertEqual(state.last_driver_run_id, "lightning-run")
+            self.assertIsNone(state.total_tokens)
+
     def test_dispatch_payload_contains_description_but_not_agent_prompt(self) -> None:
         manager = SuperWorkspaceManager()
         rendered = manager._render_dispatch_prompt(
@@ -302,6 +367,43 @@ class RolePromptSeparationTests(unittest.TestCase):
 
             self.assertIsNotNone(task)
             self.assertTrue(task.force_new_session)
+
+    def test_parallel_new_session_can_be_claimed_while_same_role_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AgentHistoryStore(Path(directory) / "history.sqlite3")
+            workspace = store.ensure_default_workspace("user")
+            chats = store.create_super_chat("user", name="Chat", root="project", workspace_id=workspace.id)
+
+            def create_task(message: str, *, parallel: bool = False):
+                run = store.create_super_run("user", message, "queued", chat_id=chats.active_chat_id)
+                store.create_dispatch_task(
+                    "user",
+                    run.id,
+                    SuperDriverRunCreate(
+                        workspace_id=workspace.id,
+                        chat_id=chats.active_chat_id,
+                        role_id="same-role",
+                        role_name="Same Role",
+                        provider="codex-app-server",
+                        force_new_session=parallel,
+                        parallel_dispatch=parallel,
+                    ),
+                )
+                return run
+
+            create_task("first")
+            first = store.claim_next_dispatch_task("worker")
+            self.assertIsNotNone(first)
+            store.update_driver_run_status(first.id, "running")
+            create_task("serial")
+            parallel_run = create_task("parallel", parallel=True)
+
+            claimed = store.claim_next_dispatch_task("worker")
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.query_message_id, parallel_run.id)
+            self.assertTrue(claimed.force_new_session)
+            self.assertTrue(claimed.parallel_dispatch)
 
     def test_orphan_sweep_preserves_run_owned_by_live_draining_worker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

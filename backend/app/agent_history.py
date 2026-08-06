@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from loguru import logger
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, event, or_, select, update
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, event, or_, select, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -90,6 +90,7 @@ class SuperHistoryRunCreate(BaseModel):
     parent_message_id: str | None = None
     sender_role_id: str | None = None
     force_new_session: bool = False
+    parallel_dispatch: bool = False
 
 
 class SuperDriverRunCreate(BaseModel):
@@ -104,6 +105,7 @@ class SuperDriverRunCreate(BaseModel):
     sender_role_id: str | None = None
     role_snapshot: dict[str, Any] = Field(default_factory=dict)
     force_new_session: bool = False
+    parallel_dispatch: bool = False
 
 
 class SuperDispatchTask(BaseModel):
@@ -135,6 +137,7 @@ class SuperDispatchTask(BaseModel):
     driver_state_path: str | None = None
     error: str = ""
     force_new_session: bool = False
+    parallel_dispatch: bool = False
     start_after_occurred_at: float = 0
     created_at: float
     started_at: float | None = None
@@ -569,6 +572,7 @@ class SuperWorkspaceDriverRunRow(AgentHistoryBase):
     driver_state_path: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
     force_new_session: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    parallel_dispatch: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     start_after_occurred_at: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
     started_at: Mapped[float | None] = mapped_column(Float)
@@ -741,6 +745,12 @@ class AgentHistoryStore:
                 "super_workspace_chats",
                 "role_routing_policy_overrides_json",
                 "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                connection,
+                "super_workspace_driver_runs",
+                "parallel_dispatch",
+                "BOOLEAN NOT NULL DEFAULT 0",
             )
             self._ensure_column(
                 connection,
@@ -1441,6 +1451,7 @@ class AgentHistoryStore:
         model_context_window: int | None = None,
         total_tokens: int | None = None,
         context_used_percent: float | None = None,
+        replace_session: bool = True,
     ) -> SuperChatRoleSessionState:
         normalized_user = normalize_user_id(user_id)
         parsed_provider, viewer_session_id = self._parse_session_ref(session_ref, provider)
@@ -1484,6 +1495,8 @@ class AgentHistoryStore:
                 db.add(row)
                 db.flush()
                 return self._chat_role_session_from_row(row)
+            if not replace_session and session_ref != str(existing.session_ref or ""):
+                return self._chat_role_session_from_row(existing)
             is_replacement = bool(session_ref) and session_ref != str(existing.session_ref or "")
             existing.session_ref = session_ref
             existing.viewer_session_id = viewer_session_id
@@ -1719,6 +1732,7 @@ class AgentHistoryStore:
                         attempt_count=0,
                         error="",
                         force_new_session=request.force_new_session,
+                        parallel_dispatch=request.parallel_dispatch,
                         start_after_occurred_at=float(start.occurred_at) if start else now,
                         created_at=now,
                         updated_at=now,
@@ -1884,7 +1898,7 @@ class AgentHistoryStore:
                     .where(
                         SuperWorkspaceDriverRunRow.id == row.id,
                         SuperWorkspaceDriverRunRow.status == "queued",
-                        ~active,
+                        true() if row.parallel_dispatch and row.force_new_session else ~active,
                     )
                     .values(
                         status="claimed",
@@ -2766,6 +2780,7 @@ class AgentHistoryStore:
             driver_state_path=row.driver_state_path if isinstance(row.driver_state_path, str) else None,
             error=str(row.error or ""),
             force_new_session=bool(row.force_new_session),
+            parallel_dispatch=bool(row.parallel_dispatch),
             start_after_occurred_at=float(row.start_after_occurred_at or 0),
             created_at=float(row.created_at),
             started_at=float(row.started_at) if isinstance(row.started_at, (int, float)) else None,

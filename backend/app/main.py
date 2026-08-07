@@ -33,6 +33,7 @@ from .files import (
     write_text,
 )
 from .git_diff import git_commit, git_diff, git_push, git_revert, git_stage, git_status
+from .llm_client import clear_provider_state, provider_states
 from .hermes_sessions import hermes_session_manager
 from .opencode_sessions import opencode_session_manager
 from .logging import ensure_logging
@@ -404,6 +405,17 @@ async def put_config(config: ConfigData):
             super_workspace=config.super_workspace,
         )
     )
+
+
+@app.get("/api/config/llm-provider-states")
+async def get_llm_provider_states():
+    return provider_states()
+
+
+@app.post("/api/config/llm-provider-states/clear")
+async def clear_llm_provider_states(provider_id: str | None = None):
+    clear_provider_state(provider_id)
+    return provider_states()
 
 
 @app.get("/api/events")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize viewer test responses with an OpenAI-compatible (vLLM) endpoint.
+"""Summarize viewer test responses with an OpenAI-compatible endpoint.
 
 Reads input mds from an input dir (default: summary_test_inputs/),
 sends each to the model with a structured-summary prompt, and writes
@@ -7,8 +7,8 @@ results to <output_root>/<model_name>/text_xxx.md for side-by-side
 model comparison.
 
 Usage:
-    python scripts/summarize_test.py --model qwen3-14b
-    python scripts/summarize_test.py --model qwen3-14b --base-url http://127.0.0.1:8010/v1
+    python scripts/summarize_test.py --model gemma4:26b --ollama-native
+    python scripts/summarize_test.py --model some-model --base-url http://127.0.0.1:11434/v1
     python scripts/summarize_test.py --model some-other-model --concurrency 4
 """
 
@@ -49,7 +49,10 @@ def call_model(base_url: str, model: str, content: str, timeout: float) -> dict:
             {"role": "user", "content": content},
         ],
         "temperature": 0.2,
-        "max_tokens": 1024,
+        # Thinking models (e.g. gemma4) spend tokens on a separate reasoning
+        # field before content; verbose inputs make reasoning+content exceed
+        # 2048 (observed truncation at exactly 2048). 4096 leaves headroom.
+        "max_tokens": 4096,
     }
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -63,7 +66,42 @@ def call_model(base_url: str, model: str, content: str, timeout: float) -> dict:
     return {"body": body, "latency_s": round(time.monotonic() - started, 2)}
 
 
-def summarize_one(path: Path, base_url: str, model: str, timeout: float) -> dict:
+def call_ollama_native(base_url: str, model: str, content: str, timeout: float) -> dict:
+    """Ollama native /api/chat — the only way to disable thinking (think:false);
+    the OpenAI-compat endpoint ignores chat_template_kwargs/think (0.32.6)."""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        "stream": False,
+        "think": False,
+        "options": {"temperature": 0.2, "num_predict": 4096},
+    }
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    started = time.monotonic()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    return {"body": body, "latency_s": round(time.monotonic() - started, 2)}
+
+
+def summarize_one(path: Path, base_url: str, model: str, timeout: float, ollama_native: bool = False) -> dict:
+    if ollama_native:
+        result = call_ollama_native(base_url, model, path.read_text(encoding="utf-8"), timeout)
+        body = result["body"]
+        return {
+            "input": path.name,
+            "summary": (body.get("message") or {}).get("content", "").strip(),
+            "latency_s": result["latency_s"],
+            "prompt_tokens": body.get("prompt_eval_count"),
+            "completion_tokens": body.get("eval_count"),
+        }
     result = call_model(base_url, model, path.read_text(encoding="utf-8"), timeout)
     body = result["body"]
     choice = body["choices"][0]
@@ -80,11 +118,13 @@ def summarize_one(path: Path, base_url: str, model: str, timeout: float) -> dict
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="served model name")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8010/v1")
+    parser.add_argument("--base-url", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--input-dir", default=str(REPO_ROOT / "summary_test_inputs"))
     parser.add_argument("--output-root", default=str(REPO_ROOT / "sumerytest"))
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument("--ollama-native", action="store_true",
+                        help="use Ollama native /api/chat with think=false (thinking off)")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -101,7 +141,7 @@ def main() -> int:
     errors: list[str] = []
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         futures = {
-            pool.submit(summarize_one, p, args.base_url, args.model, args.timeout): p
+            pool.submit(summarize_one, p, args.base_url, args.model, args.timeout, args.ollama_native): p
             for p in inputs
         }
         for fut in as_completed(futures):

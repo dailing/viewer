@@ -103,6 +103,15 @@ export interface SuperWorkspaceDispatchProfile {
   api_url: string;
   model: string;
   api_key: string;
+  enabled: boolean;
+}
+
+export interface LLMProviderState {
+  frozen: boolean;
+  frozen_until: number | null;
+  freeze_seconds_remaining: number;
+  error: string;
+  failures: number;
 }
 
 export interface ProviderContextLimitConfig {
@@ -144,6 +153,7 @@ export interface SuperWorkspaceConfig {
   chat_history_bootstrap_tokens: number;
   active_dispatch_profile_id: string;
   dispatch_history_word_budget: number;
+  llm_provider_freeze_seconds: number;
   provider_context_limits: Record<string, ProviderContextLimitConfig>;
   default_routing_policy_id: string;
   routing_policies: RoutingPolicyConfig[];

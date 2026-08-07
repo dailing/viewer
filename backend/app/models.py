@@ -109,11 +109,12 @@ class VoiceConfig(BaseModel):
 
 
 class SuperWorkspaceDispatchProfile(BaseModel):
-    id: str = "local-vllm"
-    name: str = "Local vLLM"
-    api_url: str = "http://127.0.0.1:8010/v1/chat/completions"
-    model: str = "qwen3-14b"
+    id: str = "ollama-gemma"
+    name: str = "Ollama Gemma"
+    api_url: str = "http://127.0.0.1:11434/v1/chat/completions"
+    model: str = "gemma4:26b"
     api_key: str = ""
+    enabled: bool = True
 
 
 class ProviderContextLimitConfig(BaseModel):
@@ -203,8 +204,9 @@ class SuperWorkspaceConfig(BaseModel):
     chat_show_agent_activity: bool = False
     chat_history_bootstrap_enabled: bool = True
     chat_history_bootstrap_tokens: int = Field(default=5000, ge=0, le=50000)
-    active_dispatch_profile_id: str = "local-vllm"
+    active_dispatch_profile_id: str = "ollama-gemma"
     dispatch_history_word_budget: int = Field(default=2048, ge=0, le=50000)
+    llm_provider_freeze_seconds: int = Field(default=3600, ge=0, le=86400)
     provider_context_limits: dict[str, ProviderContextLimitConfig] = Field(default_factory=default_provider_context_limits)
     default_routing_policy_id: str = ""
     routing_policies: list[RoutingPolicyConfig] = Field(default_factory=list)
@@ -212,10 +214,10 @@ class SuperWorkspaceConfig(BaseModel):
     dispatch_profiles: list[SuperWorkspaceDispatchProfile] = Field(
         default_factory=lambda: [
             SuperWorkspaceDispatchProfile(
-                id="local-vllm",
-                name="Local vLLM",
-                api_url="http://127.0.0.1:8010/v1/chat/completions",
-                model="qwen3-14b",
+                id="ollama-gemma",
+                name="Ollama Gemma",
+                api_url="http://127.0.0.1:11434/v1/chat/completions",
+                model="gemma4:26b",
                 api_key="",
             ),
             SuperWorkspaceDispatchProfile(

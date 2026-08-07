@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { restartServer, stopServer } from "../api/client";
 import { DARK_MARKDOWN_THEME, DEFAULT_DISPATCH_PROFILES, DEFAULT_DISPATCH_PROMPT_TEMPLATE, DEFAULT_MARKDOWN_THEME, DEFAULT_SUPER_WORKSPACE_CONFIG, DEFAULT_VOICE_CONFIG, useFilesStore } from "../stores/files";
-import type { AppearanceConfig, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, VoiceConfig } from "../types/files";
+import type { AppearanceConfig, LLMProviderState, MarkdownConfig, MarkdownElementStyle, MarkdownTheme, SuperWorkspaceConfig, SuperWorkspaceDispatchProfile, VoiceConfig } from "../types/files";
 
 const emit = defineEmits<{
   close: [];
@@ -48,17 +48,37 @@ const activeTheme = computed(() => {
   return fallback;
 });
 
-const activeDispatchProfile = computed<SuperWorkspaceDispatchProfile>(() => {
-  if (!draft.superWorkspace.dispatch_profiles.length) {
-    draft.superWorkspace.dispatch_profiles.push(...clone(DEFAULT_DISPATCH_PROFILES));
+const llmProviderStates = ref<Record<string, LLMProviderState>>({});
+
+onMounted(refreshLLMProviderStates);
+
+async function refreshLLMProviderStates() {
+  try {
+    const response = await fetch("/api/config/llm-provider-states", { cache: "no-store" });
+    if (response.ok) {
+      llmProviderStates.value = (await response.json()) as Record<string, LLMProviderState>;
+    }
+  } catch {
+    // Freeze states are informational only; ignore fetch failures.
   }
-  let profile = draft.superWorkspace.dispatch_profiles.find((item) => item.id === draft.superWorkspace.active_dispatch_profile_id);
-  if (!profile) {
-    profile = draft.superWorkspace.dispatch_profiles[0];
-    draft.superWorkspace.active_dispatch_profile_id = profile.id;
+}
+
+async function clearLLMProviderFreeze(providerId: string) {
+  try {
+    const response = await fetch(`/api/config/llm-provider-states/clear?provider_id=${encodeURIComponent(providerId)}`, { method: "POST" });
+    if (response.ok) {
+      llmProviderStates.value = (await response.json()) as Record<string, LLMProviderState>;
+    }
+  } catch {
+    // Ignore; the next refresh will resync.
   }
-  return profile as SuperWorkspaceDispatchProfile;
-});
+}
+
+function formatFreezeRemaining(seconds?: number): string {
+  const remaining = Math.max(0, Math.floor(seconds ?? 0));
+  if (remaining >= 60) return `${Math.ceil(remaining / 60)}m`;
+  return `${remaining}s`;
+}
 
 const fullConfigJson = computed(() =>
   JSON.stringify(
@@ -188,13 +208,8 @@ async function stop() {
   }
 }
 
-function setActiveDispatchProfile(profileId: string) {
-  const profile = draft.superWorkspace.dispatch_profiles.find((item) => item.id === profileId);
-  if (profile) draft.superWorkspace.active_dispatch_profile_id = profile.id;
-}
-
 function addDispatchProfile() {
-  const baseId = "dispatch";
+  const baseId = "provider";
   let index = draft.superWorkspace.dispatch_profiles.length + 1;
   let id = `${baseId}-${index}`;
   while (draft.superWorkspace.dispatch_profiles.some((profile) => profile.id === id)) {
@@ -203,20 +218,26 @@ function addDispatchProfile() {
   }
   const profile: SuperWorkspaceDispatchProfile = {
     id,
-    name: `Dispatch ${index}`,
-    api_url: DEFAULT_DISPATCH_PROFILES[0].api_url,
+    name: `Provider ${index}`,
+    api_url: "",
     model: "",
     api_key: "",
+    enabled: true,
   };
   draft.superWorkspace.dispatch_profiles.push(profile);
-  draft.superWorkspace.active_dispatch_profile_id = profile.id;
 }
 
-function removeActiveDispatchProfile() {
+function removeDispatchProfile(profileId: string) {
   if (draft.superWorkspace.dispatch_profiles.length <= 1) return;
-  const id = activeDispatchProfile.value.id;
-  draft.superWorkspace.dispatch_profiles = draft.superWorkspace.dispatch_profiles.filter((profile) => profile.id !== id);
-  draft.superWorkspace.active_dispatch_profile_id = draft.superWorkspace.dispatch_profiles[0]?.id ?? DEFAULT_SUPER_WORKSPACE_CONFIG.active_dispatch_profile_id;
+  draft.superWorkspace.dispatch_profiles = draft.superWorkspace.dispatch_profiles.filter((profile) => profile.id !== profileId);
+}
+
+function moveDispatchProfile(index: number, delta: number) {
+  const target = index + delta;
+  if (target < 0 || target >= draft.superWorkspace.dispatch_profiles.length) return;
+  const profiles = draft.superWorkspace.dispatch_profiles;
+  const [profile] = profiles.splice(index, 1);
+  profiles.splice(target, 0, profile);
 }
 
 function applyDispatchPreset(presetId: string) {
@@ -232,7 +253,6 @@ function applyDispatchPreset(presetId: string) {
       api_key: draft.superWorkspace.dispatch_profiles[index].api_key || replacement.api_key,
     };
   }
-  draft.superWorkspace.active_dispatch_profile_id = replacement.id;
 }
 
 function resetDispatchPromptTemplate() {
@@ -491,18 +511,14 @@ async function applyJson() {
                 </label>
               </div>
             </div>
-            <label class="compact-field">
-              <span>Dispatch profile</span>
-              <select class="form-select form-select-sm" :value="draft.superWorkspace.active_dispatch_profile_id" @change="setActiveDispatchProfile(($event.target as HTMLSelectElement).value)">
-                <option v-for="profile in draft.superWorkspace.dispatch_profiles" :key="profile.id" :value="profile.id">
-                  {{ profile.name || profile.id }}
-                </option>
-              </select>
-            </label>
+            <div class="llm-chain-header">
+              <span class="llm-chain-title">LLM providers</span>
+              <span class="llm-chain-hint">Called in order; a failed provider is frozen for the freeze window and the next provider takes over. Used by the dispatcher and future internal summaries.</span>
+            </div>
             <div class="inline-actions">
-              <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyDispatchPreset('local-vllm')">
+              <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyDispatchPreset('ollama-gemma')">
                 <i class="bi bi-cpu"></i>
-                <span>Local vLLM</span>
+                <span>Ollama Gemma</span>
               </button>
               <button class="btn btn-sm btn-outline-secondary" type="button" @click="applyDispatchPreset('deepseek')">
                 <i class="bi bi-cloud"></i>
@@ -512,40 +528,86 @@ async function applyJson() {
                 <i class="bi bi-plus-lg"></i>
                 <span>Add</span>
               </button>
-              <button class="btn btn-sm btn-outline-danger" type="button" :disabled="draft.superWorkspace.dispatch_profiles.length <= 1" @click="removeActiveDispatchProfile">
-                <i class="bi bi-trash"></i>
+              <button class="btn btn-sm btn-outline-secondary ms-auto" type="button" title="Refresh freeze states" @click="refreshLLMProviderStates">
+                <i class="bi bi-arrow-clockwise"></i>
               </button>
             </div>
             <label class="compact-field">
-              <span>Profile name</span>
-              <input v-model.trim="activeDispatchProfile.name" class="form-control form-control-sm" />
-            </label>
-            <label class="compact-field">
-              <span>Chat completions URL</span>
+              <span>Freeze window (seconds)</span>
               <input
-                v-model.trim="activeDispatchProfile.api_url"
+                v-model.number="draft.superWorkspace.llm_provider_freeze_seconds"
                 class="form-control form-control-sm"
-                placeholder="http://127.0.0.1:8010/v1/chat/completions"
+                type="number"
+                min="0"
+                max="86400"
+                step="60"
               />
             </label>
-            <label class="compact-field">
-              <span>Model name</span>
+            <div v-for="(profile, index) in draft.superWorkspace.dispatch_profiles" :key="profile.id" class="llm-provider-card">
+              <div class="llm-provider-head">
+                <span class="llm-provider-order">{{ index + 1 }}</span>
+                <input v-model.trim="profile.name" class="form-control form-control-sm llm-provider-name" placeholder="Provider name" />
+                <span
+                  v-if="llmProviderStates[profile.id]?.frozen"
+                  class="llm-provider-frozen"
+                  :title="llmProviderStates[profile.id]?.error"
+                >
+                  <i class="bi bi-snow"></i> frozen {{ formatFreezeRemaining(llmProviderStates[profile.id]?.freeze_seconds_remaining) }}
+                </span>
+                <button
+                  v-if="llmProviderStates[profile.id]?.frozen"
+                  class="btn btn-sm btn-outline-secondary"
+                  type="button"
+                  title="Clear freeze"
+                  @click="clearLLMProviderFreeze(profile.id)"
+                >
+                  <i class="bi bi-arrow-counterclockwise"></i>
+                </button>
+                <label class="llm-provider-enabled" :title="profile.enabled ? 'Enabled' : 'Disabled'">
+                  <input v-model="profile.enabled" class="form-check-input" type="checkbox" />
+                </label>
+                <button class="btn btn-sm btn-outline-secondary" type="button" title="Move up" :disabled="index === 0" @click="moveDispatchProfile(index, -1)">
+                  <i class="bi bi-chevron-up"></i>
+                </button>
+                <button
+                  class="btn btn-sm btn-outline-secondary"
+                  type="button"
+                  title="Move down"
+                  :disabled="index === draft.superWorkspace.dispatch_profiles.length - 1"
+                  @click="moveDispatchProfile(index, 1)"
+                >
+                  <i class="bi bi-chevron-down"></i>
+                </button>
+                <button
+                  class="btn btn-sm btn-outline-danger"
+                  type="button"
+                  title="Remove provider"
+                  :disabled="draft.superWorkspace.dispatch_profiles.length <= 1"
+                  @click="removeDispatchProfile(profile.id)"
+                >
+                  <i class="bi bi-trash"></i>
+                </button>
+              </div>
               <input
-                v-model.trim="activeDispatchProfile.model"
+                v-model.trim="profile.api_url"
                 class="form-control form-control-sm"
-                placeholder="Leave empty to discover /v1/models"
+                placeholder="http://127.0.0.1:11434/v1/chat/completions"
               />
-            </label>
-            <label class="compact-field">
-              <span>API key</span>
-              <input
-                v-model.trim="activeDispatchProfile.api_key"
-                class="form-control form-control-sm"
-                type="password"
-                autocomplete="off"
-                placeholder="Optional"
-              />
-            </label>
+              <div class="llm-provider-fields">
+                <input
+                  v-model.trim="profile.model"
+                  class="form-control form-control-sm"
+                  placeholder="Model (empty = discover /v1/models)"
+                />
+                <input
+                  v-model.trim="profile.api_key"
+                  class="form-control form-control-sm"
+                  type="password"
+                  autocomplete="off"
+                  placeholder="API key (optional)"
+                />
+              </div>
+            </div>
             <label class="setting-row">
               <span>Dispatch history budget</span>
               <input
@@ -1019,6 +1081,82 @@ async function applyJson() {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.llm-chain-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.llm-chain-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.llm-chain-hint {
+  color: var(--color-text-muted, #888);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.llm-provider-card {
+  border: 1px solid var(--color-border, #444);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+}
+
+.llm-provider-head {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.llm-provider-order {
+  align-items: center;
+  background: var(--color-surface-selected, #333);
+  border-radius: 50%;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 11px;
+  height: 20px;
+  justify-content: center;
+  width: 20px;
+}
+
+.llm-provider-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.llm-provider-frozen {
+  align-items: center;
+  color: var(--color-text-muted, #888);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 11px;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.llm-provider-enabled {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.llm-provider-fields {
+  display: flex;
+  gap: 6px;
+}
+
+.llm-provider-fields .form-control {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .server-actions .btn,

@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from .config import settings
-from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, TextLineWindow
+from .models import ConfigData, DirectoryListing, FileEntry, FileMeta, SuperWorkspaceDispatchProfile, TextLineWindow
 from .storage import CONFIG_PATH
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
@@ -435,13 +435,27 @@ def read_config() -> ConfigData:
         or "active_dispatch_profile_id" not in super_workspace_raw
         or "dispatch_history_word_budget" not in super_workspace_raw
         or "dispatch_prompt_template" not in super_workspace_raw
+        or "llm_provider_freeze_seconds" not in super_workspace_raw
         or "routing_policies" not in super_workspace_raw
         or super_workspace_raw.get("routing_schema_version") != 3
         or "default_routing_policy_id" not in super_workspace_raw
     )
+    ollama_injected = False
+    if not any("11434" in (profile.api_url or "") for profile in cleaned.super_workspace.dispatch_profiles):
+        cleaned.super_workspace.dispatch_profiles.insert(
+            0,
+            SuperWorkspaceDispatchProfile(
+                id="ollama-gemma",
+                name="Ollama Gemma",
+                api_url="http://127.0.0.1:11434/v1/chat/completions",
+                model="gemma4:26b",
+            ),
+        )
+        ollama_injected = True
     if isinstance(raw, dict) and (
         missing_voice_defaults
         or missing_super_workspace_defaults
+        or ollama_injected
     ):
         write_config(cleaned)
     return cleaned

@@ -89,11 +89,12 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
 
 export const DEFAULT_DISPATCH_PROFILES: SuperWorkspaceDispatchProfile[] = [
   {
-    id: "local-vllm",
-    name: "Local vLLM",
-    api_url: "http://127.0.0.1:8010/v1/chat/completions",
-    model: "qwen3-14b",
+    id: "ollama-gemma",
+    name: "Ollama Gemma",
+    api_url: "http://127.0.0.1:11434/v1/chat/completions",
+    model: "gemma4:26b",
     api_key: "",
+    enabled: true,
   },
   {
     id: "deepseek",
@@ -101,6 +102,7 @@ export const DEFAULT_DISPATCH_PROFILES: SuperWorkspaceDispatchProfile[] = [
     api_url: "https://api.deepseek.com/v1/chat/completions",
     model: "deepseek-v4-flash",
     api_key: "",
+    enabled: true,
   },
 ];
 
@@ -131,8 +133,9 @@ export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
   chat_show_agent_activity: false,
   chat_history_bootstrap_enabled: true,
   chat_history_bootstrap_tokens: 5000,
-  active_dispatch_profile_id: "local-vllm",
+  active_dispatch_profile_id: "ollama-gemma",
   dispatch_history_word_budget: 2048,
+  llm_provider_freeze_seconds: 3600,
   provider_context_limits: {
     "codex-app-server": { context_recycle_percent: 80, context_recycle_tokens: 200_000 },
     hermes: { context_recycle_percent: 80, context_recycle_tokens: null },
@@ -276,12 +279,18 @@ function normalizeSuperWorkspaceConfig(config?: Partial<SuperWorkspaceConfig>): 
     chat_history_bootstrap_tokens: Math.min(50000, Math.max(0, Number.isFinite(tokens) ? Math.floor(tokens) : DEFAULT_SUPER_WORKSPACE_CONFIG.chat_history_bootstrap_tokens)),
     active_dispatch_profile_id: activeProfileId,
     dispatch_history_word_budget: Math.min(50000, Math.max(0, Number.isFinite(dispatchBudget) ? Math.floor(dispatchBudget) : DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_history_word_budget)),
+    llm_provider_freeze_seconds: normalizeFreezeSeconds(config?.llm_provider_freeze_seconds),
     provider_context_limits: providerContextLimits,
     default_routing_policy_id: config?.default_routing_policy_id ?? "",
     routing_policies: JSON.parse(JSON.stringify(config?.routing_policies ?? [])),
     dispatch_prompt_template: config?.dispatch_prompt_template?.trim() || DEFAULT_SUPER_WORKSPACE_CONFIG.dispatch_prompt_template,
     dispatch_profiles: profiles,
   };
+}
+
+function normalizeFreezeSeconds(value?: number): number {
+  const seconds = Number(value ?? DEFAULT_SUPER_WORKSPACE_CONFIG.llm_provider_freeze_seconds);
+  return Math.min(86400, Math.max(0, Number.isFinite(seconds) ? Math.floor(seconds) : DEFAULT_SUPER_WORKSPACE_CONFIG.llm_provider_freeze_seconds));
 }
 
 function normalizeDispatchProfiles(profiles?: Partial<SuperWorkspaceDispatchProfile>[]): SuperWorkspaceDispatchProfile[] {
@@ -296,6 +305,7 @@ function normalizeDispatchProfiles(profiles?: Partial<SuperWorkspaceDispatchProf
         api_url: profile.api_url?.trim() || DEFAULT_DISPATCH_PROFILES[0].api_url,
         model: profile.model?.trim() || "",
         api_key: profile.api_key?.trim() || "",
+        enabled: profile.enabled ?? true,
       };
     })
     .filter((profile) => {

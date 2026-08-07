@@ -1,18 +1,15 @@
 import asyncio
 import hashlib
 import json
-import os
 import re
-from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from .agent_history import DEFAULT_SUPER_WORKSPACE_ID, DEFAULT_SUPER_WORKSPACE_NAME, SuperChatList, SuperChatSummary, agent_history_store
 from .files import read_config, write_config
+from .llm_client import LLMChainError, chat_completion
 from .models import (
     DEFAULT_DISPATCH_PROMPT_TEMPLATE,
     RoutingCandidateConfig,
@@ -21,11 +18,8 @@ from .models import (
 from .inference import inference_target_id
 
 
-DEFAULT_DISPATCH_MODEL = ""
-DEFAULT_DISPATCH_URL = "http://127.0.0.1:8010/v1/chat/completions"
 DEFAULT_DISPATCH_WORD_BUDGET = 2048
 DISPATCH_TEMPLATE_PATTERN = re.compile(r"\{\{(?:message|history|roles_json|roles_table)\}\}")
-PROJECT_ENV_PATH = Path(__file__).resolve().parents[2] / ".viewer.env"
 
 
 class SuperRole(BaseModel):
@@ -454,10 +448,9 @@ class SuperWorkspaceManager:
             raise HTTPException(status_code=400, detail="No dispatchable roles have descriptions")
         history_context = ""
         if request.chat_id:
-            dispatch_profile, super_workspace_config = self._dispatch_profile()
             history_budget = request.history_word_budget
             if history_budget is None:
-                history_budget = int(getattr(super_workspace_config, "dispatch_history_word_budget", DEFAULT_DISPATCH_WORD_BUDGET) or DEFAULT_DISPATCH_WORD_BUDGET)
+                history_budget = int(getattr(self._llm_config(), "dispatch_history_word_budget", DEFAULT_DISPATCH_WORD_BUDGET) or DEFAULT_DISPATCH_WORD_BUDGET)
             history_context = agent_history_store.visible_chat_history_context(
                 user_id or "",
                 data.id,
@@ -476,50 +469,37 @@ class SuperWorkspaceManager:
         raise HTTPException(status_code=404, detail="Role not found")
 
     def _dispatch_sync(self, message: str, roles: list[SuperRole], history_context: str = "") -> dict[str, Any]:
-        profile, _config = self._dispatch_profile()
-        api_key = self._dispatch_api_key(profile)
-        url = str(profile.get("api_url") or os.environ.get("VIEWER_SUPER_DISPATCH_URL", DEFAULT_DISPATCH_URL))
-        if not url.strip():
-            url = DEFAULT_DISPATCH_URL
-        model = self._dispatch_model(profile, url)
-        prompt = self._render_dispatch_prompt(message, roles, history_context, _config)
-        payload = {
-            "model": model,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Follow the routing prompt exactly. Return only a JSON object with role_ids and rationale. "
-                        "role_ids must be an array of ids from the provided roles."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-        }
-        request = Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": f"Bearer {api_key or 'EMPTY'}", "Content-Type": "application/json"},
-            method="POST",
-        )
+        prompt = self._render_dispatch_prompt(message, roles, history_context, self._llm_config())
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Follow the routing prompt exactly. Return only a JSON object with role_ids and rationale. "
+                    "role_ids must be an array of ids from the provided roles."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
         try:
-            with urlopen(request, timeout=30) as response:
-                response_payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise HTTPException(status_code=502, detail=f"Dispatch model failed: {detail}") from exc
-        except (OSError, URLError, json.JSONDecodeError) as exc:
+            result = chat_completion(messages, response_format={"type": "json_object"}, timeout=30)
+        except LLMChainError as exc:
             raise HTTPException(status_code=502, detail=f"Dispatch model failed: {exc}") from exc
-        content = response_payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+        content = result.content
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=502, detail=f"Dispatch model returned non-JSON content: {content[:500]}") from exc
         return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _llm_config() -> Any | None:
+        try:
+            return read_config().super_workspace
+        except Exception:
+            return None
 
     def _render_dispatch_prompt(self, message: str, roles: list[SuperRole], history_context: str, config: Any | None) -> str:
         template = str(getattr(config, "dispatch_prompt_template", "") or "").strip() or DEFAULT_DISPATCH_PROMPT_TEMPLATE
@@ -546,124 +526,6 @@ class SuperWorkspaceManager:
             "cwd": role.cwd,
             "provider": role.provider,
         }
-
-    def _dispatch_profile(self) -> tuple[dict[str, Any], Any]:
-        try:
-            from .files import read_config
-
-            config = read_config().super_workspace
-        except Exception:
-            return (
-                {
-                    "id": "env",
-                    "name": "Environment",
-                    "api_url": os.environ.get("VIEWER_SUPER_DISPATCH_URL", DEFAULT_DISPATCH_URL),
-                    "model": os.environ.get("VIEWER_SUPER_DISPATCH_MODEL", DEFAULT_DISPATCH_MODEL),
-                    "api_key": "",
-                    "_source": "env",
-                },
-                None,
-            )
-        profiles = [profile.model_dump() for profile in config.dispatch_profiles]
-        active_id = config.active_dispatch_profile_id
-        active = next((profile for profile in profiles if str(profile.get("id") or "") == active_id), None)
-        if active is None and profiles:
-            active = profiles[0]
-        if active is None:
-            active = {
-                "id": "local-vllm",
-                "name": "Local vLLM",
-                "api_url": DEFAULT_DISPATCH_URL,
-                "model": DEFAULT_DISPATCH_MODEL,
-                "api_key": "",
-                "_source": "default",
-            }
-        return active, config
-
-    def _dispatch_api_key(self, profile: dict[str, Any] | None = None) -> str:
-        profile_key = str((profile or {}).get("api_key") or "").strip()
-        if profile_key:
-            return profile_key
-        for name in ("VIEWER_SUPER_DISPATCH_API_KEY", "VIEWER_VLLM_API_KEY", "VIEWER_OPENAI_API_KEY", "OPENAI_API_KEY"):
-            value = os.environ.get(name, "").strip()
-            if value:
-                return value
-        for env_path in self._project_env_paths():
-            value = (
-                self._read_env_value(env_path, "VIEWER_SUPER_DISPATCH_API_KEY")
-                or self._read_env_value(env_path, "VIEWER_VLLM_API_KEY")
-                or self._read_env_value(env_path, "VIEWER_OPENAI_API_KEY")
-                or self._read_env_value(env_path, "OPENAI_API_KEY")
-            )
-            if value:
-                return value
-        return ""
-
-    def _dispatch_model(self, profile: dict[str, Any] | None = None, url: str | None = None) -> str:
-        configured = str((profile or {}).get("model") or "").strip()
-        if not configured and (profile or {}).get("_source") == "env":
-            configured = os.environ.get("VIEWER_SUPER_DISPATCH_MODEL", "").strip()
-        if configured:
-            return configured
-        url = (url or os.environ.get("VIEWER_SUPER_DISPATCH_URL", DEFAULT_DISPATCH_URL)).strip() or DEFAULT_DISPATCH_URL
-        model = self._discover_vllm_model(url)
-        return model or "default"
-
-    def _discover_vllm_model(self, chat_completions_url: str) -> str:
-        models_url = chat_completions_url.rstrip("/")
-        suffix = "/chat/completions"
-        if models_url.endswith(suffix):
-            models_url = f"{models_url[:-len(suffix)]}/models"
-        else:
-            models_url = f"{models_url.rsplit('/v1', 1)[0]}/v1/models" if "/v1" in models_url else "http://127.0.0.1:8010/v1/models"
-        request = Request(
-            models_url,
-            headers={"Authorization": f"Bearer {self._dispatch_api_key() or 'EMPTY'}", "Content-Type": "application/json"},
-            method="GET",
-        )
-        try:
-            with urlopen(request, timeout=5) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (OSError, URLError, HTTPError, json.JSONDecodeError):
-            return ""
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, list):
-            return ""
-        for item in data:
-            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
-                return item["id"].strip()
-        return ""
-
-    def _project_env_paths(self) -> list[Path]:
-        paths: list[Path] = []
-        configured = os.environ.get("VIEWER_PROJECT_ENV_PATH", "").strip()
-        if configured:
-            paths.append(Path(configured).expanduser())
-        paths.append(PROJECT_ENV_PATH)
-        unique: list[Path] = []
-        seen: set[str] = set()
-        for path in paths:
-            key = str(path)
-            if key not in seen:
-                unique.append(path)
-                seen.add(key)
-        return unique
-
-    def _read_env_value(self, path: Path, name: str) -> str:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return ""
-        prefix = f"{name}="
-        for raw in lines:
-            line = raw.strip()
-            if not line or line.startswith("#") or not line.startswith(prefix):
-                continue
-            value = line[len(prefix):].strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-            return value.strip()
-        return ""
 
     def _normalize_selected(self, raw: dict[str, Any], roles: list[SuperRole]) -> list[str]:
         valid = {role.id for role in roles}

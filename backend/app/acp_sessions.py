@@ -582,6 +582,7 @@ class ACPSessionManager:
         self._record_raw_update(session, str(update_type), raw)
         event = self._normalized_acp_event(session, update_type, update, raw)
         if event is not None:
+            self._seal_tail_stream_event(session, event)
             index, changed = self._upsert_acp_event(session, event)
             if changed and session.lineage:
                 self._record_lineage_events(session, [session.acp_events[index]], index)
@@ -637,6 +638,53 @@ class ACPSessionManager:
             return f"[{raw.get('uri') or raw.get('name') or block_type}]"
         return ""
 
+    def _stream_event_key(
+        self,
+        session: ACPSession,
+        turn_id: str,
+        update_type: str,
+        event_type: AgentEventType,
+    ) -> str:
+        # One event per agent message/thought: keep appending while the stream
+        # is the turn's newest event; once a tool call or another stream
+        # follows, start a fresh event so messages interleave with activity in
+        # chronological order instead of merging into a single late entry.
+        tail_index = len(session.acp_events) - 1
+        if tail_index >= 0:
+            tail = session.acp_events[tail_index]
+            if (
+                tail.get("event_type") == event_type
+                and tail.get("streaming")
+                and str(tail.get("turn_id") or "") == turn_id
+            ):
+                for key, index in session.acp_event_keys.items():
+                    if index == tail_index:
+                        return key
+        sequence = sum(
+            1
+            for event in session.acp_events
+            if event.get("event_type") == event_type and str(event.get("turn_id") or "") == turn_id
+        )
+        return f"{update_type}:{turn_id}:{sequence}"
+
+    def _seal_tail_stream_event(self, session: ACPSession, incoming: dict[str, Any]) -> None:
+        # A stream event followed by any other event is complete: seal it so
+        # retention and display treat the text as a finished message.
+        tail_index = len(session.acp_events) - 1
+        if tail_index < 0:
+            return
+        tail = session.acp_events[tail_index]
+        if not tail.get("streaming"):
+            return
+        if tail.get("event_type") not in {AgentEventType.MESSAGE_ASSISTANT, AgentEventType.REASONING}:
+            return
+        incoming_key = str(incoming.get("event_key") or "")
+        if incoming_key and session.acp_event_keys.get(incoming_key) == tail_index:
+            return
+        tail["streaming"] = False
+        if session.lineage:
+            self._record_lineage_events(session, [tail], tail_index)
+
     def _normalized_acp_event(
         self,
         session: ACPSession,
@@ -663,8 +711,8 @@ class ACPSessionManager:
                 return None
             # Viewer owns turn boundaries. ACP messageId remains available in
             # raw protocol data, but never controls semantic aggregation.
-            event_key = f"{update_type}:{turn_id}"
             event_type = AgentEventType.MESSAGE_ASSISTANT if update_type == "agent_message_chunk" else AgentEventType.REASONING
+            event_key = self._stream_event_key(session, turn_id, update_type, event_type)
             append = True
         elif update_type in {"tool_call", "tool_call_update"}:
             tool_call_id = str(getattr(update, "tool_call_id", None) or raw.get("toolCallId") or "unknown")
@@ -748,6 +796,10 @@ class ACPSessionManager:
         existing = session.acp_events[index]
         if append:
             event["text"] = f"{existing.get('text', '')}{event.get('text', '')}"
+            # Keep the first chunk's timestamp so the message stays at the
+            # position where the agent started it instead of drifting to the
+            # bottom of the turn as more chunks arrive.
+            event["received_at"] = float(existing.get("received_at") or event["received_at"])
         elif key.startswith("tool:"):
             previous_raw = existing.get("raw_preview") if isinstance(existing.get("raw_preview"), dict) else {}
             next_raw = event.get("raw_preview") if isinstance(event.get("raw_preview"), dict) else {}

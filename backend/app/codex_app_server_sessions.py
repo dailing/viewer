@@ -580,6 +580,9 @@ class CodexAppServerSessionManager:
                 if existing.get("source_event_id") != source_event_id:
                     continue
                 event["text"] = f"{existing.get('text', '')}{event.get('text', '')}"
+                # Keep the first delta's timestamp so the event stays at its
+                # start position instead of drifting as more deltas arrive.
+                event["received_at"] = float(existing.get("received_at") or event["received_at"])
                 if event.get("event_type") == AgentEventType.TOOL_CALL:
                     event["text"] = self._bounded_utf8(event["text"], TOOL_EVENT_MAX_BYTES)
                 event["index"] = index

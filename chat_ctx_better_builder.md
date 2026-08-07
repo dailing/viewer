@@ -144,3 +144,17 @@ Cached whole-chat briefing   ← 后台预计算（LLM），不在派送关键�
 ## 8. 变更日志
 
 - 2026-08-06：初版。记录混合 bootstrap 设计、首次 preview 实验发现（tmp_out.md）、LLM 需求结论、Phase 0–3 计划。当前优先做 Phase 0 本地模型实验。
+- 2026-08-06：Phase 0 第一批实测（`summary_test_inputs/` 14 条跨 Chat 真实 response，`scripts/summarize_test.py`，输出 `sumerytest/<model>/`）：
+  - `qwen3-14b`（vLLM AWQ，3090，no-think 模板）：14/14 成功，单条 2.9–7.1s，completion 203–342 tokens，结构完整。当前质量/速度基线。
+  - `gemma4:26b`（Ollama Q4_K_M，CPU，brew 版 ollama 0.32.5 无 CUDA 后端）：14/14 成功但单条 115–676s（比 GPU qwen 慢约 90 倍）；thinking 模型，completion 1199–2048 tokens 大部分是不可见 reasoning。
+  - 坑 1：thinking 模型必须 `max_tokens ≥ 2048`，否则 reasoning 吃光额度、content 为空（1024 时 14 条全空）。
+  - 坑 2：Ollama 默认 ctx 4096，需 `OLLAMA_CONTEXT_LENGTH` 调大；brew 版 ollama 只带 CPU ggml 后端，要用 GPU 必须装官方 ollama 包（cuda_v12/v13 runner）。
+  - 坑 3：`CUDA_VISIBLE_DEVICES=1` 数字索引在 ollama 0.32.6 上映射错了 GPU（把模型放到了 2080Ti 并触发 CPU 混合 offload，0.39 tok/s），必须用 GPU UUID 形式。
+  - 坑 4：Ollama OpenAI 兼容端点不支持关 thinking（`chat_template_kwargs`/`think` 均被忽略，0.32.6）；必须用原生 `/api/chat` + `think:false`（脚本已加 `--ollama-native`）。
+  - 坑 5：提取实验输入时注意 schema 陷阱——`message:query` 行的用户文本在 `query` 列，`text` 列为空；读 `text` 会得到"无关联 query 记录"。提取器：`scripts/extract_summary_test_inputs.py`。
+  - 输入修正（补上 query）后 gemma 已重跑（14/14，5.0–10.5s）：任务归因明显改善（如"比赛列表页面""提升并发量和解码速度"均来自 query 原文）；抽检验证 gemma 的细节依然忠实（text_009 行排列顺序正确而 qwen 顺序有误、text_014 保留关键脚本名 `print_structure.py` 而 qwen 丢失）。修正版 qwen 对比未跑（vLLM 已停，与 Ollama 无法同卡共存）。
+  - 待用户人工对比两模型摘要质量（`sumerytest/qwen3-14b/` vs `sumerytest/gemma4:26b/`）。
+  - 模型对比评估（14 条样本）：**忠实度两者均无数字幻觉**（摘要中出现的数字 100% 能在原文找到，qwen 0 / gemma 0 个无源数字）；数字召回率 qwen 0.44 vs gemma 0.47；速度 qwen 平均 ~4.8s vs gemma ~6.8s；gemma 输出约长 17%，更倾向引用具体数字/阈值（如 text_012 全部 benchmark 数字精确引用，qwen 只写"明显快很多"）；qwen 在 text_005 出现一次无依据的约束推断（"避免提及基金等敏感词"，原文无此要求）——此类"发明用户约束"对 briefing 场景毒性最大。结论：**gemma4:26b（think:false）质量略优且更忠实，qwen3-14b 更快更省显存（AWQ ~9GB vs Q4_K_M ~18GB）**；briefing 是后台任务、速度不敏感，推荐 gemma4:26b，若显存紧张则 qwen3-14b 也可用。
+  - `gemma4:26b`（官方 ollama 0.32.6，3090 全量 offload，32K ctx，**think:false**）：14/14 完整，单条 3.5–8.6s，completion 240–380 tokens——与 qwen3-14b（2.9–7.1s）基本同速；开 thinking 时单条 10.8–37.1s、completion 1048–1934（约 3/4 是不可见 reasoning），对摘要质量无明显提升，结论：摘要任务关 thinking。
+- 2026-08-06：**LLM provider 链已落地**（`backend/app/llm_client.py`）。原 dispatcher 的单一 `active_dispatch_profile_id` 改为有序 provider 链：按顺序调用，出错冻结 1 小时（`llm_provider_freeze_seconds`，状态持久化在 `~/.view/llm-provider-health.json`），自动落到下一个，语义与 agent target 的 health/cooldown 一致。Settings → Super Workspace 里可排序/启停/增删，预设含 Ollama Gemma（默认链首位，127.0.0.1:11434 `gemma4:26b`）、Local vLLM、DeepSeek；freeze 状态在 UI 可见可手动清除（`GET/POST /api/config/llm-provider-states[/clear]`）。dispatcher 已切到 `chat_completion()`；**后续 briefing/summary 直接复用 `llm_client.chat_completion()` 即可**，不需要再单独维护模型配置。已实测：真实调用命中 ollama-gemma（2.5s 返回合法 JSON）；人为冻结 ollama 后自动跳过（提示 frozen + 剩余秒数）→ local-vllm 连接拒绝被真实冻结 → 落到 deepseek 成功返回；清除 freeze 生效。
+- 2026-08-07：**vLLM 已从本机部署与 provider 链中移除**（用户决定不再使用）。systemd 用户服务 `vllm-qwen3.service` 已 disable 并删除，`/mnt/oldroot/home/d/vllm/`（含 19G AWQ 模型，共 35G）已删除；链默认与 live config 只剩 `ollama-gemma` → `deepseek`；代码默认、Settings 预设、`VIEWER_VLLM_API_KEY`、`scripts/summarize_test.py` 默认 base-url 同步清理。Ollama 改由 systemd 用户服务 `ollama.service`（官方 /usr/local/bin/ollama 0.32.6，linger 开机自启，3090 UUID 锁定，ctx 32K）托管。本文前面 Phase 0 的 qwen3-14b/vLLM 记录保留为历史实验档案。

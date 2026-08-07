@@ -18,6 +18,11 @@ frontend/dist/
 
 # Local viewer/user state
 .viewer.env
+
+# Local experiment artifacts (Phase 0 summary evaluation)
+tmp_out.md
+sumerytest/
+summary_test_inputs/
 .test-instance/
 .codex
 

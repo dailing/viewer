@@ -203,7 +203,14 @@ class SuperWorkspaceConfig(BaseModel):
     chat_virtual_space_enabled: bool = True
     chat_show_agent_activity: bool = False
     chat_history_bootstrap_enabled: bool = True
-    chat_history_bootstrap_tokens: int = Field(default=5000, ge=0, le=50000)
+    chat_history_bootstrap_tokens: int = Field(default=1500, ge=0, le=50000)
+    turn_summary_enabled: bool = True
+    turn_summary_tool_char_budget: int = Field(default=1500, ge=200, le=20000)
+    turn_summary_timeout_seconds: int = Field(default=180, ge=10, le=1800)
+    context_bridge_enabled: bool = True
+    context_bridge_summary_char_budget: int = Field(default=8000, ge=500, le=50000)
+    context_bridge_hindsight_enabled: bool = True
+    context_bridge_hindsight_max_tokens: int = Field(default=800, ge=0, le=8000)
     active_dispatch_profile_id: str = "ollama-gemma"
     dispatch_history_word_budget: int = Field(default=2048, ge=0, le=50000)
     llm_provider_freeze_seconds: int = Field(default=3600, ge=0, le=86400)

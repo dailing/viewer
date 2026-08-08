@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from loguru import logger
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, event, or_, select, true, update
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, and_, create_engine, delete, event, func, or_, select, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -319,6 +319,26 @@ class SuperChatRoleSessionState(BaseModel):
     updated_at: float
 
 
+class SuperTurnSummary(BaseModel):
+    turn_id: str
+    workspace_id: str | None = None
+    chat_id: str
+    query_message_id: str | None = None
+    role_id: str | None = None
+    role_name: str = ""
+    provider: str = ""
+    status: str = "completed"
+    summary: str = ""
+    model: str = ""
+    profile_id: str = ""
+    source_message_count: int = 0
+    source_char_count: int = 0
+    latency_ms: int = 0
+    error: str = ""
+    occurred_at: float
+    created_at: float
+
+
 class SuperHistoryRunsPage(BaseModel):
     runs: list[SuperHistoryRun]
     has_more: bool = False
@@ -618,6 +638,33 @@ class SuperWorkspaceMessageCitationRow(AgentHistoryBase):
     source_message_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspace_messages.id", ondelete="CASCADE"), primary_key=True)
     position: Mapped[int] = mapped_column(Integer, primary_key=True)
     cited_message_id: Mapped[str] = mapped_column(String, ForeignKey("super_workspace_messages.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class SuperWorkspaceTurnSummaryRow(AgentHistoryBase):
+    __tablename__ = "super_workspace_turn_summaries"
+    __table_args__ = (
+        Index("idx_super_turn_summaries_chat_time", "user_id", "workspace_id", "conversation_id", "occurred_at"),
+    )
+
+    # turn_id equals the dispatch task / driver run id of the turn.
+    turn_id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(String, ForeignKey("super_workspaces.id", ondelete="CASCADE"))
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(String, nullable=False)
+    query_message_id: Mapped[str | None] = mapped_column(String)
+    role_id: Mapped[str | None] = mapped_column(String)
+    role_name: Mapped[str] = mapped_column(String, nullable=False, default="")
+    provider: Mapped[str] = mapped_column(String, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String, nullable=False, default="completed")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    model: Mapped[str] = mapped_column(String, nullable=False, default="")
+    profile_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    source_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_char_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    occurred_at: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
@@ -2221,10 +2268,13 @@ class AgentHistoryStore:
         chat_id: str,
         before_message_id: str | None,
         token_budget: int,
+        after_time: float | None = None,
+        before_time: float | None = None,
     ) -> str:
         if token_budget <= 0:
             return ""
-        before_time = time.time()
+        if before_time is None:
+            before_time = time.time()
         normalized_user = normalize_user_id(user_id)
         with self.read_session() as db:
             if before_message_id:
@@ -2246,16 +2296,19 @@ class AgentHistoryStore:
                 SuperWorkspaceMessageRow.text != "",
                 ~self._agent_message_event_condition(),
             )
+            conditions = [
+                SuperWorkspaceMessageRow.user_id == normalized_user,
+                SuperWorkspaceMessageRow.workspace_id == workspace_id,
+                SuperWorkspaceMessageRow.conversation_id == chat_id,
+                SuperWorkspaceMessageRow.occurred_at < before_time,
+                or_(query_condition, assistant_condition),
+            ]
+            if after_time is not None:
+                conditions.append(SuperWorkspaceMessageRow.occurred_at > after_time)
             rows = list(
                 db.scalars(
                     select(SuperWorkspaceMessageRow)
-                    .where(
-                        SuperWorkspaceMessageRow.user_id == normalized_user,
-                        SuperWorkspaceMessageRow.workspace_id == workspace_id,
-                        SuperWorkspaceMessageRow.conversation_id == chat_id,
-                        SuperWorkspaceMessageRow.occurred_at < before_time,
-                        or_(query_condition, assistant_condition),
-                    )
+                    .where(*conditions)
                     .order_by(SuperWorkspaceMessageRow.occurred_at.desc(), SuperWorkspaceMessageRow.id.desc())
                     .limit(200)
                 ).all()
@@ -2319,6 +2372,232 @@ class AgentHistoryStore:
             name = role_names.get(row.recipient_role_id, row.recipient_role_id)
             return f"{name} ({row.recipient_role_id})"
         return str(row.role or "assistant")
+
+    @staticmethod
+    def _turn_summary_from_row(row: SuperWorkspaceTurnSummaryRow) -> SuperTurnSummary:
+        return SuperTurnSummary(
+            turn_id=str(row.turn_id),
+            workspace_id=str(row.workspace_id) if row.workspace_id else None,
+            chat_id=str(row.conversation_id),
+            query_message_id=str(row.query_message_id) if row.query_message_id else None,
+            role_id=str(row.role_id) if row.role_id else None,
+            role_name=str(row.role_name or ""),
+            provider=str(row.provider or ""),
+            status=str(row.status or "completed"),
+            summary=str(row.summary or ""),
+            model=str(row.model or ""),
+            profile_id=str(row.profile_id or ""),
+            source_message_count=int(row.source_message_count or 0),
+            source_char_count=int(row.source_char_count or 0),
+            latency_ms=int(row.latency_ms or 0),
+            error=str(row.error or ""),
+            occurred_at=float(row.occurred_at),
+            created_at=float(row.created_at),
+        )
+
+    def upsert_turn_summary(self, summary: SuperTurnSummary, user_id: str | None) -> None:
+        normalized_user = normalize_user_id(user_id)
+        with self.session_scope() as db:
+            statement = sqlite_insert(SuperWorkspaceTurnSummaryRow).values(
+                turn_id=summary.turn_id,
+                workspace_id=summary.workspace_id,
+                user_id=normalized_user,
+                conversation_id=summary.chat_id,
+                query_message_id=summary.query_message_id,
+                role_id=summary.role_id,
+                role_name=summary.role_name,
+                provider=summary.provider,
+                status=summary.status,
+                summary=summary.summary,
+                model=summary.model,
+                profile_id=summary.profile_id,
+                source_message_count=summary.source_message_count,
+                source_char_count=summary.source_char_count,
+                latency_ms=summary.latency_ms,
+                error=summary.error,
+                occurred_at=summary.occurred_at,
+                created_at=summary.created_at,
+            )
+            db.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["turn_id"],
+                    set_={
+                        "status": summary.status,
+                        "summary": summary.summary,
+                        "model": summary.model,
+                        "profile_id": summary.profile_id,
+                        "source_message_count": summary.source_message_count,
+                        "source_char_count": summary.source_char_count,
+                        "latency_ms": summary.latency_ms,
+                        "error": summary.error,
+                        "occurred_at": summary.occurred_at,
+                    },
+                )
+            )
+
+    def list_recent_turn_summaries(
+        self,
+        user_id: str | None,
+        workspace_id: str,
+        chat_id: str,
+        before_time: float,
+        limit: int = 6,
+    ) -> list[SuperTurnSummary]:
+        """Summaries of completed turns in one chat, ascending by time (oldest first)."""
+        normalized_user = normalize_user_id(user_id)
+        with self.read_session() as db:
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceTurnSummaryRow)
+                    .where(
+                        SuperWorkspaceTurnSummaryRow.user_id == normalized_user,
+                        SuperWorkspaceTurnSummaryRow.workspace_id == workspace_id,
+                        SuperWorkspaceTurnSummaryRow.conversation_id == chat_id,
+                        SuperWorkspaceTurnSummaryRow.occurred_at < before_time,
+                        SuperWorkspaceTurnSummaryRow.status == "completed",
+                        SuperWorkspaceTurnSummaryRow.summary != "",
+                    )
+                    .order_by(SuperWorkspaceTurnSummaryRow.occurred_at.desc())
+                    .limit(max(1, limit))
+                ).all()
+            )
+        return [self._turn_summary_from_row(row) for row in reversed(rows)]
+
+    def latest_turn_summary_time(
+        self,
+        user_id: str | None,
+        workspace_id: str,
+        chat_id: str,
+        before_time: float,
+    ) -> float | None:
+        """Newest occurred_at among completed summaries in one chat (None if none)."""
+        normalized_user = normalize_user_id(user_id)
+        with self.read_session() as db:
+            value = db.scalar(
+                select(func.max(SuperWorkspaceTurnSummaryRow.occurred_at)).where(
+                    SuperWorkspaceTurnSummaryRow.user_id == normalized_user,
+                    SuperWorkspaceTurnSummaryRow.workspace_id == workspace_id,
+                    SuperWorkspaceTurnSummaryRow.conversation_id == chat_id,
+                    SuperWorkspaceTurnSummaryRow.occurred_at < before_time,
+                    SuperWorkspaceTurnSummaryRow.status == "completed",
+                    SuperWorkspaceTurnSummaryRow.summary != "",
+                )
+            )
+        return float(value) if value is not None else None
+
+    def turn_transcript_events(
+        self,
+        user_id: str | None,
+        turn_id: str,
+        query_message_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """All recorded events of one turn (query + messages + tool events + file changes), time-ordered."""
+        normalized_user = normalize_user_id(user_id)
+        conditions = [SuperWorkspaceMessageRow.turn_id == turn_id]
+        if query_message_id:
+            conditions.append(SuperWorkspaceMessageRow.id == query_message_id)
+        with self.read_session() as db:
+            rows = list(
+                db.scalars(
+                    select(SuperWorkspaceMessageRow)
+                    .where(
+                        SuperWorkspaceMessageRow.user_id == normalized_user,
+                        or_(*conditions),
+                    )
+                    .order_by(SuperWorkspaceMessageRow.occurred_at, SuperWorkspaceMessageRow.id)
+                ).all()
+            )
+            message_ids = [str(row.id) for row in rows]
+            change_rows = []
+            if message_ids:
+                change_rows = list(
+                    db.execute(
+                        select(
+                            SuperWorkspaceMessageFileChangeRow.message_id,
+                            SuperWorkspaceMessageFileChangeRow.position,
+                            SuperWorkspaceMessageFileChangeRow.path,
+                            SuperWorkspaceMessageFileChangeRow.change_type,
+                            SuperWorkspaceMessageFileChangeRow.diff,
+                        )
+                        .where(SuperWorkspaceMessageFileChangeRow.message_id.in_(message_ids))
+                        .order_by(SuperWorkspaceMessageFileChangeRow.message_id, SuperWorkspaceMessageFileChangeRow.position)
+                    ).all()
+                )
+        changes_by_message: dict[str, list[dict[str, Any]]] = {}
+        for message_id, _position, path, change_type, diff in change_rows:
+            changes_by_message.setdefault(str(message_id), []).append(
+                {"path": str(path), "change_type": str(change_type), "diff": diff if isinstance(diff, str) else None}
+            )
+        return [
+            {
+                "id": str(row.id),
+                "event_type": str(row.event_type),
+                "role": str(row.role),
+                "text": str(row.text or ""),
+                "query": str(row.query) if isinstance(row.query, str) else None,
+                "occurred_at": float(row.occurred_at),
+                "file_changes": changes_by_message.get(str(row.id), []),
+            }
+            for row in rows
+        ]
+
+    def role_last_activity_time(
+        self,
+        user_id: str | None,
+        workspace_id: str,
+        chat_id: str,
+        role_id: str,
+        before_time: float,
+    ) -> float | None:
+        """Last time this role produced an assistant message in the chat (None if never)."""
+        normalized_user = normalize_user_id(user_id)
+        with self.read_session() as db:
+            value = db.scalar(
+                select(func.max(SuperWorkspaceMessageRow.occurred_at)).where(
+                    SuperWorkspaceMessageRow.user_id == normalized_user,
+                    SuperWorkspaceMessageRow.workspace_id == workspace_id,
+                    SuperWorkspaceMessageRow.conversation_id == chat_id,
+                    SuperWorkspaceMessageRow.role_id == role_id,
+                    SuperWorkspaceMessageRow.role == "assistant",
+                    SuperWorkspaceMessageRow.event_type == "message:assistant",
+                    SuperWorkspaceMessageRow.occurred_at < before_time,
+                )
+            )
+        return float(value) if value is not None else None
+
+    def has_visible_activity_between(
+        self,
+        user_id: str | None,
+        workspace_id: str,
+        chat_id: str,
+        after_time: float,
+        before_time: float,
+    ) -> bool:
+        """Any user query or assistant message in the (after, before) window."""
+        normalized_user = normalize_user_id(user_id)
+        query_condition = and_(
+            SuperWorkspaceMessageRow.query.is_not(None),
+            SuperWorkspaceMessageRow.query != "",
+        )
+        assistant_condition = and_(
+            SuperWorkspaceMessageRow.role == "assistant",
+            SuperWorkspaceMessageRow.event_type == "message:assistant",
+            SuperWorkspaceMessageRow.text != "",
+        )
+        with self.read_session() as db:
+            value = db.scalar(
+                select(SuperWorkspaceMessageRow.id)
+                .where(
+                    SuperWorkspaceMessageRow.user_id == normalized_user,
+                    SuperWorkspaceMessageRow.workspace_id == workspace_id,
+                    SuperWorkspaceMessageRow.conversation_id == chat_id,
+                    SuperWorkspaceMessageRow.occurred_at > after_time,
+                    SuperWorkspaceMessageRow.occurred_at < before_time,
+                    or_(query_condition, assistant_condition),
+                )
+                .limit(1)
+            )
+        return value is not None
 
     def get_super_run(self, run_id: str, user_id: str | None, message_limit: int = DEFAULT_MESSAGE_LIMIT) -> SuperHistoryRun:
         normalized_user = normalize_user_id(user_id)

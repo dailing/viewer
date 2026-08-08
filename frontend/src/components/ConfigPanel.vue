@@ -669,7 +669,7 @@ async function applyJson() {
               <input v-model="draft.superWorkspace.chat_history_bootstrap_enabled" class="form-check-input" type="checkbox" />
             </label>
             <label class="setting-row">
-              <span>History token budget</span>
+              <span>Unsummarized tail token budget</span>
               <input
                 v-model.number="draft.superWorkspace.chat_history_bootstrap_tokens"
                 class="form-range"

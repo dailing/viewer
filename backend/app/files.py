@@ -431,6 +431,7 @@ def read_config() -> ConfigData:
     missing_super_workspace_defaults = (
         not isinstance(super_workspace_raw, dict)
         or "chat_history_bootstrap_tokens" not in super_workspace_raw
+        or "context_bridge_summary_char_budget" not in super_workspace_raw
         or "dispatch_profiles" not in super_workspace_raw
         or "active_dispatch_profile_id" not in super_workspace_raw
         or "dispatch_history_word_budget" not in super_workspace_raw

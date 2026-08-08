@@ -143,3 +143,71 @@ def retain_visible_message(
 def retain_visible_message_background(**kwargs: Any) -> None:
     thread = threading.Thread(target=retain_visible_message, kwargs=kwargs, daemon=True)
     thread.start()
+
+
+HINDSIGHT_RECALL_TIMEOUT_SECONDS = 10
+# Hindsight 0.8.x caps recall queries at ~500 model tokens; keep the retrieval
+# query compact (current request + a short tail to resolve references).
+RECALL_RETRIEVAL_TAIL_CHARS = 450
+
+
+def recall_chat_memories(
+    *,
+    user_id: str,
+    workspace_id: str,
+    chat_id: str,
+    query: str,
+    recent_tail: str = "",
+    max_tokens: int = 800,
+    occurred_at: float | None = None,
+) -> list[str]:
+    """Query-aware recall against the chat's Hindsight bank.
+
+    Returns a list of memory text snippets (best first), or [] when Hindsight
+    is disabled/unreachable or returns nothing useful. Recall is candidate
+    evidence for the prompt builder — callers should inject it compactly.
+    """
+    request_text = query.strip()
+    if not request_text:
+        return []
+    try:
+        from .files import read_config
+
+        memory_config = read_config().super_workspace
+        if not memory_config.hindsight_retain_enabled:
+            return []
+        api_url = _api_url(memory_config.hindsight_api_url)
+        if not api_url:
+            return []
+        bank_id = chat_memory_bank_id(memory_config.hindsight_bank_prefix, user_id, workspace_id, chat_id)
+        url = f"{api_url}/v1/default/banks/{urllib.parse.quote(bank_id, safe='')}/memories/recall"
+        retrieval_query = (
+            "Find earlier chat facts that are useful for the current request. The immediate timeline is included to "
+            "resolve references such as 'this plan', 'continue', or 'that change'.\n\n"
+            f"CURRENT REQUEST:\n{request_text}\n\n"
+            f"IMMEDIATE TIMELINE TAIL:\n{recent_tail[-RECALL_RETRIEVAL_TAIL_CHARS:]}"
+        )
+        payload = {
+            "query": retrieval_query,
+            "types": ["world", "experience", "observation"],
+            "budget": "mid",
+            "max_tokens": max(0, int(max_tokens)),
+            "query_timestamp": _iso_timestamp(occurred_at),
+        }
+        result = _request_json("POST", url, payload, _api_token(), HINDSIGHT_RECALL_TIMEOUT_SECONDS)
+    except (OSError, urllib.error.URLError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        logger.debug("Skipping Hindsight recall chat_id={} reason={}", chat_id, exc)
+        return []
+    except Exception as exc:
+        logger.warning("Unexpected Hindsight recall failure chat_id={} reason={}", chat_id, exc)
+        return []
+    items = result.get("results") or result.get("memories") or result.get("items") or []
+    snippets: list[str] = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or item.get("content") or item.get("memory") or "").strip()
+            if text:
+                snippets.append(text)
+    return snippets

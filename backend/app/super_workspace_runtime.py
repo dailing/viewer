@@ -28,6 +28,7 @@ from .opencode_sessions import opencode_session_manager
 from .process_registry import process_slot_state, write_process_state
 from .storage import LOG_DIR
 from .super_workspace import SuperDispatchRequest, SuperRole, super_workspace_manager
+from .turn_summary import build_new_session_context, build_role_switch_bridge, generate_turn_summary
 from .models import RoutingCandidateConfig, RoutingPolicyConfig
 from .identity import normalize_user_id
 from .inference import DriverError, FailureScope, InferenceCatalog, InferenceTarget, inference_target_id
@@ -236,7 +237,7 @@ class SuperAgentDriver:
                         state.session_ref,
                         exc,
                     )
-        history_prompt = self.chat_history_prompt(user_id, lineage)
+        history_prompt = await asyncio.to_thread(self.chat_history_prompt, user_id, lineage)
         preamble = f"{self.initial_prompt(role, user_id)}\n\n{history_prompt}"
         first_prompt: str | list[dict[str, Any]]
         if isinstance(prompt, list):
@@ -335,18 +336,28 @@ class SuperAgentDriver:
             from .files import read_config
 
             config = read_config().super_workspace
-            if not config.chat_history_bootstrap_enabled or config.chat_history_bootstrap_tokens <= 0:
+            if not config.chat_history_bootstrap_enabled:
                 return ""
-            history = agent_history_store.visible_chat_history_context(
-                user_id,
-                str(lineage.get("workspace_id") or ""),
-                str(lineage.get("chat_id") or ""),
-                str(lineage.get("query_message_id") or ""),
-                int(config.chat_history_bootstrap_tokens),
+            workspace_id = str(lineage.get("workspace_id") or "")
+            chat_id = str(lineage.get("chat_id") or "")
+            query_message_id = str(lineage.get("query_message_id") or "")
+            query_text = ""
+            if query_message_id:
+                try:
+                    query_text = agent_history_store.get_super_run(query_message_id, user_id).message
+                except Exception:
+                    query_text = ""
+            memory_context = build_new_session_context(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                chat_id=chat_id,
+                query_text=query_text,
+                before_time=time.time(),
+                before_message_id=query_message_id or None,
             )
-            if not history:
+            if not memory_context:
                 return ""
-            return f"{history}\n\nCurrent routed message follows:\n\n"
+            return memory_context + "\n\nCurrent routed message follows:\n\n"
         except Exception as exc:
             logger.warning("Failed to build Super Workspace chat history prompt user={} reason={}", user_id, exc)
             return ""
@@ -844,6 +855,7 @@ class SuperWorkspaceRuntime:
                     execution_target=target,
                     routing_attempts=attempts,
                 )
+                self._schedule_turn_summary(task, run, role, candidate)
                 await self._emit_update(
                     {
                         "type": "run-updated",
@@ -961,8 +973,26 @@ class SuperWorkspaceRuntime:
         if active_session_id is not None and not task.parallel_dispatch:
             raise RoutingTargetBusy(f"Agent already has an active session: {candidate.agent_id}")
         prompt = base_prompt
-        if driver.supports_content_blocks and run.content_blocks and isinstance(base_prompt, str):
-            prompt = [{"type": "text", "text": base_prompt}, *run.content_blocks]
+        will_reuse_session = (
+            active_session_id is not None and not task.parallel_dispatch and not task.force_new_session
+        )
+        if will_reuse_session and isinstance(base_prompt, str):
+            # The session is reused, so it never saw chat activity produced by
+            # other roles since this role last answered. Bridge that gap.
+            bridge = await asyncio.to_thread(
+                build_role_switch_bridge,
+                user_id=task.user_id,
+                workspace_id=task.workspace_id,
+                chat_id=run.chat_id,
+                role_id=role.id,
+                query_text=run.message,
+                before_time=float(run.created_at or time.time()),
+                before_message_id=run.message_id,
+            )
+            if bridge:
+                prompt = f"{bridge}\n\n{prompt}"
+        if driver.supports_content_blocks and run.content_blocks and isinstance(prompt, str):
+            prompt = [{"type": "text", "text": prompt}, *run.content_blocks]
         lineage = {
             "turn_id": task.id,
             "workspace_id": task.workspace_id,
@@ -1142,6 +1172,57 @@ class SuperWorkspaceRuntime:
                 return self._summarize_run_status(run_id, user_id)
             await asyncio.sleep(1.0)
         return agent_history_store.update_super_run(run_id, user_id, status="running")
+
+    def _schedule_turn_summary(
+        self,
+        task: SuperDispatchTask,
+        run: SuperHistoryRun,
+        role: SuperRole,
+        candidate: RoutingCandidateConfig,
+    ) -> None:
+        try:
+            from .files import read_config
+
+            if not read_config().super_workspace.turn_summary_enabled:
+                return
+        except Exception:
+            return
+
+        async def _run() -> None:
+            try:
+                await asyncio.to_thread(
+                    generate_turn_summary,
+                    user_id=task.user_id,
+                    turn_id=task.id,
+                    workspace_id=task.workspace_id,
+                    chat_id=run.chat_id,
+                    query_message_id=run.message_id,
+                    role_id=role.id,
+                    role_name=role.name,
+                    provider=candidate.agent_id,
+                    occurred_at=time.time(),
+                )
+            except Exception:
+                logger.exception("Turn summary background task failed turn_id={}", task.id)
+
+        try:
+            asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:
+            # No running loop (e.g. called from a sync test harness): run inline.
+            try:
+                generate_turn_summary(
+                    user_id=task.user_id,
+                    turn_id=task.id,
+                    workspace_id=task.workspace_id,
+                    chat_id=run.chat_id,
+                    query_message_id=run.message_id,
+                    role_id=role.id,
+                    role_name=role.name,
+                    provider=candidate.agent_id,
+                    occurred_at=time.time(),
+                )
+            except Exception:
+                logger.exception("Turn summary inline generation failed turn_id={}", task.id)
 
     def _summarize_run_status(self, run_id: str, user_id: str, fallback_error: str = "") -> SuperHistoryRun:
         run = agent_history_store.get_super_run(run_id, user_id)

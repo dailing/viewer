@@ -132,7 +132,7 @@ export const DEFAULT_SUPER_WORKSPACE_CONFIG: SuperWorkspaceConfig = {
   chat_virtual_space_enabled: true,
   chat_show_agent_activity: false,
   chat_history_bootstrap_enabled: true,
-  chat_history_bootstrap_tokens: 5000,
+  chat_history_bootstrap_tokens: 1500,
   active_dispatch_profile_id: "ollama-gemma",
   dispatch_history_word_budget: 2048,
   llm_provider_freeze_seconds: 3600,

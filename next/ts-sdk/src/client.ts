@@ -241,7 +241,7 @@ export class BusClient {
     if (this.conn === null || !this._connected) {
       throw new BusConnectionError();
     }
-    const corr = crypto.randomUUID().replaceAll("-", "");
+    const corr = crypto.randomUUID().replace(/-/g, "");
     const inbox = `_inbox:${this.conn}:${corr}`;
     const timeout = options.timeout ?? this.requestTimeout;
     const payload: Record<string, unknown> =

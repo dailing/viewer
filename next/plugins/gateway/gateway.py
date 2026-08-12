@@ -137,6 +137,9 @@ class HttpGatewayPlugin(Plugin):
             await browser_ws.close(close_code)
         except (asyncio.TimeoutError, json.JSONDecodeError):
             await browser_ws.close(4002, "first frame must be hello")
+        except OSError:
+            # Kernel unreachable while opening the per-browser connection.
+            await browser_ws.close(1012, "kernel unavailable, retry")
         except ConnectionClosed:
             pass
         finally:

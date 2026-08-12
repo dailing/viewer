@@ -1,0 +1,20 @@
+{
+  "name": "@viewer/bus-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Viewer bus client SDK (TS): browser/Node WebSocket client for the microkernel message bus (protocol spec v1).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

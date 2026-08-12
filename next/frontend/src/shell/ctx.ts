@@ -19,6 +19,8 @@ export interface CtxStorage {
 export interface PluginCtx {
   /** Plugin or pane scope, e.g. `bus-inspector` or `bus-inspector:main`. */
   readonly scope: string;
+  /** Instance segment of the scope (`"_"` for plugin-level activation). */
+  readonly instanceId: string;
   readonly bus: {
     subscribe(pattern: string, handler: FrameHandler): void;
     unsubscribe(pattern: string, handler: FrameHandler): void;
@@ -54,13 +56,14 @@ function createStorage(scope: string): CtxStorage {
   };
 }
 
-export function createCtx(scope: string): PluginCtx {
+export function createCtx(scope: string, instanceId = "_"): PluginCtx {
   const subscriptions: Array<{ pattern: string; handler: FrameHandler }> = [];
   const disposeCallbacks: Array<() => void> = [];
   let disposed = false;
 
   const ctx: PluginCtx = {
     scope,
+    instanceId,
     bus: {
       subscribe(pattern: string, handler: FrameHandler): void {
         if (disposed) return;

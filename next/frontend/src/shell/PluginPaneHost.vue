@@ -22,7 +22,7 @@ watch(
   () => [props.paneType, props.instanceId],
   () => {
     ctx?.dispose();
-    ctx = createCtx(`${props.paneType}:${props.instanceId}`);
+    ctx = createCtx(`${props.paneType}:${props.instanceId}`, props.instanceId);
     provide("pluginCtx", ctx);
   },
   { immediate: true },

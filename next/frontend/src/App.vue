@@ -8,12 +8,14 @@ import { useShellStore } from "./stores/shell";
 
 const shell = useShellStore();
 
-const activePane = computed(() =>
-  shell.panes.find((pane) => pane.instanceId === shell.activeInstanceId),
-);
+const activePane = computed(() => shell.panes.find((pane) => pane.uid === shell.activeUid));
 
 const connectionBadge = computed(() => (busState.connected ? "text-bg-success" : "text-bg-danger"));
 const connectionText = computed(() => (busState.connected ? "已连接" : "连接中…"));
+
+function paneLabel(pane: { paneType: string; instanceId: string }): string {
+  return pane.instanceId === "main" ? pane.paneType : `${pane.paneType} ${pane.instanceId}`;
+}
 </script>
 
 <template>
@@ -36,15 +38,32 @@ const connectionText = computed(() => (busState.connected ? "已连接" : "连�
       </div>
     </nav>
     <main class="flex-grow-1 d-flex flex-column overflow-hidden">
-      <header class="d-flex align-items-center border-bottom px-3 py-2">
+      <header class="d-flex align-items-center border-bottom px-3 py-2 gap-2">
         <strong>Viewer</strong>
-        <span class="text-muted small ms-2">plugin workbench</span>
+        <div v-if="shell.panes.length > 0" class="d-flex align-items-center gap-1 ms-2 overflow-auto">
+          <span
+            v-for="pane in shell.panes"
+            :key="pane.uid"
+            class="badge rounded-pill pane-tab"
+            :class="pane.uid === shell.activeUid ? 'text-bg-primary' : 'text-bg-secondary'"
+            role="button"
+            @click="shell.setActive(pane.uid)"
+          >
+            {{ paneLabel(pane) }}
+            <i
+              class="bi bi-x ms-1"
+              role="button"
+              title="关闭"
+              @click.stop="shell.closePane(pane.uid)"
+            ></i>
+          </span>
+        </div>
         <span class="badge ms-auto" :class="connectionBadge">{{ connectionText }}</span>
       </header>
       <div class="flex-grow-1 overflow-hidden position-relative">
         <PluginPaneHost
           v-if="activePane !== undefined"
-          :key="activePane.instanceId"
+          :key="activePane.uid"
           :pane-type="activePane.paneType"
           :instance-id="activePane.instanceId"
         />
@@ -58,3 +77,10 @@ const connectionText = computed(() => (busState.connected ? "已连接" : "连�
     </main>
   </div>
 </template>
+
+<style scoped>
+.pane-tab {
+  cursor: pointer;
+  user-select: none;
+}
+</style>

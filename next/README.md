@@ -19,10 +19,11 @@ reference-only and will be replaced piece by piece.
   suite against a real kernel.
 - `plugins/` — core plugins: `supervisor` (C0), `configstore` (C1),
   `instancestore` (C2), `fileservice` (C3), `gateway` (C4 http-gateway +
-  static assets), `inspector` (bus-inspector debug plugin).
+  static assets), `inspector` (bus-inspector debug plugin), `terminal` (PTY
+  sessions as bus instances, framework A.4).
 - `frontend/` — Vue 3 + Pinia + Bootstrap display layer: thin bootstrap, shell
   (registries + ctx factory + PluginPaneHost), stage-A in-repo plugins at
-  `src/plugins/<id>/` (first: bus-inspector pane).
+  `src/plugins/<id>/` (bus-inspector pane, terminal panel + xterm pane).
 - `tests/` — incremental tests; every module lands with its tests in the same change.
 
 ## Run

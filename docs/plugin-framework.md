@@ -1,0 +1,573 @@
+# Viewer Plugin Framework 设计文档
+
+> 状态：**草案 v0.19**（2026-08-12）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.3 变更：插件 I/O 改为 **slots/emits 固定契约**，bindings 只存 slot→source 映射（删除 action）；**内核纯化为消息系统**，config/instance store/file/gateway 降为 core plugins；传输层定为 **WebSocket 单一栈**。
+> v0.4 变更：§8 扩写为完整的**前端插件机制**（四层结构、instance 挂载流程、两阶段加载：build-time 懒加载 → 运行时 ESM + import map）；前端加载问题从待决议中勾掉。
+> v0.5 变更：新增 **§14 插件包格式与开发流程**（目录包、双 SDK、external 加载、standalone attach 调试模式）；后续章节顺延。
+> v0.6 变更：**动态注册定稿**——后端注册 = `hello` 握手；前端 = 事件驱动运行时加载（§8.6）：订阅 `plugins:list` mailbox → dynamic import → activate。
+> v0.7 变更：**hello 内联完整 manifest**；前端资产改走**内容寻址资产库**（注册时复制/上传，shell 只认 gateway 同源 URL）；远程插件路径预留（§14.6）。
+> v0.8 变更：**前端资产统一走 WS push**：所有插件 hello 后经总线 RPC push bundle 给 gateway（本地/远程同一机制，gateway 不再读插件目录）；内核只路由；资产是 §6.2 by-reference 原则的刻意例外。
+> v0.9 变更：新增**附录 A 现状功能清单与插件映射**——全部 29 个后端模块、53 条路由、10 个 viewer、6 个 sidebar 面板逐一归档到具体插件，含 slots/emits 候选与迁移要点。
+> v0.10 变更：新增 **bus-inspector 调试插件**（附录 A.10）与 broker **monitor 订阅**原语（§5.3）；排期提前至 Phase 2。
+> v0.11 变更：**订阅完全开放**（删除 monitor 特权与 capability 声明）——任何插件可订阅任意 channel 含 RPC 帧与 `>` 全量，无权限层；框架不管插件依赖（作者声明、用户安装）；内核发布插件生命周期事件；broker 定位明确为 **NATS Core + replay window**。
+> v0.12 变更：**砍掉 broker 事件历史**（replay window 引入即废）——broker 只保留 mailbox 最新值；历史归属 source-of-truth 插件（chat DB / terminal PTY ring / bus-inspector ring）；重连重开走 §8.3 "RPC 快照 + live delta"；定位修正为 **NATS Core + retained mailbox**。
+> v0.13 变更：**instance config 更名 instance state**（状态驱动行为，与 C1 全局 configuration 解歧义）；**插件后端语言无关化**——启动 ABI 定为固定 cmdline 契约（可执行 `backend/run --kernel-ws ...`），manifest 删 `process.command`，Python SDK 降为便利而非必需。
+> v0.14 变更：**runtime instance 双模式**（manifest `instancing: shared | per-instance`，chat 选 per-instance——**每 chat 一个进程**，worker 概念删除）；状态改**四层**（manifest / plugin config / instance state / view state）；启动 ABI 加 `--instance-id` + 恢复契约；§16-4（内核重启→存活重连）、§16-9（状态清理由插件负责）敲定。
+> v0.15 变更：**instancing 双模式从框架删除**（v0.14 引入即废）——进程↔instance 映射下沉为插件内部实现；manifest 删 `instancing` 字段、ABI 回到单参数；supervisor 每插件只拉起一个 `backend/run`；插件可自行 spawn 子进程各自 hello（可选 `instance_id` 信息字段）；instance 唯一性/选举/恢复均为插件侧模式，框架零介入。
+> v0.16 变更：**supervisor 下放为 core plugin**（`viewer.supervisor`/C0，内核只剩 broker + 连接注册表 + 唯一 autostart）；**RPC 定为 pub/sub 之上的 inbox 约定**（broker 无 RPC 路由子系统，帧类型收敛为 5 种）；§16-3（错误/超时/cancel 全是约定层）、§16-12（管理 RPC 归 C0）敲定。
+
+> v0.17 变更：**Event vs State 发布准则定稿**（§5.6）——state（当前事实）走 mailbox `set` **完整自包含值**（replace 语义，broker 删除 delta 合并），消费者订阅即得、永不需为此发 RPC；event（追加流）走普通 publish 无留存，历史一律走生产者 source of truth + **显式分页 RPC 快照**。
+
+> v0.18 变更：**协议三件套定稿**——channel 语法（§5.2：冒号分隔、前三层固定 `plugin:instance:message`、`*` 单字段通配 + 前缀隐式全匹配 + `>` 全量）；payload **partial 校验**（envelope/hello 等元信息强校验，payload 本体任意 JSON 不校验）；版本策略定为**不向后兼容**（严格相等 + 一次性迁移，§16-13）。§16-1/16-2/16-13 敲定，16-11（多机）暂缓。
+
+> v0.19 变更：**Phase 0 开工**——§16 已敲定条目全部移出待决议清单（剩 16-5/16-6/16-10 + 16-11 暂缓）；新建 **`docs/plugin-protocol.md`**（线路级协议规范草案 v0.1，未冻结）：5 帧 schema、channel 匹配算法、mailbox 原子交接、RPC inbox 契约、close codes、交换时序图。
+
+## 1. 背景与目标
+
+- Viewer 演进为**微内核插件化 workbench**：
+  - **内核 = 纯消息系统**：broker（publish 路由 + mailbox）+ 连接注册表 + 唯一 autostart（拉起 supervisor 插件）。不含任何功能逻辑与监督职能（§9）。
+  - 一切功能都是**插件**，后端插件运行在**独立进程**；config store、instance store、file service、HTTP gateway 等基础能力也是插件（core plugins，必启）。
+  - 所有交互——插件间、插件与内核服务、前端与后端——**全部经过同一条消息总线、同一种传输（WebSocket）**。
+- 远期愿景：用户所有项目搬进一个 page；系统同时是一套 **event-based 自动化系统**；保留多机通信的扩展路径。
+- 非目标：多用户、权限体系、第三方不可信插件市场、**插件依赖管理**（插件间依赖由作者在插件文档声明、用户自行安装，框架零介入，§14.5）。
+
+## 2. 参照系
+
+| 参照系 | 学什么 |
+|---|---|
+| **Qt signals & slots** | 插件 I/O 模型：slot（固定 handler 的输入点）/ signal（固定输出点）在代码中声明，connect（= binding）是数据（§7） |
+| **Node-RED** | 同上：port + wire；wire 可序列化、可视化 |
+| **i3 / sway** | 微内核 + IPC 的 workbench 形态 |
+| **NATS** | subject 层级、通配、request/reply 语义对照系；远期多机平移目标 |
+| **DBus** | service/signal/method ≈ 我们的 RPC/event/mailbox |
+| **VS Code** | contribution points + `activate(ctx)` |
+| **Home Assistant** | states + events 双轨、trigger-condition-action 自动化 |
+
+**信任模型**：插件均为自写、全信任。进程隔离的目的是存活期管理与架构统一性，不是安全沙箱。
+
+## 3. 总体架构
+
+```
+┌── Kernel 进程（纯消息系统）─────────────────────┐
+│  Broker: publish 路由 + mailbox(retained)       │
+│  连接注册表: plugins:_:list + lifecycle 事件    │
+│  唯一 autostart: 拉起 viewer.supervisor 进程     │
+└───┬─────────────────────────────────────────────┘
+    │ WebSocket，统一帧协议（§5/§6）
+┌───┴──────────────────────────────────────────┐
+│ Core plugins（必启，协议上与普通插件无异）      │
+│  supervisor │ config-store │ instance-store   │
+│  file-service │ http-gateway │ automation(后期)│
+├───────────────────────────────────────────────┤
+│ 功能插件（进程）：chat runtime │ terminal │ git │ …│
+└───────────────────────────────────────────────┘
+    http-gateway │ 一条 WebSocket（多路复用全部 channel）
+┌───┴─────────────────────────────────────────────┐
+│ 浏览器 display 层（本身是插件）                    │
+│ 薄 bootstrap → layout 插件 + 各插件前端模块        │
+│ 按 instance dispatch 消息到对应组件（§8）           │
+└─────────────────────────────────────────────────┘
+```
+
+**消息流闭环示例（terminal）**：PTY 出字符 → terminal 插件从固定 emit 点 `publish terminal:3:output`(delta) → kernel 路由 → gateway（代浏览器订阅）→ WS → 前端 dispatch 到 instance 组件。前端输入反向走 RPC：`request terminal:3:input` → kernel → terminal 插件固定 slot handler。
+
+## 4. Message System：内核自建 broker
+
+协议语义对齐 NATS（subject 层级 + 通配 + request/reply），保留远期平移能力。现在不引入外部 MQ：单用户 localhost 下 asyncio broker 是几百行，envelope 护栏（§5.4）完全自控。
+
+broker 形态概括为 **NATS Core + retained mailbox**：语义对齐 NATS Core（其本身无状态），加一个 NATS Core 没有的 retained mailbox（每 channel 仅存**最新值**）。**broker 不保存事件历史**：mailbox 只有最新一条，event 纯瞬态。历史一律归属 source-of-truth 插件（chat → 插件 DB、terminal → PTY ring buffer、调试 → bus-inspector ring）；断连重开按 §5.6 准则重同步：state 重订阅 mailbox 即得当前值，历史走显式分页 RPC 快照 + live event。NATS JetStream 级别的持久流不需要。
+
+两个一等原则：
+
+- **订阅完全开放**（§5.3）：任何插件可订阅任意 channel pattern，无权限层；跨插件联动是一等用法。
+- **生命周期事件上总线**：内核发布 `plugins:{id}:lifecycle`（activated / deactivated / crashed / restarted；instance 段即插件 id）与 `plugins:_:list` mailbox；gateway 等插件也发布自己的激活事件——统计、记录、user feedback 等消费方随意挂。
+
+## 5. 消息协议
+
+### 5.1 三个原语
+
+| 原语 | 语义 | 用途 |
+|---|---|---|
+| **Event**（pub/sub） | 瞬态，"发生了一件事" | 触发器；`chat:42:turn-completed`、`terminal:3:output` |
+| **Mailbox**（retained state） | 驻留"当前值"，新订阅者立即收到 | `chat:_:active`、`terminal:3:status` |
+| **RPC**（request/reply） | id 关联的请求/响应——**pub/sub 之上的 inbox 约定，非 broker 机制**（§5.3） | 命令式调用、服务查询（`config:_:get` 等）、前端输入 |
+
+### 5.2 Channel 与 envelope
+
+```
+channel:   plugin:instance:message[:group...]
+payload:   一律 JSON
+envelope:  { channel, value, ts, origin: {plugin, instance}, trace_id, depth }
+```
+
+- **固定三层**：field 1 = plugin 名，field 2 = instance 名，field 3 = message 名；第四层起插件内部自由 grouping（如 `gateway:_:assets:push`）。无 instance 概念的插件级 channel 用保留实例名 `_`（`plugins:_:list`、`chat:_:active`）；`_` 前缀为框架保留命名空间（`_inbox:*` = RPC 回复通道）。
+- **通配匹配**：`*` = 单字段通配，可出现在任意层（`chat:*:status`）；pattern 字段数少于 channel 字段数时，**未指定的尾部字段默认全匹配**（前缀规则——`chat:42` 即该 instance 下的全部消息）；`>` = 匹配总线所有流量（零字段前缀的显式写法，bus-inspector 用）。
+- **校验（partial）**：envelope 与 hello（内联 manifest）等协议元信息**强校验**（Pydantic / JSON Schema 皆可，实现自定）；payload 本体 = 任意 JSON **不校验**——slot/emit 声明的 payload 类型为标注性（文档与工具用途），不做运行时强校验。
+
+### 5.3 帧类型
+
+`hello`（插件握手：**内联完整 manifest**、协议版本——**严格相等，不向后兼容**（§16-13）、`managed` 标志、可选 `instance_id` 信息字段——插件 spawn 的子进程标识自己属于哪个 instance，§9）/ `publish` / `set`（mailbox 写）/ `subscribe` / `unsubscribe`（通配）——**仅 5 种**。**心跳复用 WebSocket 内建 ping/pong**（§6）。
+
+**RPC = inbox 约定（broker 无 RPC 路由子系统）**：调用方生成一次性 reply channel `_inbox:{conn}:{corr}` 并订阅 → 请求作为普通 `publish` 发到目标 channel（payload 带 `reply_to` + corr）→ 被叫方把响应作为普通 `publish` 发到 `reply_to` → 调用方按 corr 匹配。超时由调用方 SDK 处理（默认 30s 可配）；取消 = 向目标 channel 发一条带 corr 的取消消息（被叫方自行决定是否响应）；错误分类 = 响应 payload 里的约定字段。SDK 的 `ctx.request()` 封装这全套——`request`/`response`/`error` 不是帧类型。
+
+> hello 必须内联完整 manifest 而非路径引用：standalone attach（§14.4）与远程插件（§14.6）场景下内核一侧没有插件的 plugin.json 文件；supervised 插件同样内联，保证注册路径只有一条。manifest 不含启动命令——入口是约定的可执行 `backend/run`（启动 ABI 见 §14.3）。
+
+**订阅完全开放**：任何插件可订阅任意 channel pattern（含 `>` 全量通配），可见总线上所有流量——含其他插件的 event / mailbox 与 RPC 流量（inbox 约定的 publish，同样可见）。**无权限层、无 capability 声明**（localhost 全信任模型，§1）。防回声由消费者自行处理（如 bus-inspector 客户端过滤自身 origin）。**跨插件联动是一等用法**：插件 A 订阅插件 B 的事件/mailbox 即完成联动；订阅了没人发、request 了没人回，都是正常状态（松耦合）。
+
+### 5.4 自动化三护栏
+
+1. **死循环防护**：`trace_id` + `depth`，同 trace 传播超上限（默认 8）丢弃并告警。
+2. **origin 标记**：每条事件带 `{plugin, instance}` 来源。
+3. **回放风暴**：订阅默认只给当前值（BehaviorSubject 语义）；event 无历史可言，不存在 replay。
+
+### 5.5 Retention 与背压
+
+mailbox 只存**当前值**（无 ring、无历史）；`set` 语义为**整体替换**——producer 每次必须发**完整自包含值**，broker 只做 replace，不做 delta 合并、不做字段级 patch；慢消费者超队列上限丢弃并通知。
+
+### 5.6 Event vs State 发布准则
+
+每条总线消息必须先归类，两类语义不同、取数路径不同：
+
+| | **State（当前事实）** | **Event（追加流）** |
+|---|---|---|
+| 定义 | 有身份、会被覆盖的"现在是什么"：instance status（idle/running/finished）、online 数、cwd、配置当前值 | 瞬态、只追加的"发生了什么"：chat 新消息、terminal 输出、turn 进度 |
+| 发布方式 | mailbox `set` **完整值**（replace） | 普通 `publish`，broker 不留存 |
+| 迟到订阅者 | 订阅即得当前值 + 后续完整替换，**永远不需要为此发 RPC** | 无当前值可言 |
+| 要历史 | 无历史概念（旧值即被覆盖） | 走生产者的 source of truth（插件 DB / PTY ring），**显式分页 RPC 快照**（如 `before_id` + `limit`），之后收 live event |
+| 判别 | 迟到者问"**现在是什么**" → State | 迟到者问"**发生了什么**" → Event |
+
+**禁止**：mailbox 发 partial/delta（破坏自包含，broker 无合并逻辑可依赖）；event payload 依赖上一条才能解读（每条 event 必须独立可解）；消费者"读上一条总线消息"式的隐式取数（要历史必须走显式 RPC 快照）。
+
+## 6. 传输层：WebSocket 单一栈
+
+**决策：plugin↔kernel、gateway↔kernel、browser↔gateway 全部使用 WebSocket。**
+
+| 候选 | 否决/采纳理由 |
+|---|---|
+| stdio | 仅限内核拉起的 1:1 子进程、不可重连、无远程——只留给 ACP 等外部协议的插件内部消化 |
+| UDS/TCP + JSONL | 需自做 stream→帧分包；UDS 无多机路径；TCP 多机可用但与浏览器栈不统一 |
+| HTTP | 无推送、逐次握手开销——仅保留为 gateway 的 by-reference 数据面（§6.2） |
+| **WebSocket** ✅ | 消息帧天然带边界（免分包）；wss+TLS 即多机路径；浏览器原生（本来就必须用）；ping/pong 内建做连接存活检测（lifecycle 事件来源）；TCP 背压内建；Python/JS 库成熟 |
+
+二进制效率不足时升级 MessagePack over WS binary frame，协议语义不变。
+
+### 6.1 前端只剩一条 WebSocket
+
+现状（SSE + 每 terminal 一条 WS + voice WS）收编为**一条多路复用 WS**。gateway 是协议翻译器：浏览器帧 ↔ 内核帧。
+
+### 6.2 控制面走消息，数据面走引用
+
+小 payload（delta、状态、事件）→ 总线；大字节（文件内容、PDF、图片、下载）→ 消息只带引用（path + token），gateway 用 HTTP 流式吐字节。禁止 base64 文件过总线。
+
+**刻意例外：插件前端 bundle**。所有插件 hello 后经总线 RPC（`gateway:_:assets:push`）把 bundle 字节（base64，通常几 MB，每次注册一次）push 给 gateway——本地/远程统一一套机制（§14.3），这是该例外的全部理由。broker 对资产 RPC 放宽帧上限（如 64MB；注意 `websockets` 库默认 `max_size=1MB` 需调），普通流量保持小上限。
+
+## 7. 插件 I/O 契约：slots / emits / bindings
+
+### 7.1 固定契约（代码写死）
+
+插件在 manifest + 代码中固定声明：
+
+- **slots**：输入点。每个 slot 有名字、payload 类型、对应的**固定 handler 函数**。事件到达 slot → 调用该函数，不可配置。
+- **emits**：输出点。固定 channel（可按 instance id 参数化，如 `terminal:{id}:output`）+ payload 类型 + 固定发送位置。
+
+### 7.2 bindings（instance state 里的数据）
+
+**Instance state**（instance 级持久化状态，重开恢复）：同一插件代码 + 同一 slot，不同 instance state → 不同 behavior——状态驱动行为。命名刻意避开 configuration：**configuration 专指插件级配置**（C1 管，改动影响全部 instance，如 chat 插件的 roles/agents 列表），instance state 是单个实例的持久化状态（C2/插件 DB 管，如某 chat 的 roles、cwd、session ids）；bindings 存在 instance state 里。
+
+**状态四层**：manifest（code，静态）/ **plugin config**（插件级，C1）/ **instance state**（instance 级，C2 + 插件 DB）/ view state（前端瞬时，F6）。
+
+**只存 slot → source channel 的映射**，不含 action：
+
+```json
+{ "bindings": { "cwd": "chat:cwd-changed" } }
+```
+
+**CWD 示例**：chat 插件的固定 emit 点在被激活时发出 CWD 事件；fs-tree 插件声明 `cwd` slot（固定 handler `setCwd()`）；binding 把 slot 接到该 source → 事件到达 → `setCwd()` 被调用。
+
+### 7.3 可选行为
+
+某 slot 若允许多种行为，则代码中预定义 A/B/C 处理分支，instance state 选择其一；代码本身不变。
+
+### 7.4 类型校验
+
+slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 source 与 slot 类型匹配，不匹配拒绝并告警。（payload 本体不校验——partial 校验见 §5.2。）
+
+### 7.5 自动化
+
+自动化引擎是一个 core plugin：规则 = 它的 instance state，格式同为 slot binding（source → 引擎的 trigger slot）；condition/action 逻辑在引擎内部固定实现。
+
+## 8. View / 前端插件机制
+
+### 8.1 基本原则
+
+- **plugin view = 前端 JS 模块 + 后端 runtime 进程**。总线上传组件的 state / props / delta / event。
+- **渲染只在浏览器**；后端（含内核）不产生 HTML。前端无进程隔离。
+- **不用 iframe 做插件容器**（破坏布局拖拽/主题/跨插件交互），不用 div 里手动跑 DOM——用 Vue 组件实例作为多实例隔离容器。iframe 仅保留给外部项目页面和不可信 HTML（HtmlViewer 模式）。
+- http-gateway 插件化不影响前端加载：gateway 的职责就是 serve 前端静态资源；浏览器拿到资源后的插件组装是浏览器内部事务。
+
+### 8.2 浏览器内四层
+
+```
+① Bootstrap（极薄静态页）：连单条 WS → 拉 manifest → 加载 layout 插件 → 启动 plugin runtime
+② Display Shell（plugin runtime）：registries（组件/sidebar/commands/设置页）+ ctx 工厂 + 消息 dispatch
+③ Layout 插件（可替换）：递归 split；pane node = instance {type, instanceId, state}
+④ 插件前端模块：每个插件一个目录，导出 activate(ctx)
+```
+
+### 8.3 Instance 挂载生命周期
+
+1. Layout 渲染 pane node `{type, instanceId}`；
+2. Shell 通用 `PluginPaneHost` 查组件注册表 → lazy loader → `defineAsyncComponent` 挂载；
+3. 注入 instance 作用域 ctx：`{bus, instanceState, layout, storage, render, input, instanceId}`；
+4. `activate`：物化 bindings（slot→source 翻译成 `bus.watch`）+ 按 §5.6 分两类取数——state 订阅 mailbox 即得当前值；需要历史时 RPC 拉显式分页快照 + 之后收 live event——然后渲染；
+5. **消息 dispatch**：gateway 推来的消息由 shell bus client 按 channel 路由到该 instance 的 slot handler；
+6. pane 关闭：ctx 记录的所有订阅/定时器**自动注销**，插件不写清理代码也不泄漏。
+
+同一 `type` 可挂 N 个 pane，Vue 组件实例 + 各自 ctx 作用域天然隔离——"plugin 是 class，pane 是 instance"的前端实现。
+
+### 8.4 插件代码加载：两阶段
+
+- **阶段 A（当前）**：插件在 repo 内 `frontend/src/plugins/<id>/index.ts`，Vite `import.meta.glob` 自动发现 + code-split 独立 chunk，首次用到才 `import()` 下载。一次 build 全出、类型检查完整、Vue/Pinia 天然单例。
+- **阶段 B（外部插件，机制见 §14）**：插件以 Vite library mode 构建为独立 ESM bundle，gateway 在 `/plugins/<id>/assets/` serve；shell 注入 **import map** 把 `vue`/`pinia` 等共享依赖钉成 shell 单例（双 Vue 拷贝 = 响应式损坏，这是阶段 B 的核心坑），再 `import(url)` 加载，走同一 `activate(ctx)` 入口。阶段 A 插件目录原样平移，接口不变。
+- **否决**：Module Federation（过重，阶段 B 用 import map 即可）；iframe 插件容器（见 §8.1）。
+
+### 8.5 简单插件的 JSON 声明式渲染
+
+后期可选捷径，非主路径。
+
+### 8.6 动态注册与运行时加载
+
+**后端注册 = `hello` 握手**：插件进程连上内核 WS → 发 `hello`（manifest、版本、slots/emits/channel 前缀）→ 内核校验登记、开始路由；断开 = 注销。内核 config 的插件列表只是自动发现的路径清单，真正的注册永远发生在运行时。
+
+**前端注册 = 事件驱动运行时加载**（无需刷新页面）：
+
+```
+① 内核维护 mailbox: plugins:_:list（全部插件的 manifest/状态）
+② Shell 自 bootstrap 订阅该 mailbox
+③ 新插件 hello 成功 → mailbox 变化 → Shell：
+   1. 取 bundle URL /plugins/<id>/assets/<hash>/frontend.js（gateway 同源）
+   2. import(url)（原生 dynamic import）
+   3. 拿到 definePlugin 模块 → activate(ctx)
+   4. 注册 components/sidebar/commands/设置页进 shell registries
+④ 此后该 type 的 pane 可挂载
+```
+
+**shell 只认 gateway 同源 URL，从不引用插件文件路径**；bundle 字节来自本地 dist 复制还是远程上传（§14.6），对 shell 不可见。
+
+关键规则：
+
+1. **import map 不随注册变化**：共享依赖（vue/pinia/SDK）bootstrap 时一次注入；插件 bundle 只 import 共享依赖 + 相对资产。
+2. **热更新靠 URL hash**：`import()` 对同 URL 返回缓存模块；reload = `deactivate` 旧模块 → 以新 hash URL 重新 `import()` → `activate`。重新 build 后 URL 变化，天然 cache-bust。
+3. **逻辑卸载，物理不卸载**：ES module 无法从浏览器真正移除；`deactivate` 注销订阅与 registry 条目、instance 组件 unmount 或转 placeholder，旧代码留内存无害，页面刷新自清。
+4. **未知 type 的 pane**：插件未加载时 `PluginPaneHost` 显示 placeholder 并排队，插件注册后自动补挂。
+5. **时序**：前端模块加载不等待后端 hello 完成；组件照常挂载，RPC 失败由 ctx 统一重试/"connecting"态；插件状态本身是 mailbox 数据，UI 直接绑定。
+
+静态与动态汇于一处：registries 只有一套，in-repo core plugins bootstrap 静态注册（build-time chunk），external plugins 走本节动态流程，插件作者无感知。
+
+## 9. 进程模型与监督
+
+- **内核只剩 message system + 唯一 autostart**：WS 端点、broker（publish 路由 + mailbox retained）、连接注册表（`plugins:_:list` mailbox + lifecycle 事件，WS 端点的自然副产品）。内核唯一的进程职责：拉起 `viewer.supervisor` 进程并在其崩溃时重生——bootstrap 的最小代价；除此之外内核无任何监督职能。
+- **Boot 序列**：内核起 WS → 拉起 `viewer.supervisor` → supervisor hello → 读插件注册表 → 拉起 C1-C4 与全部功能插件。
+- **所有后端插件 = 独立进程**，由 core plugin `viewer.supervisor` 拉起并监督（`hello` 握手 + 消费 lifecycle 事件/本地 SIGCHLD + 指数退避重启 + crash-loop 熔断 + per-plugin 日志）。supervisor 管别的插件用的全是现成原语——它是"插件可 spawn 子进程"（下条）的第一个用户。插件管理 RPC（install/reload/enable）也归它（§16-12）。
+- **框架不区分 instancing 模式**：进程↔instance 的映射（单进程托管多 instance / 每 instance 一进程 / 混合）是**插件内部实现**，manifest 不声明、supervisor 不感知。supervisor 插件对每个插件只拉起一个 `backend/run`，职责到此为止。
+- **插件可自行 spawn 子进程**（插件侧模式，如 chat 每 chat 一进程）：子进程用继承的 `--kernel-ws` 地址各自连内核、各自 hello（可带可选 `instance_id` 信息字段，用于 `plugins:_:list` 展示与 channel 归属）；内核眼里它们只是更多连接。子进程的生命周期（何时拉起、闲置回收、崩溃重启）由父插件用本地 PID 管理，框架零介入。
+- **instance 唯一性/选举是插件侧模式**：本地 PID/线程管理，或经总线发 command 消息探测（无回应即无同 instance 在跑）——用开放订阅与 RPC 现成原语拼（§5.3）。
+- **worker 概念删除**：chat 插件的 per-chat 子进程即 worker（插件侧实现）——Viewer/浏览器关闭不影响；旧 worker 的 DB 任务队列 + lease + pid handover 整套废弃。
+- **DB 并发**：插件按数据归属自行保证（如每 chat 的行只由对应子进程写，原子 insert 即可）；插件级 DB 用 WAL 支持并发读。
+- **core plugins** 是必启插件（内核启动序列的一部分），协议上与普通插件无异。
+- 跨进程通信**只有一种协议**：内核总线的 WS 帧。既有模式的归宿：
+
+| 旧模式 | 归宿 |
+|---|---|
+| DB 任务队列 + lease | **删除**（per-instance 进程取代 worker，见上） |
+| pid + leadership handover | 沉淀为 supervisor 插件统一策略 |
+| stdio JSON-RPC | 仅用于插件内部对接外部 agent（hermes/codex ACP） |
+| HTTP + SSE | 合并进 http-gateway 插件 + 单条 WS |
+
+- **内核重启：插件进程存活重连**（已定）：内核重启不杀插件进程（尤其不杀跑了一半 turn 的 instance 进程）；插件检测断连后自动重连重 hello。崩溃/关闭语义不变。
+- 外部项目（infod/badminton）= 外部服务，由薄 adapter 插件桥接进总线。
+
+## 10. Services 清单
+
+### 10.1 内核（仅一个 + autostart）
+
+| # | Service |
+|---|---|
+| K1 | Message Bus（§5：publish 路由 + mailbox + 护栏 + 连接注册表）+ 唯一 autostart（拉起 viewer.supervisor，§9） |
+
+### 10.2 Core plugins（必启，经总线 RPC 消费）
+
+| # | Plugin | 职责 |
+|---|---|---|
+| C0 | viewer.supervisor | 拉起/心跳/重启/熔断/日志全部插件进程；插件管理 RPC（install/reload/enable）归属（§9） |
+| C1 | config-store | `config:_:get/set` 等 RPC channel；`plugins.<id>.*` namespace |
+| C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件 |
+| C3 | file-service | resolve/read/hash/raw 引用签发（收紧程度待决议 §16-5） |
+| C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 |
+| C5 | automation-engine | 后期（§7.5） |
+
+### 10.3 前端 display 层（插件前端模块 `activate(ctx)`）
+
+| # | Service |
+|---|---|
+| F0 | Bus client（单 WS 上的 subscribe/request/set） |
+| F1 | Registry: 组件（instance.type → component） |
+| F2 | Registry: sidebar tools / commands / 设置页 sections |
+| F3 | Layout 插件 API（openPane/split/close；layout 自身可替换） |
+| F4 | Input service（VoiceTextarea + voice 封装） |
+| F5 | Render service（markdown/highlight/KaTeX/Mermaid） |
+| F6 | Storage（namespaced localStorage） |
+
+### 10.4 跨插件调用（三种，按耦合度）
+
+1. **Bus pub/sub + slot binding**（最松）；2. **RPC**（中，只认 channel 名）；3. **Plugin API export**（最紧，manifest 声明依赖，经 RPC 调对方服务方法）。
+
+## 11. 插件契约（manifest）
+
+```json
+{
+  "id": "viewer.files",
+  "version": "0.1.0",
+  "process":  { "restart": "on-failure" },
+  "frontend": { "entry": "plugins/files/index.ts" },
+  "io": {
+    "slots": [{ "name": "cwd", "type": "string", "description": "设置当前工作目录" }],
+    "emits": [{ "channel": "files:cwd-changed", "type": "string" }]
+  },
+  "contributes": {
+    "components":   [{ "type": "file-tree", "component": "FilesPanel" }],
+    "sidebarTools": [{ "id": "files", "icon": "bi-folder", "title": "Files" }],
+    "commands":     [{ "id": "files.refresh", "title": "Files: Refresh" }],
+    "fileTypes":    [{ "extensions": [".md"], "preview": "markdown" }],
+    "configSection": { "title": "Files", "schema": {} }
+  },
+  "dependencies": []
+}
+```
+
+`hello` 握手时内核校验 channel 前缀归属（插件只能 publish/subscribe 合法前缀）。
+
+## 12. 既有代码迁移映射
+
+| 现状 | 归宿 |
+|---|---|
+| `main.py` 53 路由 | 大部分进 http-gateway 插件（代理总线）；file/config 进对应 core plugin |
+| `events.py` SSE hub | 内核 broker + gateway 单 WS |
+| `files.py read_config/write_config` | config-store core plugin |
+| `terminals.py` | terminal 插件进程 |
+| `super_workspace_*.py` runtime/worker | chat runtime 插件进程；handover 经验沉淀为 supervisor 策略 |
+| `turn_summary.py` / `llm_client.py` | chat runtime 插件内部，或抽 agent service（§16-6） |
+| `viewers/*.vue`、`stores/*`、`VoiceTextarea` | 前端 display 层插件模块与服务 |
+| `paneToolbar.ts` | F 层 registry 模式原型，推广 |
+
+## 13. 分期路线
+
+| Phase | 内容 | 风险 |
+|---|---|---|
+| **0** | **协议规范冻结**：envelope/帧/RPC 错误分类/slots-emits 契约写成独立规范 + 类型定义 | 低，最关键 |
+| **1** | 内核 broker + viewer.supervisor；config-store / instance-store / file-service core plugins；http-gateway + 单 WS；前端 bus client | 中 |
+| **2** | **terminal 端到端**：第一个功能进程插件，PTY delta 过总线、slot binding 联通、前端组件渲染 | 中高（链路首验） |
+| **3** | file viewers 前端模块 + fileTypes 聚合；by-reference 数据面 | 中 |
+| **4** | chat runtime 插件（DB 迁移、turn summary、Hindsight）；chat pane 前端模块 | 高 |
+| **5** | layout 插件化；automation-engine（常驻 binding 物化） | 中 |
+| **6** | 外部项目 adapter；JSON 声明式 view（可选）；多机/NATS 平移（可选） | 按需 |
+
+## 14. 插件包格式与开发流程
+
+### 14.1 插件包 = 一个目录（通常就是一个 git repo）
+
+```
+my-plugin/
+├── plugin.json          # manifest（§11）
+├── backend/             # 后端进程代码，语言不限；入口 = 可执行 backend/run
+├── requirements.txt     # Python 插件用（自带 uv venv）；其他语言换各自的依赖声明
+├── frontend/            # Vue SFC + TS 源码
+└── dist/                # 构建产物 frontend.js + sourcemap，经 WS push 给 gateway（§14.3）
+```
+
+### 14.2 SDK 两个半边
+
+- **后端 `viewer-plugin-sdk`（Python）**：`Plugin` 基类 + `@slot` 装饰器 + `emit/request/set` 助手；`plugin.run()` 解析固定 cmdline 参数（§14.3 启动 ABI）连内核、完成 `hello`、分发帧到 slot handler。**SDK 是便利不是必需**——任何语言只要能连 WS、实现 §5 协议即可（§14.3）。
+- **前端 `@viewer/plugin-sdk`（TS）**：`definePlugin({ components, activate, deactivate })` + ctx 类型；Vite library mode 构建，`vue`/`pinia`/SDK externalize。
+- `viewer-plugin-template` 模板 repo 作为起点，含构建脚本与示例 slot/emit。
+
+### 14.3 加载与安装（external plugin）
+
+- 内核 config 维护插件注册表：条目指向 `~/.view/plugins/<id>/`（安装态）或**任意外部路径**（开发态，直接指向工作目录）。
+- **启动 ABI（固定 cmdline 契约，语言无关）**：插件后端入口 = 可执行文件 `backend/run`（Python entry / shell 脚本 / 编译二进制皆可）；supervisor 插件用固定参数拉起：`backend/run --kernel-ws ws://127.0.0.1:<port>`，参数集仅此一项、全框架统一，后续按需追加遇到再加。插件 spawn 自己子进程时传什么参数（如 chat 插件给 per-chat 子进程传 `--instance-id`）是**插件内部 ABI**，框架不约定（§9）。supervisor 插件与被拉起的插件进程之间只约定这一组参数 + §5 协议。
+- **前端资产管道（WS push + 内容寻址）**：所有插件（本地 supervised / standalone attach / 远程）hello 后经总线 RPC `gateway:_:assets:push` 主动 push 自己的 bundle 字节（§6.2 例外）；**gateway 不读任何插件目录**。gateway 存进内容寻址资产库 `~/.view/plugin-assets/<id>/<content-hash>/`，并维护 **`plugins:_:assets` mailbox**（id → url/hash）；shell 拿到的 URL 是 `/plugins/<id>/assets/<hash>/frontend.js`（与内核的 `plugins:_:list` 状态合并使用）。URL hash = 内容 hash，热更新 cache-bust 自动成立。SDK 在 hello 后自动 push，dev watch 模式下 dist 变化自动重推。
+- 安装/卸载/启用/禁用/重载：经总线 RPC（如 `plugins:_:install/reload`）。
+- In-repo core plugins 走 §8.4 阶段 A，不经此机制。
+
+### 14.4 开发流程
+
+1. clone 模板；`uv venv && uv pip install -r requirements.txt`；`npm install`。
+2. 后端两种模式随时切换：
+   - **standalone attach（调试首选）**：`backend/run --kernel-ws ws://127.0.0.1:<port>`（参数与 supervisor 插件注入的完全相同，只是手动传）——插件是 IDE 里的普通进程，pdb/py-spy/日志随便用，改完重启即可。WS（而非 stdio）传输使此模式成立。
+   - **supervised**：路径注册给 supervisor 插件，由它拉起，崩溃自动重启，stdout/stderr 落 per-plugin 日志。
+3. 前端：`npm run dev`（`vite build --watch` + sourcemap）→ 浏览器刷新对应 pane；Vue devtools 正常可用。
+4. 联调：浏览器开插件 pane，全链路（组件 → WS → kernel → 插件进程）实时可见；消息用 bus-inspector 插件（A.10）排查。
+5. 测试：SDK 提供 mock kernel/bus 做单元测试；e2e 用隔离实例模式。
+
+### 14.5 版本与依赖
+
+- 插件自带 venv（uv 创建），依赖与主项目完全隔离。
+- SDK 版本与内核协议版本在 `hello` 握手校验，不兼容拒绝并提示。
+- **插件间依赖不由框架管理**：作者在插件文档中声明依赖（如"消费 X 插件的 Y channel"），用户自行安装启用；开放订阅（§5.3）下依赖缺失只是"没有消息进来"，不会报错。
+- 插件更新 = git pull + 重建前端 + `plugins:reload`。
+
+### 14.6 远程插件（预留，延后实现）
+
+总线层与资产层均已天然支持（wss；资产 WS push 与本地同一机制，§14.3）。相对本地插件的全部增量只剩：
+
+1. **认证**：wss 握手带 token；
+2. **`managed: false`**：hello 标志；远程插件自行启动，内核不 spawn、不重启，只做心跳观察与断连注销。
+
+复杂度评估：低，不动架构。内核间 federation（多机多内核）是更大的变体，见 §16-11。
+
+## 15. 风险与对策
+
+1. **一切异步化的调试成本**——trace_id 全链路 + bus-inspector 插件（A.10）。
+2. **协议一次要设计对**——Phase 0 独立规范文档，先冻结再写码。
+3. **分布式状态排错难**——mailbox "当前状态总览"调试视图（经 gateway 展示）。
+4. **工程量大**——每 Phase 端到端可跑；旧系统并行存活直到对应 Phase 切换（strangler 模式）。
+5. **自动化死循环/风暴**——§5.4 三护栏第一天内置。
+6. **范围控制**——框架只长当前插件需要的能力。
+
+## 16. 待决议问题
+
+> 已敲定条目已全部移出本节（决议正文见对应章节，历史见 §17）。
+
+5. file-service 收紧程度：插件经它读写文件（可控、可审计）vs 插件直接摸文件系统（现状、自由）。
+6. Agent service：core plugin 还是 chat runtime 插件的内部能力。
+10. 插件前端 TS 类型与后端 envelope 类型的单一来源（schema 生成？）。
+11. 多机场景的内互联结（**暂缓**，v0.18）：当前只考虑单机 localhost；多机 federation 暂不考虑，NATS 平移路径保留（§4），触发条件以后再说。
+
+## 17. 修订记录
+
+- **v0.1**（2026-08-12）：初版。三层结构、Event+Mailbox 双原语、"逻辑隔离默认"进程模型。
+- **v0.2**（2026-08-12）：微内核化；RPC 升为一等原语；传输统一（单 WS）；by-reference 数据面；渲染只在浏览器、view 为前端模块+后端 runtime。
+- **v0.3**（2026-08-12）：插件 I/O 固定契约（slots/emits，bindings 只存 slot→source 映射，删除 action）；内核纯化（config/instance-store/file/gateway 降为 core plugins，内核仅 broker+supervisor）；传输层定为 WebSocket 单一栈；自动化引擎定位为 core plugin。
+- **v0.4**（2026-08-12）：前端插件机制定稿——浏览器内四层、instance 挂载生命周期（PluginPaneHost + 懒加载组件 + instance ctx + 自动清理）、两阶段加载（A: build-time `import.meta.glob` + code-split 懒加载；B: 运行时 ESM + import map 共享依赖单例）；否决 Module Federation 与 iframe 插件容器。
+- **v0.5**（2026-08-12）：新增 §14 插件包格式与开发流程——目录包（plugin.json + backend + frontend + dist）、双 SDK（Python/TS）+ 模板 repo、external 加载（注册表路径 + gateway 资产挂载 + import map）、standalone attach 调试模式（WS 传输的红利）、插件自 venv 与 hello 版本校验。
+- **v0.6**（2026-08-12）：动态注册定稿——后端注册即 `hello` 握手（断开即注销）；前端事件驱动运行时加载（§8.6）：订阅 `plugins:list` mailbox → `import(url)` → `activate(ctx)`；热更新靠 bundle URL hash；逻辑卸载物理不卸载；未知 type pane 排队补挂。
+- **v0.7**（2026-08-12）：`hello` 内联完整 manifest（standalone attach / 远程场景下内核无 plugin.json 文件，注册路径统一为一条）；前端资产改走内容寻址资产库（注册时复制进 `~/.view/plugin-assets/<id>/<hash>/`，shell 只认 gateway 同源 URL）；新增 §14.6 远程插件预留（增量仅 wss 认证 + 资产上传 + `managed:false`）。
+- **v0.8**（2026-08-12）：前端资产统一为 **WS push**——所有插件 hello 后经总线 RPC `gateway:assets:push` 主动 push bundle（base64，几 MB 一次），gateway 不读插件目录，本地/远程/standalone 同一机制；内核只路由不碰资产；资产定为 §6.2 by-reference 原则的刻意例外（broker 对资产 RPC 放宽帧上限）；gateway 维护 `plugins:assets` mailbox；远程插件增量缩减为认证 + `managed:false` 两项。
+- **v0.9**（2026-08-12）：新增附录 A 现状功能清单与插件映射（迁移作战地图）。
+- **v0.10**（2026-08-12）：新增 bus-inspector 调试插件（A.10）：broker **monitor 订阅**特权原语（§5.3，manifest capability `bus:monitor`，捕获含 RPC 在内的全部帧、排除自身防回声）、默认 5000 条 ring buffer、filter（channel glob/类型/origin/trace/payload 文本）、暂停不清流、不自动滚动、超量降采样；排期 Phase 2 与 terminal 同批。
+- **v0.11**（2026-08-12）：**订阅完全开放**——删除 monitor 特权与 `bus:monitor` capability（v0.10 引入即废），任何插件可订阅任意 channel pattern 含 RPC 帧与 `>` 全量，无权限层；防回声改消费者客户端过滤；跨插件联动定为一等用法；框架不做插件依赖管理（§2 non-goal + §14.5，作者声明用户安装）；内核发布插件生命周期事件 `plugins:{id}:lifecycle`（§4.1）；broker 定位明确为 **NATS Core + replay window**（每 channel/mailbox 保留有限历史的有状态便利，不上 JetStream 级持久流）。
+- **v0.12**（2026-08-12）：**砍掉 broker 事件历史**（replay window 引入即废）——逐 use case 检查后每个场景都有更好归属：迟到状态→mailbox 最新值；重连/重开→§8.3 "RPC 快照 + live delta"；chat 历史→插件 DB；terminal 回滚→PTY ring；调试→bus-inspector ring。broker 退回极简（路由 + mailbox 最新值表），无 retention 策略/配置面/内存增长；定位修正为 **NATS Core + retained mailbox**；§16-7 待决议勾掉。
+- **v0.13**（2026-08-12）：**instance config → instance state**：状态驱动行为（同代码同 slot，不同 state 不同 behavior）；configuration 专指 C1 全局配置，三层定为 manifest / instance state（C2）/ view state（F6）。**插件后端语言无关化**：启动 ABI = 固定 cmdline 契约——入口为可执行 `backend/run`，supervisor 注入固定参数 `--kernel-ws ws://...`（当前仅此一项，按需再扩）；manifest 删 `process.command`（§11）；Python SDK 降为便利非必需，任何语言实现 §5 协议即可；standalone attach 用同一组参数手动传（§14.4）。
+- **v0.14**（2026-08-12）：**runtime instancing 双模式**（§9，manifest `process.instancing`）：`shared`（默认，轻量插件单进程托管）/ `per-instance`（每 runtime instance 一进程；chat 采用——**每 chat 一进程**，崩溃隔离到 chat 粒度，channel 天然 per-process）。**worker 概念删除**：instance 进程即 worker（按需拉起、turn 进行中永不闲置杀、完成且闲置超时回收、Viewer 关闭不影响）；旧 DB 任务队列 + lease + pid handover 整套废弃；DB 并发按数据归属解决（每 instance 的数据只由自己的进程写）。状态三层改**四层**：manifest / plugin config（C1，插件级）/ instance state（C2+插件 DB，instance 级）/ view state（F6）。启动 ABI 加 `--instance-id` + **恢复契约**（凭 id 加载 state 恢复 cwd/sessions/续跑 turn）；cmdline 参数全框架统一。§16-4 定**存活重连**、§16-9 定**插件负责状态清理**——勾掉两条待决议。
+- **v0.15**（2026-08-12）：**instancing 双模式从框架删除**（v0.14 引入即废）——框架不区分进程↔instance 映射，下沉为插件内部实现：supervisor 每插件只拉起一个 `backend/run`（ABI 回到单参数 `--kernel-ws`）；manifest 删 `instancing` 字段；插件可自行 spawn 子进程各自连内核 hello（hello 加可选 `instance_id` 信息字段，§5.3），子进程生命周期/传参/恢复均为插件内部 ABI；instance 唯一性/选举为插件侧模式（本地 PID 管理或总线 command 探测）；worker 删除、状态四层、§16-4/§16-9 结论保留（重新归类为 chat 插件内部设计）。
+- **v0.16**（2026-08-12）：**supervisor 下放为 core plugin** `viewer.supervisor`（C0）——内核只剩 WS 端点 + broker（publish 路由 + mailbox retained）+ 连接注册表（`plugins:list` + lifecycle 事件）+ 唯一 autostart（拉起并重生 supervisor 一个进程，bootstrap 最小代价）；boot 序列：内核 → supervisor → C1-C4 + 功能插件；插件管理 RPC 归属 C0（§16-12 敲定）。**RPC 定为 inbox 约定**（§5.3）：broker 无 RPC 路由子系统，请求/响应/取消/超时/错误全是 publish 之上的约定（`_inbox:{conn}:{corr}` reply channel），帧类型收敛为 5 种（hello/publish/set/subscribe/unsubscribe）；§16-3 敲定（超时 client-side 30s 可配、错误=payload 约定字段、cancel=带 corr 普通消息）。K2 从内核 Services 清单删除，内核只剩 K1。
+
+- **v0.17**（2026-08-12）：**Event vs State 发布准则定稿**（§5.6）——每条总线消息先归类：State（"现在是什么"：instance status / online / cwd / 配置当前值）走 mailbox `set` **完整自包含值**，订阅即得当前值 + 后续替换，消费者永不需为 state 发 RPC；Event（"发生了什么"：chat 消息 / terminal 输出 / turn 进度）走普通 publish 无留存，历史一律走生产者 source of truth + **显式分页 RPC 快照**（`before_id`+`limit`）+ live event。三条禁止：mailbox 发 partial/delta；event 依赖上一条才能解读；"读上一条总线消息"式隐式取数。§5.5 `set` 语义定为整体替换，**broker 删除 delta 合并**（replace 是唯一动作，broker 再简化）；§4 重同步表述、§8.3 挂载取数、附录 A.4 terminal 存储同步更新。
+- **v0.18**（2026-08-12）：**协议三件套定稿**——§16-1 channel 语法（§5.2）：冒号分隔、**前三层语义固定** `plugin:instance:message`、第四层起自由 grouping；`*` 单字段通配（任意层）+ **pattern 前缀隐式全匹配**（pattern 字段数少于 channel 时尾部默认全匹配）+ `>` 匹配总线全部；插件级无 instance 的 channel 用保留实例名 `_`，`_` 前缀为框架保留命名空间（`_inbox:*`）；正文 channel 写法统一（`plugins:_:list`、`plugins:_:assets`、`config:_:get/set`、`gateway:_:assets:push`、`chat:_:active` 等）。§16-2 payload **partial 校验**：envelope/hello（内联 manifest）等协议元信息强校验（Pydantic / JSON Schema 皆可），payload 本体任意 JSON 不校验，slot/emit 类型声明为标注性。§16-3 补充确认：错误不需要专门 channel/订阅机制。§16-11 多机**暂缓**（当前只考虑单机 localhost）。§16-13 版本策略定**不向后兼容**：hello 协议版本严格相等、不等即拒连；schema/存储变更走一次性迁移，丢了重来可接受。待决议剩余 3 条（16-5 file-service 收紧、16-6 agent service 归属、16-10 类型单一来源）。
+- **v0.19**（2026-08-12）：**Phase 0 开工**——§16 待决议清单清理（已敲定条目移出，剩 16-5 file-service 收紧 / 16-6 agent service 归属 / 16-10 类型单一来源 + 16-11 多机暂缓）；新建 **`docs/plugin-protocol.md`** 线路级协议规范草案 v0.1（**未冻结**，评审后冻结再写码）：连接拓扑、5 帧 JSON schema（hello 含 client 生成 `conn`、成功无 ack、失败用 WS close code 4001/4002/4003/4009）、channel 匹配算法形式化（前缀隐式全匹配）、mailbox replace-only + 订阅原子交接、RPC inbox payload 契约（`_reply_to`/`_corr`/`ok`/`error`/`_cancel`、30s 超时）、`_conn:{conn}:error` 协议错误通知 mailbox、背压（出站队列 1000 丢新帧）、心跳 ping/pong 30s×2、五张组件交换时序图。
+
+---
+
+## 附录 A：现状功能清单与插件映射（迁移作战地图）
+
+> 基于 2026-08-12 代码盘点：`backend/app/` 29 个模块、`main.py` 53 条路由、前端 10 个 viewer / 6 个 sidebar 面板 / 9 个 store。**每一个现状功能都有且只有一个归宿。**
+
+### A.1 总览
+
+| 插件 | 性质 | 现状来源（后端） | 现状来源（前端） | 迁移 Phase |
+|---|---|---|---|---|
+| 内核 K1 + viewer.supervisor（C0） | 内核 + core plugin | `events.py`(概念)、`restart.py`、`main.py` 的 health/admin | — | 1 |
+| C1 config-store | core | `config.py`、`models.py` | `ConfigPanel.vue`（壳+sections） | 1 |
+| C2 instance-store | core | （新建） | `utils/storage.ts`、`stores/layout.ts` 持久化逻辑 | 1 |
+| C3 file-service | core | `files.py`（resolve/read/hash/raw）、`storage.py`、`watcher.py` | — | 1 |
+| C4 http-gateway | core | `main.py`（静态资源）、`api/events.ts` 对端 | `api/client.ts`、`api/events.ts` | 1 |
+| viewer.terminal | 功能 | `terminals.py`、`process_registry.py` | `TerminalViewer`、`sidebar/TerminalsPanel`、`stores/terminals.ts` | 2 |
+| viewer.bus-inspector | 功能（调试） | **新增**（broker monitor 订阅 + ring buffer） | **新增**（消息表 + filter bar） | 2 |
+| viewer.files | 功能 | `files.py`（preview_kind/tree/content/upload/delete/site/resolve-link） | 见 A.5 | 3 |
+| viewer.git | 功能 | `git_diff.py` | `sidebar/GitPanel`、`DiffViewer` | 3 |
+| viewer.chat | 功能 | super_workspace 全家 + agent runtimes（见 A.7） | 见 A.7 | 4 |
+| viewer.voice | 功能(候选 core) | `voice.py` | `VoiceTextarea`、`VoiceInputButton`、`stores/voice.ts` | 2-4 |
+| layout/shell | display 层 | — | `Workspace.vue`、`SplitNode`、`stores/layout.ts`、`stores/paneToolbar.ts`、`ViewerPane→PluginPaneHost` | 1（壳）/ 5（插件化） |
+| logging/共享 | 库 | `logging.py`、`identity.py` | `utils/paths.ts` | 各 Phase 随用 |
+
+### A.2 内核自带（不插件化）
+
+| 现状 | 归宿 |
+|---|---|
+| `GET /api/health`、`POST /api/admin/restart|stop`（`restart.py`） | 内核/viewer.supervisor 的 system RPC（`system:health/restart/stop`），gateway 转发 |
+| `events.py` SSE hub | 概念并入 K1 broker；`/api/events` 由 gateway 单 WS 取代 |
+| `logging.py` | 内核与 SDK 共享日志库 |
+
+### A.3 Core plugins 详单
+
+- **C0 viewer.supervisor**：`restart.py` 的进程管理逻辑 + `main.py` 的插件进程拉起职责 → 独立 core plugin；内核只保留 autostart 它一个进程的逻辑（§9）。
+- **C1 config-store**：`config.py` + `models.py`（AppConfig schema）；路由 `GET/PUT /api/config`、`GET/POST /api/config/llm-provider-states(/clear)` → RPC `config:_:get/set` 等。前端 `ConfigPanel.vue` 拆为设置壳 + per-plugin section 贡献点（F2）。
+- **C2 instance-store**：新建（§7.2 bindings、instance state 落点）；同时接管 `viewer.layout.v1` 的服务端持久化（若需要跨设备）——view state 仍走 F6 localStorage。
+- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
+- **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。
+
+### A.4 viewer.terminal（Phase 2，链路首验）
+
+- 后端：`terminals.py` + `process_registry.py`；路由 `/api/terminals`（CRUD/terminate）+ `/api/terminals/{id}/ws`。
+- Instance：每 terminal 一个 instance；**runtime = PTY session（插件进程内），view = TerminalViewer pane**——view/runtime 分离样板（pane 关闭 PTY 不死，重开 reconnect）。
+- slots：`input`（键入）、`resize`；emits：`terminal:{id}:output`（字节流 event）、`terminal:{id}:status`（mailbox）。
+- 存储：terminal 元数据 → instance-store；PTY 内容 → ring buffer（插件内存，RPC 快照源）；output 走 event（§5.6，不经 mailbox）。
+- 迁移要点：per-terminal WS 消失，output 走总线 event；PTY 高频输出验证 §5.5 背压（慢消费者丢弃）策略的第一个真实场景。
+
+### A.5 viewer.files（Phase 3）
+
+- 后端：`files.py` 其余部分；路由 `/api/tree`、`/api/file/meta|content|text-lines|upload|delete|raw|site|resolve-link|resolve-directory-link`。
+- 前端：`sidebar/FilesPanel`、`FileSidebar.vue`、`FileTree.vue`、`DirectoryPicker.vue`；**8 个 viewer**：Text / LargeText / Markdown / Csv / Image / Pdf / Html / Unsupported；`stores/files.ts`（目录+外观+主题部分）；`utils/scrollMemory.ts`。
+- Instance：file-tree（sidebar 常驻 instance）+ 每预览 pane 一个 instance（type 按 preview kind）。
+- slots：`cwd`（§7.2 的 CWD 联动示例）、`open-file`；emits：`files:file-opened`、`files:cwd-changed`。
+- 迁移要点：① `preview_kind()` 硬编码映射 → **fileTypes 贡献点**（每 viewer 声明 extensions，registry 聚合）；② `markdownRender.ts`（highlight/KaTeX/Mermaid）上提为 F5 render service 供所有插件复用；③ HtmlViewer 的 `/api/file/site` 代理 + activation shield 模式保留；④ `stores/files.ts` god-store 拆分是本子项的主要工作量。
+
+### A.6 viewer.git（Phase 3）
+
+- 后端：`git_diff.py`；路由 `/api/git/status|diff|stage|revert|commit|push`（6 条）→ 全部变 RPC。
+- 前端：`sidebar/GitPanel.vue`、`DiffViewer.vue`（同时注册为 `.diff/.patch` 的 fileType viewer）。
+- Instance：git panel（per repo/cwd）+ diff pane。
+- slots：`refresh`、`cwd`；emits：`git:status-changed`（配合 C3 watcher）。
+
+### A.7 viewer.chat（Super Workspace，Phase 4，最重）
+
+- 后端（13 个模块）：`super_workspace.py` / `_runtime.py` / `_worker.py` / `_memory.py`、`agent_history.py`、`turn_summary.py`、`llm_client.py`、`inference.py`、`identity.py`、`driver_catalog.py`、`ws_clients.py`，及 ACP 层 `acp_runtime.py` / `acp_sessions.py` / `hermes_acp.py` / `hermes_sessions.py` / `codex_app_server*.py` / `opencode_*.py`。
+- 路由：`/api/super-workspace/*`（~20 条：workspace/chats/roles/routing/runs/events/dispatch/stop）+ `/api/agents/providers|inference-targets` + `/internal/super-workspace/notify` → 全部变 RPC/总线事件。
+- 前端：`SuperWorkspacePage.vue`、`SuperWorkspaceChatPane.vue`、`sidebar/ChatsPanel|RolesPanel|RoutesPanel`、`stores/agents|superChatComposer|superChatDispatch|inputSessions.ts`。
+- Instance：每 chat 一个 instance；进程映射为插件侧选择（§9）——chat 插件内部 spawn per-chat 子进程（本地 PID 管理，子进程 hello 带 `instance_id`），runtime = agent session + dispatch；roles/routing/chat-list 面板 = plugin-level 进程的配置视图（plugin config：roles/agents 列表，C1；instance state：某 chat 的 roles/cwd/session ids，C2+插件 DB）。
+- slots：`send-message`、`stop`；emits：`chat:{id}:turn-completed`、`chat:{id}:message`、`chat:_:active`（mailbox，CWD 联动的 source）。
+- 存储：`agent-history.sqlite3` → **插件自管 DB**（chat_id 行级作用域，既有决策；per-chat 子进程只写自己 chat 的行，原子 insert 无竞争；WAL 支持并发读）；turn summaries 同库；Hindsight = 外部服务经 bus 消费。
+- 迁移要点：**worker 整套删除**（DB 任务队列 + lease + pid handover 废弃，§9）——per-chat 子进程即 worker（插件侧实现），Viewer 关闭 turn 照跑，子进程启动参数与恢复逻辑是 chat 插件内部 ABI；ACP stdio 降级为子进程内部实现；对外只暴露总线契约。session 三元组复用、turn summary 预算制注入等既有行为不变，只换通信外壳。
+
+### A.8 viewer.voice / 输入服务
+
+- 后端：`voice.py`（`/api/voice/ws`）→ 音频采集/落盘/转写链路；候选定位为 core plugin（被 chat、terminal 等复用）。
+- 前端：`VoiceTextarea.vue`、`VoiceInputButton.vue`、`stores/voice.ts` → **F4 input service**（display 层共享），各插件经 ctx.input 使用。
+- 外部依赖：Ollama / Hindsight voice gateway 维持外部服务。
+
+### A.9 display 层（layout/shell）
+
+- `Workspace.vue`、`SplitNode.vue`、`stores/layout.ts` → **layout 插件**（Phase 1 先作为壳内建，Phase 5 完成插件化、可替换）。
+- `ViewerPane.vue` → 通用 `PluginPaneHost`（§8.3）；15 行 v-else-if viewer 选择链消亡，改查 registry。
+- `stores/paneToolbar.ts` → F2 registry 直接沿用其模式。
+- `ConfigPanel.vue` → 设置壳（shell）+ per-plugin config section 贡献点。
+
+### A.10 viewer.bus-inspector（Phase 2，调试工具，新增）
+
+> 微内核下的刚需调试工具（§15 风险对策第 1 条"broker ring dump 查询"的产品化）。无现状代码对应。
+
+- 后端：**开放订阅 `>`**（§5.3，无特权）捕获总线全部帧（event / mailbox set / RPC request+response / error），客户端过滤自身 origin 防回声；插件内维护 **ring buffer 默认 5000 条**（instance state 可调）。
+- slots：`set-filter`（channel glob / 帧类型 / origin / trace_id / payload 文本）、`pause`、`resume`、`clear`；emits：`bus-inspector:{id}:matches`（命中帧流）、`bus-inspector:{id}:stats`（mailbox：速率、dropped 计数）。
+- 前端 pane：filter bar + 实时表格（ts/type/channel/origin/trace/size，行展开 payload JSON）+ pause/resume/clear；**新消息追加不自动滚动**，提供"跳到最新"按钮。
+- 防刷屏：瞬时流量超阈值时降采样并显示 dropped 计数；自身帧客户端过滤（§5.3）。
+- 排期理由：Phase 3 起每个插件的联调都靠它看消息，故与 terminal 同批落地。
+
+### A.11 完整性校验
+
+- 后端 29 模块：上表覆盖 28；`__init__.py` 不计。
+- 53 条路由：全部归入 K（3）/ C1（4）/ C3（0，库化）/ C4（静态+WS）/ files（12）/ git（6）/ terminal（6）/ chat（~22）/ voice（1）。
+- 前端 10 viewer / 6 sidebar panel / 9 store / 2 api / 4 util：全部归档（inputSessions 归 chat、scrollMemory 归 files、paths/storage 归共享与 F6）。
+
+---
+
+*评审约定：每节讨论定稿后直接修订本文件并更新版本；§16 问题敲定一条勾一条。*

@@ -2,6 +2,8 @@
 
 This document is the working project map for future agents. Read it before changing code so you can find the right file quickly and understand how frontend, backend, terminals, file watching, and preview rendering fit together.
 
+Design docs for the plugin-framework migration (target architecture, not yet implemented): `docs/plugin-framework.md` (architecture decisions, authoritative) and `docs/plugin-protocol.md` (wire-level plugin protocol spec, Phase 0).
+
 ## Purpose
 
 Local Live File Viewer is a private-network file browser and preview app. A FastAPI backend exposes file, Git, terminal, voice, and Super Workspace APIs and serves the built Vue frontend. `VIEWER_ROOT` is the fixed server-side filesystem boundary; every chat has a required relative Chat Root that supplies the actual working context for Files, Git, terminals, Codex, and Hermes. The application has one fixed persistence owner, `dailing`, and no user-profile selection layer. The Vue app provides chats, roles, recursive split panes, file viewers, live refresh, and browser-local layout persistence.

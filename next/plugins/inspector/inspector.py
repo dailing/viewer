@@ -34,6 +34,11 @@ MANIFEST: dict[str, Any] = {
 MATCHES_CHANNEL = "bus-inspector:_:matches"
 STATS_CHANNEL = "bus-inspector:_:stats"
 
+# Snapshot replies are byte-budgeted (serialized JSON, newest-first) so they
+# can never exceed the kernel's 1 MiB frame limit — an oversized reply is
+# rejected by the kernel and the RPC caller hangs until timeout.
+SNAPSHOT_BUDGET = 800_000
+
 
 class BusInspectorPlugin(Plugin):
     manifest = MANIFEST
@@ -169,11 +174,22 @@ class BusInspectorPlugin(Plugin):
         value = ctx.value if isinstance(ctx.value, dict) else {}
         limit = int(value.get("limit", 100))
         before_seq = value.get("before_seq")
-        entries = [
-            entry for entry in self.ring
-            if before_seq is None or entry["seq"] < before_seq
-        ]
-        await ctx.respond({"entries": entries[-limit:]})
+        # Newest-first under a serialized-size budget; keep at least the
+        # newest matching entry regardless of size.
+        entries: list[dict[str, Any]] = []
+        budget = SNAPSHOT_BUDGET
+        for entry in reversed(self.ring):
+            if len(entries) >= limit:
+                break
+            if before_seq is not None and entry["seq"] >= before_seq:
+                continue
+            size = len(json.dumps(entry))
+            if entries and size > budget:
+                break
+            entries.append(entry)
+            budget -= size
+        entries.reverse()
+        await ctx.respond({"entries": entries})
 
     # ------------------------------------------------------------------ stats
 

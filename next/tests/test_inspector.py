@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
 
 from kernel.server import KernelServer
 from plugins.inspector import BusInspectorPlugin
+from plugins.inspector.inspector import SNAPSHOT_BUDGET
 from sdk import BusClient
 
 PRODUCER_MANIFEST = {"id": "producer", "version": "0", "slots": {}, "emits": {}}
@@ -174,3 +176,30 @@ async def test_stats_mailbox_and_downsample(kernel: KernelServer, producer: BusC
         assert value["ring_size"] == 5000
     finally:
         await inspector.stop()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_response_stays_under_kernel_frame_limit(
+    inspector: BusInspectorPlugin, producer: BusClient, kernel: KernelServer
+) -> None:
+    """Regression: a ring holding large frames made the snapshot RPC reply
+    exceed the kernel's 1 MiB frame limit — the kernel rejected the publish
+    and the caller hung until timeout. Replies are now byte-budgeted."""
+
+    blob = "z" * 100_000
+    for index in range(15):  # ~1.5 MB of ring content
+        await producer.publish("big:_:event", {"i": index, "blob": blob})
+    await wait_for(
+        lambda: sum(1 for e in inspector.ring if e["channel"] == "big:_:event") == 15
+    )
+
+    caller = BusClient(url(kernel.port), CALLER_MANIFEST)
+    await caller.connect()
+    snapshot = await caller.request("bus-inspector:_:snapshot", {"limit": 50}, timeout=10.0)
+    entries = snapshot["entries"]
+    assert entries, "snapshot must return at least the newest entry"
+    assert len(json.dumps(snapshot)) < SNAPSHOT_BUDGET + 8192
+    big = [e for e in entries if e["channel"] == "big:_:event"]
+    assert 0 < len(big) < 15, "budget must trim older entries"
+    assert big[-1]["value"]["i"] == 14  # newest kept
+    await caller.close()

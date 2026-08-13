@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import fcntl
+import json
 import logging
 import os
 import pty
@@ -59,6 +60,16 @@ DEFAULT_COLS = 80
 DEFAULT_ROWS = 24
 RING_CHUNKS = 1000  # chunks kept per terminal (snapshot source)
 READ_SIZE = 65536
+# Output coalescing: rapid PTY bursts (full-screen TUI redraws split across
+# many reads) are merged into one frame per flush. The interval keeps
+# interactive echo latency imperceptible; the char cap keeps a single frame
+# safely under the kernel's 1 MiB wire limit even after JSON escaping
+# (escape-heavy data inflates up to ~6x: one ESC byte becomes six chars).
+FLUSH_INTERVAL = 0.03
+FLUSH_CHARS = 128 * 1024
+# Snapshot responses are byte-budgeted (serialized JSON) so the RPC reply can
+# never exceed the kernel frame limit and silently time out the caller.
+SNAPSHOT_BUDGET = 800_000
 
 
 def _become_controlling_tty() -> None:
@@ -88,6 +99,9 @@ class TerminalSession:
     ring: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=RING_CHUNKS))
     seq: int = 0
     exit_code: int | None = None
+    pending: list[str] = field(default_factory=list)
+    pending_chars: int = 0
+    flush_handle: asyncio.TimerHandle | None = None
 
     @property
     def running(self) -> bool:
@@ -210,10 +224,25 @@ class TerminalPlugin(Plugin):
         value = ctx.value if isinstance(ctx.value, dict) else {}
         limit = int(value.get("limit", 200))
         before_seq = value.get("before_seq")
-        entries = [
-            entry for entry in session.ring if before_seq is None or entry["seq"] < before_seq
-        ]
-        await ctx.respond({"entries": entries[-limit:]})
+        # Byte-budgeted (serialized JSON, newest-first): the response must
+        # stay under the kernel frame limit no matter how large the ring's
+        # chunks are — an oversized reply is rejected by the kernel and the
+        # RPC caller just hangs until timeout.
+        entries: list[dict[str, Any]] = []
+        budget = SNAPSHOT_BUDGET
+        for entry in reversed(session.ring):
+            if len(entries) >= limit:
+                break
+            if before_seq is not None and entry["seq"] >= before_seq:
+                continue
+            size = len(json.dumps(entry))
+            if entries and size > budget:
+                break  # keep at least the newest entry; single entries are
+                # always safe because flushes are capped far below the limit
+            entries.append(entry)
+            budget -= size
+        entries.reverse()
+        await ctx.respond({"entries": entries})
 
     # ------------------------------------------------------------ PTY plumbing
 
@@ -256,11 +285,37 @@ class TerminalPlugin(Plugin):
         except OSError:
             data = b""  # EIO: child side closed
         if not data:
+            tail = session.decoder.decode(b"", final=True)
+            if tail:
+                session.pending.append(tail)
+            self._flush(session)  # never lose the final output
             self._reap(session)
             return
         text = session.decoder.decode(data)
         if text == "":
+            return  # incomplete multi-byte sequence — wait for the rest
+        if session.pending and session.pending_chars + len(text) > FLUSH_CHARS:
+            self._flush(session)  # keep every frame within the char budget
+        session.pending.append(text)
+        session.pending_chars += len(text)
+        if session.pending_chars >= FLUSH_CHARS:
+            self._flush(session)
+        elif session.flush_handle is None:
+            session.flush_handle = asyncio.get_running_loop().call_later(
+                FLUSH_INTERVAL, self._flush, session
+            )
+
+    def _flush(self, session: TerminalSession) -> None:
+        """Emit buffered output as one coalesced frame (ring + live event)."""
+
+        if session.flush_handle is not None:
+            session.flush_handle.cancel()
+            session.flush_handle = None
+        if not session.pending:
             return
+        text = "".join(session.pending)
+        session.pending.clear()
+        session.pending_chars = 0
         session.seq += 1
         entry = {"seq": session.seq, "ts": int(time.time() * 1000), "data": text}
         session.ring.append(entry)
@@ -292,6 +347,9 @@ class TerminalPlugin(Plugin):
             )
 
     async def _kill_session(self, session: TerminalSession) -> None:
+        if session.flush_handle is not None:
+            session.flush_handle.cancel()
+            session.flush_handle = None
         if session.running:
             try:
                 session.proc.terminate()

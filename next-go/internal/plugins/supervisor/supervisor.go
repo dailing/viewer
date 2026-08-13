@@ -141,10 +141,25 @@ func New(config Config) (*Plugin, error) {
 }
 
 func (p *Plugin) Run(ctx context.Context) error {
+	if err := p.Start(ctx); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	p.Close()
+	return nil
+}
+
+// Start connects the supervisor and starts the configured external plugins.
+func (p *Plugin) Start(ctx context.Context) error {
+	return p.StartWithManaged(ctx, os.Getenv("VIEWER_MANAGED") == "1")
+}
+
+// StartWithManaged is Start with an explicit hello managed flag. The assembled
+// runtime passes false; standalone supervised processes derive it from the env.
+func (p *Plugin) StartWithManaged(ctx context.Context, managed bool) error {
 	if err := os.MkdirAll(p.config.LogDir, 0o755); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
-	managed := os.Getenv("VIEWER_MANAGED") == "1"
 	p.client = busclient.New(p.config.KernelWS, Manifest, busclient.WithManaged(managed))
 	if _, err := p.client.Subscribe("plugins:_:list", p.trackRegistry); err != nil {
 		return err
@@ -168,8 +183,6 @@ func (p *Plugin) Run(ctx context.Context) error {
 		}
 	}
 	p.publishStates()
-	<-ctx.Done()
-	p.shutdown()
 	return nil
 }
 

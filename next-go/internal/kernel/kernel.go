@@ -22,12 +22,11 @@ import (
 )
 
 type Config struct {
-	Host             string
-	Port             int
-	FrameSize        int
-	OutboundQueue    int
-	PingInterval     time.Duration
-	AutostartCommand []string
+	Host          string
+	Port          int
+	FrameSize     int
+	OutboundQueue int
+	PingInterval  time.Duration
 }
 
 func DefaultConfig() Config {
@@ -80,6 +79,9 @@ func New(config Config) *Server {
 
 func (s *Server) Broker() *broker.Broker { return s.broker }
 
+// RegistryEntries returns a point-in-time copy of the connected plugin registry.
+func (s *Server) RegistryEntries() []broker.RegistryEntry { return s.registry.Entries() }
+
 func (s *Server) Addr() string {
 	if s.listener == nil {
 		return net.JoinHostPort(s.config.Host, strconv.Itoa(s.config.Port))
@@ -111,8 +113,6 @@ func (s *Server) Start() error {
 		s.serveErr <- err
 	}()
 	slog.Info("kernel listening", "address", "ws://"+s.Addr()+"/ws")
-	// TODO(§9/v0.16): AutostartCommand is the milestone interface only. A later
-	// milestone may launch the single supervisor command here.
 	return nil
 }
 

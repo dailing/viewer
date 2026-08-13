@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -262,8 +263,9 @@ async def test_sigterm_close_4009() -> None:
     if not binary.is_file():
         raise AssertionError(f"viewerd binary not found: {binary}")
     port = unused_port()
+    data_dir = tempfile.mkdtemp(prefix="viewer-kernel-4009-")
     process = subprocess.Popen(
-        [str(binary), "--host", "127.0.0.1", "--port", str(port)],
+        [str(binary), "--plugins=none", "--kernel-port", str(port), "--data-dir", data_dir],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,

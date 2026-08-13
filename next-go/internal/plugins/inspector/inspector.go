@@ -102,7 +102,21 @@ func New(config Config) (*Plugin, error) {
 }
 
 func (p *Plugin) Run(ctx context.Context) error {
-	managed := os.Getenv("VIEWER_MANAGED") == "1"
+	if err := p.Start(ctx); err != nil {
+		return err
+	}
+	defer p.Close()
+	return p.Wait(ctx)
+}
+
+// Start connects the inspector and installs its capture/control subscriptions.
+func (p *Plugin) Start(ctx context.Context) error {
+	return p.StartWithManaged(ctx, os.Getenv("VIEWER_MANAGED") == "1")
+}
+
+// StartWithManaged is Start with an explicit hello managed flag. The assembled
+// runtime passes false; standalone supervised processes derive it from the env.
+func (p *Plugin) StartWithManaged(ctx context.Context, managed bool) error {
 	p.client = busclient.New(p.config.KernelWS, Manifest, busclient.WithManaged(managed))
 	if _, err := p.client.Subscribe(">", p.capture); err != nil {
 		return err
@@ -120,6 +134,11 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return fmt.Errorf("connect bus-inspector: %w", err)
 	}
 	p.publishStats()
+	return nil
+}
+
+// Wait publishes periodic statistics until the runtime context is cancelled.
+func (p *Plugin) Wait(ctx context.Context) error {
 	ticker := time.NewTicker(p.config.StatsInterval)
 	defer ticker.Stop()
 	for {
@@ -134,9 +153,17 @@ func (p *Plugin) Run(ctx context.Context) error {
 			p.mu.Unlock()
 			p.publishStats()
 		case <-ctx.Done():
-			return p.client.Close()
+			return nil
 		}
 	}
+}
+
+// Close disconnects the inspector from the bus.
+func (p *Plugin) Close() error {
+	if p.client == nil {
+		return nil
+	}
+	return p.client.Close()
 }
 
 func (p *Plugin) capture(frame busclient.Frame) {

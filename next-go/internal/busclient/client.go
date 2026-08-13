@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -536,7 +538,7 @@ func (c *Client) dispatch(frame Frame) {
 		var entry ErrorEntry
 		if jsonUnmarshal(data, &entry) == nil {
 			for _, callback := range errorHandlers {
-				go callback(entry)
+				go c.safeCallback("error", func() { callback(entry) })
 			}
 		}
 	}
@@ -559,8 +561,17 @@ func (c *Client) emitState(state ConnectionState) {
 	callbacks := append([]func(ConnectionState){}, c.stateHandlers...)
 	c.mu.RUnlock()
 	for _, callback := range callbacks {
-		go callback(state)
+		go c.safeCallback("state", func() { callback(state) })
 	}
+}
+
+func (c *Client) safeCallback(kind string, callback func()) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			slog.Error("plugin callback panic", "plugin", c.manifest.ID, "callback", kind, "panic", recovered, "stack", string(debug.Stack()))
+		}
+	}()
+	callback()
 }
 
 func (c *Client) isClosed() bool { c.mu.RLock(); defer c.mu.RUnlock(); return c.closed }

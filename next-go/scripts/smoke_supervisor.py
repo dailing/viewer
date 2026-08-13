@@ -133,7 +133,7 @@ async def main() -> int:
         supervisor_log = (temp / "supervisor.log").open("w+")
         try:
             kernel = subprocess.Popen(
-                [str(VIEWERD), "--host", "127.0.0.1", "--port", str(PORT)],
+                [str(VIEWERD), "--plugins=none", "--kernel-port", str(PORT), "--data-dir", str(temp / "data")],
                 stdout=kernel_log, stderr=subprocess.STDOUT, start_new_session=True,
             )
             await wait_port(kernel)

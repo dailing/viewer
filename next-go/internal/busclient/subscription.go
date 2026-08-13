@@ -2,6 +2,8 @@ package busclient
 
 import (
 	"context"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 )
 
@@ -47,6 +49,12 @@ func (s *Subscription) enqueue(frame Frame) {
 }
 
 func (s *Subscription) run() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.stop()
+			slog.Error("plugin subscription panic", "plugin", s.client.manifest.ID, "pattern", s.pattern, "panic", recovered, "stack", string(debug.Stack()))
+		}
+	}()
 	for {
 		select {
 		case <-s.wake:

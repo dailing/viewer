@@ -71,7 +71,7 @@ async def main() -> int:
         kernel_log = (temp / "kernel.log").open("w+")
         inspector_log = (temp / "inspector.log").open("w+")
         try:
-            kernel = subprocess.Popen([str(VIEWERD), "--host", "127.0.0.1", "--port", str(PORT)], stdout=kernel_log, stderr=subprocess.STDOUT, start_new_session=True)
+            kernel = subprocess.Popen([str(VIEWERD), "--plugins=none", "--kernel-port", str(PORT), "--data-dir", str(temp / "data")], stdout=kernel_log, stderr=subprocess.STDOUT, start_new_session=True)
             await wait_port(kernel)
             inspector = subprocess.Popen([str(INSPECTOR), "--kernel-ws", URL, "--ring-size", "5000"], stdout=inspector_log, stderr=subprocess.STDOUT, start_new_session=True)
 

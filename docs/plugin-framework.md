@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.21**（2026-08-13）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.22**（2026-08-13）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.22 变更：**chat 数据面与 provider 面定稿**——①原始事件全量保留：ACP/codex 两个 driver 的每条 session update 原文落 `turn_events`（append-only，per-turn seq），解析结果单独存 `message_blocks`（归一化 kind：agent_text/thinking/tool_call/tool_result/file_change/command/other），`messages` 表仍是用户可见文本视图；②接力定案：插件内顺序执行即最终形态，worker 队列/lease/failover 永久废弃；③codex provider 仅 app-server（原生协议库 `internal/codexserver/`），旧 codex-acp 路径不移植；④历史迁移把生产版 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`。
 > v0.21 变更：**file-service 增加目录列表能力**——新增 RPC `file:_:list`：输入 `{path}`，输出 `{path, entries[]}`，entry 字段对齐生产版 FileEntry（name/path/type(file\|directory\|symlink\|other)/size/mtime/mime/is_dir/is_symlink/link_target），目录优先 + name 字典序排序，一次性全量返回不分页，隐藏文件过滤归 file-service 插件配置。用途：viewer.files 文件树（A.5）的唯一取数通道。
 > v0.20 变更：**分发形态定稿**——核心集（内核 + core plugins + 前端）用 **Go** 实现为**单一静态二进制**（前端经 `go:embed` 内嵌），第三方/外挂插件仍以独立进程连总线、语言无关（松耦合不变）；**数据库访问一律使用 ORM**（Go 侧定 GORM + 纯 Go SQLite 驱动 modernc.org/sqlite，保持 CGO 关闭与交叉编译能力），禁止裸 SQL；现有 Python 栈（`next/`）转为协议参考实现，`next-go/` 为新主线（§17）。
 > v0.3 变更：插件 I/O 改为 **slots/emits 固定契约**，bindings 只存 slot→source 映射（删除 action）；**内核纯化为消息系统**，config/instance store/file/gateway 降为 core plugins；传输层定为 **WebSocket 单一栈**。
@@ -548,8 +549,8 @@ my-plugin/
 - 前端：`SuperWorkspacePage.vue`、`SuperWorkspaceChatPane.vue`、`sidebar/ChatsPanel|RolesPanel|RoutesPanel`、`stores/agents|superChatComposer|superChatDispatch|inputSessions.ts`。
 - Instance：每 chat 一个 instance；进程映射为插件侧选择（§9）——chat 插件内部 spawn per-chat 子进程（本地 PID 管理，子进程 hello 带 `instance_id`），runtime = agent session + dispatch；roles/routing/chat-list 面板 = plugin-level 进程的配置视图（plugin config：roles/agents 列表，C1；instance state：某 chat 的 roles/cwd/session ids，C2+插件 DB）。
 - slots：`send-message`、`stop`；emits：`chat:{id}:turn-completed`、`chat:{id}:message`、`chat:_:active`（mailbox，CWD 联动的 source）。
-- 存储：`agent-history.sqlite3` → **插件自管 DB**（chat_id 行级作用域，既有决策；per-chat 子进程只写自己 chat 的行，原子 insert 无竞争；WAL 支持并发读）；turn summaries 同库；Hindsight = 外部服务经 bus 消费。
-- 迁移要点：**worker 整套删除**（DB 任务队列 + lease + pid handover 废弃，§9）——per-chat 子进程即 worker（插件侧实现），Viewer 关闭 turn 照跑，子进程启动参数与恢复逻辑是 chat 插件内部 ABI；ACP stdio 降级为子进程内部实现；对外只暴露总线契约。session 三元组复用、turn summary 预算制注入等既有行为不变，只换通信外壳。
+- 存储：`agent-history.sqlite3` → **插件自管 DB**（chat_id 行级作用域，既有决策；per-chat 子进程只写自己 chat 的行，原子 insert 无竞争；WAL 支持并发读）；turn summaries 同库；Hindsight = 外部服务经 bus 消费。**数据面三层（v0.22 定稿）**：`turn_events`（append-only，driver 每条 session update 的完整原文 `raw_json` + per-turn `seq`，任何过滤之前落库，落库失败只记日志不阻断 turn）→ `message_blocks`（从 raw 同步派生的归一化解析块，单独存，`event_id` 回指 raw 行，拿不准的 method 进 `other` 不丢）→ `messages`（用户可见文本视图，行为不变）；删 chat 级联三层。
+- 迁移要点：**worker 整套删除**（DB 任务队列 + lease + pid handover 废弃，§9）——per-chat 子进程即 worker（插件侧实现），Viewer 关闭 turn 照跑，子进程启动参数与恢复逻辑是 chat 插件内部 ABI；ACP stdio 降级为子进程内部实现；对外只暴露总线契约。session 三元组复用、turn summary 预算制注入（词数近似，不做 token 精确化）等既有行为不变，只换通信外壳。**接力定案（v0.22）**：多 role 接力 = 插件内顺序执行（`runRelay`），即最终形态，不再回到生产版 worker 队列/lease/failover/cooldown。**provider 定案（v0.22）**：`hermes`（ACP stdio）+ `codex-app-server`（`internal/codexserver/` 原生协议库化）唯二；旧 codex-acp 适配器不移植；opencode 不实现。历史迁移脚本把生产版 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`（`seq` 取 `event_index`），`message_blocks` 不迁（可从 raw 重解析）。
 
 ### A.8 viewer.voice / 输入服务
 

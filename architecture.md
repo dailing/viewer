@@ -662,6 +662,15 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 ## Root And Build Files
 
+`next-go/`
+
+- Go 1.26 implementation line for the Viewer microkernel. `cmd/viewerd/main.go` provides the `--host` / `--port` CLI, JSON `slog` startup/shutdown logging, signal handling, and graceful close 4009.
+- `internal/protocol/protocol.go` owns the five wire-frame shapes, strong hello/envelope validation, UUIDv4 and manifest validation, channel/pattern grammar, and the formal prefix/`*`/`>` matcher. Payload values remain arbitrary JSON.
+- `internal/broker/broker.go` owns the serialized subscription table, publish fanout, ordered retained mailbox replacement/replay, atomic subscribe handoff, bounded drop-new outbound queues, priority protocol-error delivery, depth guard, and per-connection error-mailbox cleanup. `internal/broker/registry.go` owns the retained `plugins:_:list` snapshot and activated/deactivated lifecycle events.
+- `internal/kernel/kernel.go` serves only `/ws`, establishes hello identity, stamps delivery time/origin, drains and non-fatally rejects oversized post-hello frames, runs one outbound writer plus WebSocket ping/pong heartbeat per connection, and closes every accepted socket with 4009 during shutdown. `Config.AutostartCommand` is an interface placeholder; supervisor launch remains a later milestone.
+- `scripts/smoke_kernel.py` injects `next/` to use the Python SDK and black-box checks hello close codes, fanout/matching, mailbox handoff, RPC inbox traffic, oversize errors, registry/lifecycle behavior, and SIGTERM close 4009 against the built Go daemon.
+- Standard checks from `next-go/`: `go build ./...`, `go vet ./...`, `go test ./... -count=1`; the smoke test runs with `next/.venv/bin/python` against a daemon on port 28766.
+
 `run.py`
 
 - Main production/development launcher.

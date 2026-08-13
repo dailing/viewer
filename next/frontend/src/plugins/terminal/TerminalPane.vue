@@ -5,8 +5,8 @@
  * View/runtime split: closing this pane never kills the PTY; reopening
  * reconnects via the explicit `snapshot` RPC (scrollback history from the
  * plugin's ring buffer, framework section 5.6) + live `output` events.
- * Input goes back as RPC (`request terminal:{id}:input`, framework section
- * 5.1 example); resize is a fire-and-forget publish.
+ * Input and resize go back through the Go terminal plugin's `write` and
+ * `resize` RPC slots.
  */
 
 import { FitAddon } from "@xterm/addon-fit";
@@ -60,12 +60,12 @@ function applyEntry(entry: OutputEntry): void {
   term.write(entry.data);
 }
 
-function publishResize(): void {
+function requestResize(): void {
   if (term === null) return;
   if (status.value !== null && status.value.cols === term.cols && status.value.rows === term.rows) {
     return;
   }
-  ctx.bus.publish(`terminal:${termId}:resize`, { cols: term.cols, rows: term.rows }).catch(() => {});
+  ctx.bus.request(`terminal:${termId}:resize`, { cols: term.cols, rows: term.rows }).catch(() => {});
 }
 
 onMounted(() => {
@@ -83,9 +83,9 @@ onMounted(() => {
   term.open(container);
   fit.fit();
 
-  // Keystrokes/paste -> PTY via RPC (framework 5.1 request/response example).
+  // Keystrokes/paste -> PTY via the terminal plugin's write RPC.
   term.onData((data) => {
-    ctx.bus.request(`terminal:${termId}:input`, { data }).catch(() => {});
+    ctx.bus.request(`terminal:${termId}:write`, { data }).catch(() => {});
   });
 
   // Status mailbox: current value on subscribe + full replacements.
@@ -120,10 +120,10 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => {
     if (fit === null) return;
     fit.fit();
-    publishResize();
+    requestResize();
   });
   resizeObserver.observe(container);
-  publishResize();
+  requestResize();
 });
 
 onBeforeUnmount(() => {

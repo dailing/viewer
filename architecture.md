@@ -687,6 +687,14 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `examples/pingpong/` demonstrates two Go SDK clients making RPC calls in both directions.
 - Standard checks from `next-go/`: `go build ./...`, `go vet ./...`, `go test ./... -count=1`; the smoke test runs with `next/.venv/bin/python` against a daemon on port 28766.
 
+`next/frontend/README.md`
+
+- Short manual loop for serving `next/frontend/dist` through `viewerd --static`, using the embedded UI, or running Vite with its `/ws` gateway proxy.
+
+`next/ts-sdk/tests/frontend-contract.test.ts`
+
+- Go-backed Vitest contracts for every bus call used by the next/frontend terminal and Bus Inspector panes, including terminal lifecycle/output/resize/snapshot/reconnect replay and inspector filtering/control/stats/self-echo behavior.
+
 `run.py`
 
 - Main production/development launcher.

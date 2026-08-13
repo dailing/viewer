@@ -47,6 +47,9 @@ const entries = ref<InspectorEntry[]>([]);
 const stats = ref<InspectorStats | null>(null);
 const snapshotAvailable = ref(true);
 const filterChannel = ref(ctx.storage.get("filterChannel", ""));
+const filterType = ref(ctx.storage.get("filterType", ""));
+const filterOrigin = ref(ctx.storage.get("filterOrigin", ""));
+const filterTrace = ref(ctx.storage.get("filterTrace", ""));
 const filterText = ref(ctx.storage.get("filterText", ""));
 const expandedSeq = ref<number | null>(null);
 
@@ -90,9 +93,15 @@ async function clearAll(): Promise<void> {
 
 async function applyFilter(): Promise<void> {
   ctx.storage.set("filterChannel", filterChannel.value);
+  ctx.storage.set("filterType", filterType.value);
+  ctx.storage.set("filterOrigin", filterOrigin.value);
+  ctx.storage.set("filterTrace", filterTrace.value);
   ctx.storage.set("filterText", filterText.value);
   const filter: Record<string, string> = {};
   if (filterChannel.value.trim() !== "") filter.channel = filterChannel.value.trim();
+  if (filterType.value !== "") filter.type = filterType.value;
+  if (filterOrigin.value.trim() !== "") filter.origin = filterOrigin.value.trim();
+  if (filterTrace.value.trim() !== "") filter.trace_id = filterTrace.value.trim();
   if (filterText.value.trim() !== "") filter.text = filterText.value.trim();
   await ctx.bus.request("bus-inspector:_:set-filter", filter).catch(() => undefined);
 }
@@ -131,7 +140,13 @@ onMounted(() => {
   ctx.bus.subscribe("bus-inspector:_:stats", (frame) => {
     stats.value = frame.value as InspectorStats;
   });
-  if (filterChannel.value !== "" || filterText.value !== "") {
+  if (
+    filterChannel.value !== "" ||
+    filterType.value !== "" ||
+    filterOrigin.value !== "" ||
+    filterTrace.value !== "" ||
+    filterText.value !== ""
+  ) {
     void applyFilter();
   }
   void loadSnapshot();
@@ -177,13 +192,40 @@ onMounted(() => {
       </div>
     </div>
 
-    <div class="d-flex align-items-center gap-2 border-bottom px-3 py-1">
+    <div class="d-flex align-items-center gap-2 border-bottom px-3 py-1 flex-wrap">
       <input
         v-model="filterChannel"
         type="text"
         class="form-control form-control-sm"
         style="max-width: 16rem"
         placeholder="channel pattern（如 chat:*:status）"
+        @keyup.enter="applyFilter"
+      />
+      <select
+        v-model="filterType"
+        class="form-select form-select-sm"
+        style="max-width: 8rem"
+        aria-label="帧类型"
+        @change="applyFilter"
+      >
+        <option value="">全部类型</option>
+        <option value="publish">publish</option>
+        <option value="set">set</option>
+      </select>
+      <input
+        v-model="filterOrigin"
+        type="text"
+        class="form-control form-control-sm"
+        style="max-width: 12rem"
+        placeholder="origin plugin"
+        @keyup.enter="applyFilter"
+      />
+      <input
+        v-model="filterTrace"
+        type="text"
+        class="form-control form-control-sm"
+        style="max-width: 12rem"
+        placeholder="trace_id"
         @keyup.enter="applyFilter"
       />
       <input

@@ -2,29 +2,28 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"viewer/internal/acp"
 )
 
 type fakeAgent struct {
-	mu            sync.Mutex
-	sessionID     string
-	loadErr       error
-	updates       func(acp.Update)
-	promptStarted chan struct{}
-	promptRelease chan struct{}
-	cancelled     bool
-	newCalls      int
-	loadCalls     int
+	mu                  sync.Mutex
+	sessionID           string
+	loadErr             error
+	updates             func(acp.Update)
+	prompts             []string
+	cancelled           bool
+	newCalls, loadCalls int
 }
 
-func newFakeAgent() *fakeAgent {
-	return &fakeAgent{sessionID: "new-session", promptStarted: make(chan struct{}), promptRelease: make(chan struct{})}
-}
+func newFakeAgent(id string) *fakeAgent                                 { return &fakeAgent{sessionID: id} }
 func (f *fakeAgent) Initialize(context.Context) (map[string]any, error) { return map[string]any{}, nil }
 func (f *fakeAgent) NewSession(context.Context, string) (string, error) {
 	f.newCalls++
@@ -41,155 +40,99 @@ func (f *fakeAgent) Cancel(context.Context, string) error {
 	f.mu.Lock()
 	f.cancelled = true
 	f.mu.Unlock()
-	closeOnce(f.promptRelease)
 	return nil
 }
 func (f *fakeAgent) Prompt(_ context.Context, sessionID, text string) (string, error) {
-	closeOnce(f.promptStarted)
+	f.mu.Lock()
+	f.prompts = append(f.prompts, text)
+	f.mu.Unlock()
 	if f.updates != nil {
 		f.updates(acp.Update{SessionID: sessionID, Value: map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"text": "answer"}}})
-	}
-	<-f.promptRelease
-	f.mu.Lock()
-	cancelled := f.cancelled
-	f.mu.Unlock()
-	if cancelled {
-		return "cancelled", nil
 	}
 	return "end_turn", nil
 }
 
-func closeOnce(channel chan struct{}) {
-	select {
-	case <-channel:
-	default:
-		close(channel)
-	}
-}
-
-func TestPersistenceTurnAndSameChatBusy(t *testing.T) {
-	fake := newFakeAgent()
-	p, err := New(t.TempDir(), WithAgentFactory(func(context.Context) (agent, string, error) { return fake, "test", nil }))
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.ctx, p.cancel = context.WithCancel(context.Background())
-	defer p.Close()
-	result, start, err := p.accept(context.Background(), "chat-1", "hello", t.TempDir())
-	if err != nil || result["accepted"] != true {
-		t.Fatalf("accept: %#v %v", result, err)
-	}
-	start()
-	<-fake.promptStarted
-	if _, _, err := p.accept(context.Background(), "chat-1", "again", ""); !errors.Is(err, errTurnActive) {
-		t.Fatalf("expected busy, got %v", err)
-	}
-	closeOnce(fake.promptRelease)
-	p.wg.Wait()
-	var chats, messages, turns int64
-	p.store.db.Model(&Chat{}).Count(&chats)
-	p.store.db.Model(&Message{}).Count(&messages)
-	p.store.db.Model(&Turn{}).Count(&turns)
-	if chats != 1 || messages != 2 || turns != 1 {
-		t.Fatalf("rows chats=%d messages=%d turns=%d", chats, messages, turns)
-	}
-	var turn Turn
-	p.store.db.First(&turn)
-	if turn.StopReason == nil || *turn.StopReason != "end_turn" || turn.EndedAt == nil {
-		t.Fatalf("incomplete turn: %#v", turn)
-	}
-}
-
-func TestPersistedSessionLoadAndDegradeToNew(t *testing.T) {
+func TestChatRoleSessionLoadAndFallback(t *testing.T) {
 	dir := t.TempDir()
-	seed, err := New(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	chat := &Chat{ID: "reuse", CreatedAt: nowMillis(), Provider: "hermes", ProviderProfile: "test", ProviderSessionID: "old-session", CWD: dir}
-	if err := seed.store.saveChat(chat); err != nil {
-		t.Fatal(err)
-	}
-	_ = seed.Close()
-
-	fake := newFakeAgent()
-	fake.loadErr = errors.New("gone")
-	p, err := New(dir, WithAgentFactory(func(context.Context) (agent, string, error) { return fake, "test", nil }))
+	p, err := New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	defer p.Close()
-	stored, _ := p.store.chat("reuse")
-	runtime, err := p.ensureRuntime(context.Background(), stored)
-	if err != nil {
+	chat := Chat{ID: "chat", Root: dir}
+	role := SuperRole{ID: "role", Name: "Role", Provider: "hermes"}
+	if err := p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: "hermes", ProviderProfile: "test", ProviderSessionID: "old", CWD: dir}); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.sessionID != "new-session" {
-		t.Fatalf("expected degraded new session, got %q", runtime.sessionID)
+	first := newFakeAgent("new")
+	p.factory = func(context.Context) (agent, string, error) { return first, "test", nil }
+	runtime, fresh, err := p.ensureRuntime(context.Background(), chat, role)
+	if err != nil || !fresh || runtime.sessionID != "old" || first.loadCalls != 1 || first.newCalls != 0 {
+		t.Fatalf("runtime=%#v fresh=%v err=%v load=%d new=%d", runtime, fresh, err, first.loadCalls, first.newCalls)
 	}
-	refreshed, _ := p.store.chat("reuse")
-	if refreshed.ProviderSessionID != "new-session" {
-		t.Fatalf("database not updated: %#v", refreshed)
+	p.mu.Lock()
+	delete(p.runtimes, runtimeKey(chat.ID, role.ID))
+	p.mu.Unlock()
+	first.loadErr = errors.New("gone")
+	second := newFakeAgent("replacement")
+	second.loadErr = errors.New("gone")
+	p.factory = func(context.Context) (agent, string, error) { return second, "test", nil }
+	runtime, _, err = p.ensureRuntime(context.Background(), chat, role)
+	if err != nil || runtime.sessionID != "replacement" || second.newCalls != 1 {
+		t.Fatalf("fallback runtime=%#v err=%v", runtime, err)
 	}
 }
 
-func TestPersistedSessionLoadsWithoutCreatingReplacement(t *testing.T) {
-	dir := t.TempDir()
-	seed, err := New(dir)
-	if err != nil {
-		t.Fatal(err)
+func TestRenderAndParseRouter(t *testing.T) {
+	roles := []SuperRole{{ID: "one", Name: "One", Description: "first", Provider: "hermes"}, {ID: "two", Name: "Two", Description: "second", Provider: "hermes"}}
+	prompt := renderDispatchPrompt("current", roles, "User: earlier")
+	for _, want := range []string{"current", "User: earlier", `"description": "first"`, `"id": "two"`} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
 	}
-	chat := &Chat{ID: "reuse", CreatedAt: nowMillis(), Provider: "hermes", ProviderProfile: "test", ProviderSessionID: "old-session", CWD: dir}
-	if err := seed.store.saveChat(chat); err != nil {
-		t.Fatal(err)
+	ids, rationale, err := parseRoute("```json\n{\"role_ids\":[\"two\",\"bogus\",\"two\"],\"rationale\":\"fit\"}\n```", roles)
+	if err != nil || len(ids) != 1 || ids[0] != "two" || rationale != "fit" {
+		t.Fatalf("ids=%v rationale=%q err=%v", ids, rationale, err)
 	}
-	_ = seed.Close()
-
-	fake := newFakeAgent()
-	p, err := New(dir, WithAgentFactory(func(context.Context) (agent, string, error) { return fake, "test", nil }))
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.ctx, p.cancel = context.WithCancel(context.Background())
-	defer p.Close()
-	stored, _ := p.store.chat("reuse")
-	runtime, err := p.ensureRuntime(context.Background(), stored)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.sessionID != "old-session" || fake.loadCalls != 1 || fake.newCalls != 0 {
-		t.Fatalf("session=%q load=%d new=%d", runtime.sessionID, fake.loadCalls, fake.newCalls)
+	ids, rationale, err = parseRoute("乱码", roles)
+	if err != nil || len(ids) != 1 || ids[0] != "one" || !strings.Contains(rationale, "fell back") {
+		t.Fatalf("fallback ids=%v rationale=%q err=%v", ids, rationale, err)
 	}
 }
 
-func TestStopIsIdempotentAndCompletesCancelled(t *testing.T) {
-	fake := newFakeAgent()
-	p, err := New(t.TempDir(), WithAgentFactory(func(context.Context) (agent, string, error) { return fake, "test", nil }))
-	if err != nil {
-		t.Fatal(err)
+func TestRouterHTTPCompletion(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Errorf("authorization=%q", got)
+		}
+		_ = json.NewDecoder(request.Body).Decode(&captured)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"choices":[{"message":{"content":"{\"role_ids\":[\"r2\"],\"rationale\":\"best\"}"}}]}`))
+	}))
+	defer server.Close()
+	roles := []SuperRole{{ID: "r1", Name: "One", Description: "alpha", Provider: "hermes"}, {ID: "r2", Name: "Two", Description: "beta", Provider: "hermes"}}
+	ids, rationale, err := routeWithLLM(context.Background(), server.Client(), LLMConfig{Endpoint: server.URL, APIKey: "secret", Model: "router"}, "choose", roles, "history")
+	if err != nil || len(ids) != 1 || ids[0] != "r2" || rationale != "best" {
+		t.Fatalf("ids=%v rationale=%q err=%v", ids, rationale, err)
 	}
-	p.ctx, p.cancel = context.WithCancel(context.Background())
-	defer p.Close()
-	result, start, err := p.accept(context.Background(), "stop-chat", "long", t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+	data, _ := json.Marshal(captured)
+	if !strings.Contains(string(data), "history") || !strings.Contains(string(data), "choose") {
+		t.Fatalf("request prompt missing context: %s", data)
 	}
-	start()
-	<-fake.promptStarted
-	stopped, err := p.stopTurn("stop-chat")
-	if err != nil || !stopped {
-		t.Fatalf("stop=%v err=%v", stopped, err)
+}
+
+func TestProviderValidationAndMessageSender(t *testing.T) {
+	role := SuperRole{Name: "X", Provider: "codex"}
+	if !errors.Is(normalizeRole(&role, true), errProviderM6c) {
+		t.Fatal("expected M6c provider error")
 	}
-	p.wg.Wait()
-	stopped, err = p.stopTurn("stop-chat")
-	if err != nil || stopped {
-		t.Fatalf("idempotent stop=%v err=%v", stopped, err)
-	}
-	var turn Turn
-	p.store.db.First(&turn, "id = ?", result["turn_id"])
-	if turn.StopReason == nil || *turn.StopReason != "cancelled" {
-		t.Fatalf("reason: %#v", turn.StopReason)
+	message := Message{ID: "m", ChatID: "c", TurnID: "t", Role: "assistant", Text: "x", SenderFrom: "role", RoleID: "r", RoleName: "R"}
+	sender := message.payload()["sender"].(map[string]any)
+	if sender["role_id"] != "r" || sender["role_name"] != "R" || sender["from"] != "role" {
+		t.Fatal(sender)
 	}
 }
 
@@ -200,5 +143,4 @@ func TestUpdateTextOnly(t *testing.T) {
 	if got := updateText(map[string]any{"session_update": "agent_message_chunk", "content": map[string]any{"text": "ok"}}); got != "ok" {
 		t.Fatal(got)
 	}
-	time.Sleep(0)
 }

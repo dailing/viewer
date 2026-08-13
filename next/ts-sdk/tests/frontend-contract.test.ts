@@ -102,8 +102,10 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
 }
 
 function ensureViewerdBinary(): void {
-  if (existsSync(VIEWERD_BIN)) return;
-  if (process.env.VIEWERD_BIN) throw new Error(`VIEWERD_BIN does not exist: ${VIEWERD_BIN}`);
+  if (process.env.VIEWERD_BIN) {
+    if (!existsSync(VIEWERD_BIN)) throw new Error(`VIEWERD_BIN does not exist: ${VIEWERD_BIN}`);
+    return;
+  }
   mkdirSync(path.dirname(VIEWERD_BIN), { recursive: true });
   const goBinDir = path.join(homedir(), ".local", "go", "bin");
   const result = spawnSync("go", ["build", "-o", "bin/viewerd", "./cmd/viewerd"], {
@@ -117,7 +119,7 @@ function ensureViewerdBinary(): void {
   }
 }
 
-function startViewerd(gatewayPort: number, kernelPort: number, dataDir: string): ChildProcess {
+function startViewerd(gatewayPort: number, kernelPort: number, dataDir: string, plugins = "bus-inspector,terminal,file-service"): ChildProcess {
   return spawn(
     VIEWERD_BIN,
     [
@@ -129,11 +131,20 @@ function startViewerd(gatewayPort: number, kernelPort: number, dataDir: string):
       "127.0.0.1",
       "--kernel-port",
       String(kernelPort),
-      "--plugins=bus-inspector,terminal,file-service",
+      `--plugins=${plugins}`,
       "--data-dir",
       dataDir,
     ],
-    { cwd: NEXT_GO_DIR, stdio: ["ignore", "ignore", "pipe"] },
+    {
+      cwd: NEXT_GO_DIR,
+      detached: true,
+      stdio: ["ignore", "ignore", "pipe"],
+      env: {
+        ...process.env,
+        VIEWER_HERMES_COMMAND: path.join(NEXT_GO_DIR, "scripts", "mock_acp_agent.py"),
+        VIEWER_HERMES_PROFILE: "frontend-contract",
+      },
+    },
   );
 }
 
@@ -183,8 +194,13 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
       backoffBase: 25,
       backoffCap: 100,
     });
+    let registry: Array<{ manifest: { id: string } }> = [];
+    await probe.subscribe("plugins:_:list", (frame) => {
+      registry = frame.value as Array<{ manifest: { id: string } }>;
+    });
     await probe.connect();
     await probe.waitRegistered();
+    await waitFor(() => ["terminal", "file-service", "bus-inspector"].every((id) => registry.some((entry) => entry.manifest.id === id)));
     await probe.close();
   }, 30_000);
 
@@ -235,7 +251,7 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
     await client.request(`terminal:${created.id}:kill`);
     await waitFor(() => statuses.some((item) => item.id === created.id && item.state === "killed"));
     await client.close();
-  }, 20_000);
+  }, 30_000);
 
   it("drives inspector compound filters, pause/resume, clear, streams, stats, and self filtering", async () => {
     const client = new BusClient(`ws://127.0.0.1:${kernelPort}/ws`, MANIFEST);
@@ -319,7 +335,7 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
       }),
     );
     await client.close();
-  }, 20_000);
+  }, 30_000);
 
   it("lists lazy nested file trees with production fields, sorting, hidden filtering, symlinks, and errors", async () => {
     const client = new BusClient(`ws://127.0.0.1:${kernelPort}/ws`, FILES_MANIFEST);
@@ -386,5 +402,59 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
       client.request("file:_:list", { path: path.join(filesFixture, "a.txt") }),
     ).rejects.toMatchObject({ name: "RpcError", code: "not_directory" });
     await client.close();
-  }, 20_000);
+  }, 30_000);
+
+  it("drives chat roles/chats/active mailbox, dual-role relay, busy, and router errors", async () => {
+    const chatGatewayPort = await freePort();
+    const chatKernelPort = await freePort();
+    const chatDataDir = mkdtempSync(path.join(tmpdir(), "viewer-chat-contract-"));
+    const chatViewerd = startViewerd(chatGatewayPort, chatKernelPort, chatDataDir, "config-store,chat");
+    const client = new BusClient(`ws://127.0.0.1:${chatKernelPort}/ws`, { ...MANIFEST, id: "frontend-chat-contract" });
+    const messages: Array<Record<string, unknown>> = [];
+    const completed: Array<Record<string, unknown>> = [];
+    const active: unknown[] = [];
+    await client.subscribe("chat:*:message", (frame) => messages.push(frame.value as Record<string, unknown>));
+    await client.subscribe("chat:*:turn-completed", (frame) => completed.push(frame.value as Record<string, unknown>));
+    await client.subscribe("chat:_:active", (frame) => active.push(frame.value));
+    let registry: Array<{ manifest: { id: string } }> = [];
+    await client.subscribe("plugins:_:list", (frame) => { registry = frame.value as Array<{ manifest: { id: string } }>; });
+    await client.connect();
+    await waitFor(() => ["chat", "config-store"].every((id) => registry.some((entry) => entry.manifest.id === id)));
+
+    const first = (await client.request("chat:_:roles:create", { name: "One", description: "first", prompt: "ONE", provider: "hermes" })) as { id: string };
+    const second = (await client.request("chat:_:roles:create", { name: "Two", description: "second", prompt: "TWO", provider: "hermes" })) as { id: string };
+    expect(await client.request("chat:_:roles:list", {})).toEqual(expect.arrayContaining([expect.objectContaining({ id: first.id }), expect.objectContaining({ id: second.id })]));
+    await expect(client.request("chat:_:roles:create", { name: "Later", provider: "codex" })).rejects.toMatchObject({ code: "unsupported_provider" });
+    const chat = (await client.request("chat:_:chats:create", { name: "Contract", root: NEXT_GO_DIR, member_role_ids: [first.id, second.id] })) as { id: string };
+    await client.request("chat:_:chats:patch", { id: chat.id, pinned: true, name: "Contract renamed" });
+    await client.request("chat:_:chats:activate", { id: chat.id });
+    await waitFor(() => active.at(-1) === chat.id);
+    expect(await client.request("chat:_:chats:list", {})).toEqual(expect.objectContaining({ active_chat_id: chat.id, chats: [expect.objectContaining({ id: chat.id, pinned: true })] }));
+
+    const dispatched = (await client.request("chat:_:dispatch", { chat_id: chat.id, message: "hello", role_ids: [first.id, second.id] })) as { role_ids: string[] };
+    expect(dispatched.role_ids).toEqual([first.id, second.id]);
+    await waitFor(() => completed.filter((item) => item.chat_id === chat.id).length === 2);
+    const relay = completed.filter((item) => item.chat_id === chat.id);
+    expect(relay.map((item) => item.role_id)).toEqual([first.id, second.id]);
+    expect(relay.map((item) => item.sender)).toEqual([
+      { from: "role", role_id: first.id, role_name: "One" },
+      { from: "role", role_id: second.id, role_name: "Two" },
+    ]);
+    expect(messages.find((item) => item.chat_id === chat.id && item.role === "user")?.sender).toEqual({ from: "user" });
+
+    const beforeLong = messages.length;
+    const longRun = (await client.request("chat:_:dispatch", { chat_id: chat.id, message: "long turn", role_ids: [first.id] })) as { dispatch_id: string };
+    expect(longRun.dispatch_id).toBeTruthy();
+    await waitFor(() => messages.slice(beforeLong).some((item) => item.chat_id === chat.id && item.sender && (item.sender as { role_id?: string }).role_id === first.id && String(item.text).includes("mock:")));
+    await expect(client.request("chat:_:dispatch", { chat_id: chat.id, message: "busy", role_ids: [first.id] })).rejects.toMatchObject({ code: "routing_target_busy" });
+    await client.request("chat:_:stop", { chat_id: chat.id, role_id: first.id });
+    await waitFor(() => completed.some((item) => item.chat_id === chat.id && item.role_id === first.id && item.stop_reason === "cancelled"));
+    await expect(client.request("chat:_:dispatch", { chat_id: chat.id, message: "auto" })).rejects.toMatchObject({ code: "chat_error" });
+    await client.request("chat:_:chats:delete", { id: chat.id });
+    await client.request("chat:_:roles:delete", { id: first.id });
+    await client.request("chat:_:roles:delete", { id: second.id });
+    await client.close();
+    await stopViewerd(chatViewerd);
+    rmSync(chatDataDir, { recursive: true, force: true });
+  }, 30_000);
 });

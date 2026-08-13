@@ -1,17 +1,18 @@
-// Package chat exposes the M6a single-provider chat skeleton on the Viewer bus.
+// Package chat implements the Viewer Super Workspace bus plugin.
 package chat
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"viewer/internal/acp"
 	"viewer/internal/busclient"
@@ -19,14 +20,16 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "chat", Version: "0.1.0",
+	ID: "chat", Version: "0.2.0",
 	Slots: map[string]any{
-		"chat:_:send-message": map[string]any{"value": map[string]any{"chat_id": "string", "text": "string", "cwd": "string?"}},
-		"chat:_:stop":         map[string]any{"value": map[string]any{"chat_id": "string"}},
+		"chat:_:workspace:get": map[string]any{}, "chat:_:workspace:patch": map[string]any{},
+		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},
+		"chat:_:routing:get": map[string]any{}, "chat:_:routing:put": map[string]any{},
+		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
+		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
 	},
 	Emits: map[string]any{
-		"chat:*:message":        map[string]any{"value": map[string]any{"id": "string", "chat_id": "string", "turn_id": "string", "role": "user|assistant", "text": "string", "created_at": "unix-ms"}},
-		"chat:*:turn-completed": map[string]any{"value": map[string]any{"chat_id": "string", "turn_id": "string", "stop_reason": "string"}},
+		"chat:*:message": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
 	},
 }
 
@@ -40,34 +43,38 @@ type agent interface {
 	Stderr() string
 	Close() error
 }
-
 type agentFactory func(context.Context) (agent, string, error)
 type Option func(*Plugin)
 
 func WithAgentFactory(factory agentFactory) Option { return func(p *Plugin) { p.factory = factory } }
+func WithHTTPClient(client *http.Client) Option    { return func(p *Plugin) { p.httpClient = client } }
 
 type runtime struct {
-	agent           agent
-	sessionID       string
-	profile         string
-	cwd             string
-	activeTurn      string
-	cancelRequested bool
+	agent                                                 agent
+	sessionID, profile, cwd, activeTurn, roleID, roleName string
+	cancelRequested                                       bool
 }
-
 type Plugin struct {
-	dataDir string
-	store   *store
-	client  *busclient.Client
-	factory agentFactory
-
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	runtimes map[string]*runtime
-	closed   bool
-	wg       sync.WaitGroup
+	dataDir      string
+	store        *store
+	client       *busclient.Client
+	factory      agentFactory
+	httpClient   *http.Client
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.Mutex
+	runtimes     map[string]*runtime
+	busy         map[string]bool
+	activeChatID string
+	closed       bool
+	wg           sync.WaitGroup
 }
+
+var (
+	errBadRequest  = errors.New("chat_id and message are required")
+	errTurnActive  = errors.New("RoutingTargetBusy: chat role already has a turn in progress")
+	errProviderM6c = errors.New("provider must be hermes; additional providers are deferred to M6c")
+)
 
 func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
@@ -77,7 +84,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plugin{dataDir: dataDir, store: database, runtimes: make(map[string]*runtime)}
+	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, httpClient: defaultHTTPClient()}
 	p.factory = p.hermesAgent
 	for _, option := range options {
 		option(p)
@@ -94,16 +101,14 @@ func (p *Plugin) hermesAgent(ctx context.Context) (agent, string, error) {
 	if profile == "" {
 		profile = "default"
 	}
-	yolo := envBool("VIEWER_HERMES_YOLO", true)
 	arguments := []string{"-p", profile}
-	if yolo {
+	if envBool("VIEWER_HERMES_YOLO", true) {
 		arguments = append(arguments, "--yolo")
 	}
 	arguments = append(arguments, "acp")
 	client, err := acp.New(ctx, command, arguments...)
 	return client, profile, err
 }
-
 func envBool(name string, fallback bool) bool {
 	value, exists := os.LookupEnv(name)
 	if !exists {
@@ -120,257 +125,399 @@ func envBool(name string, fallback bool) bool {
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed))
-	for pattern, handler := range map[string]func(busclient.Frame){
-		"chat:_:send-message": p.handleSend,
-		"chat:_:stop":         p.handleStop,
-	} {
-		if _, err := p.client.Subscribe(pattern, handler); err != nil {
+	handlers := map[string]func(busclient.Frame){
+		"chat:_:workspace:get": p.handleWorkspaceGet, "chat:_:workspace:patch": p.handleWorkspacePatch,
+		"chat:_:roles:list": p.handleRolesList, "chat:_:roles:create": p.handleRolesCreate, "chat:_:roles:patch": p.handleRolesPatch, "chat:_:roles:delete": p.handleRolesDelete,
+		"chat:_:routing:get": p.handleRoutingGet, "chat:_:routing:put": p.handleRoutingPut,
+		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
+		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
+	}
+	for pattern, handler := range handlers {
+		asyncHandler := handler
+		if _, err := p.client.Subscribe(pattern, func(frame busclient.Frame) { go asyncHandler(frame) }); err != nil {
 			return err
 		}
 	}
-	return p.client.Connect(ctx)
+	if err := p.client.Connect(ctx); err != nil {
+		return err
+	}
+	activeID, err := p.store.activeChatID()
+	if err != nil {
+		return err
+	}
+	p.activeChatID = activeID
+	if activeID != "" {
+		if err := p.client.Set(context.Background(), "chat:_:active", activeID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (p *Plugin) handleSend(frame busclient.Frame) {
+func (p *Plugin) reply(frame busclient.Frame, value any, err error) {
+	if err == nil {
+		_ = pluginrpc.Respond(p.client, frame, value)
+		return
+	}
+	code := "chat_error"
+	if errors.Is(err, errBadRequest) {
+		code = "bad_request"
+	}
+	if errors.Is(err, errTurnActive) {
+		code = "routing_target_busy"
+	}
+	if errors.Is(err, errProviderM6c) {
+		code = "unsupported_provider"
+	}
+	_ = pluginrpc.RespondError(p.client, frame, code, err.Error())
+}
+func frameObject(frame busclient.Frame) (map[string]any, error) {
 	value, ok := pluginrpc.Object(frame)
 	if !ok {
-		pluginrpc.RespondError(p.client, frame, "bad_request", "payload must be an object")
-		return
+		return nil, errors.New("payload must be an object")
 	}
-	chatID, _ := value["chat_id"].(string)
-	text, _ := value["text"].(string)
-	cwd, _ := value["cwd"].(string)
-	result, startTurn, err := p.accept(p.ctx, strings.TrimSpace(chatID), text, strings.TrimSpace(cwd))
-	if err != nil {
-		code := "send_failed"
-		if errors.Is(err, errBadRequest) {
-			code = "bad_request"
-		}
-		if errors.Is(err, errTurnActive) {
-			code = "turn_in_progress"
-		}
-		_ = pluginrpc.RespondError(p.client, frame, code, err.Error())
-		return
-	}
-	_ = pluginrpc.Respond(p.client, frame, result)
-	startTurn()
+	return value, nil
 }
 
-func (p *Plugin) handleStop(frame busclient.Frame) {
-	value, ok := pluginrpc.Object(frame)
-	if !ok {
-		_ = pluginrpc.RespondError(p.client, frame, "bad_request", "payload must be an object")
-		return
-	}
-	chatID, _ := value["chat_id"].(string)
-	stopped, err := p.stopTurn(strings.TrimSpace(chatID))
-	if err != nil {
-		_ = pluginrpc.RespondError(p.client, frame, "stop_failed", err.Error())
-		return
-	}
-	_ = pluginrpc.Respond(p.client, frame, map[string]any{"stopped": stopped})
+func (p *Plugin) handleWorkspaceGet(frame busclient.Frame) {
+	value, err := p.workspace(p.ctx)
+	p.reply(frame, value, err)
 }
-
-var (
-	errBadRequest = errors.New("chat_id and text are required")
-	errTurnActive = errors.New("chat already has a turn in progress")
-)
-
-func (p *Plugin) accept(ctx context.Context, chatID, text, requestedCWD string) (map[string]any, func(), error) {
-	if chatID == "" || strings.TrimSpace(text) == "" {
-		return nil, nil, errBadRequest
+func (p *Plugin) handleWorkspacePatch(frame busclient.Frame) {
+	patch, err := frameObject(frame)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return nil, nil, errors.New("chat plugin is stopping")
+	workspace, err := p.workspace(p.ctx)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
 	}
-	if current := p.runtimes[chatID]; current != nil && current.activeTurn != "" {
-		return nil, nil, errTurnActive
+	if value, ok := patch["name"].(string); ok {
+		workspace.Name = strings.TrimSpace(value)
 	}
-	chat, err := p.store.chat(chatID)
-	if err == nil && chat == nil {
-		cwd := requestedCWD
-		if cwd == "" {
-			cwd, err = os.Getwd()
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		cwd, err = filepath.Abs(cwd)
-		if err != nil {
-			return nil, nil, err
-		}
-		chat = &Chat{ID: chatID, CreatedAt: nowMillis(), Provider: "hermes", CWD: cwd}
-	} else if err != nil {
-		return nil, nil, err
+	if value, ok := patch["common_prompt"].(string); ok {
+		workspace.CommonPrompt = strings.TrimSpace(value)
 	}
-	if requestedCWD != "" {
-		absolute, absErr := filepath.Abs(requestedCWD)
-		if absErr != nil {
-			return nil, nil, absErr
+	err = p.configSet(p.ctx, "workspace", map[string]any{"id": workspace.ID, "name": workspace.Name, "common_prompt": workspace.CommonPrompt})
+	p.reply(frame, workspace, err)
+}
+func (p *Plugin) handleRolesList(frame busclient.Frame) {
+	workspace, err := p.workspace(p.ctx)
+	p.reply(frame, workspace.Roles, err)
+}
+func (p *Plugin) handleRolesCreate(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	var role SuperRole
+	if err == nil {
+		err = decodeInto(value, &role)
+	}
+	if err == nil {
+		err = normalizeRole(&role, true)
+	}
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	workspace, err := p.workspace(p.ctx)
+	if err == nil {
+		workspace.Roles = append(workspace.Roles, role)
+		err = p.configSet(p.ctx, "roles", workspace.Roles)
+	}
+	p.reply(frame, role, err)
+}
+func (p *Plugin) handleRolesPatch(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	id, _ := value["id"].(string)
+	if err != nil || id == "" {
+		p.reply(frame, nil, errors.New("id is required"))
+		return
+	}
+	workspace, err := p.workspace(p.ctx)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	index := -1
+	for i := range workspace.Roles {
+		if workspace.Roles[i].ID == id {
+			index = i
+			break
 		}
-		if chat.CWD != "" && chat.CWD != absolute {
-			if old := p.runtimes[chatID]; old != nil {
-				_ = old.agent.Close()
-				delete(p.runtimes, chatID)
+	}
+	if index < 0 {
+		p.reply(frame, nil, errors.New("role not found"))
+		return
+	}
+	encoded, _ := jsonMap(workspace.Roles[index])
+	for key, item := range value {
+		if key != "id" && key != "created_at" && key != "updated_at" {
+			encoded[key] = item
+		}
+	}
+	role := workspace.Roles[index]
+	err = decodeInto(encoded, &role)
+	if err == nil {
+		role.ID = id
+		err = normalizeRole(&role, false)
+	}
+	if err == nil {
+		workspace.Roles[index] = role
+		err = p.configSet(p.ctx, "roles", workspace.Roles)
+	}
+	p.reply(frame, role, err)
+}
+func (p *Plugin) handleRolesDelete(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	id, _ := value["id"].(string)
+	if err != nil || id == "" {
+		p.reply(frame, nil, errors.New("id is required"))
+		return
+	}
+	workspace, err := p.workspace(p.ctx)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	roles := make([]SuperRole, 0, len(workspace.Roles))
+	found := false
+	for _, role := range workspace.Roles {
+		if role.ID == id {
+			found = true
+		} else {
+			roles = append(roles, role)
+		}
+	}
+	if !found {
+		p.reply(frame, nil, errors.New("role not found"))
+		return
+	}
+	err = p.configSet(p.ctx, "roles", roles)
+	if err == nil {
+		chats, listErr := p.store.chats()
+		if listErr != nil {
+			err = listErr
+		}
+		for i := range chats {
+			members := decodeStrings(chats[i].MemberRoleIDsJSON)
+			filtered := members[:0]
+			for _, memberID := range members {
+				if memberID != id {
+					filtered = append(filtered, memberID)
+				}
 			}
-			chat.ProviderSessionID = ""
+			overrides := decodeStringMap(chats[i].RoleRoutingOverridesJSON)
+			_, hadOverride := overrides[id]
+			delete(overrides, id)
+			if len(filtered) != len(members) || hadOverride {
+				chats[i].MemberRoleIDsJSON = encodeJSON(filtered)
+				chats[i].RoleRoutingOverridesJSON = encodeJSON(overrides)
+				chats[i].UpdatedAt = nowMillis()
+				if saveErr := p.store.saveChat(&chats[i]); saveErr != nil {
+					err = saveErr
+					break
+				}
+			}
 		}
-		chat.CWD = absolute
 	}
-	current, err := p.ensureRuntime(ctx, chat)
-	if err != nil {
-		return nil, nil, err
+	p.reply(frame, map[string]any{"deleted": true, "id": id}, err)
+}
+func (p *Plugin) handleRoutingGet(frame busclient.Frame) {
+	workspace, err := p.workspace(p.ctx)
+	p.reply(frame, RoutingConfig{workspace.DefaultRoutingPolicyID, workspace.RoutingPolicies}, err)
+}
+func (p *Plugin) handleRoutingPut(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	var routing RoutingConfig
+	if err == nil {
+		err = decodeInto(value, &routing)
 	}
-	turnID := newID()
-	message := &Message{ID: newID(), ChatID: chatID, TurnID: turnID, Role: "user", Text: text, CreatedAt: nowMillis()}
-	turn := &Turn{ID: turnID, ChatID: chatID, StartedAt: nowMillis()}
-	if err := p.store.beginTurn(chat, turn, message); err != nil {
-		return nil, nil, err
+	if err == nil {
+		err = validateRouting(routing)
 	}
-	current.activeTurn, current.cancelRequested = turnID, false
-	p.publishMessage(message)
-	startGate := make(chan struct{})
-	p.wg.Add(1)
-	go func() {
-		<-startGate
-		p.runTurn(chatID, turnID, text, current)
-	}()
-	var startOnce sync.Once
-	start := func() {
-		startOnce.Do(func() { close(startGate) })
+	if err == nil {
+		err = p.configSet(p.ctx, "routing", routing)
 	}
-	return map[string]any{"accepted": true, "turn_id": turnID}, start, nil
+	p.reply(frame, routing, err)
 }
 
-func (p *Plugin) ensureRuntime(ctx context.Context, chat *Chat) (*runtime, error) {
-	if current := p.runtimes[chat.ID]; current != nil {
-		return current, nil
+func validateRouting(value RoutingConfig) error {
+	ids := map[string]bool{}
+	for _, policy := range value.RoutingPolicies {
+		if strings.TrimSpace(policy.ID) == "" || ids[policy.ID] {
+			return errors.New("routing policy ids must be non-empty and unique")
+		}
+		ids[policy.ID] = true
+		candidateIDs := map[string]bool{}
+		for _, candidate := range policy.Candidates {
+			if candidate.ID == "" || candidateIDs[candidate.ID] {
+				return fmt.Errorf("candidate ids must be non-empty and unique in policy %s", policy.ID)
+			}
+			candidateIDs[candidate.ID] = true
+		}
 	}
-	process, profile, err := p.factory(ctx)
+	if value.DefaultRoutingPolicyID != "" && !ids[value.DefaultRoutingPolicyID] {
+		return errors.New("default routing policy must reference an existing policy")
+	}
+	return nil
+}
+
+func (p *Plugin) handleChatsList(frame busclient.Frame) {
+	request, _ := pluginrpc.Object(frame)
+	chats, err := p.store.chats()
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	payload := make([]map[string]any, 0, len(chats))
+	for _, chat := range chats {
+		payload = append(payload, chat.payload())
+	}
+	result := map[string]any{"chats": payload, "active_chat_id": p.activeChatID}
+	if request != nil && request["include_messages"] == true {
+		chatID, _ := request["chat_id"].(string)
+		messages, historyErr := p.store.history(chatID, 0, 0)
+		if historyErr != nil {
+			p.reply(frame, nil, historyErr)
+			return
+		}
+		values := make([]map[string]any, 0, len(messages))
+		for _, message := range messages {
+			values = append(values, message.payload())
+		}
+		result["messages"] = values
+	}
+	p.reply(frame, result, nil)
+}
+func (p *Plugin) handleChatsCreate(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	now := nowMillis()
+	chat := Chat{ID: newID(), Name: "New Chat", Type: "group", CreatedAt: now, UpdatedAt: now, MemberRoleIDsJSON: "[]", RoleRoutingOverridesJSON: "{}"}
+	applyChatPatch(&chat, value)
+	if strings.TrimSpace(chat.Root) == "" {
+		p.reply(frame, nil, errors.New("root is required"))
+		return
+	}
+	chat.Root, err = filepath.Abs(chat.Root)
+	if err == nil {
+		err = p.store.saveChat(&chat)
+	}
+	p.reply(frame, chat.payload(), err)
+}
+func (p *Plugin) handleChatsPatch(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	id, _ := value["id"].(string)
+	if err != nil || id == "" {
+		p.reply(frame, nil, errors.New("id is required"))
+		return
+	}
+	chat, err := p.store.chat(id)
+	if err != nil || chat == nil {
+		if err == nil {
+			err = errors.New("chat not found")
+		}
+		p.reply(frame, nil, err)
+		return
+	}
+	applyChatPatch(chat, value)
+	chat.UpdatedAt = nowMillis()
+	if chat.Root == "" {
+		err = errors.New("root is required")
+	} else {
+		chat.Root, err = filepath.Abs(chat.Root)
+	}
+	if err == nil {
+		err = p.store.saveChat(chat)
+	}
+	p.reply(frame, chat.payload(), err)
+}
+func applyChatPatch(chat *Chat, value map[string]any) {
+	if item, ok := value["name"].(string); ok {
+		chat.Name = strings.TrimSpace(item)
+		if chat.Name == "" {
+			chat.Name = "New Chat"
+		}
+	}
+	if item, ok := value["type"].(string); ok {
+		chat.Type = item
+	}
+	if item, ok := value["pinned"].(bool); ok {
+		chat.Pinned = item
+	}
+	if item, ok := value["root"].(string); ok {
+		chat.Root = strings.TrimSpace(item)
+	}
+	if item, ok := value["common_prompt"].(string); ok {
+		chat.CommonPrompt = strings.TrimSpace(item)
+	}
+	if item, ok := value["member_role_ids"]; ok {
+		var ids []string
+		if decodeInto(item, &ids) == nil {
+			chat.MemberRoleIDsJSON = encodeJSON(ids)
+		}
+	}
+	if item, ok := value["role_routing_policy_overrides"]; ok {
+		var overrides map[string]string
+		if decodeInto(item, &overrides) == nil {
+			chat.RoleRoutingOverridesJSON = encodeJSON(overrides)
+		}
+	}
+}
+func (p *Plugin) handleChatsDelete(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	id, _ := value["id"].(string)
+	if err == nil && id == "" {
+		err = errors.New("id is required")
+	}
+	if err == nil {
+		err = p.store.deleteChat(id)
+	}
+	if err == nil && p.activeChatID == id {
+		p.activeChatID = ""
+		err = p.store.setActiveChatID("")
+		if err == nil {
+			err = p.client.Set(context.Background(), "chat:_:active", "")
+		}
+	}
+	p.reply(frame, map[string]any{"deleted": err == nil, "id": id}, err)
+}
+func (p *Plugin) handleChatsActivate(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	id, _ := value["id"].(string)
+	var chat *Chat
+	if err == nil {
+		chat, err = p.store.chat(id)
+		if chat == nil && err == nil {
+			err = errors.New("chat not found")
+		}
+	}
+	if err == nil {
+		p.activeChatID = id
+		err = p.store.setActiveChatID(id)
+		if err == nil {
+			err = p.client.Set(context.Background(), "chat:_:active", id)
+		}
+	}
+	if chat == nil {
+		p.reply(frame, nil, err)
+	} else {
+		p.reply(frame, chat.payload(), err)
+	}
+}
+
+func jsonMap(value any) (map[string]any, error) {
+	result := map[string]any{}
+	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
-	process.OnUpdate(func(update acp.Update) { p.handleUpdate(chat.ID, update) })
-	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if _, err := process.Initialize(initCtx); err != nil {
-		_ = process.Close()
-		return nil, fmt.Errorf("initialize Hermes ACP: %w", err)
-	}
-	sessionID := chat.ProviderSessionID
-	if sessionID != "" && chat.ProviderProfile == profile {
-		if err := process.LoadSession(initCtx, sessionID, chat.CWD); err != nil {
-			sessionID = ""
-		}
-	} else {
-		sessionID = ""
-	}
-	if sessionID == "" {
-		sessionID, err = process.NewSession(initCtx, chat.CWD)
-		if err != nil {
-			_ = process.Close()
-			return nil, fmt.Errorf("create Hermes ACP session: %w", err)
-		}
-		chat.ProviderSessionID, chat.ProviderProfile, chat.Provider = sessionID, profile, "hermes"
-		if err := p.store.saveChat(chat); err != nil {
-			_ = process.Close()
-			return nil, err
-		}
-	}
-	current := &runtime{agent: process, sessionID: sessionID, profile: profile, cwd: chat.CWD}
-	p.runtimes[chat.ID] = current
-	return current, nil
-}
-
-func (p *Plugin) handleUpdate(chatID string, update acp.Update) {
-	p.mu.Lock()
-	current := p.runtimes[chatID]
-	if current == nil || current.activeTurn == "" || update.SessionID != current.sessionID {
-		p.mu.Unlock()
-		return
-	}
-	turnID := current.activeTurn
-	p.mu.Unlock()
-	if text := updateText(update.Value); text != "" {
-		message := &Message{ID: newID(), ChatID: chatID, TurnID: turnID, Role: "assistant", Text: text, CreatedAt: nowMillis()}
-		if p.store.addMessage(message) == nil {
-			p.publishMessage(message)
-		}
-	}
-}
-
-func updateText(value map[string]any) string {
-	kind, _ := value["sessionUpdate"].(string)
-	if kind == "" {
-		kind, _ = value["session_update"].(string)
-	}
-	if kind != "agent_message_chunk" {
-		return ""
-	}
-	if content, ok := value["content"].(map[string]any); ok {
-		text, _ := content["text"].(string)
-		return text
-	}
-	text, _ := value["text"].(string)
-	return text
-}
-
-func (p *Plugin) runTurn(chatID, turnID, text string, current *runtime) {
-	defer p.wg.Done()
-	reason, err := current.agent.Prompt(p.ctx, current.sessionID, text)
-	p.mu.Lock()
-	cancelled := current.cancelRequested
-	if current.activeTurn == turnID {
-		current.activeTurn = ""
-		current.cancelRequested = false
-	}
-	if err != nil {
-		delete(p.runtimes, chatID)
-		_ = current.agent.Close()
-	}
-	p.mu.Unlock()
-	if cancelled {
-		reason = "cancelled"
-	} else if err != nil {
-		reason = "error"
-	} else if reason == "" {
-		reason = "end_turn"
-	}
-	_ = p.store.completeTurn(turnID, reason)
-	p.publish("chat:"+chatID+":turn-completed", map[string]any{"chat_id": chatID, "turn_id": turnID, "stop_reason": reason})
-}
-
-func (p *Plugin) stopTurn(chatID string) (bool, error) {
-	if chatID == "" {
-		return false, errBadRequest
-	}
-	p.mu.Lock()
-	current := p.runtimes[chatID]
-	if current == nil || current.activeTurn == "" {
-		p.mu.Unlock()
-		return false, nil
-	}
-	current.cancelRequested = true
-	agent, sessionID := current.agent, current.sessionID
-	p.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return true, agent.Cancel(ctx, sessionID)
-}
-
-func (p *Plugin) publishMessage(message *Message) {
-	p.publish("chat:"+message.ChatID+":message", map[string]any{
-		"id": message.ID, "chat_id": message.ChatID, "turn_id": message.TurnID,
-		"role": message.Role, "text": message.Text, "created_at": message.CreatedAt,
-	})
-}
-
-func (p *Plugin) publish(channel string, value any) {
-	if p.client != nil {
-		_ = p.client.Publish(context.Background(), channel, value)
-	}
+	err = json.Unmarshal(data, &result)
+	return result, err
 }
 
 func (p *Plugin) Close() error {
@@ -398,7 +545,6 @@ func (p *Plugin) Close() error {
 	}
 	return errors.Join(busErr, p.store.close())
 }
-
 func newID() string {
 	value := make([]byte, 16)
 	if _, err := rand.Read(value); err != nil {

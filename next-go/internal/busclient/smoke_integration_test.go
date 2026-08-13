@@ -79,6 +79,10 @@ func TestSDKSmokeDualKernel(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := responder.Set(ctx, "smoke:_:rpc-ready", true); err != nil {
+		t.Fatal(err)
+	}
+	peerReady(t, caller, "smoke:_:rpc-ready")
 	result, err := caller.Request(ctx, "smoke:_:rpc", map[string]any{"message": "roundtrip"}, 2*time.Second)
 	if err != nil || result.(map[string]any)["echo"] != "roundtrip" {
 		t.Fatalf("RPC result=%#v err=%v", result, err)

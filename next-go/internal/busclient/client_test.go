@@ -78,6 +78,30 @@ func waitUntil(t *testing.T, timeout time.Duration, predicate func() bool) {
 	t.Fatal("condition was not satisfied before timeout")
 }
 
+// peerReady is a deterministic cross-connection barrier. Subscribe is
+// fire-and-forget, so a requester must not race ahead of the responder's
+// registration. The responder Set()s a retained marker after subscribing
+// (ordered on its own connection); the waiter subscribes the marker channel
+// and blocks until the retained replay or the live frame arrives — either
+// ordering proves the responder's RPC subscription is registered.
+func peerReady(t *testing.T, waiter *Client, readyChannel string) {
+	t.Helper()
+	ready := make(chan struct{}, 1)
+	if _, err := waiter.Subscribe(readyChannel, func(Frame) {
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("peer readiness marker %q never arrived", readyChannel)
+	}
+}
+
 func TestRequestCorrelationGenerationAndMatching(t *testing.T) {
 	server := startTestKernel(t, 0)
 	defer stopTestKernel(t, server)
@@ -87,15 +111,23 @@ func TestRequestCorrelationGenerationAndMatching(t *testing.T) {
 	seen := make(chan map[string]any, 1)
 	_, err := responder.Subscribe("rpc:_:corr", func(frame Frame) {
 		value, _ := frame.Value.(map[string]any)
+		replyTo, replyOK := value["_reply_to"].(string)
+		if value["_cancel"] == true || !replyOK {
+			return // best-effort cancels and malformed frames carry no reply target
+		}
 		seen <- value
-		_ = responder.Publish(context.Background(), value["_reply_to"].(string), map[string]any{
+		_ = responder.Publish(context.Background(), replyTo, map[string]any{
 			"_corr": value["_corr"], "ok": true, "result": "matched",
 		})
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := caller.Request(context.Background(), "rpc:_:corr", map[string]any{"input": 1}, time.Second)
+	if err := responder.Set(context.Background(), "ready:_:corr", true); err != nil {
+		t.Fatal(err)
+	}
+	peerReady(t, caller, "ready:_:corr")
+	result, err := caller.Request(context.Background(), "rpc:_:corr", map[string]any{"input": 1}, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +161,10 @@ func TestRequestTimeoutPublishesCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := callee.Set(context.Background(), "ready:_:slow", true); err != nil {
+		t.Fatal(err)
+	}
+	peerReady(t, caller, "ready:_:slow")
 	_, err = caller.Request(context.Background(), "rpc:_:slow", nil, 60*time.Millisecond)
 	if !errors.Is(err, ErrRequestTimeout) {
 		t.Fatalf("error = %v", err)
@@ -153,8 +189,12 @@ func TestRPCErrorResponseMapping(t *testing.T) {
 	responder := connectTestClient(t, server, "error-responder")
 	caller := connectTestClient(t, server, "error-caller")
 	_, err := responder.Subscribe("rpc:_:error", func(frame Frame) {
-		value := frame.Value.(map[string]any)
-		_ = responder.Publish(context.Background(), value["_reply_to"].(string), map[string]any{
+		value, _ := frame.Value.(map[string]any)
+		replyTo, replyOK := value["_reply_to"].(string)
+		if value["_cancel"] == true || !replyOK {
+			return // best-effort cancels and malformed frames carry no reply target
+		}
+		_ = responder.Publish(context.Background(), replyTo, map[string]any{
 			"_corr": value["_corr"], "ok": false,
 			"error": map[string]any{"code": "not_found", "message": "missing item"},
 		})
@@ -162,7 +202,11 @@ func TestRPCErrorResponseMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = caller.Request(context.Background(), "rpc:_:error", nil, time.Second)
+	if err := responder.Set(context.Background(), "ready:_:error", true); err != nil {
+		t.Fatal(err)
+	}
+	peerReady(t, caller, "ready:_:error")
+	_, err = caller.Request(context.Background(), "rpc:_:error", nil, 5*time.Second)
 	var rpcError *RPCError
 	if !errors.As(err, &rpcError) || rpcError.Code != "not_found" || rpcError.Message != "missing item" {
 		t.Fatalf("error = %#v", err)

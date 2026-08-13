@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.19**（2026-08-12）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.20**（2026-08-13）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.20 变更：**分发形态定稿**——核心集（内核 + core plugins + 前端）用 **Go** 实现为**单一静态二进制**（前端经 `go:embed` 内嵌），第三方/外挂插件仍以独立进程连总线、语言无关（松耦合不变）；**数据库访问一律使用 ORM**（Go 侧定 GORM + 纯 Go SQLite 驱动 modernc.org/sqlite，保持 CGO 关闭与交叉编译能力），禁止裸 SQL；现有 Python 栈（`next/`）转为协议参考实现，`next-go/` 为新主线（§17）。
 > v0.3 变更：插件 I/O 改为 **slots/emits 固定契约**，bindings 只存 slot→source 映射（删除 action）；**内核纯化为消息系统**，config/instance store/file/gateway 降为 core plugins；传输层定为 **WebSocket 单一栈**。
 > v0.4 变更：§8 扩写为完整的**前端插件机制**（四层结构、instance 挂载流程、两阶段加载：build-time 懒加载 → 运行时 ESM + import map）；前端加载问题从待决议中勾掉。
 > v0.5 变更：新增 **§14 插件包格式与开发流程**（目录包、双 SDK、external 加载、standalone attach 调试模式）；后续章节顺延。
@@ -436,14 +437,22 @@ my-plugin/
 
 ## 16. 待决议问题
 
-> 已敲定条目已全部移出本节（决议正文见对应章节，历史见 §17）。
+> 已敲定条目已全部移出本节（决议正文见对应章节，历史见 §18）。
 
 5. file-service 收紧程度：插件经它读写文件（可控、可审计）vs 插件直接摸文件系统（现状、自由）。
 6. Agent service：core plugin 还是 chat runtime 插件的内部能力。
 10. 插件前端 TS 类型与后端 envelope 类型的单一来源（schema 生成？）。
 11. 多机场景的内互联结（**暂缓**，v0.18）：当前只考虑单机 localhost；多机 federation 暂不考虑，NATS 平移路径保留（§4），触发条件以后再说。
 
-## 17. 修订记录
+## 17. 分发形态与 Go 主线
+
+- **核心集 = 单一静态二进制**：内核 + 全部 core plugins（supervisor / config-store / instance-store / file-service / http-gateway / bus-inspector / terminal）+ 前端（`go:embed` 内嵌 dist）用 **Go** 实现为单个二进制，交叉编译分发（无运行时依赖、无 venv、RSS 一个数量级下降）。
+- **进程模型**：核心集从「每插件一进程」收进**单进程 goroutine 插件**（编译期 registry 注册，panic 隔离到插件粒度）；内部通信复用同一线路协议（进程内 transport），总线观察者无法区分。外挂/第三方插件**维持独立进程**连总线，语言无关（v0.13 启动 ABI + wire protocol 保证），不打包进二进制。
+- **数据库访问一律 ORM**，禁止裸 SQL：Go 侧定 **GORM**（AutoMigrate 管 schema 演进）；SQLite 驱动用 **modernc.org/sqlite**（纯 Go，CGO 关闭，交叉编译不受损）。
+- **Python 栈（`next/`）转为协议参考实现**，不再加新功能；**`next-go/` 为新主线**。迁移期 Go 内核必须能被现有测试套件（pytest 协议测试 + TS SDK vitest）直接验证——测试即规格。
+- 迁移顺序：内核 → terminal → gateway（+embed 前端）→ supervisor / config-store / instance-store / file-service / inspector → 前端适配 → chat（最重，附录 A.7 原有排期不变）。
+
+## 18. 修订记录
 
 - **v0.1**（2026-08-12）：初版。三层结构、Event+Mailbox 双原语、"逻辑隔离默认"进程模型。
 - **v0.2**（2026-08-12）：微内核化；RPC 升为一等原语；传输统一（单 WS）；by-reference 数据面；渲染只在浏览器、view 为前端模块+后端 runtime。
@@ -465,6 +474,7 @@ my-plugin/
 - **v0.17**（2026-08-12）：**Event vs State 发布准则定稿**（§5.6）——每条总线消息先归类：State（"现在是什么"：instance status / online / cwd / 配置当前值）走 mailbox `set` **完整自包含值**，订阅即得当前值 + 后续替换，消费者永不需为 state 发 RPC；Event（"发生了什么"：chat 消息 / terminal 输出 / turn 进度）走普通 publish 无留存，历史一律走生产者 source of truth + **显式分页 RPC 快照**（`before_id`+`limit`）+ live event。三条禁止：mailbox 发 partial/delta；event 依赖上一条才能解读；"读上一条总线消息"式隐式取数。§5.5 `set` 语义定为整体替换，**broker 删除 delta 合并**（replace 是唯一动作，broker 再简化）；§4 重同步表述、§8.3 挂载取数、附录 A.4 terminal 存储同步更新。
 - **v0.18**（2026-08-12）：**协议三件套定稿**——§16-1 channel 语法（§5.2）：冒号分隔、**前三层语义固定** `plugin:instance:message`、第四层起自由 grouping；`*` 单字段通配（任意层）+ **pattern 前缀隐式全匹配**（pattern 字段数少于 channel 时尾部默认全匹配）+ `>` 匹配总线全部；插件级无 instance 的 channel 用保留实例名 `_`，`_` 前缀为框架保留命名空间（`_inbox:*`）；正文 channel 写法统一（`plugins:_:list`、`plugins:_:assets`、`config:_:get/set`、`gateway:_:assets:push`、`chat:_:active` 等）。§16-2 payload **partial 校验**：envelope/hello（内联 manifest）等协议元信息强校验（Pydantic / JSON Schema 皆可），payload 本体任意 JSON 不校验，slot/emit 类型声明为标注性。§16-3 补充确认：错误不需要专门 channel/订阅机制。§16-11 多机**暂缓**（当前只考虑单机 localhost）。§16-13 版本策略定**不向后兼容**：hello 协议版本严格相等、不等即拒连；schema/存储变更走一次性迁移，丢了重来可接受。待决议剩余 3 条（16-5 file-service 收紧、16-6 agent service 归属、16-10 类型单一来源）。
 - **v0.19**（2026-08-12）：**Phase 0 开工**——§16 待决议清单清理（已敲定条目移出，剩 16-5 file-service 收紧 / 16-6 agent service 归属 / 16-10 类型单一来源 + 16-11 多机暂缓）；新建 **`docs/plugin-protocol.md`** 线路级协议规范草案 v0.1（**未冻结**，评审后冻结再写码）：连接拓扑、5 帧 JSON schema（hello 含 client 生成 `conn`、成功无 ack、失败用 WS close code 4001/4002/4003/4009）、channel 匹配算法形式化（前缀隐式全匹配）、mailbox replace-only + 订阅原子交接、RPC inbox payload 契约（`_reply_to`/`_corr`/`ok`/`error`/`_cancel`、30s 超时）、`_conn:{conn}:error` 协议错误通知 mailbox、背压（出站队列 1000 丢新帧）、心跳 ping/pong 30s×2、五张组件交换时序图。
+- **v0.20**（2026-08-13）：**分发形态定稿（§17）**——核心集（内核 + core plugins + 前端 embed）用 Go 实现为单一静态二进制；外挂插件维持独立进程连总线、语言无关；核心集进程模型改为单进程 goroutine 插件（编译期 registry、panic 隔离到插件粒度）；数据库访问定 ORM（GORM + modernc.org/sqlite 纯 Go 驱动），禁止裸 SQL；Python 栈转协议参考实现，`next-go/` 为新主线，测试套件作迁移期验收标准。
 
 ---
 

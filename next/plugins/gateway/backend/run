@@ -1,0 +1,11 @@
+#!/bin/sh
+# Startup ABI entry (framework section 14.3): supervisor spawns this as
+# `backend/run --kernel-ws ws://...` with VIEWER_MANAGED=1.
+# The gateway additionally serves the built frontend; override with
+# VIEWER_HTTP_HOST / VIEWER_HTTP_PORT / VIEWER_STATIC.
+cd "$(dirname "$0")/../../.." || exit 1
+exec .venv/bin/python -m plugins.gateway \
+  --host "${VIEWER_HTTP_HOST:-127.0.0.1}" \
+  --port "${VIEWER_HTTP_PORT:-18730}" \
+  --static "${VIEWER_STATIC:-frontend/dist}" \
+  "$@"

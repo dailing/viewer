@@ -2,4 +2,4 @@
 # Startup ABI entry (framework section 14.3): supervisor spawns this as
 # `backend/run --kernel-ws ws://...` with VIEWER_MANAGED=1.
 cd "$(dirname "$0")/../../.." || exit 1
-exec .venv/bin/python -m plugins.terminal "$@"
+exec .venv/bin/python -m plugins.inspector "$@"

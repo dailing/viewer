@@ -28,13 +28,19 @@ reference-only and will be replaced piece by piece.
 
 ## Run
 
-```bash
-uv sync
-uv run python -m kernel --port 8765
-uv run pytest -v
+```
+cd next && ./start.sh
 ```
 
-TS SDK: `cd ts-sdk && npm install && npx vitest run`
+`start.sh` launches the kernel and the C0 supervisor, which spawns every
+enabled plugin in `registry.json` (each via its `backend/run` startup-ABI
+entry). Ctrl-C stops the whole stack gracefully (supervisor SIGTERMs managed
+plugins first, then the kernel closes with 4009). Ports: kernel `18765`,
+gateway `18730` (serves `frontend/dist`; build it first with
+`cd frontend && npm run build`). Env overrides: `VIEWER_HOST`, `VIEWER_PORT`,
+`VIEWER_REGISTRY`, `VIEWER_HTTP_HOST`, `VIEWER_HTTP_PORT`, `VIEWER_STATIC`.
+
+Tests: `uv run pytest -q`; TS SDK: `cd ts-sdk && npm install && npx vitest run`
 
 Frontend: `cd frontend && npm install && npm run build` — serve `frontend/dist`
 via the gateway plugin: `python -m plugins.gateway --kernel-ws ws://127.0.0.1:8765/ws --static frontend/dist --port 18730`

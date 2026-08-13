@@ -7,7 +7,7 @@
 
 import { createCtx } from "./ctx";
 import type { PluginModule } from "./definePlugin";
-import { registerComponent, registerSidebarTool } from "./registries";
+import { registerComponent, registerDockProvider } from "./registries";
 
 export function loadPlugins(): void {
   const modules = import.meta.glob<{ default: PluginModule }>("../plugins/*/index.ts", {
@@ -22,14 +22,20 @@ export function loadPlugins(): void {
     for (const [type, component] of Object.entries(plugin.components ?? {})) {
       registerComponent(type, component);
     }
-    for (const tool of plugin.sidebarTools ?? []) {
-      registerSidebarTool(tool);
-    }
-    if (plugin.activate !== undefined) {
+    if (plugin.activate !== undefined || plugin.createDockProvider !== undefined) {
       const ctx = createCtx(plugin.id);
-      Promise.resolve(plugin.activate(ctx)).catch((error: unknown) => {
-        console.error(`plugin ${plugin.id} activate failed`, error);
-      });
+      if (plugin.createDockProvider !== undefined) {
+        try {
+          registerDockProvider(plugin.createDockProvider(ctx));
+        } catch (error) {
+          console.error(`plugin ${plugin.id} createDockProvider failed`, error);
+        }
+      }
+      if (plugin.activate !== undefined) {
+        Promise.resolve(plugin.activate(ctx)).catch((error: unknown) => {
+          console.error(`plugin ${plugin.id} activate failed`, error);
+        });
+      }
     }
   }
 }

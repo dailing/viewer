@@ -11,19 +11,46 @@ import type { Component } from "vue";
 
 import type { PluginCtx } from "./ctx";
 
-/** A sidebar entry; clicking it opens a pane of `paneType`. */
-export interface SidebarTool {
+/** One running instance shown in the shell Dock. */
+export interface DockInstance {
   id: string;
+  /** Tooltip text, e.g. "#3 /usr/bin/zsh · /home/d". */
+  label: string;
+  /** Optional state word ("running"…) — drives the status dot color. */
+  state?: string;
+  /** Per-instance icon override; falls back to the provider's icon. */
+  icon?: string;
+}
+
+/**
+ * A plugin's contribution to the Dock: the live list of its running instances
+ * plus how to create a new one (framework section 8.5).
+ */
+export interface DockProvider {
+  /** instance.type — the paneType used when opening one of these instances. */
+  type: string;
   icon: string;
+  /** "+" menu entry label. */
   title: string;
-  paneType: string;
+  /**
+   * Singleton providers (bus-inspector) have no backend-tracked instances;
+   * the Dock shows their entry while a pane of `type` is open.
+   */
+  singleton?: boolean;
+  /** Reactive list of running instances, maintained by the provider. */
+  instances: DockInstance[];
+  /** "+" menu action (create a new instance); absent = not user-creatable. */
+  create?: () => Promise<void> | void;
+  /** Dock hover action to remove a running instance (e.g. kill a terminal). */
+  remove?: (id: string) => Promise<void> | void;
 }
 
 export interface PluginModule {
   id: string;
   /** instance.type → component (lazy via defineAsyncComponent). */
   components?: Record<string, Component>;
-  sidebarTools?: SidebarTool[];
+  /** Build the Dock contribution; called once at bootstrap with plugin ctx. */
+  createDockProvider?: (ctx: PluginCtx) => DockProvider;
   /** Called once at bootstrap with the plugin-scope ctx. */
   activate?: (ctx: PluginCtx) => void | Promise<void>;
   deactivate?: () => void;

@@ -7,7 +7,13 @@ export default definePlugin({
   components: {
     "bus-inspector": defineAsyncComponent(() => import("./InspectorPane.vue")),
   },
-  sidebarTools: [
-    { id: "bus-inspector", icon: "bi-activity", title: "Bus Inspector", paneType: "bus-inspector" },
-  ],
+  // Singleton: no backend-tracked instances — the Dock shows its entry while
+  // a bus-inspector pane is open; "+" focuses/opens that pane.
+  createDockProvider: () => ({
+    type: "bus-inspector",
+    icon: "bi-activity",
+    title: "Bus Inspector",
+    singleton: true,
+    instances: [],
+  }),
 });

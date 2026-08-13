@@ -44,10 +44,30 @@ def update(session_id: str, text: str) -> None:
     )
 
 
+def tool_update(session_id: str) -> None:
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "mock-read",
+                    "title": "Read fixture",
+                    "status": "completed",
+                    "arguments": {"path": "fixture.txt"},
+                },
+            },
+        }
+    )
+
+
 def run_prompt(request_id: Any, params: dict[str, Any]) -> None:
     session_id = str(params.get("sessionId", ""))
     blocks = params.get("prompt") or []
     text = "".join(str(block.get("text", "")) for block in blocks if isinstance(block, dict))
+    tool_update(session_id)
     update(session_id, "mock: ")
     update(session_id, text)
     if "long" in text.lower():

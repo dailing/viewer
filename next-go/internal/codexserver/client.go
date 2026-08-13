@@ -26,7 +26,7 @@ type Update struct {
 	ThreadID string
 	Method   string
 	Params   map[string]any
-	Raw      map[string]any
+	Raw      json.RawMessage
 }
 
 type response struct {
@@ -103,7 +103,7 @@ func (c *Client) readLoop(reader io.Reader) {
 		if len(line) > 0 {
 			var message map[string]any
 			if json.Unmarshal(line, &message) == nil {
-				c.handleMessage(message)
+				c.handleMessage(message, append(json.RawMessage(nil), line...))
 			}
 		}
 		if err != nil {
@@ -117,7 +117,7 @@ func (c *Client) readLoop(reader io.Reader) {
 	}
 }
 
-func (c *Client) handleMessage(message map[string]any) {
+func (c *Client) handleMessage(message map[string]any, raw json.RawMessage) {
 	if rawID, ok := message["id"]; ok {
 		id, valid := numberID(rawID)
 		if _, hasMethod := message["method"]; hasMethod {
@@ -146,8 +146,8 @@ func (c *Client) handleMessage(message map[string]any) {
 	c.mu.Lock()
 	callback := c.onUpdate
 	c.mu.Unlock()
-	if callback != nil && threadID != "" {
-		callback(Update{ThreadID: threadID, Method: method, Params: params, Raw: message})
+	if callback != nil && method != "" {
+		callback(Update{ThreadID: threadID, Method: method, Params: params, Raw: raw})
 	}
 	if method == "turn/completed" {
 		turn, _ := params["turn"].(map[string]any)

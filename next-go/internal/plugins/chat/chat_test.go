@@ -9,15 +9,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"viewer/internal/acp"
 )
 
 type fakeAgent struct {
 	mu                  sync.Mutex
 	sessionID           string
 	loadErr             error
-	updates             func(acp.Update)
+	updates             func(driverEvent)
 	prompts             []string
 	cancelled           bool
 	newCalls, loadCalls int
@@ -33,9 +31,9 @@ func (f *fakeAgent) LoadSession(context.Context, string, string) error {
 	f.loadCalls++
 	return f.loadErr
 }
-func (f *fakeAgent) OnUpdate(callback func(acp.Update)) { f.updates = callback }
-func (f *fakeAgent) Stderr() string                     { return "" }
-func (f *fakeAgent) Close() error                       { return nil }
+func (f *fakeAgent) OnUpdate(callback func(driverEvent)) { f.updates = callback }
+func (f *fakeAgent) Stderr() string                      { return "" }
+func (f *fakeAgent) Close() error                        { return nil }
 func (f *fakeAgent) Cancel(context.Context, string) error {
 	f.mu.Lock()
 	f.cancelled = true
@@ -47,7 +45,8 @@ func (f *fakeAgent) Prompt(_ context.Context, sessionID, text string) (string, e
 	f.prompts = append(f.prompts, text)
 	f.mu.Unlock()
 	if f.updates != nil {
-		f.updates(acp.Update{SessionID: sessionID, Value: map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"text": "answer"}}})
+		data := map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"text": "answer"}}
+		f.updates(driverEvent{Provider: "hermes", SessionID: sessionID, Kind: "agent_message_chunk", Raw: json.RawMessage(`{"sessionId":"fake","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"answer"}}}`), Data: data, Text: "answer"})
 	}
 	return "end_turn", nil
 }
@@ -146,5 +145,51 @@ func TestUpdateTextOnly(t *testing.T) {
 	}
 	if got := updateText(map[string]any{"session_update": "agent_message_chunk", "content": map[string]any{"text": "ok"}}); got != "ok" {
 		t.Fatal(got)
+	}
+}
+
+func TestDeriveMessageBlocks(t *testing.T) {
+	event := &TurnEvent{ID: "event", ChatID: "chat", TurnID: "turn", Provider: "hermes", Kind: "tool_call", OccurredAt: 42}
+	block, err := deriveMessageBlock(event, map[string]any{"title": "Read", "status": "completed", "arguments": map[string]any{"path": "a.txt"}})
+	if err != nil || block.Kind != "tool_call" || !strings.Contains(block.Payload, `"name":"Read"`) {
+		t.Fatalf("block=%#v err=%v", block, err)
+	}
+	codex := &TurnEvent{ID: "codex-event", ChatID: "chat", TurnID: "turn", Provider: "codex-app-server", Kind: "item/commandExecution/outputDelta", OccurredAt: 43}
+	block, err = deriveMessageBlock(codex, map[string]any{"command": "go test ./...", "status": "running", "delta": "ok"})
+	if err != nil || block.Kind != "command" || transcriptBlockLine(*block) != "[cmd: go test ./... → running]" {
+		t.Fatalf("block=%#v err=%v", block, err)
+	}
+}
+
+func TestHandleUpdatePersistsRawBeforeVisibleTextFilter(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		delete(p.runtimes, runtimeKey("chat", "role"))
+		_ = p.Close()
+	}()
+	p.runtimes[runtimeKey("chat", "role")] = &runtime{sessionID: "session", activeTurn: "turn", roleName: "Role"}
+	raw := json.RawMessage(`{"sessionId":"session","update":{"sessionUpdate":"tool_call","title":"Read","status":"pending"}}`)
+	p.handleUpdate("chat", "role", driverEvent{Provider: "hermes", SessionID: "session", Kind: "tool_call", Raw: raw, Data: map[string]any{"title": "Read", "status": "pending"}})
+	var events []TurnEvent
+	if err := p.store.db.Find(&events).Error; err != nil || len(events) != 1 || events[0].RawJSON != string(raw) || events[0].Seq != 0 {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+	var blocks []MessageBlock
+	if err := p.store.db.Find(&blocks).Error; err != nil || len(blocks) != 1 || blocks[0].Kind != "tool_call" {
+		t.Fatalf("blocks=%#v err=%v", blocks, err)
+	}
+	var count int64
+	if err := p.store.db.Model(&Message{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("visible messages=%d err=%v", count, err)
+	}
+	var schemas []string
+	if err := p.store.db.Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name IN ('turn_events', 'message_blocks') ORDER BY name").Scan(&schemas).Error; err != nil || len(schemas) != 2 {
+		t.Fatalf("schemas=%#v err=%v", schemas, err)
+	}
+	for _, schema := range schemas {
+		t.Log(schema)
 	}
 }

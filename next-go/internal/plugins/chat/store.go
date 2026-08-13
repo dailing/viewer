@@ -66,6 +66,30 @@ type Message struct {
 	CreatedAt  int64
 }
 
+type TurnEvent struct {
+	ID         string `gorm:"primaryKey"`
+	ChatID     string `gorm:"index;not null"`
+	TurnID     string `gorm:"index;not null"`
+	RoleID     string `gorm:"index"`
+	Provider   string `gorm:"not null"`
+	SessionID  string `gorm:"not null"`
+	Seq        int    `gorm:"not null"`
+	Kind       string `gorm:"not null"`
+	RawJSON    string `gorm:"not null"`
+	OccurredAt int64  `gorm:"index"`
+}
+
+type MessageBlock struct {
+	ID         string `gorm:"primaryKey"`
+	EventID    string `gorm:"index;not null"`
+	ChatID     string `gorm:"index;not null"`
+	TurnID     string `gorm:"index;not null"`
+	Kind       string `gorm:"not null"`
+	Text       string
+	Payload    string `gorm:"not null"`
+	OccurredAt int64
+}
+
 func (m Message) payload() map[string]any {
 	sender := map[string]any{"from": m.SenderFrom}
 	if m.RoleID != "" {
@@ -117,7 +141,7 @@ func openStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open chat database: %w", err)
 	}
-	if err := db.AutoMigrate(&Chat{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &PluginState{}); err != nil {
+	if err := db.AutoMigrate(&Chat{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
 	return &store{db: db}, nil
@@ -147,7 +171,7 @@ func (s *store) saveChat(value *Chat) error { return s.db.Save(value).Error }
 
 func (s *store) deleteChat(id string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, model := range []any{&Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}} {
+		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}} {
 			if err := tx.Where("chat_id = ?", id).Delete(model).Error; err != nil {
 				return err
 			}
@@ -183,8 +207,10 @@ func (s *store) setActiveChatID(id string) error {
 	return s.db.Save(&PluginState{Key: "active_chat_id", Value: id}).Error
 }
 
-func (s *store) beginTurn(turn *Turn) error        { return s.db.Create(turn).Error }
-func (s *store) addMessage(message *Message) error { return s.db.Create(message).Error }
+func (s *store) beginTurn(turn *Turn) error                { return s.db.Create(turn).Error }
+func (s *store) addMessage(message *Message) error         { return s.db.Create(message).Error }
+func (s *store) addTurnEvent(event *TurnEvent) error       { return s.db.Create(event).Error }
+func (s *store) addMessageBlock(block *MessageBlock) error { return s.db.Create(block).Error }
 
 func (s *store) message(id string) (*Message, error) {
 	var value Message
@@ -218,6 +244,17 @@ func (s *store) turn(id string) (*Turn, error) {
 func (s *store) turnMessages(turnID string) ([]Message, error) {
 	var values []Message
 	err := s.db.Where("turn_id = ?", turnID).Order("created_at, id").Find(&values).Error
+	return values, err
+}
+
+func (s *store) turnMessageBlocks(turnID string) ([]MessageBlock, error) {
+	var values []MessageBlock
+	err := s.db.Table("message_blocks").
+		Select("message_blocks.*").
+		Joins("JOIN turn_events ON turn_events.id = message_blocks.event_id").
+		Where("message_blocks.turn_id = ?", turnID).
+		Order("turn_events.seq, message_blocks.id").
+		Find(&values).Error
 	return values, err
 }
 

@@ -6,14 +6,13 @@ import (
 	"os"
 	"strings"
 
-	"viewer/internal/acp"
 	"viewer/internal/codexserver"
 )
 
 type codexAgent struct {
 	client *codexserver.Client
 	model  string
-	update func(acp.Update)
+	update func(driverEvent)
 }
 
 func (p *Plugin) newCodexAgent(ctx context.Context, model string) (agent, string, error) {
@@ -33,11 +32,11 @@ func (p *Plugin) newCodexAgent(ctx context.Context, model string) (agent, string
 		if result.update == nil {
 			return
 		}
+		text := ""
 		if update.Method == "item/agentMessage/delta" {
-			if text, _ := update.Params["delta"].(string); text != "" {
-				result.update(acp.Update{SessionID: update.ThreadID, Value: map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"text": text}}})
-			}
+			text, _ = update.Params["delta"].(string)
 		}
+		result.update(driverEvent{Provider: "codex-app-server", SessionID: update.ThreadID, Kind: update.Method, Raw: update.Raw, Data: update.Params, Text: text})
 	})
 	return result, model, nil
 }
@@ -68,6 +67,6 @@ func (c *codexAgent) Prompt(ctx context.Context, id, text string) (string, error
 func (c *codexAgent) Cancel(ctx context.Context, id string) error {
 	return c.client.TurnInterrupt(ctx, id)
 }
-func (c *codexAgent) OnUpdate(callback func(acp.Update)) { c.update = callback }
-func (c *codexAgent) Stderr() string                     { return "" }
-func (c *codexAgent) Close() error                       { return c.client.Close() }
+func (c *codexAgent) OnUpdate(callback func(driverEvent)) { c.update = callback }
+func (c *codexAgent) Stderr() string                      { return "" }
+func (c *codexAgent) Close() error                        { return c.client.Close() }

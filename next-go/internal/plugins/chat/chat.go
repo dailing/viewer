@@ -39,7 +39,7 @@ type agent interface {
 	LoadSession(context.Context, string, string) error
 	Prompt(context.Context, string, string) (string, error)
 	Cancel(context.Context, string) error
-	OnUpdate(func(acp.Update))
+	OnUpdate(func(driverEvent))
 	Stderr() string
 	Close() error
 }
@@ -53,6 +53,7 @@ type runtime struct {
 	agent                                                 agent
 	sessionID, profile, cwd, activeTurn, roleID, roleName string
 	cancelRequested                                       bool
+	eventSeq                                              int
 }
 type Plugin struct {
 	dataDir      string
@@ -107,7 +108,10 @@ func (p *Plugin) hermesAgent(ctx context.Context) (agent, string, error) {
 	}
 	arguments = append(arguments, "acp")
 	client, err := acp.New(ctx, command, arguments...)
-	return client, profile, err
+	if err != nil {
+		return nil, "", err
+	}
+	return &acpAgent{Client: client}, profile, nil
 }
 
 func (p *Plugin) agentForRole(ctx context.Context, role SuperRole) (agent, string, error) {

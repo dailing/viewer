@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"viewer/internal/acp"
 	"viewer/internal/busclient"
 )
 
@@ -209,7 +209,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 				prompt = bridge + "\n\nCurrent routed message follows:\n" + message
 			}
 			p.mu.Lock()
-			current.activeTurn, current.cancelRequested, current.roleName = turnID, false, role.Name
+			current.activeTurn, current.cancelRequested, current.roleName, current.eventSeq = turnID, false, role.Name, 0
 			p.mu.Unlock()
 			reason, err = current.agent.Prompt(p.ctx, current.sessionID, prompt)
 			p.mu.Lock()
@@ -319,7 +319,7 @@ func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (
 		return nil, false, err
 	}
 	current := &runtime{agent: process, profile: profile, cwd: absolute, roleID: role.ID, roleName: role.Name}
-	process.OnUpdate(func(update acp.Update) { p.handleUpdate(chat.ID, role.ID, update) })
+	process.OnUpdate(func(update driverEvent) { p.handleUpdate(chat.ID, role.ID, update) })
 	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if _, err = process.Initialize(initCtx); err != nil {
@@ -358,16 +358,30 @@ func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (
 	return current, newSession, nil
 }
 
-func (p *Plugin) handleUpdate(chatID, roleID string, update acp.Update) {
+func (p *Plugin) handleUpdate(chatID, roleID string, update driverEvent) {
 	p.mu.Lock()
 	current := p.runtimes[runtimeKey(chatID, roleID)]
 	if current == nil || current.activeTurn == "" || update.SessionID != current.sessionID {
 		p.mu.Unlock()
 		return
 	}
-	turnID, roleName := current.activeTurn, current.roleName
+	turnID, roleName, seq := current.activeTurn, current.roleName, current.eventSeq
+	current.eventSeq++
 	p.mu.Unlock()
-	if text := updateText(update.Value); text != "" {
+	occurredAt := nowMillis()
+	kind := update.Kind
+	if kind == "" {
+		kind = "unknown"
+	}
+	event := &TurnEvent{ID: newID(), ChatID: chatID, TurnID: turnID, RoleID: roleID, Provider: update.Provider, SessionID: update.SessionID, Seq: seq, Kind: kind, RawJSON: string(update.Raw), OccurredAt: occurredAt}
+	if err := p.store.addTurnEvent(event); err != nil {
+		log.Printf("viewer-chat raw event persistence failed chat_id=%s turn_id=%s provider=%s kind=%s: %v", chatID, turnID, update.Provider, kind, err)
+	} else if block, err := deriveMessageBlock(event, update.Data); err != nil {
+		log.Printf("viewer-chat message block derivation failed event_id=%s: %v", event.ID, err)
+	} else if err = p.store.addMessageBlock(block); err != nil {
+		log.Printf("viewer-chat message block persistence failed event_id=%s kind=%s: %v", event.ID, block.Kind, err)
+	}
+	if text := update.Text; text != "" {
 		message := &Message{ID: newID(), ChatID: chatID, TurnID: turnID, Role: "assistant", Text: text, SenderFrom: "role", RoleID: roleID, RoleName: roleName, CreatedAt: nowMillis()}
 		if p.store.addMessage(message) == nil {
 			p.publishMessage(message)

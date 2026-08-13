@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Black-box M6b workspace/chat/dual-role relay smoke through the Go bus."""
 from __future__ import annotations
-import asyncio, os, socket, sqlite3, subprocess, sys, tempfile, time
+import asyncio, json, os, socket, sqlite3, subprocess, sys, tempfile, time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -74,8 +74,15 @@ async def run() -> None:
                 assert database.execute("select count(*) from turns").fetchone()[0] == 2
                 assert database.execute("select count(*) from messages").fetchone()[0] == 5
                 assert database.execute("select count(distinct role_id) from role_sessions where chat_id=?", (chat["id"],)).fetchone()[0] == 2
+                raw_rows = database.execute("select raw_json from turn_events where chat_id=? order by turn_id,seq", (chat["id"],)).fetchall()
+                assert len(raw_rows) >= 6  # mock emits tool_call + two text updates for each Role turn
+                assert all(isinstance(json.loads(row[0]), dict) for row in raw_rows)
+                block_row = database.execute("select kind,payload from message_blocks where chat_id=? and kind='tool_call' order by occurred_at limit 1", (chat["id"],)).fetchone()
+                assert block_row and json.loads(block_row[1])["name"] == "Read fixture"
+                print("RAW_JSON_SAMPLE", raw_rows[0][0])
+                print("MESSAGE_BLOCK_SAMPLE", json.dumps({"kind": block_row[0], "payload": json.loads(block_row[1])}, separators=(",", ":")))
             finally: database.close()
-            print("PASS explicit dual-role ordered relay, sender frames, prompts, and DB rows")
+            print("PASS explicit dual-role ordered relay, sender frames, raw events, parsed blocks, and DB rows")
 
             try: await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "auto"})
             except Exception as exc: assert "LLM router is not configured" in str(exc)

@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -48,6 +49,10 @@ func (p *Plugin) buildTurnTranscript(turnID string, toolCharBudget int) (string,
 	if err != nil {
 		return "", 0, 0, err
 	}
+	messageBlocks, err := p.store.turnMessageBlocks(turnID)
+	if err != nil {
+		return "", 0, 0, err
+	}
 	blocks := []string{}
 	query, err := p.store.latestUserMessage(turn.ChatID, turn.StartedAt)
 	if err != nil {
@@ -56,19 +61,49 @@ func (p *Plugin) buildTurnTranscript(turnID string, toolCharBudget int) (string,
 	if query != nil && strings.TrimSpace(query.Text) != "" {
 		blocks = append(blocks, "### User query\n"+strings.TrimSpace(query.Text))
 	}
-	for _, message := range messages {
-		text := strings.TrimSpace(message.Text)
-		if text == "" {
-			continue
+	if len(messageBlocks) > 0 {
+		for _, block := range messageBlocks {
+			if line := transcriptBlockLine(block); line != "" {
+				blocks = append(blocks, line)
+			}
 		}
-		label := "Assistant"
-		if message.Role == "user" {
-			label = "User query"
+	} else {
+		// Pre-M7 turns have no parsed blocks; preserve their visible-message
+		// transcript as a non-destructive migration fallback.
+		for _, message := range messages {
+			text := strings.TrimSpace(message.Text)
+			if text == "" {
+				continue
+			}
+			label := "Assistant"
+			if message.Role == "user" {
+				label = "User query"
+			}
+			blocks = append(blocks, "### "+label+"\n"+text)
 		}
-		blocks = append(blocks, "### "+label+"\n"+text)
 	}
 	transcript := strings.Join(blocks, "\n\n")
 	return transcript, len(blocks), len([]rune(transcript)), nil
+}
+
+func transcriptBlockLine(block MessageBlock) string {
+	payload := map[string]any{}
+	_ = json.Unmarshal([]byte(block.Payload), &payload)
+	switch block.Kind {
+	case "agent_text":
+		if text := strings.TrimSpace(block.Text); text != "" {
+			return "### Assistant\n" + text
+		}
+		return ""
+	case "tool_call":
+		return fmt.Sprintf("[tool: %s]", strings.TrimSpace(fallback(stringify(payload["name"]), "unknown")+" "+stringify(payload["status"])))
+	case "file_change":
+		return fmt.Sprintf("[file: %s]", fallback(stringify(payload["path"]), "unknown"))
+	case "command":
+		return fmt.Sprintf("[cmd: %s → %s]", fallback(stringify(payload["command"]), "unknown"), fallback(stringify(payload["status"]), "unknown"))
+	default:
+		return ""
+	}
 }
 
 func (p *Plugin) generateTurnSummary(turnID, provider string) {

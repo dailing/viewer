@@ -2,6 +2,7 @@ package codexserver
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -33,7 +34,12 @@ func TestProtocolSubset(t *testing.T) {
 	}
 	methods := map[string]bool{}
 	for len(updates) > 0 {
-		methods[(<-updates).Method] = true
+		update := <-updates
+		methods[update.Method] = true
+		var raw map[string]any
+		if json.Unmarshal(update.Raw, &raw) != nil || raw["method"] != update.Method {
+			t.Errorf("raw update was not preserved for %s: %q", update.Method, update.Raw)
+		}
 	}
 	for _, method := range []string{"item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/commandExecution/outputDelta", "turn/diff/updated", "thread/tokenUsage/updated", "turn/completed"} {
 		if !methods[method] {

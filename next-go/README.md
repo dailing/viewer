@@ -36,4 +36,14 @@ Go SDK 的双内核集成冒烟：
 ./scripts/smoke_sdk.sh
 ```
 
+构建 C0 supervisor 与 bus-inspector 后，可用 Python SDK 做黑盒冒烟（默认监听端口 29371/29372）：
+
+```bash
+go build -o /tmp/viewerd ./cmd/viewerd
+go build -o /tmp/viewer-supervisor ./cmd/viewer-supervisor
+go build -o /tmp/viewer-inspector ./cmd/viewer-inspector
+../next/.venv/bin/python scripts/smoke_supervisor.py
+../next/.venv/bin/python scripts/smoke_inspector.py
+```
+
 双向 RPC 示例见 `examples/pingpong/`。

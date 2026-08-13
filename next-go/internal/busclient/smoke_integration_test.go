@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -15,7 +14,7 @@ import (
 func TestSDKSmokeDualKernel(t *testing.T) {
 	kind := os.Getenv("BUSCLIENT_SMOKE_KERNEL")
 	if kind == "" {
-		t.Skip("set BUSCLIENT_SMOKE_KERNEL=go or python to run external-kernel smoke")
+		t.Skip("set BUSCLIENT_SMOKE_KERNEL=go to run external-kernel smoke")
 	}
 	port := freePort(t)
 	process := startSmokeKernel(t, kind, port)
@@ -143,17 +142,16 @@ func startSmokeKernel(t *testing.T, kind string, port int) *exec.Cmd {
 	var command *exec.Cmd
 	switch kind {
 	case "go":
-		command = exec.Command("/tmp/viewerd", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
-	case "python":
-		repoRoot, err := filepath.Abs("../../..")
-		if err != nil {
-			t.Fatal(err)
-		}
-		nextDir := filepath.Join(repoRoot, "next")
-		command = exec.Command(filepath.Join(nextDir, ".venv", "bin", "python"), "-m", "kernel", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
-		command.Dir = nextDir
+		// Isolated kernel port + data dir; only the gateway plugin is resident
+		// (the client URL targets gateway /ws) — stores stay off so nothing
+		// double-answers RPCs or touches real data, and the default kernel
+		// port 8765 (legitimately used by other services) is never assumed free.
+		command = exec.Command("/tmp/viewerd",
+			"--host", "127.0.0.1", "--port", fmt.Sprint(port),
+			"--kernel-port", fmt.Sprint(freePort(t)),
+			"--plugins=gateway", "--data-dir", t.TempDir())
 	default:
-		t.Fatalf("unknown BUSCLIENT_SMOKE_KERNEL %q", kind)
+		t.Fatalf("unknown BUSCLIENT_SMOKE_KERNEL %q (only \"go\" is supported; the Python kernel was removed)", kind)
 	}
 	command.Stdout, command.Stderr = os.Stdout, os.Stderr
 	if err := command.Start(); err != nil {

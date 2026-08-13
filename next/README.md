@@ -25,6 +25,8 @@ bus-native prototype UI.
 The Python stack here no longer ships a kernel; run the Go black-box suite
 instead (it exercises the protocol against the Go binaries using `sdk/`):
 
+Run `cd ts-sdk && npm test` as the TS SDK vitest gate against the Go kernel.
+
 ```bash
 ../next-go/scripts/smoke_all.sh
 ```

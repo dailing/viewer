@@ -2,10 +2,12 @@
  * BusClient integration tests against a REAL kernel process — the kernel is
  * the spec, no wire mocks (same convention as the Python test suite).
  *
- * Each suite spawns `uv run python -m kernel` from next/ on a free port.
+ * Each suite spawns the Go `viewer-kernel` binary on a free port.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +24,11 @@ import {
 } from "../src/index.js";
 
 const NEXT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const REPO_DIR = path.resolve(NEXT_DIR, "..");
+const NEXT_GO_DIR = path.join(REPO_DIR, "next-go");
+const KERNEL_BIN = process.env.VIEWER_KERNEL_BIN
+  ? path.resolve(process.env.VIEWER_KERNEL_BIN)
+  : path.join(NEXT_GO_DIR, "bin", "viewer-kernel");
 
 const TEST_MANIFEST = { id: "ts-sdk-test", version: "0.1.0", slots: {}, emits: {} };
 
@@ -37,20 +44,43 @@ async function freePort(): Promise<number> {
   });
 }
 
-function startKernel(port: number): ChildProcess {
-  // Spawn the venv python directly: `uv run` wraps python in a child process,
-  // and SIGKILLing the wrapper orphans the kernel (the port stays bound and
-  // the survival-reconnect test never sees a disconnect).
-  return spawn(
-    path.join(NEXT_DIR, ".venv", "bin", "python"),
-    ["-m", "kernel", "--host", "127.0.0.1", "--port", String(port)],
-    { cwd: NEXT_DIR, stdio: ["ignore", "ignore", "pipe"] },
+function ensureKernelBinary(): void {
+  if (existsSync(KERNEL_BIN)) return;
+  if (process.env.VIEWER_KERNEL_BIN) {
+    throw new Error(`VIEWER_KERNEL_BIN does not exist: ${KERNEL_BIN}`);
+  }
+
+  mkdirSync(path.dirname(KERNEL_BIN), { recursive: true });
+  const goBinDir = path.join(homedir(), ".local", "go", "bin");
+  const result = spawnSync(
+    "go",
+    ["build", "-o", "bin/viewer-kernel", "./cmd/viewer-kernel"],
+    {
+      cwd: NEXT_GO_DIR,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${goBinDir}:${process.env.PATH ?? ""}` },
+    },
   );
+  if (result.status !== 0 || !existsSync(KERNEL_BIN)) {
+    const detail = result.error?.message ?? result.stderr.trim() ?? `exit status ${result.status}`;
+    throw new Error(`Failed to build Go viewer-kernel at ${KERNEL_BIN}: ${detail}`);
+  }
+}
+
+function startKernel(port: number): ChildProcess {
+  return spawn(KERNEL_BIN, ["--host", "127.0.0.1", "--port", String(port)], {
+    cwd: NEXT_GO_DIR,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
 }
 
 function stopKernel(child: ChildProcess): void {
   if (child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
+    child.kill("SIGTERM");
+    const killTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, 1_000);
+    killTimer.unref();
   }
 }
 
@@ -71,6 +101,10 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
   }
   throw new Error("waitFor timed out");
 }
+
+beforeAll(() => {
+  ensureKernelBinary();
+});
 
 describe("BusClient against the real kernel", () => {
   let port = 0;

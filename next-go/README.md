@@ -6,6 +6,7 @@
 
 ```
 cmd/viewerd/        单二进制入口（kernel + 核心插件集 + embed 前端）
+cmd/viewer-kernel/  独立 kernel 入口（SDK 测试与外挂调试）
 internal/protocol/  帧类型、channel 匹配、hello 校验（纯函数，无 IO）
 internal/broker/    publish 路由 + mailbox(retained) + 连接注册表
 internal/kernel/    WS 端点 + 连接生命周期
@@ -36,8 +37,8 @@ go build -o /tmp/viewerd ./cmd/viewerd
 - gateway 可用 `--host` 对外暴露；这不会改变内核绑定地址。
 - `--data-dir` 默认是 `$XDG_DATA_HOME/viewer`，未设置 XDG 时为
   `~/.local/share/viewer`；`config.json`、`instance.json`、外挂 registry 和日志均在其中。
-- 默认静态资源来自二进制内嵌的 `web/dist`。开发时用
-  `--static ../frontend/dist` 覆盖 embed。
+- 默认静态资源是从 `next/frontend` 构建并内嵌到二进制的 UI。开发时用
+  `--static ../next/frontend/dist` 覆盖 embed。
 
 SIGINT/SIGTERM 会让内核先向所有连接广播 4009，再逆序关闭插件和 PTY，整个关闭流程
 受 10 秒 deadline 约束。插件顶层、订阅 handler 与 SDK callback 都有带 plugin id 和
@@ -50,6 +51,7 @@ instance-store / file-service / inspector → 前端适配 → chat。
 
 每一步的验收标准：现有测试套件（`next/tests/` pytest + `next/ts-sdk/`
 vitest）直接对新栈通过——测试即规格。Python 栈（`next/`）为协议参考实现。
+`next/ts-sdk` vitest 直接运行 Go kernel binary，可用 `VIEWER_KERNEL_BIN` 覆盖路径。
 
 ## 构建
 
@@ -58,11 +60,11 @@ export PATH="$HOME/.local/go/bin:$PATH"
 go build ./... && go vet ./... && go test ./...
 ```
 
-发布构建先构建真实前端、同步到 embed 目录，再产出单二进制（默认
+发布构建先构建 `next/frontend`、同步到 embed 目录，再产出单二进制（默认
 `next-go/dist/viewerd`，可把输出路径作为第一个参数）：
 
 ```bash
-./scripts/build-release.sh
+./web/build-release.sh
 ```
 
 单二进制黑盒验收：

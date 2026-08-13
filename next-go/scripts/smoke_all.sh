@@ -77,7 +77,10 @@ kill "${PIDS[-1]}" 2>/dev/null; unset 'PIDS[-1]'
 run_suite supervisor "$PY" "$SCRIPT_DIR/smoke_supervisor.py"
 run_suite inspector "$PY" "$SCRIPT_DIR/smoke_inspector.py"
 
-# 4. gateway 最后跑——smoke 会 SIGTERM 内核验证关闭传导
+# 4. chat 单独拉起按需白名单 viewerd，并以 mock ACP agent 验证 turn/DB/cancel。
+run_suite chat "$PY" "$SCRIPT_DIR/smoke_chat.py"
+
+# 5. gateway 最后跑——smoke 会 SIGTERM 内核验证关闭传导
 STATIC=$(mktemp -d)
 printf '<html><body>viewer-static</body></html>\n' > "$STATIC/index.html"
 printf 'body{color:red}\n' > "$STATIC/style.css"
@@ -92,7 +95,7 @@ run_suite gateway "$PY" "$SCRIPT_DIR/smoke_gateway.py" \
 kill "$GW" "$K29200" 2>/dev/null
 rm -rf "$STATIC"
 
-# 5. 单二进制装配冒烟（M4 落地后存在则跑）
+# 6. 单二进制装配冒烟（M4 落地后存在则跑）
 if [ -f "$SCRIPT_DIR/smoke_single_binary.py" ]; then
   run_suite single-binary "$PY" "$SCRIPT_DIR/smoke_single_binary.py" --viewerd-bin "$BIN/viewerd"
 fi

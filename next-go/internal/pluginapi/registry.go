@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 
+	"viewer/internal/plugins/chat"
 	"viewer/internal/plugins/configstore"
 	"viewer/internal/plugins/fileservice"
 	"viewer/internal/plugins/gateway"
@@ -21,9 +22,21 @@ var Registry = []Entry{
 	{ID: configstore.Manifest.ID, Factory: newConfigStore},
 	{ID: instancestore.Manifest.ID, Factory: newInstanceStore},
 	{ID: fileservice.Manifest.ID, Factory: newFileService},
+	{ID: chat.Manifest.ID, Factory: newChat},
 	{ID: terminal.Manifest.ID, Factory: newTerminal},
 	{ID: supervisor.Manifest.ID, Factory: newSupervisor},
 	{ID: "gateway", Factory: newGateway},
+}
+
+func newChat(config RuntimeConfig) (Plugin, error) {
+	plugin, err := chat.New(config.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	return lifecycleAdapter{
+		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
+		wait:  waitContext, close: func(context.Context) error { return plugin.Close() },
+	}, nil
 }
 
 type lifecycleAdapter struct {

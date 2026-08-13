@@ -18,6 +18,31 @@ import { channelMatches } from "./matching.js";
 
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * UUIDv4. `crypto.randomUUID()` requires a SECURE context (https/localhost);
+ * on plain-http LAN origins it is undefined, so fall back to
+ * `crypto.getRandomValues`, which is available everywhere. The kernel
+ * validates `conn` as UUIDv4 either way.
+ */
+export function uuidv4(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40; // version 4
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80; // variant 1
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0"));
+  return (
+    hex.slice(0, 4).join("") +
+    "-" +
+    hex.slice(4, 6).join("") +
+    "-" +
+    hex.slice(6, 8).join("") +
+    "-" +
+    hex.slice(8, 10).join("") +
+    "-" +
+    hex.slice(10, 16).join("")
+  );
+}
+
 export interface Origin {
   plugin: string;
   instance: string;
@@ -241,7 +266,7 @@ export class BusClient {
     if (this.conn === null || !this._connected) {
       throw new BusConnectionError();
     }
-    const corr = crypto.randomUUID().replace(/-/g, "");
+    const corr = uuidv4().replace(/-/g, "");
     const inbox = `_inbox:${this.conn}:${corr}`;
     const timeout = options.timeout ?? this.requestTimeout;
     const payload: Record<string, unknown> =
@@ -376,7 +401,7 @@ export class BusClient {
 
   /** One connection lifetime: open, hello, replay, serve until close. */
   private async _serveOnce(): Promise<void> {
-    this.conn = crypto.randomUUID();
+    this.conn = uuidv4();
     const hello: Record<string, unknown> = {
       type: "hello",
       protocol_version: PROTOCOL_VERSION,

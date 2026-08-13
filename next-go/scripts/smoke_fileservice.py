@@ -65,6 +65,15 @@ async def run(args: argparse.Namespace) -> None:
         adjustable_path.write_bytes(b"y" * 4096)
         home_path = home / "home.txt"
         home_path.write_text("expanded")
+        listing_path = temp / "listing"
+        (listing_path / "A-dir" / "level-two").mkdir(parents=True)
+        (listing_path / "z-dir").mkdir()
+        (listing_path / "A-dir" / "level-two" / "deep.txt").write_text("deep")
+        (listing_path / "a.txt").write_text("alpha")
+        (listing_path / "B.json").write_text("{}")
+        (listing_path / ".hidden").write_text("secret")
+        (listing_path / "A-dir" / ".nested-hidden").write_text("secret")
+        (listing_path / "link.json").symlink_to(listing_path / "B.json")
         log_path = temp / "fileservice.log"
         environment = os.environ.copy()
         environment["HOME"] = str(home)
@@ -130,6 +139,74 @@ async def run(args: argparse.Namespace) -> None:
                 "sha256": hashlib.sha256(binary_path.read_bytes()).hexdigest(),
             }
             print("file hash success/errors: PASS")
+
+            await expect_error(client, "file:_:list", {}, "invalid_request")
+            await expect_error(
+                client, "file:_:list", {"path": str(temp / "missing")}, "not_found"
+            )
+            await expect_error(
+                client, "file:_:list", {"path": str(text_path)}, "not_directory"
+            )
+            current = await client.request("file:_:list", {"path": ""})
+            assert current["path"] == str(Path.cwd().resolve())
+            home_listing = await client.request("file:_:list", {"path": "~"})
+            assert home_listing["path"] == str(home.resolve())
+            assert [entry["name"] for entry in home_listing["entries"]] == ["home.txt"]
+            listing = await client.request("file:_:list", {"path": str(listing_path)})
+            assert listing["path"] == str(listing_path.resolve())
+            assert [entry["name"] for entry in listing["entries"]] == [
+                "A-dir",
+                "z-dir",
+                "a.txt",
+                "B.json",
+                "link.json",
+            ]
+            assert all(not entry["name"].startswith(".") for entry in listing["entries"])
+            assert all(
+                set(entry)
+                == {
+                    "name",
+                    "path",
+                    "type",
+                    "size",
+                    "mtime",
+                    "mime",
+                    "is_dir",
+                    "is_symlink",
+                    "link_target",
+                }
+                for entry in listing["entries"]
+            )
+            directories = listing["entries"][:2]
+            assert all(
+                entry["type"] == "directory"
+                and entry["is_dir"] is True
+                and entry["size"] is None
+                and entry["mime"] is None
+                for entry in directories
+            )
+            symlink = next(entry for entry in listing["entries"] if entry["name"] == "link.json")
+            expected_symlink = {
+                "name": "link.json",
+                "path": str((listing_path / "B.json").resolve()),
+                "type": "symlink",
+                "size": (listing_path / "B.json").stat().st_size,
+                "mtime": (listing_path / "B.json").stat().st_mtime,
+                "mime": "application/json",
+                "is_dir": False,
+                "is_symlink": True,
+                "link_target": str((listing_path / "B.json").resolve()),
+            }
+            assert symlink == expected_symlink, (symlink, expected_symlink)
+            nested = await client.request(
+                "file:_:list", {"path": str(listing_path / "A-dir")}
+            )
+            assert [entry["name"] for entry in nested["entries"]] == ["level-two"]
+            deep = await client.request(
+                "file:_:list", {"path": str(listing_path / "A-dir" / "level-two")}
+            )
+            assert [entry["name"] for entry in deep["entries"]] == ["deep.txt"]
+            print("file list sorting/hidden/symlink/nesting/errors: PASS")
         finally:
             await client.close()
             if process.poll() is None:

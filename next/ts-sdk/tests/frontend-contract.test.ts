@@ -4,7 +4,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
@@ -21,6 +21,7 @@ const VIEWERD_BIN = process.env.VIEWERD_BIN
   ? path.resolve(process.env.VIEWERD_BIN)
   : path.join(NEXT_GO_DIR, "bin", "viewerd");
 const MANIFEST = { id: "frontend-contract", version: "0.1.0", slots: {}, emits: {} };
+const FILES_MANIFEST = { ...MANIFEST, id: "frontend-files-contract" };
 
 interface TerminalStatus {
   id: string;
@@ -60,6 +61,23 @@ interface InspectorStats {
   filter: Record<string, string>;
   ring_size: number;
   ring_used: number;
+}
+
+interface FileEntry {
+  name: string;
+  path: string;
+  type: "file" | "directory" | "symlink" | "other";
+  size: number | null;
+  mtime: number | null;
+  mime: string | null;
+  is_dir: boolean;
+  is_symlink: boolean;
+  link_target: string | null;
+}
+
+interface DirectoryListing {
+  path: string;
+  entries: FileEntry[];
 }
 
 async function freePort(): Promise<number> {
@@ -111,7 +129,7 @@ function startViewerd(gatewayPort: number, kernelPort: number, dataDir: string):
       "127.0.0.1",
       "--kernel-port",
       String(kernelPort),
-      "--plugins=bus-inspector,terminal",
+      "--plugins=bus-inspector,terminal,file-service",
       "--data-dir",
       dataDir,
     ],
@@ -136,6 +154,7 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
   let gatewayPort = 0;
   let kernelPort = 0;
   let dataDir = "";
+  let filesFixture = "";
   let viewerd: ChildProcess;
 
   beforeAll(async () => {
@@ -143,6 +162,15 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
     gatewayPort = await freePort();
     kernelPort = await freePort();
     dataDir = mkdtempSync(path.join(tmpdir(), "viewer-frontend-contract-"));
+    filesFixture = path.join(dataDir, "files-fixture");
+    mkdirSync(path.join(filesFixture, "Alpha", "nested"), { recursive: true });
+    mkdirSync(path.join(filesFixture, "zulu"));
+    writeFileSync(path.join(filesFixture, "Alpha", "nested", "deep.txt"), "deep");
+    writeFileSync(path.join(filesFixture, "Alpha", ".nested-hidden"), "secret");
+    writeFileSync(path.join(filesFixture, "a.txt"), "alpha");
+    writeFileSync(path.join(filesFixture, "B.json"), "{}");
+    writeFileSync(path.join(filesFixture, ".hidden"), "secret");
+    symlinkSync(path.join(filesFixture, "B.json"), path.join(filesFixture, "link.json"));
     viewerd = startViewerd(gatewayPort, kernelPort, dataDir);
     let stderr = "";
     viewerd.stderr?.on("data", (chunk: Buffer) => {
@@ -290,6 +318,73 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
         rate_per_sec: expect.any(Number),
       }),
     );
+    await client.close();
+  }, 20_000);
+
+  it("lists lazy nested file trees with production fields, sorting, hidden filtering, symlinks, and errors", async () => {
+    const client = new BusClient(`ws://127.0.0.1:${kernelPort}/ws`, FILES_MANIFEST);
+    await client.connect();
+
+    const current = (await client.request("file:_:list", { path: "" })) as DirectoryListing;
+    expect(current.path).toBe(NEXT_GO_DIR);
+
+    const root = (await client.request("file:_:list", {
+      path: filesFixture,
+    })) as DirectoryListing;
+    expect(root.path).toBe(filesFixture);
+    expect(root.entries.map((entry) => entry.name)).toEqual([
+      "Alpha",
+      "zulu",
+      "a.txt",
+      "B.json",
+      "link.json",
+    ]);
+    expect(root.entries.some((entry) => entry.name.startsWith("."))).toBe(false);
+    expect(root.entries.every((entry) => Object.keys(entry).sort().join(",") === [
+      "is_dir",
+      "is_symlink",
+      "link_target",
+      "mime",
+      "mtime",
+      "name",
+      "path",
+      "size",
+      "type",
+    ].join(","))).toBe(true);
+    expect(root.entries.slice(0, 2)).toEqual([
+      expect.objectContaining({ name: "Alpha", type: "directory", is_dir: true, size: null, mime: null }),
+      expect.objectContaining({ name: "zulu", type: "directory", is_dir: true, size: null, mime: null }),
+    ]);
+
+    const target = path.join(filesFixture, "B.json");
+    expect(root.entries.find((entry) => entry.name === "link.json")).toEqual({
+      name: "link.json",
+      path: target,
+      type: "symlink",
+      size: 2,
+      mtime: expect.any(Number),
+      mime: "application/json",
+      is_dir: false,
+      is_symlink: true,
+      link_target: target,
+    });
+
+    // These are the two lazy expansion calls made after the root is visible.
+    const firstExpansion = (await client.request("file:_:list", {
+      path: path.join(filesFixture, "Alpha"),
+    })) as DirectoryListing;
+    expect(firstExpansion.entries.map((entry) => entry.name)).toEqual(["nested"]);
+    const secondExpansion = (await client.request("file:_:list", {
+      path: path.join(filesFixture, "Alpha", "nested"),
+    })) as DirectoryListing;
+    expect(secondExpansion.entries.map((entry) => entry.name)).toEqual(["deep.txt"]);
+
+    await expect(
+      client.request("file:_:list", { path: path.join(filesFixture, "missing") }),
+    ).rejects.toMatchObject({ name: "RpcError", code: "not_found" });
+    await expect(
+      client.request("file:_:list", { path: path.join(filesFixture, "a.txt") }),
+    ).rejects.toMatchObject({ name: "RpcError", code: "not_directory" });
     await client.close();
   }, 20_000);
 });

@@ -678,7 +678,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 - `scripts/smoke_terminal.py` is the Python-SDK black-box terminal suite used unchanged against the Go kernel with the Go terminal plugin.
 - `internal/plugins/supervisor/` implements the C0 process supervisor over the Go bus SDK: registry loading, managed `backend/run` process groups, append-only per-plugin logs, starting/running/crashed/broken state publication, lifecycle events, serialized manual restart RPCs, exponential backoff, the 60-second crash-loop breaker, and TERM-to-KILL tree shutdown. `cmd/viewer-supervisor/main.go` exposes `--kernel-ws`, `--registry`, and `--log-dir` for the standalone process form.
 - `internal/plugins/inspector/` implements the Go bus-inspector: open `>` capture with client-side self-origin rejection, a bounded ring, compound protocol-glob/frame/origin/trace/payload filters, pause/resume/clear control, a fresh depth-zero match stream capped at 200 events per second, retained statistics, and newest-first 800KB-budgeted cursor snapshots. `cmd/viewer-inspector/main.go` exposes `--kernel-ws`, `--ring-size`, and `--echo`.
-- `internal/plugins/configstore/`, `instancestore/`, and `fileservice/` implement the Go C1-C3 core services: atomic JSON plugin config, atomic JSON per-instance state with retained tombstones, and unrestricted absolute/tilde-expanded file resolve/read/hash operations. `internal/plugins/pluginrpc/` supplies their inbox response helpers, while `internal/plugins/storefile/` owns sibling-temp-file JSON replacement.
+- `internal/plugins/configstore/`, `instancestore/`, and `fileservice/` implement the Go C1-C3 core services: atomic JSON plugin config, atomic JSON per-instance state with retained tombstones, and unrestricted absolute/tilde-expanded file resolve/read/hash plus unpaged directory listing. `file:_:list` filters hidden names, returns production-compatible file-entry metadata, and sorts directories first case-insensitively. `internal/plugins/pluginrpc/` supplies their inbox response helpers, while `internal/plugins/storefile/` owns sibling-temp-file JSON replacement.
 - `cmd/viewer-configstore/`, `cmd/viewer-instancestore/`, and `cmd/viewer-fileservice/` expose the standalone migration binaries with the common `--kernel-ws` ABI and store-specific `--db` overrides. `scripts/smoke_stores.py` and `scripts/smoke_fileservice.py` use the Python SDK to black-box the RPC, persistence, retained-mailbox, tombstone, size-limit, and binary-content contracts.
 - `scripts/smoke_kernel.py` injects `next/` to use the Python SDK and black-box checks hello close codes, fanout/matching, mailbox handoff, RPC inbox traffic, oversize errors, registry/lifecycle behavior, and SIGTERM close 4009 against the built Go daemon.
 - `scripts/smoke_single_binary.py` starts one assembled `viewerd` on isolated ports/data, checks embedded HTTP, all seven registrations through gateway `/ws`, both JSON stores, terminal IO, inspector capture, direct-kernel external-plugin compatibility, clean SIGTERM, and restart persistence. `web/build-release.sh` builds `next/frontend`, synchronizes its dist into the embed tree, and builds the release binary; `scripts/build-release.sh` remains the compatibility entry point.
@@ -691,9 +691,13 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 - Short manual loop for serving `next/frontend/dist` through `viewerd --static`, using the embedded UI, or running Vite with its `/ws` gateway proxy.
 
+`next/frontend/src/plugins/files/`
+
+- Singleton Files pane plugin registered through the shell's in-repo plugin loader. `FilesPane.vue` obtains the root and every expanded directory exclusively through `file:_:list`, keeps child directories lazy, distinguishes file/directory/symlink icons, and deliberately has no preview or mutation actions.
+
 `next/ts-sdk/tests/frontend-contract.test.ts`
 
-- Go-backed Vitest contracts for every bus call used by the next/frontend terminal and Bus Inspector panes, including terminal lifecycle/output/resize/snapshot/reconnect replay and inspector filtering/control/stats/self-echo behavior.
+- Go-backed Vitest contracts for every bus call used by the next/frontend terminal, Files, and Bus Inspector panes, including terminal lifecycle/output/resize/snapshot/reconnect replay, lazy nested directory listing and file-entry semantics, and inspector filtering/control/stats/self-echo behavior.
 
 `run.py`
 

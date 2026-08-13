@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -19,10 +21,11 @@ import (
 )
 
 const DefaultMaxReadBytes int64 = 1024 * 1024
+const showHiddenFiles = false
 
 var Manifest = busclient.Manifest{
 	ID: "file-service", Version: "0.1.0",
-	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}},
+	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}},
 	Emits: map[string]any{},
 }
 
@@ -36,6 +39,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"file:_:resolve": p.resolve,
 		"file:_:read":    p.read,
 		"file:_:hash":    p.hash,
+		"file:_:list":    p.list,
 	} {
 		if _, err := client.Subscribe(pattern, handler); err != nil {
 			_ = client.Close()
@@ -165,6 +169,134 @@ func (p *Plugin) hash(frame busclient.Frame) {
 	p.reply(frame, map[string]any{"path": path, "sha256": digest})
 }
 
+type fileEntry struct {
+	Name       string   `json:"name"`
+	Path       string   `json:"path"`
+	Type       string   `json:"type"`
+	Size       *int64   `json:"size"`
+	Mtime      *float64 `json:"mtime"`
+	MIME       *string  `json:"mime"`
+	IsDir      bool     `json:"is_dir"`
+	IsSymlink  bool     `json:"is_symlink"`
+	LinkTarget *string  `json:"link_target"`
+}
+
+func (p *Plugin) list(frame busclient.Frame) {
+	if pluginrpc.Cancelled(frame) {
+		return
+	}
+	value, ok := pluginrpc.Object(frame)
+	if !ok {
+		p.replyError(frame, "invalid_request", "missing required field: path")
+		return
+	}
+	raw, ok := value["path"].(string)
+	if !ok {
+		p.replyError(frame, "invalid_request", "missing required field: path")
+		return
+	}
+	path, ok := resolveRequestPath(raw)
+	if !ok {
+		p.replyError(frame, "invalid_request", "invalid path")
+		return
+	}
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		p.replyError(frame, "not_found", "directory not found: "+path)
+		return
+	}
+	if err != nil {
+		p.replyError(frame, "read_error", err.Error())
+		return
+	}
+	if !info.IsDir() {
+		p.replyError(frame, "not_directory", "path is not a directory: "+path)
+		return
+	}
+	children, err := os.ReadDir(path)
+	if err != nil {
+		p.replyError(frame, "read_error", err.Error())
+		return
+	}
+	entries := make([]fileEntry, 0, len(children))
+	for _, child := range children {
+		if !showHiddenFiles && strings.HasPrefix(child.Name(), ".") {
+			continue
+		}
+		entries = append(entries, entryFor(filepath.Join(path, child.Name())))
+	}
+	sort.SliceStable(entries, func(left, right int) bool {
+		if entries[left].IsDir != entries[right].IsDir {
+			return entries[left].IsDir
+		}
+		return strings.ToLower(entries[left].Name) < strings.ToLower(entries[right].Name)
+	})
+	p.reply(frame, map[string]any{"path": path, "entries": entries})
+}
+
+func entryFor(path string) fileEntry {
+	linkInfo, linkErr := os.Lstat(path)
+	isSymlink := linkErr == nil && linkInfo.Mode()&os.ModeSymlink != 0
+	info, statErr := os.Stat(path)
+	isDir := statErr == nil && info.IsDir()
+	entryType := "other"
+	if isDir {
+		if isSymlink {
+			entryType = "symlink"
+		} else {
+			entryType = "directory"
+		}
+	} else if statErr == nil && info.Mode().IsRegular() {
+		if isSymlink {
+			entryType = "symlink"
+		} else {
+			entryType = "file"
+		}
+	}
+
+	entry := fileEntry{
+		Name:      filepath.Base(path),
+		Path:      resolvedPath(path),
+		Type:      entryType,
+		IsDir:     isDir,
+		IsSymlink: isSymlink,
+	}
+	if statErr == nil {
+		mtime := float64(info.ModTime().Unix()) + float64(info.ModTime().Nanosecond())/1e9
+		entry.Mtime = &mtime
+		if !isDir {
+			size := info.Size()
+			entry.Size = &size
+		}
+	}
+	if !isDir {
+		guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+		if guessed == "" {
+			guessed = "application/octet-stream"
+		} else if mediaType, _, err := mime.ParseMediaType(guessed); err == nil {
+			guessed = mediaType
+		}
+		entry.MIME = &guessed
+	}
+	if isSymlink {
+		target := resolvedPath(path)
+		entry.LinkTarget = &target
+	}
+	return entry
+}
+
+func resolvedPath(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved
+	}
+	absolute, err := filepath.Abs(path)
+	if err == nil {
+		return absolute
+	}
+	return path
+}
+
 func requestPath(frame busclient.Frame) (string, bool) {
 	value, ok := pluginrpc.Object(frame)
 	if !ok {
@@ -174,6 +306,10 @@ func requestPath(frame busclient.Frame) (string, bool) {
 	if !ok || raw == "" {
 		return "", false
 	}
+	return resolveRequestPath(raw)
+}
+
+func resolveRequestPath(raw string) (string, bool) {
 	expanded, err := expandUser(raw)
 	if err != nil {
 		return "", false

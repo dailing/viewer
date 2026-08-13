@@ -1,7 +1,7 @@
 [project]
 name = "viewer-next"
 version = "0.1.0"
-description = "Viewer plugin-framework rewrite: microkernel message bus + core plugins (Phase 0+)"
+description = "Viewer bus SDKs and prototype frontend; the kernel and core plugins live in next-go/"
 requires-python = ">=3.12"
 dependencies = [
     "websockets>=15",
@@ -12,11 +12,6 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.26",
 ]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-pythonpath = ["."]
 
 [tool.uv]
 package = false

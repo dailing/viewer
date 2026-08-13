@@ -9,6 +9,7 @@ cmd/viewerd/        单二进制入口（kernel + 核心插件集 + embed 前端
 internal/protocol/  帧类型、channel 匹配、hello 校验（纯函数，无 IO）
 internal/broker/    publish 路由 + mailbox(retained) + 连接注册表
 internal/kernel/    WS 端点 + 连接生命周期 + autostart
+internal/busclient/ Go 插件总线 SDK（RPC、订阅、重连）
 internal/pluginapi/ 进程内插件契约（interface + 编译期 registry）
 internal/plugins/   核心插件集（supervisor/terminal/gateway/...）
 web/                go:embed 前端 dist 的挂载点
@@ -28,3 +29,11 @@ vitest）直接对新栈通过——测试即规格。Python 栈（`next/`）为
 export PATH="$HOME/.local/go/bin:$PATH"
 go build ./... && go vet ./... && go test ./...
 ```
+
+Go SDK 的双内核集成冒烟：
+
+```bash
+./scripts/smoke_sdk.sh
+```
+
+双向 RPC 示例见 `examples/pingpong/`。

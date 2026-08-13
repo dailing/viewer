@@ -73,7 +73,7 @@ type Plugin struct {
 var (
 	errBadRequest  = errors.New("chat_id and message are required")
 	errTurnActive  = errors.New("RoutingTargetBusy: chat role already has a turn in progress")
-	errProviderM6c = errors.New("provider must be hermes; additional providers are deferred to M6c")
+	errProviderM6c = errors.New("provider must be hermes or codex-app-server; opencode is not implemented")
 )
 
 func New(dataDir string, options ...Option) (*Plugin, error) {
@@ -108,6 +108,17 @@ func (p *Plugin) hermesAgent(ctx context.Context) (agent, string, error) {
 	arguments = append(arguments, "acp")
 	client, err := acp.New(ctx, command, arguments...)
 	return client, profile, err
+}
+
+func (p *Plugin) agentForRole(ctx context.Context, role SuperRole) (agent, string, error) {
+	if role.Provider == "codex-app-server" {
+		model := ""
+		if role.Model != nil {
+			model = strings.TrimSpace(*role.Model)
+		}
+		return p.newCodexAgent(ctx, model)
+	}
+	return p.factory(ctx)
 }
 func envBool(name string, fallback bool) bool {
 	value, exists := os.LookupEnv(name)

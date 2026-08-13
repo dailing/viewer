@@ -203,8 +203,10 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		if err == nil {
 			prompt := message
 			if fresh {
-				history, _ := p.historyPrompt(chat.ID, before, defaultHistoryWordBudget)
-				prompt = initialPrompt(workspace, chat, role, history, message)
+				contextBridge := p.buildNewSessionContext(chat, message, before)
+				prompt = initialPrompt(workspace, chat, role, contextBridge, message)
+			} else if bridge := p.buildRoleSwitchBridge(chat, role.ID, message, before); bridge != "" {
+				prompt = bridge + "\n\nCurrent routed message follows:\n" + message
 			}
 			p.mu.Lock()
 			current.activeTurn, current.cancelRequested, current.roleName = turnID, false, role.Name
@@ -230,6 +232,10 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		}
 		_ = p.store.completeTurn(turnID, reason)
 		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
+		if reason != "cancelled" {
+			p.wg.Add(1)
+			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, role.Provider)
+		}
 		if err != nil || reason == "cancelled" {
 			break
 		}
@@ -308,7 +314,7 @@ func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (
 	if existing != nil {
 		_ = existing.agent.Close()
 	}
-	process, profile, err := p.factory(ctx)
+	process, profile, err := p.agentForRole(ctx, role)
 	if err != nil {
 		return nil, false, err
 	}
@@ -318,7 +324,7 @@ func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (
 	defer cancel()
 	if _, err = process.Initialize(initCtx); err != nil {
 		_ = process.Close()
-		return nil, false, fmt.Errorf("initialize Hermes ACP: %w", err)
+		return nil, false, fmt.Errorf("initialize %s driver: %w", role.Provider, err)
 	}
 	state, err := p.store.roleSession(chat.ID, role.ID)
 	if err != nil {
@@ -326,18 +332,20 @@ func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (
 		return nil, false, err
 	}
 	sessionID := ""
-	if role.SessionPolicy != "new_each_run" && state != nil && state.ProviderProfile == profile && state.CWD == absolute {
+	newSession := true
+	if role.SessionPolicy != "new_each_run" && state != nil && state.Provider == role.Provider && state.ProviderProfile == profile && state.CWD == absolute {
 		if process.LoadSession(initCtx, state.ProviderSessionID, absolute) == nil {
 			sessionID = state.ProviderSessionID
+			newSession = false
 		}
 	}
 	if sessionID == "" {
 		sessionID, err = process.NewSession(initCtx, absolute)
 		if err != nil {
 			_ = process.Close()
-			return nil, false, fmt.Errorf("create Hermes ACP session: %w", err)
+			return nil, false, fmt.Errorf("create %s session: %w", role.Provider, err)
 		}
-		err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: "hermes", ProviderProfile: profile, ProviderSessionID: sessionID, CWD: absolute, UpdatedAt: nowMillis()})
+		err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: role.Provider, ProviderProfile: profile, ProviderSessionID: sessionID, CWD: absolute, UpdatedAt: nowMillis()})
 		if err != nil {
 			_ = process.Close()
 			return nil, false, err
@@ -347,7 +355,7 @@ func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (
 	p.mu.Lock()
 	p.runtimes[key] = current
 	p.mu.Unlock()
-	return current, true, nil
+	return current, newSession, nil
 }
 
 func (p *Plugin) handleUpdate(chatID, roleID string, update acp.Update) {

@@ -60,6 +60,24 @@ type LLMConfig struct {
 	Model    string `json:"model"`
 }
 
+type SummaryConfig struct {
+	Enabled           bool `json:"enabled"`
+	ToolCharBudget    int  `json:"tool_char_budget"`
+	TimeoutSeconds    int  `json:"timeout_seconds"`
+	ContextEnabled    bool `json:"context_enabled"`
+	SummaryCharBudget int  `json:"summary_char_budget"`
+	TailWordBudget    int  `json:"tail_word_budget"`
+}
+
+type HindsightConfig struct {
+	Endpoint       string `json:"endpoint"`
+	Token          string `json:"token"`
+	BankPrefix     string `json:"bank_prefix"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	MaxTokens      int    `json:"max_tokens"`
+	Limit          int    `json:"limit"`
+}
+
 func defaultWorkspace() Workspace {
 	return Workspace{ID: "default", Name: "Default Super Workspace", Roles: []SuperRole{}, RoutingPolicies: []RoutingPolicyConfig{}}
 }
@@ -73,7 +91,7 @@ func normalizeRole(role *SuperRole, creating bool) error {
 	if role.Provider == "" {
 		role.Provider = "hermes"
 	}
-	if role.Provider != "hermes" {
+	if role.Provider != "hermes" && role.Provider != "codex-app-server" {
 		return errProviderM6c
 	}
 	if role.SessionPolicy == "" {

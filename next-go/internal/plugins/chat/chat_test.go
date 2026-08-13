@@ -68,7 +68,7 @@ func TestChatRoleSessionLoadAndFallback(t *testing.T) {
 	first := newFakeAgent("new")
 	p.factory = func(context.Context) (agent, string, error) { return first, "test", nil }
 	runtime, fresh, err := p.ensureRuntime(context.Background(), chat, role)
-	if err != nil || !fresh || runtime.sessionID != "old" || first.loadCalls != 1 || first.newCalls != 0 {
+	if err != nil || fresh || runtime.sessionID != "old" || first.loadCalls != 1 || first.newCalls != 0 {
 		t.Fatalf("runtime=%#v fresh=%v err=%v load=%d new=%d", runtime, fresh, err, first.loadCalls, first.newCalls)
 	}
 	p.mu.Lock()
@@ -125,6 +125,10 @@ func TestRouterHTTPCompletion(t *testing.T) {
 }
 
 func TestProviderValidationAndMessageSender(t *testing.T) {
+	codex := SuperRole{Name: "Codex", Provider: "codex-app-server"}
+	if err := normalizeRole(&codex, true); err != nil {
+		t.Fatalf("codex-app-server should be accepted: %v", err)
+	}
 	role := SuperRole{Name: "X", Provider: "codex"}
 	if !errors.Is(normalizeRole(&role, true), errProviderM6c) {
 		t.Fatal("expected M6c provider error")

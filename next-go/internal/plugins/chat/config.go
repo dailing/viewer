@@ -97,3 +97,41 @@ func (p *Plugin) llmConfig(ctx context.Context) (LLMConfig, error) {
 	}
 	return result, nil
 }
+
+func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
+	result := SummaryConfig{Enabled: true, ToolCharBudget: 4000, TimeoutSeconds: 60, ContextEnabled: true, SummaryCharBudget: 8000, TailWordBudget: defaultHistoryWordBudget}
+	_ = p.configGet(ctx, "turn_summary", &result)
+	if result.ToolCharBudget < 0 {
+		result.ToolCharBudget = 0
+	}
+	if result.TimeoutSeconds <= 0 {
+		result.TimeoutSeconds = 60
+	}
+	if result.SummaryCharBudget < 0 {
+		result.SummaryCharBudget = 0
+	}
+	if result.TailWordBudget < 0 {
+		result.TailWordBudget = 0
+	}
+	return result
+}
+
+func (p *Plugin) hindsightConfig(ctx context.Context) HindsightConfig {
+	result := HindsightConfig{BankPrefix: "super-workspace", TimeoutSeconds: 10, MaxTokens: 800, Limit: 8}
+	_ = p.configGet(ctx, "hindsight", &result)
+	for key, target := range map[string]*string{"hindsight.endpoint": &result.Endpoint, "hindsight.token": &result.Token, "hindsight.bank_prefix": &result.BankPrefix} {
+		if *target == "" {
+			_ = p.configGet(ctx, key, target)
+		}
+	}
+	if result.TimeoutSeconds <= 0 {
+		result.TimeoutSeconds = 10
+	}
+	if result.MaxTokens < 0 {
+		result.MaxTokens = 0
+	}
+	if result.Limit <= 0 {
+		result.Limit = 8
+	}
+	return result
+}

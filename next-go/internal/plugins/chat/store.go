@@ -90,6 +90,24 @@ type Turn struct {
 	StopReason *string
 }
 
+type TurnSummary struct {
+	TurnID             string `gorm:"primaryKey"`
+	ChatID             string `gorm:"index;not null"`
+	RoleID             string `gorm:"index"`
+	RoleName           string
+	Provider           string
+	Status             string
+	Summary            string
+	Model              string
+	ProfileID          string
+	SourceMessageCount int
+	SourceCharCount    int
+	LatencyMS          int
+	Error              string
+	OccurredAt         int64 `gorm:"index"`
+	CreatedAt          int64
+}
+
 type store struct{ db *gorm.DB }
 
 func openStore(dataDir string) (*store, error) {
@@ -99,7 +117,7 @@ func openStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open chat database: %w", err)
 	}
-	if err := db.AutoMigrate(&Chat{}, &RoleSession{}, &Message{}, &Turn{}, &PluginState{}); err != nil {
+	if err := db.AutoMigrate(&Chat{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &PluginState{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
 	return &store{db: db}, nil
@@ -129,7 +147,7 @@ func (s *store) saveChat(value *Chat) error { return s.db.Save(value).Error }
 
 func (s *store) deleteChat(id string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, model := range []any{&Message{}, &Turn{}, &RoleSession{}} {
+		for _, model := range []any{&Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}} {
 			if err := tx.Where("chat_id = ?", id).Delete(model).Error; err != nil {
 				return err
 			}
@@ -183,6 +201,99 @@ func (s *store) message(id string) (*Message, error) {
 func (s *store) completeTurn(id, reason string) error {
 	ended := nowMillis()
 	return s.db.Model(&Turn{}).Where("id = ?", id).Updates(map[string]any{"ended_at": ended, "stop_reason": reason}).Error
+}
+
+func (s *store) turn(id string) (*Turn, error) {
+	var value Turn
+	result := s.db.Limit(1).Find(&value, "id = ?", id)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &value, nil
+}
+
+func (s *store) turnMessages(turnID string) ([]Message, error) {
+	var values []Message
+	err := s.db.Where("turn_id = ?", turnID).Order("created_at, id").Find(&values).Error
+	return values, err
+}
+
+func (s *store) latestUserMessage(chatID string, before int64) (*Message, error) {
+	var value Message
+	result := s.db.Where("chat_id = ? AND role = ? AND created_at <= ?", chatID, "user", before).Order("created_at desc").Limit(1).Find(&value)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &value, nil
+}
+
+func (s *store) saveTurnSummary(value *TurnSummary) error { return s.db.Save(value).Error }
+
+func (s *store) recentTurnSummaries(chatID string, before, after int64, excludeRoleID string) ([]TurnSummary, error) {
+	var values []TurnSummary
+	query := s.db.Where("chat_id = ? AND status = ? AND occurred_at < ?", chatID, "completed", before)
+	if after > 0 {
+		query = query.Where("occurred_at > ?", after)
+	}
+	if excludeRoleID != "" {
+		query = query.Where("role_id <> ?", excludeRoleID)
+	}
+	err := query.Order("occurred_at asc, turn_id asc").Limit(50).Find(&values).Error
+	return values, err
+}
+
+func (s *store) latestSummaryTime(chatID string, before int64) (int64, error) {
+	var value TurnSummary
+	result := s.db.Where("chat_id = ? AND status = ? AND occurred_at < ?", chatID, "completed", before).Order("occurred_at desc").Limit(1).Find(&value)
+	if result.Error != nil || result.RowsAffected == 0 {
+		return 0, result.Error
+	}
+	return value.OccurredAt, nil
+}
+
+func (s *store) roleLastActivity(chatID, roleID string, before int64) (int64, error) {
+	var value Message
+	result := s.db.Where("chat_id = ? AND role_id = ? AND created_at < ?", chatID, roleID, before).Order("created_at desc").Limit(1).Find(&value)
+	if result.Error != nil || result.RowsAffected == 0 {
+		return 0, result.Error
+	}
+	return value.CreatedAt, nil
+}
+
+func (s *store) hasActivityBetween(chatID string, after, before int64) (bool, error) {
+	var count int64
+	err := s.db.Model(&Message{}).Where("chat_id = ? AND created_at > ? AND created_at < ?", chatID, after, before).Count(&count).Error
+	return count > 0, err
+}
+
+func (s *store) historyAfter(chatID string, after, before int64, wordBudget int) ([]Message, error) {
+	var values []Message
+	query := s.db.Where("chat_id = ? AND created_at < ?", chatID, before)
+	if after > 0 {
+		query = query.Where("created_at > ?", after)
+	}
+	if err := query.Order("created_at desc").Limit(1000).Find(&values).Error; err != nil {
+		return nil, err
+	}
+	used, picked := 0, []Message{}
+	for _, value := range values {
+		words := len(splitWords(value.Text))
+		if wordBudget > 0 && used+words > wordBudget && len(picked) > 0 {
+			break
+		}
+		used += words
+		picked = append(picked, value)
+	}
+	for left, right := 0, len(picked)-1; left < right; left, right = left+1, right-1 {
+		picked[left], picked[right] = picked[right], picked[left]
+	}
+	return picked, nil
 }
 
 func (s *store) history(chatID string, before int64, wordBudget int) ([]Message, error) {

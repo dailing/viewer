@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.20**（2026-08-13）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.21**（2026-08-13）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.21 变更：**file-service 增加目录列表能力**——新增 RPC `file:_:list`：输入 `{path}`，输出 `{path, entries[]}`，entry 字段对齐生产版 FileEntry（name/path/type(file\|directory\|symlink\|other)/size/mtime/mime/is_dir/is_symlink/link_target），目录优先 + name 字典序排序，一次性全量返回不分页，隐藏文件过滤归 file-service 插件配置。用途：viewer.files 文件树（A.5）的唯一取数通道。
 > v0.20 变更：**分发形态定稿**——核心集（内核 + core plugins + 前端）用 **Go** 实现为**单一静态二进制**（前端经 `go:embed` 内嵌），第三方/外挂插件仍以独立进程连总线、语言无关（松耦合不变）；**数据库访问一律使用 ORM**（Go 侧定 GORM + 纯 Go SQLite 驱动 modernc.org/sqlite，保持 CGO 关闭与交叉编译能力），禁止裸 SQL；现有 Python 栈（`next/`）转为协议参考实现，`next-go/` 为新主线（§17）。
 > v0.3 变更：插件 I/O 改为 **slots/emits 固定契约**，bindings 只存 slot→source 映射（删除 action）；**内核纯化为消息系统**，config/instance store/file/gateway 降为 core plugins；传输层定为 **WebSocket 单一栈**。
 > v0.4 变更：§8 扩写为完整的**前端插件机制**（四层结构、instance 挂载流程、两阶段加载：build-time 懒加载 → 运行时 ESM + import map）；前端加载问题从待决议中勾掉。
@@ -303,7 +304,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 | C0 | viewer.supervisor | 拉起/心跳/重启/熔断/日志全部插件进程；插件管理 RPC（install/reload/enable）归属（§9） |
 | C1 | config-store | `config:_:get/set` 等 RPC channel；`plugins.<id>.*` namespace |
 | C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件 |
-| C3 | file-service | resolve/read/hash/raw 引用签发（收紧程度待决议 §16-5） |
+| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5） |
 | C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 |
 | C5 | automation-engine | 后期（§7.5） |
 
@@ -475,6 +476,7 @@ my-plugin/
 - **v0.18**（2026-08-12）：**协议三件套定稿**——§16-1 channel 语法（§5.2）：冒号分隔、**前三层语义固定** `plugin:instance:message`、第四层起自由 grouping；`*` 单字段通配（任意层）+ **pattern 前缀隐式全匹配**（pattern 字段数少于 channel 时尾部默认全匹配）+ `>` 匹配总线全部；插件级无 instance 的 channel 用保留实例名 `_`，`_` 前缀为框架保留命名空间（`_inbox:*`）；正文 channel 写法统一（`plugins:_:list`、`plugins:_:assets`、`config:_:get/set`、`gateway:_:assets:push`、`chat:_:active` 等）。§16-2 payload **partial 校验**：envelope/hello（内联 manifest）等协议元信息强校验（Pydantic / JSON Schema 皆可），payload 本体任意 JSON 不校验，slot/emit 类型声明为标注性。§16-3 补充确认：错误不需要专门 channel/订阅机制。§16-11 多机**暂缓**（当前只考虑单机 localhost）。§16-13 版本策略定**不向后兼容**：hello 协议版本严格相等、不等即拒连；schema/存储变更走一次性迁移，丢了重来可接受。待决议剩余 3 条（16-5 file-service 收紧、16-6 agent service 归属、16-10 类型单一来源）。
 - **v0.19**（2026-08-12）：**Phase 0 开工**——§16 待决议清单清理（已敲定条目移出，剩 16-5 file-service 收紧 / 16-6 agent service 归属 / 16-10 类型单一来源 + 16-11 多机暂缓）；新建 **`docs/plugin-protocol.md`** 线路级协议规范草案 v0.1（**未冻结**，评审后冻结再写码）：连接拓扑、5 帧 JSON schema（hello 含 client 生成 `conn`、成功无 ack、失败用 WS close code 4001/4002/4003/4009）、channel 匹配算法形式化（前缀隐式全匹配）、mailbox replace-only + 订阅原子交接、RPC inbox payload 契约（`_reply_to`/`_corr`/`ok`/`error`/`_cancel`、30s 超时）、`_conn:{conn}:error` 协议错误通知 mailbox、背压（出站队列 1000 丢新帧）、心跳 ping/pong 30s×2、五张组件交换时序图。
 - **v0.20**（2026-08-13）：**分发形态定稿（§17）**——核心集（内核 + core plugins + 前端 embed）用 Go 实现为单一静态二进制；外挂插件维持独立进程连总线、语言无关；核心集进程模型改为单进程 goroutine 插件（编译期 registry、panic 隔离到插件粒度）；数据库访问定 ORM（GORM + modernc.org/sqlite 纯 Go 驱动），禁止裸 SQL；Python 栈转协议参考实现，`next-go/` 为新主线，测试套件作迁移期验收标准。
+- **v0.21**（2026-08-13）：**file-service 目录列表定稿**——新增 RPC `file:_:list`：输入 `{path}`（与 resolve 同一解析语义），输出 `{path, entries[]}`；entry 字段对齐生产版 FileEntry（name/path/type(file|directory|symlink|other)/size/mtime/mime/is_dir/is_symlink/link_target）；排序 = 目录优先 + name 字典序；一次性全量返回不分页；隐藏文件过滤归 file-service 插件配置。用途：viewer.files 文件树（A.5）的唯一取数通道。
 
 ---
 
@@ -513,7 +515,7 @@ my-plugin/
 - **C0 viewer.supervisor**：`restart.py` 的进程管理逻辑 + `main.py` 的插件进程拉起职责 → 独立 core plugin；内核只保留 autostart 它一个进程的逻辑（§9）。
 - **C1 config-store**：`config.py` + `models.py`（AppConfig schema）；路由 `GET/PUT /api/config`、`GET/POST /api/config/llm-provider-states(/clear)` → RPC `config:_:get/set` 等。前端 `ConfigPanel.vue` 拆为设置壳 + per-plugin section 贡献点（F2）。
 - **C2 instance-store**：新建（§7.2 bindings、instance state 落点）；同时接管 `viewer.layout.v1` 的服务端持久化（若需要跨设备）——view state 仍走 F6 localStorage。
-- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
+- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
 - **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。
 
 ### A.4 viewer.terminal（Phase 2，链路首验）

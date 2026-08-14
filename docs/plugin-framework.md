@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.27**（2026-08-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.28**（2026-08-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.28 变更：**viewer.voice 插件契约定稿**（A.8）——语音输入走总线：RPC `voice:_:start`/`cancel` + publish `voice:{rec}:chunk`（base64 音频）/`voice:{rec}:stop` + 事件 `voice:{rec}:event`（ready/processing/partial/committed/final/error）；后端插件只做外部 voice-service 的 WS relay（C1 `plugins.viewer-voice.*` 注入 service_ws/model/language，内嵌 ASR 后端不移植）；前端新增无 pane 的 `voice` 插件（voiceStore + VoiceInputButton 移植自生产版），chat composer 直接引用。
 > v0.27 变更：**dock overlay 展开 + 设置入口 + 管理面板版式统一**——①dock hover 展开改为 overlay（右侧 workspace 不被压缩 reflow），悬停延迟可配（默认 500ms，localStorage 持久化）；②dock 底部总线连接指示移除，原位换设置按钮；③管理面板统一 master-detail 版式（§8.9）：左窄 list 只显名字 + 固定新建按钮，删除/pin 等动作收进右栏 configuration；④路由编辑器改版：候选每行一条、agent/provider/model 为可点击文本（非 select 下拉样式）、候选间分割线中央"+"插入、拖拽排序取代上下移按钮、内嵌 parameters 框移除改为右栏底部整体 JSON 预览。
 > v0.26 变更：**dock 自动展开**——默认纯图标窄条，hover 持续 ≥500ms 展开显示每个条目名字，移出即收回；无开关、不持久化（§8.8）。
 > v0.25 变更：**pane chrome 注册机制**——移植老版 paneToolbar：插件经 ctx 注册 title/status/actions/controls，由 shell 的 pane title bar 统一渲染，插件不再自渲染标题栏；chat dock 实例列表收窄为 pinned ∪ 已开（§8.8）。
@@ -509,6 +510,7 @@ my-plugin/
 - **v0.25**（2026-08-14）：**pane chrome 注册机制**（§8.8）——移植老版 paneToolbar 到插件契约：`ctx.setChrome` 注册 title/status/actions/controls，shell title bar 统一渲染，插件禁自渲染标题栏；ChatPane 拆除内部 header 改用 chrome（标题 = chat 名，config 按钮 → chat-manager）。chat dock 实例收窄为 pinned ∪ 已开。
 - **v0.26**（2026-08-14）：**dock 自动展开**（§8.8）——默认纯图标窄条，hover ≥500ms 展开显示条目名，移出收回；无开关不持久化。
 - **v0.27**（2026-08-14）：**dock overlay 展开 + 设置入口 + 管理面板版式统一**（§8.8/§8.9）——dock 展开改 overlay（右侧 workspace 不再 reflow），悬停延迟可配（localStorage）；dock 底部连接指示移除、原位换设置按钮；管理面板统一 master-detail（左窄 list 只显名字 + 固定新建按钮，动作归右栏 configuration）；路由编辑器去 select 化（label + 可点击文本弹菜单、分割线中央"+"插入、拖拽排序、底部整体 JSON 预览）。
+- **v0.28**（2026-08-14）：**viewer.voice 契约定稿**（A.8）——音频经总线传输（base64 chunk publish）、文字经总线事件回传（ready/partial/final…）；后端插件只做外部 voice-service 的 WS relay（C1 注入 service_ws/model/language；内嵌 ASR 后端不移植）；前端 voice 插件无 pane（store + 按钮），chat composer 直接 import 引用；录音安全上限 10 分钟。
 - **v0.24**（2026-08-14）：**chat 体验与 shell 语义定稿**——①agent 契约加 `turn_id` 贯穿：`start`/`prompt` payload 携带，`event`/`turn-ended` 帧 echo，chat 按 turn_id 解复用（删 session→turn 映射，同 session 连续 turn 消歧）；②**idle reap 否决**：agent 子进程常驻不自动回收（用户随时重开网页须看到原状；常用 chat 个位数，开销可忽略）；③shell 行为定稿（新增 §8.7）：`openInstance` 不再覆盖已占用 pane（聚焦/空 pane/自动 split 三级），dock singleton 条目改 pin 制（默认 pinned 常驻，可切换）；④chat 前端拆为 `chat` + `chat-manager` 两个前端插件（后者 = singleton 三 tab 管理面板：聊天/Roles/路由），后端 `viewer.chat` 保持单插件；⑤roles/routing policies 从 C1 config-store 迁入 chat 插件 DB（GORM 表，对齐生产版 `super_workspace_roles`/routing 模型），C1 收缩为纯插件级配置。
 
 ---
@@ -585,11 +587,21 @@ my-plugin/
 - 存储：`agent-history.sqlite3` → **插件自管 DB**（chat_id 行级作用域，既有决策；per-chat 子进程只写自己 chat 的行，原子 insert 无竞争；WAL 支持并发读）；turn summaries 同库；Hindsight = 外部服务经 bus 消费。**数据面三层（v0.22 定稿）**：`turn_events`（append-only，driver 每条 session update 的完整原文 `raw_json` + per-turn `seq`，任何过滤之前落库，落库失败只记日志不阻断 turn）→ `message_blocks`（从 raw 同步派生的归一化解析块，单独存，`event_id` 回指 raw 行，拿不准的 method 进 `other` 不丢）→ `messages`（用户可见文本视图，行为不变）；删 chat 级联三层。roles/routing policies 同库（**v0.24 从 C1 迁入**：GORM 表对齐生产版 `super_workspace_roles` 与 routing policy 模型——role = id/name/description/prompt/cwd/routing_policy_id/session_policy/context 回收阈值；policy = 有序 candidates（agent/provider/model/parameters/enabled）+ auto_failover；启动时一次性迁移 C1 遗留数据，C1 收缩为插件级配置）。
 - 迁移要点：**worker 整套删除**（DB 任务队列 + lease + pid handover 废弃，§9）——per-chat 子进程即 worker（插件侧实现），Viewer 关闭 turn 照跑，子进程启动参数与恢复逻辑是 chat 插件内部 ABI；ACP stdio 降级为子进程内部实现；对外只暴露总线契约。session 三元组复用、turn summary 预算制注入（词数近似，不做 token 精确化）等既有行为不变，只换通信外壳。**接力定案（v0.22）**：多 role 接力 = 插件内顺序执行（`runRelay`），即最终形态，不再回到生产版 worker 队列/lease/failover/cooldown。**provider 定案（v0.22）**：`hermes`（ACP stdio）+ `codex-app-server`（`internal/codexserver/` 原生协议库化）唯二；旧 codex-acp 适配器不移植；opencode 暂不实现 → **v0.23 起 opencode 转为新建**（ACP 第二租户，见上方 Instance 条）。历史迁移脚本把生产版 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`（`seq` 取 `event_index`），`message_blocks` 不迁（可从 raw 重解析）。
 
-### A.8 viewer.voice / 输入服务
+### A.8 viewer.voice（语音输入，v0.28 定稿）
 
-- 后端：`voice.py`（`/api/voice/ws`）→ 音频采集/落盘/转写链路；候选定位为 core plugin（被 chat、terminal 等复用）。
-- 前端：`VoiceTextarea.vue`、`VoiceInputButton.vue`、`stores/voice.ts` → **F4 input service**（display 层共享），各插件经 ctx.input 使用。
-- 外部依赖：Ollama / Hindsight voice gateway 维持外部服务。
+> 现状对应：生产版 `voice.py`（`/api/voice/ws`，三种后端 relay）+ `VoiceInputButton.vue` / `stores/voice.ts`。新版只保留 **voice-service relay** 一条链路——offline faster-whisper / whisperlivekit 内嵌后端**不移植**，ASR 一律归外部 voice-service 项目。
+
+- **定位**：功能插件（goroutine，编译期注册），被 chat 等前端复用；无 pane、无 dock 条目。
+- **总线契约**（三段式；`{rec}` = 每次录音的会话 id，插件在 start 时签发）：
+  - RPC `voice:_:start` `{mime_type, llm_refine}` → `{rec_id}`：插件拨 voice-service WS，发送 start（合并 C1 配置 `plugins.viewer-voice.service_ws/model/language`，空值省略走服务端默认），随后发布 `ready` 事件。
+  - publish `voice:{rec}:chunk` `{data}`：base64 音频块（MediaRecorder 250ms 一片，约 5–15KB）；插件解码转发为 WS 二进制帧。总线帧为 JSON，音频即 base64 payload（内核无帧长上限，`SetReadLimit(-1)`）。
+  - publish `voice:{rec}:stop`：插件转发 stop，继续 relay 直到 final，随后关闭会话。
+  - RPC `voice:_:cancel` `{rec_id}`：中止并清理（关 WS、丢弃结果）。
+  - emit `voice:{rec}:event` `{type: ready|processing|partial|committed|final|error, text?, message?}`：voice-service 消息的直通归一（语义对齐生产版 `_normalize_voice_service_message`）。
+- **会话生命周期**：final / error / cancel 结束；单条录音设安全上限（默认 10 分钟，超时发 error 并清理）——协议安全帽，非 idle reap。
+- **并发**：多 rec 并行；ASR 串行化由 voice-service 自身保证（其全局转写锁）。
+- **前端**：`src/plugins/voice/`（无 components/dock）：`voiceStore`（per-composer 状态 + 分段合成，移植生产版语义）+ `VoiceInputButton.vue`（mic/hourglass/record/check 状态机不变）；chat 插件 ChatPane composer **直接 import** 引用（`ctx.input` 共享输入机制不建——单一机制优于特判，Stage A 同 bundle 直接 import 即可）。
+- **外部依赖**：voice-service（默认 `ws://127.0.0.1:8765/v1/voice/ws`，Docker，faster-whisper + 可选 LLM refine）维持外部服务。
 
 ### A.9 display 层（layout/shell）
 

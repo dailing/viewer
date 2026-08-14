@@ -25,6 +25,7 @@ const icon = computed(() => {
   return "bi-mic-fill";
 });
 const title = computed(() => {
+  if (!voice.backendAvailable) return "语音不可用：voice 插件未运行";
   if (error.value !== "" || state.value.status === "error")
     return error.value || state.value.error;
   if (state.value.status === "connecting") return "Connecting voice input";
@@ -53,6 +54,7 @@ async function startVoiceInput(): Promise<void> {
 }
 
 function toggleVoiceInput(): void {
+  if (!voice.backendAvailable) return;
   if (state.value.status === "connecting" || state.value.status === "recording") {
     void voice.stop(props.contextId);
   } else {
@@ -96,10 +98,11 @@ defineExpose({
     <button
       ref="voiceButton"
       class="btn btn-sm voice-input-button"
-      :class="buttonClass"
+      :class="[buttonClass, { 'voice-input-button--unavailable': !voice.backendAvailable }]"
       type="button"
       :title="title"
       :aria-label="title"
+      :disabled="!voice.backendAvailable"
       @click="toggleVoiceInput"
     >
       <i class="bi" :class="icon"></i>
@@ -117,5 +120,10 @@ defineExpose({
   align-items: center;
   display: inline-flex;
   justify-content: center;
+}
+
+.voice-input-button--unavailable {
+  filter: grayscale(1);
+  opacity: 0.45;
 }
 </style>

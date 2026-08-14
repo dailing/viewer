@@ -707,7 +707,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `next/frontend/src/plugins/voice/`
 
-- Headless frontend plugin activated once by the shell loader. `voiceStore.ts` owns per-composer recording/processing/ready state, ordered transcript composition, one globally active MediaRecorder, 250 ms chunk encoding and bus delivery, and cancellation cleanup; a wildcard event subscription buffers an early ready event until the start RPC returns its recording id, after which the job also owns its exact recording-channel subscription. `VoiceInputButton.vue` binds that state to a draft through `defineModel`; ChatPane places it beside the composer textarea.
+- Headless frontend plugin activated once by the shell loader. `voiceStore.ts` owns per-composer recording/processing/ready state, ordered transcript composition, one globally active MediaRecorder, 250 ms chunk encoding and bus delivery, and cancellation cleanup; a wildcard event subscription buffers an early ready event until the start RPC returns its recording id, after which the job also owns its exact recording-channel subscription. It probes `plugins:_:list` on activation and every bus reconnect, clearing backend availability on disconnect or probe failure. `VoiceInputButton.vue` binds that state to a draft through `defineModel` and renders disabled with an explanatory tooltip when the backend voice plugin is absent; ChatPane places it beside the composer textarea.
 
 `next/frontend/src/plugins/chat-manager/`
 

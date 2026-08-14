@@ -1,6 +1,8 @@
 import type { BusFrame } from "@viewer/bus-sdk";
 import { defineStore } from "pinia";
+import { watch } from "vue";
 
+import { busState } from "../../shell/bus";
 import type { PluginCtx } from "../../shell/ctx";
 
 export type VoiceJobStatus =
@@ -55,14 +57,51 @@ const compositions = new Map<string, VoiceComposition>();
 const earlyEvents = new Map<string, VoiceMessage[]>();
 const processedFrames = new WeakSet<object>();
 
+interface PluginRegistryEntry {
+  manifest?: { id?: string };
+}
+
 export function setVoiceCtx(ctx: PluginCtx): void {
   voiceCtx = ctx;
-  useVoiceStore().languageModelRefine = ctx.storage.get("languageModelRefine", true);
+  const store = useVoiceStore();
+  let probeGeneration = 0;
+  store.languageModelRefine = ctx.storage.get("languageModelRefine", true);
   ctx.bus.subscribe("voice:*:event", handleVoiceFrame);
+  const stopConnectionWatch = watch(
+    () => busState.connected,
+    (connected) => {
+      const generation = ++probeGeneration;
+      store.backendAvailable = false;
+      if (!connected) return;
+      void probeBackendAvailability(ctx).then((available) => {
+        if (voiceCtx === ctx && generation === probeGeneration && busState.connected) {
+          store.backendAvailable = available;
+        }
+      });
+    },
+    { immediate: true },
+  );
   ctx.onDispose(() => {
+    stopConnectionWatch();
+    probeGeneration += 1;
+    store.backendAvailable = false;
     voiceCtx = null;
     for (const job of [...runtimeJobs.values()]) void cancelRuntime(job);
   });
+}
+
+async function probeBackendAvailability(ctx: PluginCtx): Promise<boolean> {
+  try {
+    const result = (await ctx.bus.request("plugins:_:list", {}, { timeout: 3000 })) as unknown;
+    return (
+      Array.isArray(result) &&
+      result.some(
+        (entry: PluginRegistryEntry) => entry?.manifest?.id === "voice",
+      )
+    );
+  } catch {
+    return false;
+  }
 }
 
 function handleVoiceFrame(frame: BusFrame): void {
@@ -183,6 +222,7 @@ export const useVoiceStore = defineStore("next-voice", {
     activeRecordingContextId: "",
     activeRecordingJobId: "",
     languageModelRefine: true,
+    backendAvailable: false,
   }),
   getters: {
     context: (state) => (id: string): VoiceContextState =>

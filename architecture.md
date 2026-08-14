@@ -710,7 +710,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `next/frontend/src/stores/layout.ts`, `next/frontend/src/stores/paneChrome.ts`, and the shell pane components
 
-- `openInstance()` focuses an existing instance, then prefers the active/first empty pane, otherwise creates a vertical split to the active pane's right; occupied pane content is never silently replaced. Singleton Dock providers are pinned by default, expose a hover pin toggle, and persist the per-provider choice in localStorage; unpinned singletons are visible only while open. `paneChrome.ts` stores instance-uid-keyed title/status/action/control contributions; `PluginCtx.setChrome()` registers them and clears them on dispose, while `PaneContainer.vue` renders them before the standard refresh/split/close controls.
+- `openInstance()` focuses an existing instance, then prefers the active/first empty pane, otherwise creates a vertical split to the active pane's right; occupied pane content is never silently replaced. The Dock stays a narrow icon rail by default and expands after a 500 ms pointer hover to show singleton titles and shortened instance labels, then retracts immediately on pointer leave. Singleton Dock providers are pinned by default, expose a hover pin toggle, and persist the per-provider choice in localStorage; unpinned singletons are visible only while open. `paneChrome.ts` stores instance-uid-keyed title/status/action/control contributions; `PluginCtx.setChrome()` registers them and clears them on dispose, while `PaneContainer.vue` renders them before the standard refresh/split/close controls.
 
 `next/ts-sdk/tests/frontend-contract.test.ts`
 

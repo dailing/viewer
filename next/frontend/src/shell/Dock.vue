@@ -5,7 +5,7 @@
  * the bus connection state. There is deliberately no other chrome — the old
  * top NavBar is gone.
  */
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 
 import { useLayoutStore } from "../stores/layout";
 import { busState } from "./bus";
@@ -15,6 +15,29 @@ import { dockProviders } from "./registries";
 const layout = useLayoutStore();
 const menuOpen = ref(false);
 const pinRevision = ref(0);
+const expanded = ref(false);
+let expandTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearExpandTimer(): void {
+  if (expandTimer === null) return;
+  clearTimeout(expandTimer);
+  expandTimer = null;
+}
+
+function handlePointerEnter(event: PointerEvent): void {
+  if (event.pointerType === "touch" || expanded.value || expandTimer !== null) return;
+  expandTimer = setTimeout(() => {
+    expandTimer = null;
+    expanded.value = true;
+  }, 500);
+}
+
+function handlePointerLeave(): void {
+  clearExpandTimer();
+  expanded.value = false;
+}
+
+onBeforeUnmount(clearExpandTimer);
 
 function pinStorageKey(type: string): string {
   return `viewer.dock.singletonPinned.v1.${type}`;
@@ -30,10 +53,26 @@ interface DockEntry {
   uid: string;
   icon: string;
   label: string;
+  displayLabel: string;
   state?: string;
   provider: DockProvider;
   instance?: DockInstance;
   pinned?: boolean;
+}
+
+function chatDisplayLabel(label: string): string {
+  const separator = " · ";
+  const separatorIndex = label.lastIndexOf(separator);
+  if (separatorIndex < 0) return label;
+
+  const root = label.slice(separatorIndex + separator.length);
+  const withoutTrailingSeparators = root.replace(/[\\/]+$/, "");
+  const basename = withoutTrailingSeparators.split(/[\\/]/).pop() || root;
+  return `${label.slice(0, separatorIndex)}${separator}${basename}`;
+}
+
+function instanceDisplayLabel(provider: DockProvider, instance: DockInstance): string {
+  return provider.type === "chat" ? chatDisplayLabel(instance.label) : instance.label;
 }
 
 const entries = computed<DockEntry[]>(() => {
@@ -48,6 +87,7 @@ const entries = computed<DockEntry[]>(() => {
           uid,
           icon: provider.icon,
           label: provider.title,
+          displayLabel: provider.title,
           provider,
           pinned,
         });
@@ -61,6 +101,7 @@ const entries = computed<DockEntry[]>(() => {
         uid,
         icon: instance.icon ?? provider.icon,
         label: instance.label,
+        displayLabel: instanceDisplayLabel(provider, instance),
         state: instance.state,
         provider,
         instance,
@@ -108,7 +149,12 @@ function togglePin(entry: DockEntry): void {
 </script>
 
 <template>
-  <nav class="dock">
+  <nav
+    class="dock"
+    :class="{ expanded }"
+    @pointerenter="handlePointerEnter"
+    @pointerleave="handlePointerLeave"
+  >
     <div class="dock-plus-wrap">
       <button
         type="button"
@@ -143,8 +189,15 @@ function togglePin(entry: DockEntry): void {
         class="dock-item"
         :class="{ active: entry.uid === activeUid }"
       >
-        <button type="button" class="dock-btn" :title="entry.label" @click="openEntry(entry)">
+        <button
+          type="button"
+          class="dock-btn"
+          :title="entry.label"
+          :aria-label="entry.label"
+          @click="openEntry(entry)"
+        >
           <i class="bi" :class="entry.icon"></i>
+          <span v-if="expanded" class="dock-label">{{ entry.displayLabel }}</span>
         </button>
         <span
           v-if="entry.state !== undefined"
@@ -191,7 +244,13 @@ function togglePin(entry: DockEntry): void {
   flex-direction: column;
   min-height: 0;
   padding: 6px 0;
+  transition: flex-basis 160ms ease, width 160ms ease;
   width: var(--dock-width);
+}
+
+.dock.expanded {
+  flex-basis: 220px;
+  width: 220px;
 }
 
 .dock-plus-wrap {
@@ -241,7 +300,33 @@ function togglePin(entry: DockEntry): void {
 }
 
 .dock-item {
+  align-items: center;
+  display: flex;
+  min-width: 0;
   position: relative;
+  width: 34px;
+}
+
+.dock.expanded .dock-item {
+  width: calc(100% - 12px);
+}
+
+.dock.expanded .dock-item > .dock-btn {
+  flex: 1 1 auto;
+  gap: 8px;
+  justify-content: flex-start;
+  min-width: 0;
+  padding: 0 9px;
+  width: auto;
+}
+
+.dock-label {
+  font-size: var(--font-size-ui);
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dock-item.active .dock-btn {
@@ -265,6 +350,11 @@ function togglePin(entry: DockEntry): void {
 
 .dock-dot.dead {
   background: var(--color-text-subtle);
+}
+
+.dock.expanded .dock-dot {
+  left: 27px;
+  right: auto;
 }
 
 .dock-remove,
@@ -292,6 +382,15 @@ function togglePin(entry: DockEntry): void {
 .dock-item:hover .dock-remove,
 .dock-item:hover .dock-pin {
   display: inline-flex;
+}
+
+.dock.expanded .dock-remove,
+.dock.expanded .dock-pin {
+  flex: 0 0 16px;
+  left: auto;
+  margin-right: 4px;
+  position: static;
+  top: auto;
 }
 
 .dock-empty {

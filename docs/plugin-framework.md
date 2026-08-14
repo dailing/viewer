@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.26**（2026-08-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.27**（2026-08-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.27 变更：**dock overlay 展开 + 设置入口 + 管理面板版式统一**——①dock hover 展开改为 overlay（右侧 workspace 不被压缩 reflow），悬停延迟可配（默认 500ms，localStorage 持久化）；②dock 底部总线连接指示移除，原位换设置按钮；③管理面板统一 master-detail 版式（§8.9）：左窄 list 只显名字 + 固定新建按钮，删除/pin 等动作收进右栏 configuration；④路由编辑器改版：候选每行一条、agent/provider/model 为可点击文本（非 select 下拉样式）、候选间分割线中央"+"插入、拖拽排序取代上下移按钮、内嵌 parameters 框移除改为右栏底部整体 JSON 预览。
 > v0.26 变更：**dock 自动展开**——默认纯图标窄条，hover 持续 ≥500ms 展开显示每个条目名字，移出即收回；无开关、不持久化（§8.8）。
 > v0.25 变更：**pane chrome 注册机制**——移植老版 paneToolbar：插件经 ctx 注册 title/status/actions/controls，由 shell 的 pane title bar 统一渲染，插件不再自渲染标题栏；chat dock 实例列表收窄为 pinned ∪ 已开（§8.8）。
 > v0.24 变更：**chat 体验与 shell 语义定稿**——①agent 契约加 `turn_id` 贯穿（`start`/`prompt` 携带、`event`/`turn-ended` echo，chat 按 turn_id 解复用，删 session→turn 映射）；②idle reap 否决（agent 子进程常驻不自动回收，用户随时重开网页须看到原状）；③shell 两条行为定稿（§8.7）：`openInstance` 不再覆盖已占用 pane（已开→聚焦；有空 pane→用之；否则自动 split，默认垂直）；dock singleton 条目引入 **pin**（pinned 常驻，可切换）；④chat 前端拆为 `chat`（ChatPane + 实例 dock 列表）与 `chat-manager`（singleton 管理面板：聊天/Roles/路由三 tab）两个前端插件，后端 `viewer.chat` 单插件不变；⑤roles/routing policies 从 C1 迁入 chat 插件 DB（领域数据归 source-of-truth 插件），C1 只留插件级配置（agents 映射/LLM router/预算）。
@@ -283,7 +284,14 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 - **注册 API**：`ctx.setChrome({title?, status?, statusClass?, actions?, controls?})`，按 instance uid（`paneType:instanceId`）键控；ctx dispose 时自动清除。actions = `{id, title, icon?, label?, active?, variant?, run()}`；controls = `select`（options + onChange）或 `chips`（只读条目）——类型移植自老版 `stores/paneToolbar.ts`，语义不变。
 - **标题回退**：未注册时 shell 沿用自动标题（provider title + instance 标识）。
 - **dock 实例过滤**：instance 型 DockProvider 的 dock 列表 = **pinned ∪ 当前已开**（与 singleton unpin 后"开着才显示"同一条语义）；完整列表永远在管理界面（chat → chat-manager 聊天 tab）。
-- **dock 自动展开（v0.26）**：dock 默认纯图标窄条；hover 持续 ≥500ms 自动展开，每个条目显示名字（图标 + 文本）；指针移出即收回。无开关、不持久化。
+- **dock 自动展开（v0.26 引入，v0.27 修订）**：dock 默认纯图标窄条；hover 持续超过阈值自动展开，每个条目显示名字（图标 + 文本）；指针移出即收回。**v0.27 修订两点**：①展开改 **overlay**——展开面板覆盖在 workspace 之上，dock 的 flex 占位不变，右侧 pane 布局不因展开/收回而 reflow；②悬停延迟**可配**（默认 500ms，0 = 立即），入口为 dock 底部设置按钮，值持久化于 localStorage（view state，F6）。
+
+### 8.9 管理面板版式约定（v0.27 定稿）
+
+- **统一 master-detail**：管理型面板（chat-manager 三个 tab 为首例）一律**左窄 list + 右 configuration** 两栏，各 tab 共用同一套版式与视觉风格。list 条目**只显示名字**——无图标/星标前缀、无路径、无摘要行；list 顶部或底部固定一个"新建"按钮。
+- **动作归右栏**：list 条目上不放任何按钮；删除、pin 等破坏性或有副作用的动作一律在右栏 configuration 区（与保存并列）。
+- **dock 底部 = 设置入口**：总线连接状态指示从 dock 移除，原位为设置按钮（齿轮）；设置项含"悬停展开延迟（ms）"，持久化于 localStorage（view state，F6）。
+- **路由编辑器**：policy 的 candidates 每候选一行；agent/provider/model 渲染为"浅色小 label + 可点击文本"（不使用 select 下拉箭头样式），点击文本弹出选项菜单；相邻候选间的分割线轻微高亮、中央置小"+"按钮 = 在该位置插入新候选（列表末尾同样有一条"+"分割线用于追加）；候选排序用**拖拽**（drag & drop），不设上下移按钮；候选行不再内嵌 parameters JSON 框——右栏最底部用一个等宽框展示当前 policy 的完整 JSON 预览（只读，随可视化编辑实时更新）。
 
 ## 9. 进程模型与监督
 
@@ -500,6 +508,7 @@ my-plugin/
 - **v0.23**（2026-08-13）：**agent 实现拆为独立 headless 插件族**——`viewer.agent-hermes`（ACP）/ `viewer.agent-codex`（app-server）/ `viewer.agent-opencode`（ACP，新建）；统一契约：RPC `start`/`prompt`（ack 异步）/`cancel` + 事件 `event`（seq/kind/raw_json/block 同帧）/`turn-ended` + retained mailbox `catalog`；chat 瘦身为纯编排，经 C1 `plugins.viewer-chat.agents` 映射发现并聚合 catalog；profile = routing policy（既有模型），role 挂 policy，turn 开始按序解析 candidates，`auto_failover` 接回；`role.provider/model` 降为迁移输入；opencode 转为新建（ACP 第二租户）；§16-6 敲定。
 - **v0.25**（2026-08-14）：**pane chrome 注册机制**（§8.8）——移植老版 paneToolbar 到插件契约：`ctx.setChrome` 注册 title/status/actions/controls，shell title bar 统一渲染，插件禁自渲染标题栏；ChatPane 拆除内部 header 改用 chrome（标题 = chat 名，config 按钮 → chat-manager）。chat dock 实例收窄为 pinned ∪ 已开。
 - **v0.26**（2026-08-14）：**dock 自动展开**（§8.8）——默认纯图标窄条，hover ≥500ms 展开显示条目名，移出收回；无开关不持久化。
+- **v0.27**（2026-08-14）：**dock overlay 展开 + 设置入口 + 管理面板版式统一**（§8.8/§8.9）——dock 展开改 overlay（右侧 workspace 不再 reflow），悬停延迟可配（localStorage）；dock 底部连接指示移除、原位换设置按钮；管理面板统一 master-detail（左窄 list 只显名字 + 固定新建按钮，动作归右栏 configuration）；路由编辑器去 select 化（label + 可点击文本弹菜单、分割线中央"+"插入、拖拽排序、底部整体 JSON 预览）。
 - **v0.24**（2026-08-14）：**chat 体验与 shell 语义定稿**——①agent 契约加 `turn_id` 贯穿：`start`/`prompt` payload 携带，`event`/`turn-ended` 帧 echo，chat 按 turn_id 解复用（删 session→turn 映射，同 session 连续 turn 消歧）；②**idle reap 否决**：agent 子进程常驻不自动回收（用户随时重开网页须看到原状；常用 chat 个位数，开销可忽略）；③shell 行为定稿（新增 §8.7）：`openInstance` 不再覆盖已占用 pane（聚焦/空 pane/自动 split 三级），dock singleton 条目改 pin 制（默认 pinned 常驻，可切换）；④chat 前端拆为 `chat` + `chat-manager` 两个前端插件（后者 = singleton 三 tab 管理面板：聊天/Roles/路由），后端 `viewer.chat` 保持单插件；⑤roles/routing policies 从 C1 config-store 迁入 chat 插件 DB（GORM 表，对齐生产版 `super_workspace_roles`/routing 模型），C1 收缩为纯插件级配置。
 
 ---

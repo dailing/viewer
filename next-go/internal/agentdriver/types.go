@@ -19,6 +19,19 @@ type Target struct {
 	Parameters map[string]any `json:"parameters"`
 }
 
+type StartRequest struct {
+	CWD       string `json:"cwd"`
+	Target    Target `json:"target"`
+	SessionID string `json:"session_id"`
+	TurnID    string `json:"turn_id,omitempty"`
+}
+
+type PromptRequest struct {
+	SessionID string `json:"session_id"`
+	TurnID    string `json:"turn_id"`
+	Text      string `json:"text"`
+}
+
 type Block struct {
 	Kind    string `json:"kind"`
 	Text    string `json:"text"`
@@ -27,10 +40,18 @@ type Block struct {
 
 type EventFrame struct {
 	SessionID string `json:"session_id"`
+	TurnID    string `json:"turn_id"`
 	Seq       int    `json:"seq"`
 	Kind      string `json:"kind"`
 	RawJSON   string `json:"raw_json"`
 	Block     Block  `json:"block"`
+}
+
+type TurnEndedFrame struct {
+	SessionID  string `json:"session_id"`
+	TurnID     string `json:"turn_id"`
+	StopReason string `json:"stop_reason"`
+	Error      string `json:"error,omitempty"`
 }
 
 type ProviderCatalog struct {

@@ -73,14 +73,14 @@ func (p *Plugin) handleAgentCatalog(frame busclient.Frame) {
 
 func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 	var update agentdriver.EventFrame
-	if decodeInto(frame.Value, &update) != nil || update.SessionID == "" {
+	if decodeInto(frame.Value, &update) != nil || update.SessionID == "" || update.TurnID == "" {
 		return
 	}
 	pluginID := pluginFromChannel(frame.Channel)
 	p.mu.Lock()
 	var current *runtime
 	for _, item := range p.runtimes {
-		if item.pluginID == pluginID && item.sessionID == update.SessionID && item.activeTurn != "" {
+		if item.pluginID == pluginID && item.activeTurn == update.TurnID {
 			current = item
 			break
 		}
@@ -89,7 +89,7 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 		p.mu.Unlock()
 		return
 	}
-	turnID, roleID, roleName, provider := current.activeTurn, current.roleID, current.roleName, current.providerKey
+	turnID, roleID, roleName, provider := update.TurnID, current.roleID, current.roleName, current.providerKey
 	p.mu.Unlock()
 	occurredAt := nowMillis()
 	event := &TurnEvent{ID: newID(), ChatID: chatIDForTurn(p, turnID), TurnID: turnID, RoleID: roleID, Provider: provider, SessionID: update.SessionID, Seq: update.Seq, Kind: fallback(update.Kind, "unknown"), RawJSON: update.RawJSON, OccurredAt: occurredAt}
@@ -127,17 +127,14 @@ func chatIDForTurn(p *Plugin, turnID string) string {
 }
 
 func (p *Plugin) handleAgentTurnEnded(frame busclient.Frame) {
-	var update struct {
-		SessionID  string `json:"session_id"`
-		StopReason string `json:"stop_reason"`
-	}
-	if decodeInto(frame.Value, &update) != nil {
+	var update agentdriver.TurnEndedFrame
+	if decodeInto(frame.Value, &update) != nil || update.TurnID == "" {
 		return
 	}
 	pluginID := pluginFromChannel(frame.Channel)
 	p.mu.Lock()
 	for _, current := range p.runtimes {
-		if current.pluginID == pluginID && current.sessionID == update.SessionID && current.activeTurn != "" && current.ended != nil {
+		if current.pluginID == pluginID && current.activeTurn == update.TurnID && current.ended != nil {
 			select {
 			case current.ended <- fallback(update.StopReason, "end_turn"):
 			default:
@@ -182,15 +179,7 @@ func (p *Plugin) resolveCandidates(chat Chat, workspace Workspace, role SuperRol
 			}
 		}
 	} else {
-		agentID, providerID := role.Provider, role.Provider
-		if agentID == "hermes" {
-			providerID = "default"
-		}
-		model := ""
-		if role.Model != nil {
-			model = strings.TrimSpace(*role.Model)
-		}
-		configs = []RoutingCandidateConfig{{AgentID: agentID, ProviderID: providerID, ModelID: model, Enabled: true, Parameters: map[string]any{}}}
+		return nil, errors.New("role has no routing policy")
 	}
 	result := []resolvedCandidate{}
 	for _, candidate := range configs {
@@ -237,7 +226,7 @@ func candidateProfile(target agentdriver.Target) string {
 	return string(encoded)
 }
 
-func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole, candidate resolvedCandidate) (*runtime, bool, error) {
+func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole, candidate resolvedCandidate, turnID string) (*runtime, bool, error) {
 	key := runtimeKey(chat.ID, role.ID)
 	effectiveCWD := chat.Root
 	if role.CWD != "" {
@@ -268,7 +257,7 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole
 	if role.SessionPolicy != "new_each_run" && state != nil && state.Provider == providerKey && state.ProviderProfile == profile && state.CWD == absolute {
 		requested = state.ProviderSessionID
 	}
-	value, err := p.client.Request(ctx, candidate.pluginID+":_:start", map[string]any{"cwd": absolute, "target": candidate.target, "session_id": requested}, 30*time.Second)
+	value, err := p.client.Request(ctx, candidate.pluginID+":_:start", map[string]any{"cwd": absolute, "target": candidate.target, "session_id": requested, "turn_id": turnID}, 30*time.Second)
 	if err != nil {
 		return nil, false, err
 	}
@@ -289,7 +278,7 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole
 	return current, !started.Resumed, nil
 }
 
-func (p *Plugin) promptBus(ctx context.Context, current *runtime, text string) (string, error) {
+func (p *Plugin) promptBus(ctx context.Context, current *runtime, turnID, text string) (string, error) {
 	for {
 		select {
 		case <-current.ended:
@@ -298,7 +287,7 @@ func (p *Plugin) promptBus(ctx context.Context, current *runtime, text string) (
 		}
 	}
 drained:
-	if _, err := p.client.Request(ctx, current.pluginID+":_:prompt", map[string]any{"session_id": current.sessionID, "text": text}, 30*time.Second); err != nil {
+	if _, err := p.client.Request(ctx, current.pluginID+":_:prompt", map[string]any{"session_id": current.sessionID, "turn_id": turnID, "text": text}, 30*time.Second); err != nil {
 		return "error", err
 	}
 	select {

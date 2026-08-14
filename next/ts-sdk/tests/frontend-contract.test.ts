@@ -405,6 +405,26 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
     await client.close();
   }, 30_000);
 
+  it("mounts the chat-manager pane contract with all three tab RPC groups", async () => {
+    const chatGatewayPort = await freePort();
+    const chatKernelPort = await freePort();
+    const chatDataDir = mkdtempSync(path.join(tmpdir(), "viewer-chat-manager-contract-"));
+    const chatViewerd = startViewerd(chatGatewayPort, chatKernelPort, chatDataDir, "config-store,viewer.agent-hermes,viewer.agent-codex,chat");
+    const client = new BusClient(`ws://127.0.0.1:${chatKernelPort}/ws`, { ...MANIFEST, id: "frontend-chat-manager-contract" });
+    let registry: Array<{ manifest: { id: string } }> = [];
+    await client.subscribe("plugins:_:list", (frame) => { registry = frame.value as Array<{ manifest: { id: string } }>; });
+    await client.connect();
+    await waitFor(() => ["chat", "config-store"].every((id) => registry.some((entry) => entry.manifest.id === id)));
+    await expect(client.request("chat:_:workspace:get", {})).resolves.toEqual(expect.objectContaining({ roles: expect.any(Array), routing_policies: expect.any(Array) }));
+    await expect(client.request("chat:_:chats:list", {})).resolves.toEqual(expect.objectContaining({ chats: expect.any(Array) }));
+    await expect(client.request("chat:_:roles:list", {})).resolves.toEqual(expect.any(Array));
+    await expect(client.request("chat:_:routing:get", {})).resolves.toEqual(expect.objectContaining({ routing_policies: expect.any(Array) }));
+    await expect(client.request("chat:_:agent-catalog", {})).resolves.toEqual(expect.any(Array));
+    await client.close();
+    await stopViewerd(chatViewerd);
+    rmSync(chatDataDir, { recursive: true, force: true });
+  }, 30_000);
+
   it("drives chat roles/chats/active mailbox, dual-role relay, busy, and router errors", async () => {
     const chatGatewayPort = await freePort();
     const chatKernelPort = await freePort();
@@ -428,10 +448,28 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
       expect.objectContaining({ agent: "codex-app-server", plugin_id: "viewer.agent-codex", online: true, providers: [expect.objectContaining({ provider: "openai-subscription", models: expect.arrayContaining(["gpt-test"]) })] }),
     ]));
 
-    const first = (await client.request("chat:_:roles:create", { name: "One", description: "first", prompt: "ONE", provider: "hermes" })) as { id: string };
-    const second = (await client.request("chat:_:roles:create", { name: "Two", description: "second", prompt: "TWO", provider: "hermes" })) as { id: string };
+    // ManagerPanel's three tabs mount against these real plugin channels.
+    await expect(client.request("chat:_:workspace:get", {})).resolves.toEqual(expect.objectContaining({ roles: expect.any(Array), routing_policies: expect.any(Array) }));
+    await expect(client.request("chat:_:chats:list", {})).resolves.toEqual(expect.objectContaining({ chats: expect.any(Array) }));
+    await expect(client.request("chat:_:roles:list", {})).resolves.toEqual(expect.any(Array));
+    await expect(client.request("chat:_:routing:get", {})).resolves.toEqual(expect.objectContaining({ routing_policies: expect.any(Array) }));
+
+    const routing = {
+      default_routing_policy_id: "hermes-default",
+      routing_policies: [{
+        id: "hermes-default",
+        name: "Hermes default",
+        enabled: true,
+        auto_failover: false,
+        max_attempts: 1,
+        candidates: [{ id: "hermes-default-1", name: "Hermes", agent_id: "hermes", provider_id: "default", model_id: "", enabled: true, parameters: {} }],
+      }],
+    };
+    await expect(client.request("chat:_:routing:put", routing)).resolves.toEqual(expect.objectContaining({ default_routing_policy_id: "hermes-default", routing_policies: expect.any(Array) }));
+
+    const first = (await client.request("chat:_:roles:create", { name: "One", description: "first", prompt: "ONE", routing_policy_id: "hermes-default" })) as { id: string };
+    const second = (await client.request("chat:_:roles:create", { name: "Two", description: "second", prompt: "TWO", routing_policy_id: "hermes-default" })) as { id: string };
     expect(await client.request("chat:_:roles:list", {})).toEqual(expect.arrayContaining([expect.objectContaining({ id: first.id }), expect.objectContaining({ id: second.id })]));
-    await expect(client.request("chat:_:roles:create", { name: "Later", provider: "codex" })).rejects.toMatchObject({ code: "unsupported_provider" });
     const chat = (await client.request("chat:_:chats:create", { name: "Contract", root: NEXT_GO_DIR, member_role_ids: [first.id, second.id] })) as { id: string };
     await client.request("chat:_:chats:patch", { id: chat.id, pinned: true, name: "Contract renamed" });
     await client.request("chat:_:chats:activate", { id: chat.id });
@@ -448,6 +486,9 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
       { from: "role", role_id: second.id, role_name: "Two" },
     ]);
     expect(messages.find((item) => item.chat_id === chat.id && item.role === "user")?.sender).toEqual({ from: "user" });
+    for (const completion of relay) {
+      expect(messages.some((item) => item.chat_id === chat.id && item.role === "assistant" && item.turn_id === completion.turn_id)).toBe(true);
+    }
 
     const beforeLong = messages.length;
     const longRun = (await client.request("chat:_:dispatch", { chat_id: chat.id, message: "long turn", role_ids: [first.id] })) as { dispatch_id: string };

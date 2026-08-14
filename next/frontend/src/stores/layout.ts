@@ -97,7 +97,7 @@ export const useLayoutStore = defineStore("layout", {
     isUidOpen(uid: string): boolean {
       return this.panes.some((pane) => pane.content !== null && contentUid(pane.content) === uid);
     },
-    /** Focus the pane already showing this instance, else open it in the active pane. */
+    /** Focus an open instance, reuse an empty pane, or split without replacing content. */
     openInstance(paneType: string, instanceId: string): void {
       const uid = `${paneType}:${instanceId}`;
       const existing = this.panes.find(
@@ -107,7 +107,16 @@ export const useLayoutStore = defineStore("layout", {
         this.activePaneId = existing.id;
         return;
       }
-      const target = this.activePane;
+      let target = this.activePane;
+      if (target.content !== null) {
+        const empty = this.panes.find((pane) => pane.content === null);
+        if (empty !== undefined) {
+          target = empty;
+        } else {
+          this.splitPane(target.id, "vertical");
+          target = this.activePane;
+        }
+      }
       target.content = { paneType, instanceId };
       this.activePaneId = target.id;
     },

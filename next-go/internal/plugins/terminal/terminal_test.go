@@ -24,6 +24,13 @@ func TestManifestContract(t *testing.T) {
 	}
 }
 
+func TestShellCommandUsesLoginSemantics(t *testing.T) {
+	_, command := shellCommand()
+	if !strings.HasSuffix(command, " -l") || strings.Contains(command, " -f") || strings.Contains(command, "--noprofile") || strings.Contains(command, "--norc") {
+		t.Fatalf("shell command is not a login shell: %q", command)
+	}
+}
+
 func TestDecodeUTF8AcrossReadsAndInvalidInput(t *testing.T) {
 	encoded := []byte("A界B")
 	first, tail := decodeUTF8(encoded[:2], false)

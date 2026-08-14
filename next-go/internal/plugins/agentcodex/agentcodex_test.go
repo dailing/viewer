@@ -54,7 +54,7 @@ func TestCodexBusContractWithMockServer(t *testing.T) {
 
 	caller := busclient.New(url, busclient.Manifest{ID: "agentcodex-test-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
 	events := make(chan agentdriver.EventFrame, 16)
-	ended := make(chan string, 4)
+	ended := make(chan agentdriver.TurnEndedFrame, 4)
 	catalogs := make(chan agentdriver.Catalog, 1)
 	_, _ = caller.Subscribe(agentcodex.PluginID+":_:event", func(frame busclient.Frame) {
 		var value agentdriver.EventFrame
@@ -63,11 +63,9 @@ func TestCodexBusContractWithMockServer(t *testing.T) {
 		}
 	})
 	_, _ = caller.Subscribe(agentcodex.PluginID+":_:turn-ended", func(frame busclient.Frame) {
-		var value struct {
-			StopReason string `json:"stop_reason"`
-		}
+		var value agentdriver.TurnEndedFrame
 		if decode(frame.Value, &value) == nil {
-			ended <- value.StopReason
+			ended <- value
 		}
 	})
 	_, _ = caller.Subscribe(agentcodex.PluginID+":_:catalog", func(frame busclient.Frame) {
@@ -99,14 +97,14 @@ func TestCodexBusContractWithMockServer(t *testing.T) {
 	if err := decode(startedValue, &started); err != nil || started.SessionID == "" {
 		t.Fatalf("started=%#v err=%v", started, err)
 	}
-	if _, err := caller.Request(ctx, agentcodex.PluginID+":_:prompt", map[string]any{"session_id": started.SessionID, "text": "hello"}); err != nil {
+	if _, err := caller.Request(ctx, agentcodex.PluginID+":_:prompt", map[string]any{"session_id": started.SessionID, "turn_id": "turn-1", "text": "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	foundText := false
 	for !foundText {
 		select {
 		case event := <-events:
-			if event.SessionID != started.SessionID || event.RawJSON == "" || event.Block.Kind == "" {
+			if event.SessionID != started.SessionID || event.TurnID != "turn-1" || event.RawJSON == "" || event.Block.Kind == "" {
 				t.Fatalf("event=%#v", event)
 			}
 			foundText = event.Block.Kind == agentdriver.KindAgentText && event.Block.Text == "mock answer"
@@ -115,9 +113,9 @@ func TestCodexBusContractWithMockServer(t *testing.T) {
 		}
 	}
 	select {
-	case reason := <-ended:
-		if reason != "end_turn" {
-			t.Fatalf("reason=%q", reason)
+	case result := <-ended:
+		if result.TurnID != "turn-1" || result.StopReason != "end_turn" {
+			t.Fatalf("ended=%#v", result)
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())

@@ -14,6 +14,16 @@ import { dockProviders } from "./registries";
 
 const layout = useLayoutStore();
 const menuOpen = ref(false);
+const pinRevision = ref(0);
+
+function pinStorageKey(type: string): string {
+  return `viewer.dock.singletonPinned.v1.${type}`;
+}
+
+function isSingletonPinned(type: string): boolean {
+  void pinRevision.value;
+  return localStorage.getItem(pinStorageKey(type)) !== "false";
+}
 
 interface DockEntry {
   key: string;
@@ -23,6 +33,7 @@ interface DockEntry {
   state?: string;
   provider: DockProvider;
   instance?: DockInstance;
+  pinned?: boolean;
 }
 
 const entries = computed<DockEntry[]>(() => {
@@ -30,13 +41,15 @@ const entries = computed<DockEntry[]>(() => {
   for (const provider of dockProviders) {
     if (provider.singleton === true) {
       const uid = `${provider.type}:main`;
-      if (layout.isUidOpen(uid)) {
+      const pinned = isSingletonPinned(provider.type);
+      if (pinned || layout.isUidOpen(uid)) {
         result.push({
           key: uid,
           uid,
           icon: provider.icon,
           label: provider.title,
           provider,
+          pinned,
         });
       }
       continue;
@@ -85,6 +98,12 @@ async function createFrom(provider: DockProvider): Promise<void> {
 async function removeEntry(entry: DockEntry): Promise<void> {
   if (entry.instance === undefined) return;
   await entry.provider.remove?.(entry.instance.id);
+}
+
+function togglePin(entry: DockEntry): void {
+  const pinned = entry.pinned !== false;
+  localStorage.setItem(pinStorageKey(entry.provider.type), pinned ? "false" : "true");
+  pinRevision.value += 1;
 }
 </script>
 
@@ -140,6 +159,15 @@ async function removeEntry(entry: DockEntry): Promise<void> {
           @click="removeEntry(entry)"
         >
           <i class="bi bi-x"></i>
+        </button>
+        <button
+          v-if="entry.provider.singleton === true"
+          type="button"
+          class="dock-pin"
+          :title="entry.pinned === false ? '固定到 Dock' : '从 Dock 取消固定'"
+          @click="togglePin(entry)"
+        >
+          <i class="bi" :class="entry.pinned === false ? 'bi-pin-angle' : 'bi-pin-angle-fill'"></i>
         </button>
       </div>
       <div v-if="entries.length === 0" class="dock-empty" title="没有正在运行的 instance">
@@ -239,7 +267,8 @@ async function removeEntry(entry: DockEntry): Promise<void> {
   background: var(--color-text-subtle);
 }
 
-.dock-remove {
+.dock-remove,
+.dock-pin {
   align-items: center;
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
@@ -256,7 +285,12 @@ async function removeEntry(entry: DockEntry): Promise<void> {
   width: 14px;
 }
 
-.dock-item:hover .dock-remove {
+.dock-pin {
+  color: var(--color-text-muted);
+}
+
+.dock-item:hover .dock-remove,
+.dock-item:hover .dock-pin {
   display: inline-flex;
 }
 

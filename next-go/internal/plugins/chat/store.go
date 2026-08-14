@@ -141,7 +141,7 @@ func openStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open chat database: %w", err)
 	}
-	if err := db.AutoMigrate(&Chat{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}); err != nil {
+	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
 	return &store{db: db}, nil
@@ -168,6 +168,127 @@ func (s *store) chats() ([]Chat, error) {
 }
 
 func (s *store) saveChat(value *Chat) error { return s.db.Save(value).Error }
+
+func (s *store) roles() ([]SuperRole, error) {
+	var values []SuperRole
+	err := s.db.Order("created_at, id").Find(&values).Error
+	return values, err
+}
+
+func (s *store) saveRole(value *SuperRole) error { return s.db.Save(value).Error }
+
+func (s *store) deleteRole(id string) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("role_id = ?", id).Delete(&RoleSession{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&SuperRole{}, "id = ?", id).Error
+	})
+}
+
+func policyRow(value RoutingPolicyConfig, createdAt int64) RoutingPolicyRow {
+	candidates := make([]storedRoutingCandidate, 0, len(value.Candidates))
+	for _, candidate := range value.Candidates {
+		agent := strings.TrimSpace(candidate.AgentID)
+		if agent == "" {
+			agent = strings.TrimSpace(candidate.TargetID)
+		}
+		parameters := candidate.Parameters
+		if parameters == nil {
+			parameters = map[string]any{}
+		}
+		candidates = append(candidates, storedRoutingCandidate{Agent: agent, Provider: candidate.ProviderID, Model: candidate.ModelID, Parameters: parameters, Enabled: candidate.Enabled})
+	}
+	now := nowMillis()
+	if createdAt == 0 {
+		createdAt = now
+	}
+	return RoutingPolicyRow{ID: value.ID, Name: value.Name, CandidatesJSON: encodeJSON(candidates), AutoFailover: value.AutoFailover, MaxAttempts: value.MaxAttempts, CreatedAt: createdAt, UpdatedAt: now}
+}
+
+func policyConfig(value RoutingPolicyRow) RoutingPolicyConfig {
+	var stored []storedRoutingCandidate
+	if json.Unmarshal([]byte(value.CandidatesJSON), &stored) != nil {
+		stored = []storedRoutingCandidate{}
+	}
+	candidates := make([]RoutingCandidateConfig, 0, len(stored))
+	for index, candidate := range stored {
+		candidates = append(candidates, RoutingCandidateConfig{ID: fmt.Sprintf("%s-candidate-%d", value.ID, index+1), Name: fmt.Sprintf("Candidate %d", index+1), AgentID: candidate.Agent, ProviderID: candidate.Provider, ModelID: candidate.Model, Enabled: candidate.Enabled, Parameters: candidate.Parameters})
+	}
+	return RoutingPolicyConfig{ID: value.ID, Name: value.Name, Enabled: true, AutoFailover: value.AutoFailover, MaxAttempts: value.MaxAttempts, Candidates: candidates}
+}
+
+func (s *store) routingPolicies() ([]RoutingPolicyConfig, error) {
+	var rows []RoutingPolicyRow
+	if err := s.db.Order("created_at, id").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	values := make([]RoutingPolicyConfig, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, policyConfig(row))
+	}
+	return values, nil
+}
+
+func (s *store) replaceRouting(value RoutingConfig) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var existing []RoutingPolicyRow
+		if err := tx.Find(&existing).Error; err != nil {
+			return err
+		}
+		created := map[string]int64{}
+		for _, row := range existing {
+			created[row.ID] = row.CreatedAt
+		}
+		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&RoutingPolicyRow{}).Error; err != nil {
+			return err
+		}
+		for _, policy := range value.RoutingPolicies {
+			row := policyRow(policy, created[policy.ID])
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Save(&PluginState{Key: "default_routing_policy_id", Value: value.DefaultRoutingPolicyID}).Error
+	})
+}
+
+func (s *store) defaultRoutingPolicyID() (string, error) {
+	var value PluginState
+	result := s.db.Limit(1).Find(&value, "key = ?", "default_routing_policy_id")
+	if result.Error != nil || result.RowsAffected == 0 {
+		return "", result.Error
+	}
+	return value.Value, nil
+}
+
+func (s *store) domainTablesEmpty() (bool, error) {
+	var roleCount, policyCount int64
+	if err := s.db.Model(&SuperRole{}).Count(&roleCount).Error; err != nil {
+		return false, err
+	}
+	if err := s.db.Model(&RoutingPolicyRow{}).Count(&policyCount).Error; err != nil {
+		return false, err
+	}
+	return roleCount == 0 && policyCount == 0, nil
+}
+
+func (s *store) importDomain(roles []SuperRole, routing RoutingConfig) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		for index := range roles {
+			if err := tx.Create(&roles[index]).Error; err != nil {
+				return err
+			}
+		}
+		for _, policy := range routing.RoutingPolicies {
+			row := policyRow(policy, 0)
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Save(&PluginState{Key: "default_routing_policy_id", Value: routing.DefaultRoutingPolicyID}).Error
+	})
+}
 
 func (s *store) deleteChat(id string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {

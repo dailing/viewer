@@ -57,7 +57,7 @@ func TestHermesBusContractWithMockACP(t *testing.T) {
 
 	caller := busclient.New(url, busclient.Manifest{ID: "agenthermes-test-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
 	events := make(chan agentdriver.EventFrame, 16)
-	ended := make(chan string, 4)
+	ended := make(chan agentdriver.TurnEndedFrame, 4)
 	catalogs := make(chan agentdriver.Catalog, 1)
 	_, _ = caller.Subscribe(agenthermes.PluginID+":_:event", func(frame busclient.Frame) {
 		var value agentdriver.EventFrame
@@ -66,11 +66,9 @@ func TestHermesBusContractWithMockACP(t *testing.T) {
 		}
 	})
 	_, _ = caller.Subscribe(agenthermes.PluginID+":_:turn-ended", func(frame busclient.Frame) {
-		var value struct {
-			StopReason string `json:"stop_reason"`
-		}
+		var value agentdriver.TurnEndedFrame
 		if decode(frame.Value, &value) == nil {
-			ended <- value.StopReason
+			ended <- value
 		}
 	})
 	_, _ = caller.Subscribe(agenthermes.PluginID+":_:catalog", func(frame busclient.Frame) {
@@ -102,27 +100,27 @@ func TestHermesBusContractWithMockACP(t *testing.T) {
 	if err := decode(startedValue, &started); err != nil || started.SessionID == "" {
 		t.Fatalf("started=%#v err=%v", started, err)
 	}
-	if _, err := caller.Request(ctx, agenthermes.PluginID+":_:prompt", map[string]any{"session_id": started.SessionID, "text": "hello"}); err != nil {
+	if _, err := caller.Request(ctx, agenthermes.PluginID+":_:prompt", map[string]any{"session_id": started.SessionID, "turn_id": "turn-1", "text": "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case event := <-events:
-		if event.SessionID != started.SessionID || event.Seq != 0 || event.RawJSON == "" || event.Block.Kind == "" {
+		if event.SessionID != started.SessionID || event.TurnID != "turn-1" || event.Seq != 0 || event.RawJSON == "" || event.Block.Kind == "" {
 			t.Fatalf("event=%#v", event)
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
 	select {
-	case reason := <-ended:
-		if reason != "end_turn" {
-			t.Fatalf("reason=%q", reason)
+	case result := <-ended:
+		if result.TurnID != "turn-1" || result.StopReason != "end_turn" {
+			t.Fatalf("ended=%#v", result)
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
 
-	if _, err := caller.Request(ctx, agenthermes.PluginID+":_:prompt", map[string]any{"session_id": started.SessionID, "text": "long"}); err != nil {
+	if _, err := caller.Request(ctx, agenthermes.PluginID+":_:prompt", map[string]any{"session_id": started.SessionID, "turn_id": "turn-2", "text": "long"}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -142,9 +140,9 @@ func TestHermesBusContractWithMockACP(t *testing.T) {
 		t.Fatalf("cancel=%#v", cancelled)
 	}
 	select {
-	case reason := <-ended:
-		if reason != "cancelled" {
-			t.Fatalf("reason=%q", reason)
+	case result := <-ended:
+		if result.TurnID != "turn-2" || result.StopReason != "cancelled" {
+			t.Fatalf("ended=%#v", result)
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())

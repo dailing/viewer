@@ -197,13 +197,13 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			continue
 		}
 		candidates, err := p.resolveCandidates(chat, workspace, role)
-		reason, summaryProvider := "error", role.Provider
+		reason, summaryProvider := "error", ""
 		attempts := []map[string]any{}
 		for _, candidate := range candidates {
 			var current *runtime
 			var fresh bool
 			attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
-			current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate)
+			current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID)
 			if err != nil {
 				attempt["outcome"], attempt["error"] = "start_error", err.Error()
 				attempts = append(attempts, attempt)
@@ -223,7 +223,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 				current.ended = make(chan string, 1)
 			}
 			p.mu.Unlock()
-			reason, err = p.promptBus(p.ctx, current, prompt)
+			reason, err = p.promptBus(p.ctx, current, turnID, prompt)
 			p.mu.Lock()
 			cancelled := current.cancelRequested
 			if current.activeTurn == turnID {

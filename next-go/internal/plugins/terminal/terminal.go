@@ -630,9 +630,9 @@ func homeDir() string {
 
 func shellCommand() (string, string) {
 	if _, err := exec.LookPath("zsh"); err == nil {
-		return "zsh", "exec zsh -f"
+		return "zsh", "exec zsh -l"
 	}
-	return "bash", "exec bash --noprofile --norc"
+	return "bash", "exec bash -l"
 }
 
 func environmentWith(overrides map[string]string) []string {

@@ -105,6 +105,9 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	if err := p.client.Connect(ctx); err != nil {
 		return err
 	}
+	if err := p.migrateLegacyDomainConfig(ctx); err != nil {
+		return err
+	}
 	var configured map[string]string
 	if err := p.configGet(ctx, "agents", &configured); err == nil && len(configured) > 0 {
 		for agentID, pluginID := range configured {
@@ -173,8 +176,8 @@ func (p *Plugin) handleWorkspacePatch(frame busclient.Frame) {
 	p.reply(frame, workspace, err)
 }
 func (p *Plugin) handleRolesList(frame busclient.Frame) {
-	workspace, err := p.workspace(p.ctx)
-	p.reply(frame, workspace.Roles, err)
+	roles, err := p.store.roles()
+	p.reply(frame, roles, err)
 }
 func (p *Plugin) handleRolesCreate(frame busclient.Frame) {
 	value, err := frameObject(frame)
@@ -189,11 +192,7 @@ func (p *Plugin) handleRolesCreate(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	workspace, err := p.workspace(p.ctx)
-	if err == nil {
-		workspace.Roles = append(workspace.Roles, role)
-		err = p.configSet(p.ctx, "roles", workspace.Roles)
-	}
+	err = p.store.saveRole(&role)
 	p.reply(frame, role, err)
 }
 func (p *Plugin) handleRolesPatch(frame busclient.Frame) {
@@ -203,14 +202,14 @@ func (p *Plugin) handleRolesPatch(frame busclient.Frame) {
 		p.reply(frame, nil, errors.New("id is required"))
 		return
 	}
-	workspace, err := p.workspace(p.ctx)
+	roles, err := p.store.roles()
 	if err != nil {
 		p.reply(frame, nil, err)
 		return
 	}
 	index := -1
-	for i := range workspace.Roles {
-		if workspace.Roles[i].ID == id {
+	for i := range roles {
+		if roles[i].ID == id {
 			index = i
 			break
 		}
@@ -219,21 +218,20 @@ func (p *Plugin) handleRolesPatch(frame busclient.Frame) {
 		p.reply(frame, nil, errors.New("role not found"))
 		return
 	}
-	encoded, _ := jsonMap(workspace.Roles[index])
+	encoded, _ := jsonMap(roles[index])
 	for key, item := range value {
 		if key != "id" && key != "created_at" && key != "updated_at" {
 			encoded[key] = item
 		}
 	}
-	role := workspace.Roles[index]
+	role := roles[index]
 	err = decodeInto(encoded, &role)
 	if err == nil {
 		role.ID = id
 		err = normalizeRole(&role, false)
 	}
 	if err == nil {
-		workspace.Roles[index] = role
-		err = p.configSet(p.ctx, "roles", workspace.Roles)
+		err = p.store.saveRole(&role)
 	}
 	p.reply(frame, role, err)
 }
@@ -244,25 +242,18 @@ func (p *Plugin) handleRolesDelete(frame busclient.Frame) {
 		p.reply(frame, nil, errors.New("id is required"))
 		return
 	}
-	workspace, err := p.workspace(p.ctx)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	roles := make([]SuperRole, 0, len(workspace.Roles))
+	roles, err := p.store.roles()
 	found := false
-	for _, role := range workspace.Roles {
-		if role.ID == id {
-			found = true
-		} else {
-			roles = append(roles, role)
-		}
+	for _, role := range roles {
+		found = found || role.ID == id
 	}
-	if !found {
+	if err == nil && !found {
 		p.reply(frame, nil, errors.New("role not found"))
 		return
 	}
-	err = p.configSet(p.ctx, "roles", roles)
+	if err == nil {
+		err = p.store.deleteRole(id)
+	}
 	if err == nil {
 		chats, listErr := p.store.chats()
 		if listErr != nil {
@@ -293,8 +284,13 @@ func (p *Plugin) handleRolesDelete(frame busclient.Frame) {
 	p.reply(frame, map[string]any{"deleted": true, "id": id}, err)
 }
 func (p *Plugin) handleRoutingGet(frame busclient.Frame) {
-	workspace, err := p.workspace(p.ctx)
-	p.reply(frame, RoutingConfig{workspace.DefaultRoutingPolicyID, workspace.RoutingPolicies}, err)
+	policies, err := p.store.routingPolicies()
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	defaultID, err := p.store.defaultRoutingPolicyID()
+	p.reply(frame, RoutingConfig{DefaultRoutingPolicyID: defaultID, RoutingPolicies: policies}, err)
 }
 func (p *Plugin) handleRoutingPut(frame busclient.Frame) {
 	value, err := frameObject(frame)
@@ -306,7 +302,7 @@ func (p *Plugin) handleRoutingPut(frame busclient.Frame) {
 		err = validateRouting(routing)
 	}
 	if err == nil {
-		err = p.configSet(p.ctx, "routing", routing)
+		err = p.store.replaceRouting(routing)
 	}
 	p.reply(frame, routing, err)
 }

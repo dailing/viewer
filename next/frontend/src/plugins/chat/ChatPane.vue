@@ -13,13 +13,13 @@ const members = computed(() => roles.value.filter((role) => chat.value?.member_r
 async function load(): Promise<void> { const [list, workspace] = await Promise.all([ctx.bus.request("chat:_:chats:list", { chat_id: ctx.instanceId, include_messages: true }) as Promise<ChatList>, ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>]); chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null; messages.value = list.messages ?? []; roles.value = workspace.roles; }
 async function send(): Promise<void> { const message = draft.value.trim(); if (message === "") return; error.value = ""; try { const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message }; if (selected.value.length > 0) payload.role_ids = selected.value; const result = await ctx.bus.request("chat:_:dispatch", payload) as { role_ids: string[] }; activeRoles.value = new Set([...activeRoles.value, ...result.role_ids]); draft.value = ""; } catch (cause) { error.value = errorText(cause); } }
 async function stop(): Promise<void> { try { await ctx.bus.request("chat:_:stop", { chat_id: ctx.instanceId }); } catch (cause) { error.value = errorText(cause); } }
-function open(type: string): void { layout.openInstance(type, "main"); }
+function openManager(): void { layout.openInstance("chat-manager", "main"); }
 onMounted(() => { ctx.bus.subscribe(`chat:${ctx.instanceId}:message`, (frame) => messages.value.push(frame.value as ChatMessage)); ctx.bus.subscribe(`chat:${ctx.instanceId}:turn-completed`, (frame) => { const value = frame.value as { role_id: string }; const next = new Set(activeRoles.value); next.delete(value.role_id); activeRoles.value = next; }); void load().catch((cause) => { error.value = errorText(cause); }); });
 </script>
 
 <template>
   <section class="chat-pane d-flex flex-column h-100">
-    <header class="d-flex gap-1 align-items-center border-bottom px-2 py-1 small"><strong class="me-auto">{{ chat?.name ?? "Chat" }}</strong><button v-for="item in [['chats','bi-list','Chats'],['roles','bi-people','Roles'],['routes','bi-signpost-split','Routes']]" :key="item[0]" class="btn btn-sm btn-outline-secondary py-0" :title="item[2]" @click="open(item[0])"><i :class="item[1]" /></button></header>
+    <header class="d-flex gap-1 align-items-center border-bottom px-2 py-1 small"><strong class="me-auto">{{ chat?.name ?? "Chat" }}</strong><button class="btn btn-sm btn-outline-secondary py-0" title="聊天管理" @click="openManager"><i class="bi-sliders" /></button></header>
     <div class="flex-grow-1 overflow-auto p-2" aria-live="polite">
       <article v-for="item in grouped" :key="item.turn + item.ts" class="message-box mb-2 p-2" :class="item.sender.from === 'user' ? 'user-box' : 'role-box'">
         <div class="small text-secondary mb-1">{{ item.sender.from === 'user' ? 'You' : item.sender.role_name }}</div><div class="message-text">{{ item.text }}</div>

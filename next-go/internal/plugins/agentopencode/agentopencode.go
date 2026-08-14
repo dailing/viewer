@@ -35,6 +35,7 @@ var Manifest = busclient.Manifest{
 type session struct {
 	client    *acp.Client
 	seq       int
+	turnID    string
 	active    bool
 	cancelled bool
 }
@@ -48,12 +49,6 @@ type Plugin struct {
 }
 
 func New() *Plugin { return &Plugin{sessions: map[string]*session{}} }
-
-type startRequest struct {
-	CWD       string             `json:"cwd"`
-	Target    agentdriver.Target `json:"target"`
-	SessionID string             `json:"session_id"`
-}
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed), busclient.WithInstanceID("_"))
@@ -71,7 +66,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 }
 
 func (p *Plugin) handleStart(frame busclient.Frame) {
-	var request startRequest
+	var request agentdriver.StartRequest
 	err := decodeFrame(frame, &request)
 	if err == nil && strings.TrimSpace(request.CWD) == "" {
 		err = errors.New("cwd is required")
@@ -125,11 +120,11 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 }
 
 func (p *Plugin) handlePrompt(frame busclient.Frame) {
-	var request struct {
-		SessionID string `json:"session_id"`
-		Text      string `json:"text"`
-	}
+	var request agentdriver.PromptRequest
 	err := decodeFrame(frame, &request)
+	if err == nil && strings.TrimSpace(request.TurnID) == "" {
+		err = errors.New("turn_id is required")
+	}
 	p.mu.Lock()
 	current := p.sessions[request.SessionID]
 	if err == nil && current == nil {
@@ -139,7 +134,7 @@ func (p *Plugin) handlePrompt(frame busclient.Frame) {
 		err = errors.New("session turn already active")
 	}
 	if err == nil {
-		current.active, current.cancelled, current.seq = true, false, 0
+		current.active, current.cancelled, current.seq, current.turnID = true, false, 0, request.TurnID
 	}
 	p.mu.Unlock()
 	if err != nil {
@@ -154,7 +149,7 @@ func (p *Plugin) handlePrompt(frame busclient.Frame) {
 		reason, promptErr := current.client.Prompt(context.Background(), request.SessionID, request.Text)
 		p.mu.Lock()
 		cancelled := current.cancelled
-		current.active, current.cancelled = false, false
+		current.active, current.cancelled, current.turnID = false, false, ""
 		p.mu.Unlock()
 		if cancelled {
 			reason = "cancelled"
@@ -163,7 +158,7 @@ func (p *Plugin) handlePrompt(frame busclient.Frame) {
 		} else if reason == "" {
 			reason = "end_turn"
 		}
-		_ = p.client.Publish(context.Background(), PluginID+":_:turn-ended", map[string]any{"session_id": request.SessionID, "stop_reason": reason})
+		_ = p.client.Publish(context.Background(), PluginID+":_:turn-ended", agentdriver.TurnEndedFrame{SessionID: request.SessionID, TurnID: request.TurnID, StopReason: reason})
 	}()
 	p.respond(frame, map[string]any{"accepted": true}, nil)
 	close(gate)
@@ -201,9 +196,10 @@ func (p *Plugin) handleUpdate(sessionID string, current *session, update acp.Upd
 		return
 	}
 	seq := current.seq
+	turnID := current.turnID
 	current.seq++
 	p.mu.Unlock()
-	frame := agentdriver.EventFrame{SessionID: sessionID, Seq: seq, Kind: kind, RawJSON: string(update.Raw), Block: acp.ParseBlock(kind, update.Value)}
+	frame := agentdriver.EventFrame{SessionID: sessionID, TurnID: turnID, Seq: seq, Kind: kind, RawJSON: string(update.Raw), Block: acp.ParseBlock(kind, update.Value)}
 	_ = p.client.Publish(context.Background(), PluginID+":_:event", frame)
 }
 

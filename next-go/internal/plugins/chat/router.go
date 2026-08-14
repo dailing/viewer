@@ -33,7 +33,7 @@ Current message:
 func renderDispatchPrompt(message string, roles []SuperRole, history string) string {
 	payload := make([]map[string]string, 0, len(roles))
 	for _, role := range roles {
-		payload = append(payload, map[string]string{"id": role.ID, "name": role.Name, "description": role.Description, "cwd": role.CWD, "provider": role.Provider})
+		payload = append(payload, map[string]string{"id": role.ID, "name": role.Name, "description": role.Description, "cwd": role.CWD})
 	}
 	encoded, _ := json.MarshalIndent(payload, "", "  ")
 	result := strings.ReplaceAll(dispatchTemplate, "{{roles_json}}", string(encoded))

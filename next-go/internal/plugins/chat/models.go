@@ -5,21 +5,23 @@ import "strings"
 const configNamespace = "plugins.viewer-chat"
 
 type SuperRole struct {
-	ID                     string         `json:"id"`
-	Name                   string         `json:"name"`
-	Description            string         `json:"description"`
-	Prompt                 string         `json:"prompt"`
-	Provider               string         `json:"provider"`
-	CWD                    string         `json:"cwd"`
-	Model                  *string        `json:"model"`
-	RoutingPolicyID        string         `json:"routing_policy_id"`
-	CapabilityRequirements map[string]any `json:"capability_requirements"`
-	SessionPolicy          string         `json:"session_policy"`
-	ContextRecyclePercent  *float64       `json:"context_recycle_percent"`
-	ContextRecycleTokens   *int           `json:"context_recycle_tokens"`
-	CreatedAt              int64          `json:"created_at"`
-	UpdatedAt              int64          `json:"updated_at"`
+	ID                    string   `gorm:"primaryKey" json:"id"`
+	Name                  string   `json:"name"`
+	Description           string   `json:"description"`
+	Prompt                string   `json:"prompt"`
+	CWD                   string   `json:"cwd"`
+	RoutingPolicyID       string   `json:"routing_policy_id"`
+	SessionPolicy         string   `json:"session_policy"`
+	ContextRecyclePercent *float64 `json:"context_recycle_percent"`
+	ContextRecycleTokens  *int     `json:"context_recycle_tokens"`
+	CreatedAt             int64    `json:"created_at"`
+	UpdatedAt             int64    `json:"updated_at"`
+	// Legacy C1 migration inputs; never persisted to the roles table.
+	Provider string  `gorm:"-" json:"provider,omitempty"`
+	Model    *string `gorm:"-" json:"model,omitempty"`
 }
+
+func (SuperRole) TableName() string { return "roles" }
 
 type Workspace struct {
 	ID                     string                `json:"id"`
@@ -54,6 +56,26 @@ type RoutingConfig struct {
 	DefaultRoutingPolicyID string                `json:"default_routing_policy_id"`
 	RoutingPolicies        []RoutingPolicyConfig `json:"routing_policies"`
 }
+
+type RoutingPolicyRow struct {
+	ID             string `gorm:"primaryKey"`
+	Name           string
+	CandidatesJSON string `gorm:"column:candidates_json"`
+	AutoFailover   bool
+	MaxAttempts    int
+	CreatedAt      int64
+	UpdatedAt      int64
+}
+
+func (RoutingPolicyRow) TableName() string { return "routing_policies" }
+
+type storedRoutingCandidate struct {
+	Agent      string         `json:"agent"`
+	Provider   string         `json:"provider"`
+	Model      string         `json:"model"`
+	Parameters map[string]any `json:"parameters"`
+	Enabled    bool           `json:"enabled"`
+}
 type LLMConfig struct {
 	Endpoint string `json:"endpoint"`
 	APIKey   string `json:"key"`
@@ -87,15 +109,8 @@ func normalizeRole(role *SuperRole, creating bool) error {
 		role.Name = "New Role"
 	}
 	role.Description, role.Prompt, role.CWD = strings.TrimSpace(role.Description), strings.TrimSpace(role.Prompt), strings.TrimSpace(role.CWD)
-	role.Provider = strings.TrimSpace(role.Provider)
-	if role.Provider == "" {
-		role.Provider = "hermes"
-	}
 	if role.SessionPolicy == "" {
 		role.SessionPolicy = "reuse"
-	}
-	if role.CapabilityRequirements == nil {
-		role.CapabilityRequirements = map[string]any{}
 	}
 	if creating {
 		role.ID = newID()

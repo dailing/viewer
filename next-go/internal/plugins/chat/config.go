@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -55,14 +56,19 @@ func (p *Plugin) workspace(ctx context.Context) (Workspace, error) {
 		result.Name = base.Name
 	}
 	result.CommonPrompt = base.CommonPrompt
-	if err := p.configGet(ctx, "roles", &result.Roles); err != nil {
+	roles, err := p.store.roles()
+	if err != nil {
 		return result, err
 	}
-	var routing RoutingConfig
-	if err := p.configGet(ctx, "routing", &routing); err != nil {
+	policies, err := p.store.routingPolicies()
+	if err != nil {
 		return result, err
 	}
-	result.RoutingPolicies, result.DefaultRoutingPolicyID = routing.RoutingPolicies, routing.DefaultRoutingPolicyID
+	defaultPolicyID, err := p.store.defaultRoutingPolicyID()
+	if err != nil {
+		return result, err
+	}
+	result.Roles, result.RoutingPolicies, result.DefaultRoutingPolicyID = roles, policies, defaultPolicyID
 	if result.Roles == nil {
 		result.Roles = []SuperRole{}
 	}
@@ -70,6 +76,65 @@ func (p *Plugin) workspace(ctx context.Context) (Workspace, error) {
 		result.RoutingPolicies = []RoutingPolicyConfig{}
 	}
 	return result, nil
+}
+
+func (p *Plugin) migrateLegacyDomainConfig(ctx context.Context) error {
+	empty, err := p.store.domainTablesEmpty()
+	if err != nil || !empty {
+		return err
+	}
+	var roles []SuperRole
+	if err := p.configGet(ctx, "roles", &roles); err != nil {
+		return err
+	}
+	var routing RoutingConfig
+	if err := p.configGet(ctx, "routing", &routing); err != nil {
+		return err
+	}
+	if len(roles) == 0 && len(routing.RoutingPolicies) == 0 && routing.DefaultRoutingPolicyID == "" {
+		return nil
+	}
+	policyIDs := map[string]bool{}
+	for _, policy := range routing.RoutingPolicies {
+		policyIDs[policy.ID] = true
+	}
+	for index := range roles {
+		role := &roles[index]
+		if role.ID == "" {
+			role.ID = newID()
+		}
+		if role.CreatedAt == 0 {
+			role.CreatedAt = nowMillis()
+		}
+		if role.UpdatedAt == 0 {
+			role.UpdatedAt = role.CreatedAt
+		}
+		if role.RoutingPolicyID != "" || strings.TrimSpace(role.Provider) == "" {
+			continue
+		}
+		policyID := "migrated-role-" + role.ID
+		for policyIDs[policyID] {
+			policyID += "-legacy"
+		}
+		agent, provider := strings.TrimSpace(role.Provider), strings.TrimSpace(role.Provider)
+		if agent == "hermes" {
+			provider = "default"
+		}
+		model := ""
+		if role.Model != nil {
+			model = strings.TrimSpace(*role.Model)
+		}
+		routing.RoutingPolicies = append(routing.RoutingPolicies, RoutingPolicyConfig{ID: policyID, Name: "Migrated " + role.Name, Enabled: true, AutoFailover: false, MaxAttempts: 1, Candidates: []RoutingCandidateConfig{{ID: policyID + "-candidate-1", Name: "Migrated target", AgentID: agent, ProviderID: provider, ModelID: model, Enabled: true, Parameters: map[string]any{}}}})
+		policyIDs[policyID] = true
+		role.RoutingPolicyID = policyID
+	}
+	if err := p.store.importDomain(roles, routing); err != nil {
+		return fmt.Errorf("migrate legacy roles and routing: %w", err)
+	}
+	if err := p.configSet(ctx, "roles", nil); err != nil {
+		return err
+	}
+	return p.configSet(ctx, "routing", nil)
 }
 
 func roleByID(roles []SuperRole, id string) (SuperRole, bool) {

@@ -34,7 +34,7 @@ export interface DockProvider {
   title: string;
   /**
    * Singleton providers (bus-inspector) have no backend-tracked instances;
-   * the Dock shows their entry while a pane of `type` is open.
+   * the Dock pins their entry by default and lets users persistently unpin it.
    */
   singleton?: boolean;
   /** Reactive list of running instances, maintained by the provider. */

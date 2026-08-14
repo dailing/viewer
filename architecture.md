@@ -703,7 +703,7 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `next/frontend/src/plugins/chat/`
 
-- Per-chat frontend module registered through the same in-repo loader. It contributes only `ChatPane.vue` plus the live chat instance Dock list, filtered reactively to pinned or currently open chats. Its create action makes a default chat and immediately opens it, so the first-chat path does not depend on an existing pane. ChatPane registers its chat title and manager action into the shell pane chrome; chat-manager mutations emit the frontend-local `viewer:chats-changed` event so open titles and Dock pin/name state refresh without a new backend frame.
+- Per-chat frontend module registered through the same in-repo loader. It contributes `ChatPane.vue`, its textarea/action-row `ComposerBox.vue`, and the live chat instance Dock list, filtered reactively to pinned or currently open chats. Its create action makes a default chat and immediately opens it, so the first-chat path does not depend on an existing pane. ChatPane registers its chat title and manager action into the shell pane chrome; `ComposerBox.vue` owns auto-grow, voice input, explicit/automatic Role selection, send/stop, and draft clearing while leaving dispatch semantics in ChatPane. Chat-manager mutations emit the frontend-local `viewer:chats-changed` event so open titles and Dock pin/name state refresh without a new backend frame.
 
 `next/frontend/src/plugins/voice/`
 

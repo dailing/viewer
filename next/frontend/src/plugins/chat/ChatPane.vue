@@ -2,7 +2,7 @@
 import { computed, inject, onMounted, ref } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import { useLayoutStore } from "../../stores/layout";
-import VoiceInputButton from "../voice/VoiceInputButton.vue";
+import ComposerBox from "./ComposerBox.vue";
 import type { Chat, ChatList, ChatMessage, Role, Workspace } from "./types";
 import { errorText } from "./types";
 
@@ -25,7 +25,7 @@ onMounted(() => { const reload = (): void => { void load().catch(() => undefined
       </article>
       <div v-if="activeRoles.size" class="small text-secondary"><span class="spinner-border spinner-border-sm me-1" />{{ activeRoles.size }} role turn(s) active</div>
     </div>
-    <div class="border-top p-2"><div v-if="error" class="small text-danger mb-1">{{ error }}</div><div class="d-flex flex-wrap gap-2 mb-1 small"><label v-for="role in members" :key="role.id"><input v-model="selected" type="checkbox" :value="role.id" class="me-1">{{ role.name }}</label><span v-if="selected.length === 0" class="text-secondary">Auto route</span></div><div class="input-group"><textarea v-model="draft" class="form-control" rows="2" placeholder="Message" @keydown.ctrl.enter.prevent="send" /><VoiceInputButton v-model="draft" :context-id="'chat:' + ctx.instanceId" /><button v-if="activeRoles.size" class="btn btn-outline-danger" title="Stop active turn" @click="stop"><i class="bi-stop-fill" /></button><button class="btn btn-primary" title="Dispatch (Ctrl+Enter)" @click="send"><i class="bi-send" /></button></div></div>
+    <div class="composer-shell"><div v-if="error" class="small text-danger mb-1">{{ error }}</div><ComposerBox v-model="draft" v-model:selected-role-ids="selected" :roles="members" :context-id="'chat:' + ctx.instanceId" :has-active-roles="activeRoles.size > 0" @send="send" @stop="stop" /></div>
   </section>
 </template>
-<style scoped>.message-box{background:var(--bs-tertiary-bg);border-radius:2px;white-space:pre-wrap}.user-box{border-inline-start:3px solid var(--bs-primary)}.role-box{border-inline-start:3px solid var(--bs-success)}.message-text{font-size:13px}.chat-pane textarea{resize:none}</style>
+<style scoped>.message-box{background:var(--bs-tertiary-bg);border-radius:2px;white-space:pre-wrap}.user-box{border-inline-start:3px solid var(--bs-primary)}.role-box{border-inline-start:3px solid var(--bs-success)}.message-text{font-size:13px}.composer-shell{flex:0 0 auto;min-width:0;padding:0;width:100%;z-index:5}</style>

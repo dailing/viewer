@@ -1,0 +1,347 @@
+<script setup lang="ts">
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import VoiceInputButton from "../voice/VoiceInputButton.vue";
+import type { Role } from "./types";
+
+const props = defineProps<{
+  modelValue: string;
+  selectedRoleIds: string[];
+  roles: Role[];
+  contextId: string;
+  hasActiveRoles: boolean;
+}>();
+
+const emit = defineEmits<{
+  "update:modelValue": [value: string];
+  "update:selectedRoleIds": [value: string[]];
+  send: [];
+  stop: [];
+}>();
+
+const textarea = ref<HTMLTextAreaElement | null>(null);
+const text = computed({
+  get: () => props.modelValue,
+  set: (value: string) => emit("update:modelValue", value),
+});
+const selectedRoles = computed(() => {
+  const selected = new Set(props.selectedRoleIds);
+  return props.roles.filter((role) => selected.has(role.id));
+});
+const dispatchPickerTitle = computed(() =>
+  selectedRoles.value.length > 0
+    ? `Dispatch to ${selectedRoles.value.map((role) => role.name).join(", ")}`
+    : "Auto route",
+);
+
+watch(
+  () => props.modelValue,
+  () => resizeTextarea(),
+);
+
+onMounted(() => resizeTextarea());
+
+function resizeTextarea(): void {
+  void nextTick(() => {
+    const element = textarea.value;
+    if (element === null) return;
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  });
+}
+
+function clearText(): void {
+  if (props.modelValue === "") return;
+  emit("update:modelValue", "");
+  void nextTick(() => textarea.value?.focus());
+}
+
+function clearRoles(): void {
+  emit("update:selectedRoleIds", []);
+}
+
+function toggleRole(roleId: string): void {
+  const next = new Set(props.selectedRoleIds);
+  if (next.has(roleId)) next.delete(roleId);
+  else next.add(roleId);
+  emit("update:selectedRoleIds", [...next]);
+}
+
+function isRoleSelected(roleId: string): boolean {
+  return props.selectedRoleIds.includes(roleId);
+}
+
+function handleSummaryClick(event: MouseEvent): void {
+  if (selectedRoles.value.length === 0) return;
+  event.preventDefault();
+  clearRoles();
+  const details = event.currentTarget instanceof HTMLElement
+    ? event.currentTarget.closest("details")
+    : null;
+  if (details instanceof HTMLDetailsElement) details.open = false;
+}
+
+function closePicker(event: Event): void {
+  if (event.currentTarget instanceof HTMLDetailsElement) event.currentTarget.open = false;
+}
+
+function handlePickerFocusOut(event: FocusEvent): void {
+  const details = event.currentTarget;
+  if (!(details instanceof HTMLDetailsElement)) return;
+  const nextTarget = event.relatedTarget instanceof Node ? event.relatedTarget : null;
+  if (nextTarget !== null && details.contains(nextTarget)) return;
+  window.setTimeout(() => {
+    const active = document.activeElement;
+    if (active !== null && details.contains(active)) return;
+    details.open = false;
+  }, 0);
+}
+</script>
+
+<template>
+  <div class="composer-card">
+    <textarea
+      ref="textarea"
+      v-model="text"
+      rows="2"
+      placeholder="Message"
+      @input="resizeTextarea"
+      @keydown.ctrl.enter.prevent="emit('send')"
+    />
+    <div class="composer-actions">
+      <div class="composer-actions-main">
+        <VoiceInputButton v-model="text" :context-id="contextId" />
+        <details
+          class="dispatch-picker"
+          :class="{ active: selectedRoles.length > 0 }"
+          :title="dispatchPickerTitle"
+          @focusout="handlePickerFocusOut"
+          @keydown.esc.stop.prevent="closePicker"
+        >
+          <summary :aria-label="dispatchPickerTitle" @click="handleSummaryClick">
+            <i class="bi" :class="selectedRoles.length > 0 ? 'bi-people-fill' : 'bi-diagram-3'" />
+            <span class="dispatch-label">
+              {{ selectedRoles.length > 0 ? selectedRoles.map((role) => role.name).join(", ") : "Auto" }}
+            </span>
+            <span v-if="selectedRoles.length > 1" class="dispatch-count">{{ selectedRoles.length }}</span>
+          </summary>
+          <div class="list-group dispatch-menu" @mousedown.prevent>
+            <button
+              class="list-group-item list-group-item-action dispatch-option"
+              :class="{ selected: selectedRoles.length === 0 }"
+              type="button"
+              @click="clearRoles"
+            >
+              <i class="bi" :class="selectedRoles.length === 0 ? 'bi-check-circle-fill' : 'bi-circle'" />
+              <span>Auto</span>
+            </button>
+            <div v-if="roles.length === 0" class="dispatch-empty">No roles in chat</div>
+            <button
+              v-for="role in roles"
+              :key="role.id"
+              class="list-group-item list-group-item-action dispatch-option"
+              :class="{ selected: isRoleSelected(role.id) }"
+              type="button"
+              @click="toggleRole(role.id)"
+            >
+              <i class="bi" :class="isRoleSelected(role.id) ? 'bi-check-square-fill' : 'bi-square'" />
+              <span>{{ role.name }}</span>
+            </button>
+          </div>
+        </details>
+        <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="emit('send')">
+          <i class="bi bi-send" />
+        </button>
+      </div>
+      <div class="composer-actions-trailing">
+        <button v-if="hasActiveRoles" class="btn btn-sm btn-outline-danger action-button" type="button" title="Stop active turn" aria-label="Stop active turn" @click="emit('stop')">
+          <i class="bi bi-stop-fill" />
+        </button>
+        <button class="btn btn-sm btn-outline-secondary action-button" type="button" title="Clear text" aria-label="Clear text" :disabled="modelValue === ''" @click="clearText">
+          <i class="bi bi-eraser" />
+        </button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.composer-card {
+  background: var(--color-surface-muted, var(--bs-tertiary-bg));
+  border: 0;
+  border-radius: var(--radius-md, 2px);
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 3px;
+  width: 100%;
+}
+
+.composer-card textarea {
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--radius-sm, 2px);
+  color: var(--bs-body-color);
+  font-family: inherit;
+  font-size: var(--font-size-content, 13px);
+  line-height: 1.35;
+  max-height: 50vh;
+  min-height: 58px;
+  outline: none;
+  overflow: auto;
+  padding: 8px;
+  resize: vertical;
+  width: 100%;
+}
+
+.composer-card textarea:focus {
+  border-color: var(--bs-border-color);
+  box-shadow: none;
+}
+
+.composer-actions,
+.composer-actions-main,
+.composer-actions-trailing {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.composer-actions-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.composer-actions-trailing {
+  border-left: 1px solid var(--bs-border-color);
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 10px;
+}
+
+.composer-actions :deep(.btn),
+.dispatch-picker summary {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.composer-actions :deep(.voice-input-button),
+.action-button {
+  flex: 0 0 auto;
+  height: 32px;
+  min-width: 0;
+  padding: 0;
+  width: 32px;
+}
+
+.composer-actions :deep(.bi) {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.dispatch-picker {
+  display: inline-block;
+  flex: 0 0 auto;
+  height: 32px;
+  margin: 0;
+  max-width: min(220px, 34vw);
+  padding: 0;
+  position: relative;
+}
+
+.dispatch-picker summary {
+  background: transparent;
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--radius-sm, 2px);
+  color: var(--bs-secondary-color);
+  cursor: pointer;
+  gap: 5px;
+  height: 32px;
+  list-style: none;
+  max-width: min(220px, 34vw);
+  min-width: 58px;
+  padding: 0 8px;
+  position: relative;
+}
+
+.dispatch-picker summary::-webkit-details-marker {
+  display: none;
+}
+
+.dispatch-label {
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dispatch-count {
+  align-items: center;
+  background: transparent;
+  border-radius: 999px;
+  color: var(--bs-secondary-color);
+  display: inline-flex;
+  font-size: 9px;
+  height: 14px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 14px;
+  padding: 0 4px;
+  position: absolute;
+  right: -4px;
+  top: -5px;
+}
+
+.dispatch-menu {
+  --bs-list-group-action-hover-bg: var(--color-surface-hover, var(--bs-tertiary-bg));
+  --bs-list-group-action-hover-color: var(--bs-body-color);
+  --bs-list-group-bg: transparent;
+  --bs-list-group-border-radius: 0;
+  --bs-list-group-border-width: 0;
+  --bs-list-group-color: var(--bs-body-color);
+  background: var(--color-surface-raised, var(--bs-body-bg));
+  border: 0;
+  border-radius: var(--radius-md, 2px);
+  bottom: calc(100% + 6px);
+  display: flex;
+  gap: 3px;
+  left: 0;
+  max-height: min(260px, 42vh);
+  min-width: 180px;
+  overflow-y: auto;
+  padding: 6px;
+  position: absolute;
+  z-index: 30;
+}
+
+.dispatch-option {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px 7px;
+  text-align: left;
+  width: 100%;
+}
+
+.dispatch-option.selected {
+  color: var(--color-accent-hover, var(--bs-primary));
+  font-weight: 700;
+}
+
+.dispatch-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dispatch-empty {
+  color: var(--bs-secondary-color);
+  font-size: 12px;
+  padding: 7px;
+}
+</style>

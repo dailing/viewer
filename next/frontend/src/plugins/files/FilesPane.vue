@@ -70,6 +70,9 @@ async function loadRoot(): Promise<void> {
     errors.set("", error instanceof Error ? error.message : "无法加载目录");
   } finally {
     loading.delete("");
+    // The shell's standard refresh remounts the pane, so only the root title
+    // needs a plugin contribution here.
+    ctx.setChrome({ title: rootPath.value || "文件" });
   }
 }
 
@@ -105,20 +108,6 @@ onMounted(() => void loadRoot());
 
 <template>
   <div class="files-pane d-flex flex-column h-100">
-    <div class="files-header d-flex align-items-center gap-2 border-bottom px-2 py-1">
-      <i class="bi bi-folder2-open text-muted"></i>
-      <span class="text-truncate" :title="rootPath">{{ rootPath || "当前目录" }}</span>
-      <button
-        type="button"
-        class="btn btn-sm btn-outline-secondary ms-auto"
-        title="刷新文件树"
-        :disabled="loading.has('')"
-        @click="loadRoot"
-      >
-        <i class="bi bi-arrow-clockwise"></i>
-      </button>
-    </div>
-
     <div class="files-tree flex-grow-1 overflow-auto py-1" role="tree" aria-label="文件树">
       <div v-if="errors.has('')" class="small text-danger px-3 py-2">
         {{ errors.get("") }}
@@ -164,11 +153,6 @@ onMounted(() => void loadRoot());
   color: var(--color-text);
   font-size: 12px;
   min-width: 0;
-}
-
-.files-header {
-  flex: 0 0 auto;
-  min-height: 32px;
 }
 
 .files-tree {

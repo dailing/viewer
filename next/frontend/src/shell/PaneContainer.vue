@@ -8,11 +8,14 @@ import { computed } from "vue";
 
 import { contentUid, type PaneNode } from "../stores/layout";
 import { useLayoutStore } from "../stores/layout";
+import { usePaneChromeStore } from "../stores/paneChrome";
+import type { PaneChromeAction, PaneChromeControl } from "../stores/paneChrome";
 import PluginPaneHost from "./PluginPaneHost.vue";
 import { dockProviders } from "./registries";
 
 const props = defineProps<{ pane: PaneNode }>();
 const layout = useLayoutStore();
+const paneChrome = usePaneChromeStore();
 
 const provider = computed(() =>
   props.pane.content === null
@@ -26,7 +29,7 @@ const dockInstance = computed(() =>
     : provider.value?.instances.find((entry) => entry.id === props.pane.content?.instanceId),
 );
 
-const title = computed(() => {
+const automaticTitle = computed(() => {
   if (props.pane.content === null) return "";
   const base = provider.value?.title ?? props.pane.content.paneType;
   return props.pane.content.instanceId === "main"
@@ -38,6 +41,21 @@ const icon = computed(() => dockInstance.value?.icon ?? provider.value?.icon ?? 
 const tooltip = computed(() => dockInstance.value?.label ?? title.value);
 const isActive = computed(() => layout.activePaneId === props.pane.id);
 const uid = computed(() => (props.pane.content === null ? "" : contentUid(props.pane.content)));
+const chrome = computed(() => paneChrome.forUid(uid.value));
+const title = computed(() => chrome.value?.title ?? automaticTitle.value);
+
+function runAction(action: PaneChromeAction): void {
+  layout.setActivePane(props.pane.id);
+  void action.run();
+}
+
+function updateControl(control: PaneChromeControl, event: Event): void {
+  if (control.kind !== "select") return;
+  const target = event.target as HTMLSelectElement | null;
+  if (target === null) return;
+  layout.setActivePane(props.pane.id);
+  void control.onChange(target.value);
+}
 </script>
 
 <template>
@@ -50,9 +68,53 @@ const uid = computed(() => (props.pane.content === null ? "" : contentUid(props.
       <template v-if="pane.content !== null">
         <i class="bi pane-icon" :class="icon" :title="tooltip"></i>
         <span class="pane-title" :title="tooltip">{{ title }}</span>
+        <span v-if="chrome?.status" class="pane-status" :class="chrome.statusClass">
+          {{ chrome.status }}
+        </span>
       </template>
       <span v-else class="pane-title pane-title-empty">空面板</span>
       <span class="pane-actions">
+        <button
+          v-for="action in chrome?.actions ?? []"
+          :key="action.id"
+          type="button"
+          class="pane-btn pane-custom-action"
+          :class="{
+            active: action.active,
+            danger: action.variant === 'danger',
+            'has-label': action.icon === undefined,
+          }"
+          :title="action.title"
+          :aria-label="action.title"
+          @click.stop="runAction(action)"
+        >
+          <i v-if="action.icon" class="bi" :class="action.icon"></i>
+          <span v-else>{{ action.label }}</span>
+        </button>
+        <template v-for="control in chrome?.controls ?? []" :key="control.id">
+          <select
+            v-if="control.kind === 'select'"
+            class="pane-control-select"
+            :class="{ compact: control.size === 'compact' }"
+            :title="control.title"
+            :value="control.value"
+            @pointerdown.stop
+            @change="updateControl(control, $event)"
+          >
+            <option v-for="option in control.options" :key="option" :value="option">
+              {{ option }}
+            </option>
+          </select>
+          <span v-else class="pane-control-chips" :title="control.title">
+            <span
+              v-for="(item, index) in control.items"
+              :key="`${index}:${item}`"
+              class="pane-control-chip"
+            >
+              {{ item }}
+            </span>
+          </span>
+        </template>
         <button
           v-if="pane.content !== null"
           type="button"
@@ -147,7 +209,17 @@ const uid = computed(() => (props.pane.content === null ? "" : contentUid(props.
   color: var(--color-text-subtle);
 }
 
+.pane-status {
+  color: var(--color-text-subtle);
+  flex: 0 1 auto;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pane-actions {
+  align-items: center;
   display: flex;
   gap: 2px;
   margin-left: auto;
@@ -170,6 +242,58 @@ const uid = computed(() => (props.pane.content === null ? "" : contentUid(props.
 .pane-btn:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);
+}
+
+.pane-btn.active {
+  color: var(--color-text);
+}
+
+.pane-btn.danger {
+  color: var(--color-danger);
+}
+
+.pane-btn.has-label {
+  font-size: 10px;
+  font-weight: 700;
+  min-width: max-content;
+  padding: 0 6px;
+  white-space: nowrap;
+  width: auto;
+}
+
+.pane-control-select {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  flex: 0 0 120px;
+  font-size: var(--font-size-ui-small);
+  height: var(--nav-button-size);
+  min-width: 80px;
+  padding: 0 18px 0 5px;
+}
+
+.pane-control-select.compact {
+  flex-basis: 64px;
+  min-width: 54px;
+}
+
+.pane-control-chips {
+  align-items: center;
+  display: flex;
+  gap: 2px;
+  max-width: 180px;
+  overflow: hidden;
+}
+
+.pane-control-chip {
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 10px;
+  overflow: hidden;
+  padding: 2px 5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rotate-90 {

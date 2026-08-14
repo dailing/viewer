@@ -698,19 +698,19 @@ Local Live File Viewer is a private-network file browser and preview app. A Fast
 
 `next/frontend/src/plugins/files/`
 
-- Singleton Files pane plugin registered through the shell's in-repo plugin loader. `FilesPane.vue` obtains the root and every expanded directory exclusively through `file:_:list`, keeps child directories lazy, distinguishes file/directory/symlink icons, and deliberately has no preview or mutation actions.
+- Singleton Files pane plugin registered through the shell's in-repo plugin loader. `FilesPane.vue` obtains the root and every expanded directory exclusively through `file:_:list`, keeps child directories lazy, distinguishes file/directory/symlink icons, and deliberately has no preview or mutation actions. Its root title is registered into the shell pane chrome rather than rendered as a second header; the shell's standard pane refresh remounts and reloads it.
 
 `next/frontend/src/plugins/chat/`
 
-- Per-chat frontend module registered through the same in-repo loader. It contributes only `ChatPane.vue` plus the live chat instance Dock list. Its create action makes a default chat and immediately opens it, so the first-chat path does not depend on an existing pane. Chat headers open the separate chat-manager singleton.
+- Per-chat frontend module registered through the same in-repo loader. It contributes only `ChatPane.vue` plus the live chat instance Dock list, filtered reactively to pinned or currently open chats. Its create action makes a default chat and immediately opens it, so the first-chat path does not depend on an existing pane. ChatPane registers its chat title and manager action into the shell pane chrome; chat-manager mutations emit the frontend-local `viewer:chats-changed` event so open titles and Dock pin/name state refresh without a new backend frame.
 
 `next/frontend/src/plugins/chat-manager/`
 
 - Pure-frontend singleton management plugin with one `ManagerPanel.vue`. Its pinned Dock entry opens a three-tab page: Chats owns chat CRUD/pinning/activation, common prompts, roots/types, and member Roles; Roles owns Role prompt/cwd/session/context settings and routing-policy binding, with the aggregate Agent catalog as a three-level candidate helper; Routes owns ordered candidate editing, move controls, parameters, failover, and attempt limits. It consumes only `chat:_:*` RPC from the existing backend chat plugin.
 
-`next/frontend/src/stores/layout.ts` and `next/frontend/src/shell/Dock.vue`
+`next/frontend/src/stores/layout.ts`, `next/frontend/src/stores/paneChrome.ts`, and the shell pane components
 
-- `openInstance()` focuses an existing instance, then prefers the active/first empty pane, otherwise creates a vertical split to the active pane's right; occupied pane content is never silently replaced. Singleton Dock providers are pinned by default, expose a hover pin toggle, and persist the per-provider choice in localStorage; unpinned singletons are visible only while open.
+- `openInstance()` focuses an existing instance, then prefers the active/first empty pane, otherwise creates a vertical split to the active pane's right; occupied pane content is never silently replaced. Singleton Dock providers are pinned by default, expose a hover pin toggle, and persist the per-provider choice in localStorage; unpinned singletons are visible only while open. `paneChrome.ts` stores instance-uid-keyed title/status/action/control contributions; `PluginCtx.setChrome()` registers them and clears them on dispose, while `PaneContainer.vue` renders them before the standard refresh/split/close controls.
 
 `next/ts-sdk/tests/frontend-contract.test.ts`
 

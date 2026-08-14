@@ -20,6 +20,10 @@ const type = ref("group");
 const error = ref("");
 const selected = computed(() => chats.value.find((chat) => chat.id === selectedID.value) ?? null);
 
+function notifyChatsChanged(): void {
+  window.dispatchEvent(new CustomEvent("viewer:chats-changed"));
+}
+
 async function load(): Promise<void> {
   const [list, loadedRoles] = await Promise.all([
     ctx.bus.request("chat:_:chats:list", {}) as Promise<ChatList>,
@@ -37,6 +41,7 @@ async function create(): Promise<void> {
     const chat = await ctx.bus.request("chat:_:chats:create", { name: name.value, root: root.value, type: type.value, member_role_ids: [] }) as Chat;
     await load();
     selectedID.value = chat.id;
+    notifyChatsChanged();
   } catch (cause) { error.value = errorText(cause); }
 }
 
@@ -45,6 +50,7 @@ async function patch(chat: Chat, values: Record<string, unknown>): Promise<void>
   try {
     await ctx.bus.request("chat:_:chats:patch", { id: chat.id, ...values });
     await load();
+    notifyChatsChanged();
   } catch (cause) { error.value = errorText(cause); }
 }
 
@@ -70,6 +76,7 @@ async function remove(chat: Chat): Promise<void> {
   try {
     await ctx.bus.request("chat:_:chats:delete", { id: chat.id });
     await load();
+    notifyChatsChanged();
   } catch (cause) { error.value = errorText(cause); }
 }
 

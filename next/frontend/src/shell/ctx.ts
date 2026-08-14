@@ -8,6 +8,8 @@
 
 import type { FrameHandler } from "@viewer/bus-sdk";
 
+import { usePaneChromeStore } from "../stores/paneChrome";
+import type { PaneChrome } from "../stores/paneChrome";
 import { bus } from "./bus";
 
 export interface CtxStorage {
@@ -31,6 +33,8 @@ export interface PluginCtx {
   };
   /** F6: namespaced localStorage. */
   readonly storage: CtxStorage;
+  /** Register this instance's shell-rendered title-bar content. */
+  setChrome(chrome: PaneChrome): void;
   onDispose(callback: () => void): void;
   dispose(): void;
 }
@@ -57,6 +61,7 @@ function createStorage(scope: string): CtxStorage {
 }
 
 export function createCtx(scope: string, instanceId = "_"): PluginCtx {
+  const paneChrome = usePaneChromeStore();
   const subscriptions: Array<{ pattern: string; handler: FrameHandler }> = [];
   const disposeCallbacks: Array<() => void> = [];
   let disposed = false;
@@ -83,6 +88,10 @@ export function createCtx(scope: string, instanceId = "_"): PluginCtx {
       cancel: bus.cancel.bind(bus),
     },
     storage: createStorage(scope),
+    setChrome(chrome: PaneChrome): void {
+      if (disposed) return;
+      paneChrome.setChrome(scope, chrome);
+    },
     onDispose(callback: () => void): void {
       disposeCallbacks.push(callback);
     },
@@ -93,6 +102,7 @@ export function createCtx(scope: string, instanceId = "_"): PluginCtx {
         bus.unsubscribe(pattern, handler).catch(() => undefined);
       }
       for (const callback of disposeCallbacks.splice(0)) callback();
+      paneChrome.clearChrome(scope);
     },
   };
   return ctx;

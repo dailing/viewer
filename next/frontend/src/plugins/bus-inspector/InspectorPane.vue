@@ -9,7 +9,7 @@
  * manual only.
  */
 
-import { computed, inject, onMounted, ref } from "vue";
+import { computed, inject, onMounted, ref, watchEffect } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { busState } from "../../shell/bus";
@@ -133,6 +133,22 @@ function typeBadge(type: string): string {
   }
 }
 
+watchEffect(() => {
+  const current = stats.value;
+  const status = current !== null
+    ? `捕获 ${current.captured} · 丢弃 ${current.dropped} · ${current.rate_per_sec.toFixed(0)}/s · ring ${current.ring_used}/${current.ring_size}`
+    : snapshotAvailable.value ? undefined : "inspector 插件未运行";
+  ctx.setChrome({
+    title: "Bus Inspector",
+    status,
+    actions: [
+      { id: "pause", title: paused.value ? "继续捕获" : "暂停捕获", icon: paused.value ? "bi-play-fill" : "bi-pause-fill", active: paused.value, run: togglePause },
+      { id: "clear", title: "清空 ring buffer 与显示", icon: "bi-trash", variant: "danger", run: clearAll },
+      { id: "snapshot", title: "重新拉取快照", icon: "bi-arrow-clockwise", run: () => loadSnapshot() },
+    ],
+  });
+});
+
 onMounted(() => {
   ctx.bus.subscribe("bus-inspector:_:matches", (frame) => {
     mergeEntries([frame.value as InspectorEntry]);
@@ -155,43 +171,6 @@ onMounted(() => {
 
 <template>
   <div class="d-flex flex-column h-100">
-    <div class="d-flex align-items-center gap-2 border-bottom px-3 py-2 flex-wrap">
-      <strong>Bus Inspector</strong>
-      <span v-if="stats !== null" class="text-muted small">
-        捕获 {{ stats.captured }} · 丢弃 {{ stats.dropped }} · {{ stats.rate_per_sec.toFixed(0) }}/s
-        · ring {{ stats.ring_used }}/{{ stats.ring_size }}
-      </span>
-      <span v-else-if="!snapshotAvailable" class="text-muted small">inspector 插件未运行</span>
-      <div class="ms-auto d-flex align-items-center gap-1">
-        <button
-          type="button"
-          class="btn btn-sm btn-outline-secondary"
-          :class="{ active: paused }"
-          :aria-pressed="paused"
-          :title="paused ? '继续捕获' : '暂停捕获'"
-          @click="togglePause"
-        >
-          <i class="bi" :class="paused ? 'bi-play-fill' : 'bi-pause-fill'"></i>
-        </button>
-        <button
-          type="button"
-          class="btn btn-sm btn-outline-secondary"
-          title="清空 ring buffer 与显示"
-          @click="clearAll"
-        >
-          <i class="bi bi-trash"></i>
-        </button>
-        <button
-          type="button"
-          class="btn btn-sm btn-outline-secondary"
-          title="重新拉取快照"
-          @click="loadSnapshot()"
-        >
-          <i class="bi bi-arrow-clockwise"></i>
-        </button>
-      </div>
-    </div>
-
     <div class="d-flex align-items-center gap-2 border-bottom px-3 py-1 flex-wrap">
       <input
         v-model="filterChannel"

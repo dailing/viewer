@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.22**（2026-08-13）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.23**（2026-08-13）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.23 变更：**agent 实现拆为独立 headless 插件族**——`viewer.agent-hermes`（ACP）/ `viewer.agent-codex`（app-server）/ `viewer.agent-opencode`（ACP，新建）为无 UI 单实例服务插件，统一总线契约：RPC `start`（`target={agent,provider,model,parameters}` opaque 透传 + cwd + session_id?）/ `prompt`（立即 ack，turn 异步）/ `cancel`；事件 `event`（seq + kind + raw_json + 已解析 block 同帧）/ `turn-ended`；retained mailbox `catalog` 公布 agent-provider-model 清单。chat 瘦身为纯编排（roles/routing/relay/DB/summaries），经 C1 `plugins.viewer-chat.agents` 映射发现 agent 插件并聚合 catalog；**profile = routing policy**（既有模型不造新概念）：role 挂 policy，candidates = 有序三元组参数包，turn 开始按序解析首个 enabled 且在线者，`auto_failover` 接回失败按序尝试语义；`role.provider/model` 降为迁移输入。opencode 由"不实现"（v0.22）转为新建（ACP 第二租户）。
 > v0.22 变更：**chat 数据面与 provider 面定稿**——①原始事件全量保留：ACP/codex 两个 driver 的每条 session update 原文落 `turn_events`（append-only，per-turn seq），解析结果单独存 `message_blocks`（归一化 kind：agent_text/thinking/tool_call/tool_result/file_change/command/other），`messages` 表仍是用户可见文本视图；②接力定案：插件内顺序执行即最终形态，worker 队列/lease/failover 永久废弃；③codex provider 仅 app-server（原生协议库 `internal/codexserver/`），旧 codex-acp 路径不移植；④历史迁移把生产版 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`。
 > v0.21 变更：**file-service 增加目录列表能力**——新增 RPC `file:_:list`：输入 `{path}`，输出 `{path, entries[]}`，entry 字段对齐生产版 FileEntry（name/path/type(file\|directory\|symlink\|other)/size/mtime/mime/is_dir/is_symlink/link_target），目录优先 + name 字典序排序，一次性全量返回不分页，隐藏文件过滤归 file-service 插件配置。用途：viewer.files 文件树（A.5）的唯一取数通道。
 > v0.20 变更：**分发形态定稿**——核心集（内核 + core plugins + 前端）用 **Go** 实现为**单一静态二进制**（前端经 `go:embed` 内嵌），第三方/外挂插件仍以独立进程连总线、语言无关（松耦合不变）；**数据库访问一律使用 ORM**（Go 侧定 GORM + 纯 Go SQLite 驱动 modernc.org/sqlite，保持 CGO 关闭与交叉编译能力），禁止裸 SQL；现有 Python 栈（`next/`）转为协议参考实现，`next-go/` 为新主线（§17）。
@@ -442,7 +443,7 @@ my-plugin/
 > 已敲定条目已全部移出本节（决议正文见对应章节，历史见 §18）。
 
 5. file-service 收紧程度：插件经它读写文件（可控、可审计）vs 插件直接摸文件系统（现状、自由）。
-6. Agent service：core plugin 还是 chat runtime 插件的内部能力。
+6. Agent service：core plugin 还是 chat runtime 插件的内部能力。 → **已定（v0.23）**：皆非——agent 实现拆为独立 headless 功能插件族 `viewer.agent-*`（无 UI 单实例服务插件，统一总线契约，见 A.7）；chat 只经契约消费，不认识任何 provider 实现。
 10. 插件前端 TS 类型与后端 envelope 类型的单一来源（schema 生成？）。
 11. 多机场景的内互联结（**暂缓**，v0.18）：当前只考虑单机 localhost；多机 federation 暂不考虑，NATS 平移路径保留（§4），触发条件以后再说。
 
@@ -478,6 +479,8 @@ my-plugin/
 - **v0.19**（2026-08-12）：**Phase 0 开工**——§16 待决议清单清理（已敲定条目移出，剩 16-5 file-service 收紧 / 16-6 agent service 归属 / 16-10 类型单一来源 + 16-11 多机暂缓）；新建 **`docs/plugin-protocol.md`** 线路级协议规范草案 v0.1（**未冻结**，评审后冻结再写码）：连接拓扑、5 帧 JSON schema（hello 含 client 生成 `conn`、成功无 ack、失败用 WS close code 4001/4002/4003/4009）、channel 匹配算法形式化（前缀隐式全匹配）、mailbox replace-only + 订阅原子交接、RPC inbox payload 契约（`_reply_to`/`_corr`/`ok`/`error`/`_cancel`、30s 超时）、`_conn:{conn}:error` 协议错误通知 mailbox、背压（出站队列 1000 丢新帧）、心跳 ping/pong 30s×2、五张组件交换时序图。
 - **v0.20**（2026-08-13）：**分发形态定稿（§17）**——核心集（内核 + core plugins + 前端 embed）用 Go 实现为单一静态二进制；外挂插件维持独立进程连总线、语言无关；核心集进程模型改为单进程 goroutine 插件（编译期 registry、panic 隔离到插件粒度）；数据库访问定 ORM（GORM + modernc.org/sqlite 纯 Go 驱动），禁止裸 SQL；Python 栈转协议参考实现，`next-go/` 为新主线，测试套件作迁移期验收标准。
 - **v0.21**（2026-08-13）：**file-service 目录列表定稿**——新增 RPC `file:_:list`：输入 `{path}`（与 resolve 同一解析语义），输出 `{path, entries[]}`；entry 字段对齐生产版 FileEntry（name/path/type(file|directory|symlink|other)/size/mtime/mime/is_dir/is_symlink/link_target）；排序 = 目录优先 + name 字典序；一次性全量返回不分页；隐藏文件过滤归 file-service 插件配置。用途：viewer.files 文件树（A.5）的唯一取数通道。
+- **v0.22**（2026-08-13）：**chat 数据面与 provider 面定稿**——数据面三层：`turn_events`（append-only raw 帧全量，per-turn seq，过滤前落库）→ `message_blocks`（归一化解析块单独存，event_id 回指）→ `messages`（用户可见文本视图）；接力 = 插件内顺序执行即最终形态；provider = hermes + codex-app-server 唯二（codex-acp 不移植，opencode 暂不实现）；历史迁移 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`。
+- **v0.23**（2026-08-13）：**agent 实现拆为独立 headless 插件族**——`viewer.agent-hermes`（ACP）/ `viewer.agent-codex`（app-server）/ `viewer.agent-opencode`（ACP，新建）；统一契约：RPC `start`/`prompt`（ack 异步）/`cancel` + 事件 `event`（seq/kind/raw_json/block 同帧）/`turn-ended` + retained mailbox `catalog`；chat 瘦身为纯编排，经 C1 `plugins.viewer-chat.agents` 映射发现并聚合 catalog；profile = routing policy（既有模型），role 挂 policy，turn 开始按序解析 candidates，`auto_failover` 接回；`role.provider/model` 降为迁移输入；opencode 转为新建（ACP 第二租户）；§16-6 敲定。
 
 ---
 
@@ -498,7 +501,8 @@ my-plugin/
 | viewer.bus-inspector | 功能（调试） | **新增**（broker monitor 订阅 + ring buffer） | **新增**（消息表 + filter bar） | 2 |
 | viewer.files | 功能 | `files.py`（preview_kind/tree/content/upload/delete/site/resolve-link） | 见 A.5 | 3 |
 | viewer.git | 功能 | `git_diff.py` | `sidebar/GitPanel`、`DiffViewer` | 3 |
-| viewer.chat | 功能 | super_workspace 全家 + agent runtimes（见 A.7） | 见 A.7 | 4 |
+| viewer.chat | 功能 | super_workspace 编排 + 存储（见 A.7；agent 驱动层已拆出，v0.23） | 见 A.7 | 4 |
+| viewer.agent-hermes / agent-codex / agent-opencode | 功能（headless 服务插件，无 UI，v0.23） | `hermes_acp.py` + `acp_*.py` / `codex_app_server*.py` / `opencode_*.py`（新建） | —（无前端） | 4 |
 | viewer.voice | 功能(候选 core) | `voice.py` | `VoiceTextarea`、`VoiceInputButton`、`stores/voice.ts` | 2-4 |
 | layout/shell | display 层 | — | `Workspace.vue`、`SplitNode`、`stores/layout.ts`、`stores/paneToolbar.ts`、`ViewerPane→PluginPaneHost` | 1（壳）/ 5（插件化） |
 | logging/共享 | 库 | `logging.py`、`identity.py` | `utils/paths.ts` | 各 Phase 随用 |
@@ -544,13 +548,13 @@ my-plugin/
 
 ### A.7 viewer.chat（Super Workspace，Phase 4，最重）
 
-- 后端（13 个模块）：`super_workspace.py` / `_runtime.py` / `_worker.py` / `_memory.py`、`agent_history.py`、`turn_summary.py`、`llm_client.py`、`inference.py`、`identity.py`、`driver_catalog.py`、`ws_clients.py`，及 ACP 层 `acp_runtime.py` / `acp_sessions.py` / `hermes_acp.py` / `hermes_sessions.py` / `codex_app_server*.py` / `opencode_*.py`。
+- 后端（13 个模块）：`super_workspace.py` / `_runtime.py` / `_worker.py` / `_memory.py`、`agent_history.py`、`turn_summary.py`、`llm_client.py`、`inference.py`、`identity.py`、`driver_catalog.py`、`ws_clients.py`，及 ACP 层 `acp_runtime.py` / `acp_sessions.py` / `hermes_acp.py` / `hermes_sessions.py` / `codex_app_server*.py` / `opencode_*.py`。**（v0.23：ACP/agent 驱动层模块归对应 `viewer.agent-*` 插件，chat 只留编排 + 存储 + summaries/Hindsight。）**
 - 路由：`/api/super-workspace/*`（~20 条：workspace/chats/roles/routing/runs/events/dispatch/stop）+ `/api/agents/providers|inference-targets` + `/internal/super-workspace/notify` → 全部变 RPC/总线事件。
 - 前端：`SuperWorkspacePage.vue`、`SuperWorkspaceChatPane.vue`、`sidebar/ChatsPanel|RolesPanel|RoutesPanel`、`stores/agents|superChatComposer|superChatDispatch|inputSessions.ts`。
-- Instance：每 chat 一个 instance；进程映射为插件侧选择（§9）——chat 插件内部 spawn per-chat 子进程（本地 PID 管理，子进程 hello 带 `instance_id`），runtime = agent session + dispatch；roles/routing/chat-list 面板 = plugin-level 进程的配置视图（plugin config：roles/agents 列表，C1；instance state：某 chat 的 roles/cwd/session ids，C2+插件 DB）。
+- Instance：每 chat 一个 instance。**agent runtime 移出 chat（v0.23）**——agent 实现为独立 headless 插件族 `viewer.agent-hermes`（ACP）/ `viewer.agent-codex`（app-server）/ `viewer.agent-opencode`（ACP，新建）：无 UI、单实例（instance 恒 `_`）、随二进制编译期 registry 启动，插件内部自管 session→子进程池（"per-chat 子进程即 worker"决策不变，所有者从 chat 变为 agent 插件；外挂语言实现的 agent 插件经同一总线契约接入，语言无关）。**统一契约**：RPC `start`（`{cwd, target:{agent,provider,model,parameters}, session_id?}` → `{session_id, resumed}`；`parameters` opaque 透传，agent 插件自行解释）/ `prompt`（`{session_id, text}` → 立即 ack，turn 异步执行）/ `cancel`（`{session_id}`）；事件 `<plugin>:_:event`（`{session_id, seq, kind, raw_json, block}`——raw 原文与归一化解析块同帧，seq 由 agent 侧 turn 内单调发号）、`<plugin>:_:turn-ended`（`{session_id, stop_reason}`）；retained mailbox `<plugin>:_:catalog` 公布 `{agent, providers:[{provider, models[], parameter_schema}]}`。chat = 纯编排：经 C1 `plugins.viewer-chat.agents`（agent → 插件 id 映射，带默认值可改）发现 agent 插件、聚合 catalog（对前端暴露 `chat:_:agent-catalog` RPC 供 Roles/Routes 面板做候选选择器）；**profile = routing policy**（既有 RoutingPolicy/RoutingCandidate 模型，不造新概念）——role 挂 `routing_policy_id`，candidate = 有序 (agent, provider, model, parameters) 参数包，turn 开始按序解析首个 enabled 且 agent 插件在线（catalog 存在）的 candidate，`auto_failover` 开启时 start/prompt 失败按序试下一个（`max_attempts` 封顶）；`role.provider/model` 直写字段降为迁移输入（自动转 migrated policy，同生产版 `_ensure_role_routing_migration`）。roles/routing/chat-list 面板 = plugin-level 进程的配置视图（plugin config：roles/policies/agents 映射，C1；instance state：某 chat 的 roles/cwd/session ids，C2+插件 DB）。
 - slots：`send-message`、`stop`；emits：`chat:{id}:turn-completed`、`chat:{id}:message`、`chat:_:active`（mailbox，CWD 联动的 source）。
 - 存储：`agent-history.sqlite3` → **插件自管 DB**（chat_id 行级作用域，既有决策；per-chat 子进程只写自己 chat 的行，原子 insert 无竞争；WAL 支持并发读）；turn summaries 同库；Hindsight = 外部服务经 bus 消费。**数据面三层（v0.22 定稿）**：`turn_events`（append-only，driver 每条 session update 的完整原文 `raw_json` + per-turn `seq`，任何过滤之前落库，落库失败只记日志不阻断 turn）→ `message_blocks`（从 raw 同步派生的归一化解析块，单独存，`event_id` 回指 raw 行，拿不准的 method 进 `other` 不丢）→ `messages`（用户可见文本视图，行为不变）；删 chat 级联三层。
-- 迁移要点：**worker 整套删除**（DB 任务队列 + lease + pid handover 废弃，§9）——per-chat 子进程即 worker（插件侧实现），Viewer 关闭 turn 照跑，子进程启动参数与恢复逻辑是 chat 插件内部 ABI；ACP stdio 降级为子进程内部实现；对外只暴露总线契约。session 三元组复用、turn summary 预算制注入（词数近似，不做 token 精确化）等既有行为不变，只换通信外壳。**接力定案（v0.22）**：多 role 接力 = 插件内顺序执行（`runRelay`），即最终形态，不再回到生产版 worker 队列/lease/failover/cooldown。**provider 定案（v0.22）**：`hermes`（ACP stdio）+ `codex-app-server`（`internal/codexserver/` 原生协议库化）唯二；旧 codex-acp 适配器不移植；opencode 不实现。历史迁移脚本把生产版 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`（`seq` 取 `event_index`），`message_blocks` 不迁（可从 raw 重解析）。
+- 迁移要点：**worker 整套删除**（DB 任务队列 + lease + pid handover 废弃，§9）——per-chat 子进程即 worker（插件侧实现），Viewer 关闭 turn 照跑，子进程启动参数与恢复逻辑是 chat 插件内部 ABI；ACP stdio 降级为子进程内部实现；对外只暴露总线契约。session 三元组复用、turn summary 预算制注入（词数近似，不做 token 精确化）等既有行为不变，只换通信外壳。**接力定案（v0.22）**：多 role 接力 = 插件内顺序执行（`runRelay`），即最终形态，不再回到生产版 worker 队列/lease/failover/cooldown。**provider 定案（v0.22）**：`hermes`（ACP stdio）+ `codex-app-server`（`internal/codexserver/` 原生协议库化）唯二；旧 codex-acp 适配器不移植；opencode 暂不实现 → **v0.23 起 opencode 转为新建**（ACP 第二租户，见上方 Instance 条）。历史迁移脚本把生产版 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`（`seq` 取 `event_index`），`message_blocks` 不迁（可从 raw 重解析）。
 
 ### A.8 viewer.voice / 输入服务
 

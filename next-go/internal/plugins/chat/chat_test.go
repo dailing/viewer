@@ -7,84 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"viewer/internal/agentdriver"
 	"viewer/internal/busclient"
 )
-
-type fakeAgent struct {
-	mu                  sync.Mutex
-	sessionID           string
-	loadErr             error
-	updates             func(driverEvent)
-	prompts             []string
-	cancelled           bool
-	newCalls, loadCalls int
-}
-
-func newFakeAgent(id string) *fakeAgent                                 { return &fakeAgent{sessionID: id} }
-func (f *fakeAgent) Initialize(context.Context) (map[string]any, error) { return map[string]any{}, nil }
-func (f *fakeAgent) NewSession(context.Context, string) (string, error) {
-	f.newCalls++
-	return f.sessionID, nil
-}
-func (f *fakeAgent) LoadSession(context.Context, string, string) error {
-	f.loadCalls++
-	return f.loadErr
-}
-func (f *fakeAgent) OnUpdate(callback func(driverEvent)) { f.updates = callback }
-func (f *fakeAgent) Stderr() string                      { return "" }
-func (f *fakeAgent) Close() error                        { return nil }
-func (f *fakeAgent) Cancel(context.Context, string) error {
-	f.mu.Lock()
-	f.cancelled = true
-	f.mu.Unlock()
-	return nil
-}
-func (f *fakeAgent) Prompt(_ context.Context, sessionID, text string) (string, error) {
-	f.mu.Lock()
-	f.prompts = append(f.prompts, text)
-	f.mu.Unlock()
-	if f.updates != nil {
-		data := map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"text": "answer"}}
-		f.updates(driverEvent{Provider: "hermes", SessionID: sessionID, Kind: "agent_message_chunk", Raw: json.RawMessage(`{"sessionId":"fake","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"answer"}}}`), Data: data, Text: "answer"})
-	}
-	return "end_turn", nil
-}
-
-func TestChatRoleSessionLoadAndFallback(t *testing.T) {
-	dir := t.TempDir()
-	p, err := New(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.ctx, p.cancel = context.WithCancel(context.Background())
-	defer p.Close()
-	chat := Chat{ID: "chat", Root: dir}
-	role := SuperRole{ID: "role", Name: "Role", Provider: "hermes"}
-	if err := p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: "hermes", ProviderProfile: "test", ProviderSessionID: "old", CWD: dir}); err != nil {
-		t.Fatal(err)
-	}
-	first := newFakeAgent("new")
-	p.factory = func(context.Context) (agent, string, error) { return first, "test", nil }
-	runtime, fresh, err := p.ensureRuntime(context.Background(), chat, role)
-	if err != nil || fresh || runtime.sessionID != "old" || first.loadCalls != 1 || first.newCalls != 0 {
-		t.Fatalf("runtime=%#v fresh=%v err=%v load=%d new=%d", runtime, fresh, err, first.loadCalls, first.newCalls)
-	}
-	p.mu.Lock()
-	delete(p.runtimes, runtimeKey(chat.ID, role.ID))
-	p.mu.Unlock()
-	first.loadErr = errors.New("gone")
-	second := newFakeAgent("replacement")
-	second.loadErr = errors.New("gone")
-	p.factory = func(context.Context) (agent, string, error) { return second, "test", nil }
-	runtime, _, err = p.ensureRuntime(context.Background(), chat, role)
-	if err != nil || runtime.sessionID != "replacement" || second.newCalls != 1 {
-		t.Fatalf("fallback runtime=%#v err=%v", runtime, err)
-	}
-}
 
 func TestRenderAndParseRouter(t *testing.T) {
 	roles := []SuperRole{{ID: "one", Name: "One", Description: "first", Provider: "hermes"}, {ID: "two", Name: "Two", Description: "second", Provider: "hermes"}}
@@ -142,15 +69,6 @@ func TestProviderValidationAndMessageSender(t *testing.T) {
 	}
 }
 
-func TestUpdateTextOnly(t *testing.T) {
-	if got := updateText(map[string]any{"sessionUpdate": "tool_call", "text": "ignored"}); got != "" {
-		t.Fatal(got)
-	}
-	if got := updateText(map[string]any{"session_update": "agent_message_chunk", "content": map[string]any{"text": "ok"}}); got != "ok" {
-		t.Fatal(got)
-	}
-}
-
 func TestRoutingPolicySelectsEnabledOnlineCandidates(t *testing.T) {
 	p, err := New(t.TempDir())
 	if err != nil {
@@ -174,11 +92,27 @@ func TestRoutingPolicySelectsEnabledOnlineCandidates(t *testing.T) {
 	}
 }
 
-func TestDeriveMessageBlocks(t *testing.T) {
-	codex := &TurnEvent{ID: "codex-event", ChatID: "chat", TurnID: "turn", Provider: "codex-app-server", Kind: "item/commandExecution/outputDelta", OccurredAt: 43}
-	block, err := deriveMessageBlock(codex, map[string]any{"command": "go test ./...", "status": "running", "delta": "ok"})
-	if err != nil || block.Kind != "command" || transcriptBlockLine(*block) != "[cmd: go test ./... → running]" {
-		t.Fatalf("block=%#v err=%v", block, err)
+func TestRoutingPolicyWithoutFailoverOrZeroMaxAttemptsSelectsOne(t *testing.T) {
+	for _, policy := range []RoutingPolicyConfig{
+		{ID: "disabled-failover", Enabled: true, AutoFailover: false, MaxAttempts: 9},
+		{ID: "zero-attempts", Enabled: true, AutoFailover: true, MaxAttempts: 0},
+	} {
+		t.Run(policy.ID, func(t *testing.T) {
+			p, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			p.catalogs["viewer.agent-hermes"] = agentdriver.Catalog{Agent: "hermes"}
+			policy.Candidates = []RoutingCandidateConfig{
+				{ID: "first", AgentID: "hermes", ProviderID: "one", Enabled: true},
+				{ID: "second", AgentID: "hermes", ProviderID: "two", Enabled: true},
+			}
+			resolved, err := p.resolveCandidates(Chat{}, Workspace{RoutingPolicies: []RoutingPolicyConfig{policy}}, SuperRole{RoutingPolicyID: policy.ID})
+			if err != nil || len(resolved) != 1 || resolved[0].target.Provider != "one" {
+				t.Fatalf("resolved=%#v err=%v", resolved, err)
+			}
+		})
 	}
 }
 

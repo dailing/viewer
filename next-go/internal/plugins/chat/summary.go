@@ -106,6 +106,21 @@ func transcriptBlockLine(block MessageBlock) string {
 	}
 }
 
+func stringify(value any) string {
+	switch value := value.(type) {
+	case string:
+		return value
+	case nil:
+		return ""
+	default:
+		encoded, err := json.Marshal(value)
+		if err == nil {
+			return string(encoded)
+		}
+		return fmt.Sprint(value)
+	}
+}
+
 func (p *Plugin) generateTurnSummary(turnID, provider string) {
 	config := p.summaryConfig(p.ctx)
 	if !config.Enabled {

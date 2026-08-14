@@ -4,4 +4,9 @@ export interface Role { id: string; name: string; description: string; prompt: s
 export interface Chat { id: string; name: string; type: string; pinned: boolean; root: string; common_prompt: string; member_role_ids: string[]; role_routing_policy_overrides: Record<string, string>; created_at: number; updated_at: number }
 export interface ChatList { chats: Chat[]; active_chat_id: string; messages?: ChatMessage[] }
 export interface Workspace { id: string; name: string; common_prompt: string; roles: Role[]; routing_policies: unknown[]; default_routing_policy_id: string }
+export interface AgentProviderCatalog { provider: string; models: string[]; parameter_schema?: Record<string, unknown> }
+export interface AgentCatalog { agent: string; plugin_id: string; online: boolean; providers: AgentProviderCatalog[] }
+export interface RoutingCandidate { id: string; name: string; agent_id: string; provider_id: string; model_id: string; enabled: boolean; parameters: Record<string, unknown> }
+export interface RoutingPolicy { id: string; name: string; enabled: boolean; auto_failover: boolean; max_attempts: number; candidates: RoutingCandidate[] }
+export interface RoutingConfig { default_routing_policy_id: string; routing_policies: RoutingPolicy[] }
 export function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error) }

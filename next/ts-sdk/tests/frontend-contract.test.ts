@@ -143,6 +143,7 @@ function startViewerd(gatewayPort: number, kernelPort: number, dataDir: string, 
         ...process.env,
         VIEWER_HERMES_COMMAND: path.join(NEXT_GO_DIR, "scripts", "mock_acp_agent.py"),
         VIEWER_HERMES_PROFILE: "frontend-contract",
+        VIEWER_CODEX_APP_SERVER_COMMAND: path.join(NEXT_GO_DIR, "scripts", "mock_codex_server.py"),
       },
     },
   );
@@ -408,7 +409,7 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
     const chatGatewayPort = await freePort();
     const chatKernelPort = await freePort();
     const chatDataDir = mkdtempSync(path.join(tmpdir(), "viewer-chat-contract-"));
-    const chatViewerd = startViewerd(chatGatewayPort, chatKernelPort, chatDataDir, "config-store,chat");
+    const chatViewerd = startViewerd(chatGatewayPort, chatKernelPort, chatDataDir, "config-store,viewer.agent-hermes,viewer.agent-codex,chat");
     const client = new BusClient(`ws://127.0.0.1:${chatKernelPort}/ws`, { ...MANIFEST, id: "frontend-chat-contract" });
     const messages: Array<Record<string, unknown>> = [];
     const completed: Array<Record<string, unknown>> = [];
@@ -419,7 +420,13 @@ describe.sequential("next/frontend pane contracts against viewerd", () => {
     let registry: Array<{ manifest: { id: string } }> = [];
     await client.subscribe("plugins:_:list", (frame) => { registry = frame.value as Array<{ manifest: { id: string } }>; });
     await client.connect();
-    await waitFor(() => ["chat", "config-store"].every((id) => registry.some((entry) => entry.manifest.id === id)));
+    await waitFor(() => ["chat", "config-store", "viewer.agent-hermes", "viewer.agent-codex"].every((id) => registry.some((entry) => entry.manifest.id === id)));
+
+    const catalog = await client.request("chat:_:agent-catalog", {}) as Array<Record<string, unknown>>;
+    expect(catalog).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agent: "hermes", plugin_id: "viewer.agent-hermes", online: true, providers: expect.any(Array) }),
+      expect.objectContaining({ agent: "codex-app-server", plugin_id: "viewer.agent-codex", online: true, providers: [expect.objectContaining({ provider: "openai-subscription", models: expect.arrayContaining(["gpt-test"]) })] }),
+    ]));
 
     const first = (await client.request("chat:_:roles:create", { name: "One", description: "first", prompt: "ONE", provider: "hermes" })) as { id: string };
     const second = (await client.request("chat:_:roles:create", { name: "Two", description: "second", prompt: "TWO", provider: "hermes" })) as { id: string };

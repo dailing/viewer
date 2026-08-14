@@ -242,6 +242,12 @@ func (c *Client) ThreadStart(ctx context.Context, cwd, model string) (string, er
 	c.mu.Unlock()
 	return id, nil
 }
+
+// ModelList returns the App Server's model/list result for best-effort catalog
+// discovery. Callers deliberately own compatibility parsing of the result.
+func (c *Client) ModelList(ctx context.Context) (map[string]any, error) {
+	return c.request(ctx, "model/list", map[string]any{})
+}
 func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) error {
 	c.mu.Lock()
 	bound := c.bound[threadID]

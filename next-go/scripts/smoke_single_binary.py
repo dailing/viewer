@@ -26,6 +26,7 @@ CORE_IDS = {
     "bus-inspector",
     "config-store",
     "viewer.agent-hermes",
+    "viewer.agent-codex",
     "instance-store",
     "file-service",
     "chat",

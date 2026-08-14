@@ -34,36 +34,21 @@ var Manifest = busclient.Manifest{
 	},
 }
 
-type agent interface {
-	Initialize(context.Context) (map[string]any, error)
-	NewSession(context.Context, string) (string, error)
-	LoadSession(context.Context, string, string) error
-	Prompt(context.Context, string, string) (string, error)
-	Cancel(context.Context, string) error
-	OnUpdate(func(driverEvent))
-	Stderr() string
-	Close() error
-}
-type agentFactory func(context.Context) (agent, string, error)
 type Option func(*Plugin)
 
-func WithAgentFactory(factory agentFactory) Option { return func(p *Plugin) { p.factory = factory } }
-func WithHTTPClient(client *http.Client) Option    { return func(p *Plugin) { p.httpClient = client } }
+func WithHTTPClient(client *http.Client) Option { return func(p *Plugin) { p.httpClient = client } }
 
 type runtime struct {
-	agent                                                 agent
 	sessionID, profile, cwd, activeTurn, roleID, roleName string
 	pluginID, providerKey                                 string
 	target                                                agentdriver.Target
 	ended                                                 chan string
 	cancelRequested                                       bool
-	eventSeq                                              int
 }
 type Plugin struct {
 	dataDir      string
 	store        *store
 	client       *busclient.Client
-	factory      agentFactory
 	httpClient   *http.Client
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -96,29 +81,6 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 		option(p)
 	}
 	return p, nil
-}
-
-func (p *Plugin) agentForRole(ctx context.Context, role SuperRole) (agent, string, error) {
-	if role.Provider == "codex-app-server" {
-		model := ""
-		if role.Model != nil {
-			model = strings.TrimSpace(*role.Model)
-		}
-		return p.newCodexAgent(ctx, model)
-	}
-	return p.factory(ctx)
-}
-func envBool(name string, fallback bool) bool {
-	value, exists := os.LookupEnv(name)
-	if !exists {
-		return fallback
-	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
 }
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
@@ -541,16 +503,7 @@ func (p *Plugin) Close() error {
 	if p.cancel != nil {
 		p.cancel()
 	}
-	items := make([]*runtime, 0, len(p.runtimes))
-	for _, item := range p.runtimes {
-		items = append(items, item)
-	}
 	p.mu.Unlock()
-	for _, item := range items {
-		if item.agent != nil {
-			_ = item.agent.Close()
-		}
-	}
 	p.wg.Wait()
 	var busErr error
 	if p.client != nil {

@@ -63,7 +63,6 @@ func (p *Plugin) handleAgentCatalog(frame busclient.Frame) {
 		catalog, online := p.catalogs[pluginID]
 		item := map[string]any{"agent": agentID, "plugin_id": pluginID, "online": online, "providers": []agentdriver.ProviderCatalog{}}
 		if online {
-			item["agent"] = catalog.Agent
 			item["providers"] = catalog.Providers
 		}
 		result = append(result, item)
@@ -206,9 +205,6 @@ func (p *Plugin) resolveCandidates(chat Chat, workspace Workspace, role SuperRol
 		pluginID := p.agents[agentID]
 		_, online := p.catalogs[pluginID]
 		p.mu.Unlock()
-		if agentID == "codex-app-server" {
-			online = true
-		}
 		if pluginID == "" || !online {
 			continue
 		}

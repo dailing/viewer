@@ -27,14 +27,14 @@ async def wait_port(port: int) -> None:
     raise TimeoutError(f"kernel port {port} did not open")
 
 async def run() -> None:
-    viewerd, mock, port = Path(os.environ["VIEWERD_BIN"]), Path(__file__).with_name("mock_acp_agent.py"), free_port()
+    viewerd, mock, codex_mock, port = Path(os.environ["VIEWERD_BIN"]), Path(__file__).with_name("mock_acp_agent.py"), Path(__file__).with_name("mock_codex_server.py"), free_port()
     with tempfile.TemporaryDirectory(prefix="viewer-chat-smoke-") as temp:
         data_dir, log_path = Path(temp) / "data", Path(temp) / "viewerd.log"
-        environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true"}
+        environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true", "VIEWER_CODEX_APP_SERVER_COMMAND": str(codex_mock), "VIEWER_CODEX_APP_SERVER_YOLO": "true"}
         with log_path.open("wb") as log:
-            process = subprocess.Popen([str(viewerd), "--plugins=config-store,viewer.agent-hermes,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(viewerd), "--plugins=config-store,viewer.agent-hermes,viewer.agent-codex,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
         client = BusClient(f"ws://127.0.0.1:{port}/ws", CALLER, request_timeout=25.0)
-        messages: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []; catalogs: list[Any] = []; agent_events: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []; catalogs: list[Any] = []; codex_catalogs: list[Any] = []; agent_events: list[dict[str, Any]] = []; codex_events: list[dict[str, Any]] = []
         try:
             await wait_port(port)
             registry: list[list[dict[str, Any]]] = []
@@ -43,17 +43,23 @@ async def run() -> None:
             async def collect_active(frame: dict[str, Any]) -> None: active.append(frame["value"])
             async def collect_registry(frame: dict[str, Any]) -> None: registry.append(frame["value"])
             async def collect_catalog(frame: dict[str, Any]) -> None: catalogs.append(frame["value"])
+            async def collect_codex_catalog(frame: dict[str, Any]) -> None: codex_catalogs.append(frame["value"])
             async def collect_agent_event(frame: dict[str, Any]) -> None: agent_events.append(frame["value"])
+            async def collect_codex_event(frame: dict[str, Any]) -> None: codex_events.append(frame["value"])
             await client.subscribe("chat:*:message", collect_messages)
             await client.subscribe("chat:*:turn-completed", collect_completions)
             await client.subscribe("chat:_:active", collect_active)
             await client.subscribe("plugins:_:list", collect_registry)
             await client.subscribe("viewer.agent-hermes:_:catalog", collect_catalog)
             await client.subscribe("viewer.agent-hermes:_:event", collect_agent_event)
+            await client.subscribe("viewer.agent-codex:_:catalog", collect_codex_catalog)
+            await client.subscribe("viewer.agent-codex:_:event", collect_codex_event)
             await client.connect()
-            await wait_for(lambda: registry and {item["manifest"]["id"] for item in registry[-1]} >= {"chat", "config-store", "viewer.agent-hermes"})
+            await wait_for(lambda: registry and {item["manifest"]["id"] for item in registry[-1]} >= {"chat", "config-store", "viewer.agent-hermes", "viewer.agent-codex"})
             await wait_for(lambda: catalogs and catalogs[-1] and catalogs[-1]["agent"] == "hermes")
+            await wait_for(lambda: codex_catalogs and codex_catalogs[-1] and codex_catalogs[-1]["agent"] == "codex")
             print("CATALOG_MAILBOX_SAMPLE", json.dumps(catalogs[-1], separators=(",", ":")))
+            print("CODEX_CATALOG_MAILBOX_SAMPLE", json.dumps(codex_catalogs[-1], separators=(",", ":")))
             routing = {"default_routing_policy_id": "hermes-policy", "routing_policies": [{"id": "hermes-policy", "name": "Hermes", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "hermes-default", "name": "Hermes default", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]}]}
             await client.request("chat:_:routing:put", routing)
             first = await client.request("chat:_:roles:create", {"name": "Planner", "description": "plans", "prompt": "PLAN-RULE", "provider": "hermes", "routing_policy_id": "hermes-policy"})
@@ -107,6 +113,50 @@ async def run() -> None:
             assert stopped_again["stopped"] is False
             print("AGENT_EVENT_SAMPLE", json.dumps(agent_events[0], separators=(",", ":")))
             print("PASS routing policy, catalog aggregation, async agent event, and idempotent stop")
+
+            routing["routing_policies"].extend([
+                {"id": "codex-policy", "name": "Codex", "enabled": True, "auto_failover": False, "max_attempts": 0, "candidates": [{"id": "codex-default", "name": "Codex mock", "agent_id": "codex-app-server", "provider_id": "openai-subscription", "model_id": "gpt-test", "enabled": True, "parameters": {}}]},
+                {"id": "failover-policy", "name": "Failover", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "codex-fails", "name": "Failing Codex", "agent_id": "codex-app-server", "provider_id": "openai-subscription", "model_id": "fail-start", "enabled": True, "parameters": {}}, {"id": "hermes-fallback", "name": "Hermes fallback", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]},
+                {"id": "turn-error-policy", "name": "Turn error failover", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "codex-turn-error", "name": "Codex turn error", "agent_id": "codex-app-server", "provider_id": "openai-subscription", "model_id": "gpt-test", "enabled": True, "parameters": {}}, {"id": "hermes-after-turn-error", "name": "Hermes fallback", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]},
+            ])
+            await client.request("chat:_:routing:put", routing)
+
+            codex_role = await client.request("chat:_:roles:create", {"name": "Codex", "description": "codex", "prompt": "CODEX-RULE", "provider": "codex-app-server", "routing_policy_id": "codex-policy"})
+            codex_chat = await client.request("chat:_:chats:create", {"name": "Codex bus", "root": str(ROOT), "type": "direct", "member_role_ids": [codex_role["id"]]})
+            await client.request("chat:_:dispatch", {"chat_id": codex_chat["id"], "message": "codex hello", "role_ids": [codex_role["id"]]})
+            await wait_for(lambda: any(item["chat_id"] == codex_chat["id"] for item in completions))
+            codex_done = next(item for item in completions if item["chat_id"] == codex_chat["id"])
+            assert codex_done["stop_reason"] == "end_turn" and codex_done["attempts"][0]["outcome"] == "completed"
+            await wait_for(lambda: any(item["chat_id"] == codex_chat["id"] and item.get("text") == "mock answer" for item in messages))
+            assert codex_events and any(item["block"]["kind"] == "agent_text" for item in codex_events)
+            database = sqlite3.connect(data_dir / "chat.sqlite3")
+            try:
+                assert database.execute("select count(*) from turn_events where chat_id=? and provider='codex-app-server/openai-subscription'", (codex_chat["id"],)).fetchone()[0] >= 5
+                assert database.execute("select count(*) from message_blocks where chat_id=? and kind='agent_text'", (codex_chat["id"],)).fetchone()[0] == 1
+            finally: database.close()
+            print("CODEX_BUS_EVENT_SAMPLE", json.dumps(next(item for item in codex_events if item["block"]["kind"] == "agent_text"), separators=(",", ":")))
+            print("PASS codex bus start -> prompt -> event persistence -> turn-ended")
+
+            failover_role = await client.request("chat:_:roles:create", {"name": "Fallback", "description": "fallback", "prompt": "FALLBACK-RULE", "provider": "codex-app-server", "routing_policy_id": "failover-policy"})
+            failover_chat = await client.request("chat:_:chats:create", {"name": "Failover", "root": str(ROOT), "type": "direct", "member_role_ids": [failover_role["id"]]})
+            await client.request("chat:_:dispatch", {"chat_id": failover_chat["id"], "message": "fallback hello", "role_ids": [failover_role["id"]]})
+            await wait_for(lambda: any(item["chat_id"] == failover_chat["id"] for item in completions))
+            failover_done = next(item for item in completions if item["chat_id"] == failover_chat["id"])
+            assert failover_done["stop_reason"] == "end_turn"
+            assert [item["outcome"] for item in failover_done["attempts"]] == ["start_error", "completed"]
+            assert [item["agent"] for item in failover_done["attempts"]] == ["codex-app-server", "hermes"]
+            print("FAILOVER_ATTEMPTS_SAMPLE", json.dumps(failover_done["attempts"], separators=(",", ":")))
+            print("PASS automatic failover advances after start RPC failure")
+
+            turn_error_role = await client.request("chat:_:roles:create", {"name": "Turn error", "description": "turn error", "prompt": "TURN-ERROR-RULE", "provider": "codex-app-server", "routing_policy_id": "turn-error-policy"})
+            turn_error_chat = await client.request("chat:_:chats:create", {"name": "Turn error failover", "root": str(ROOT), "type": "direct", "member_role_ids": [turn_error_role["id"]]})
+            await client.request("chat:_:dispatch", {"chat_id": turn_error_chat["id"], "message": "mock turn error", "role_ids": [turn_error_role["id"]]})
+            await wait_for(lambda: any(item["chat_id"] == turn_error_chat["id"] for item in completions))
+            turn_error_done = next(item for item in completions if item["chat_id"] == turn_error_chat["id"])
+            assert turn_error_done["stop_reason"] == "end_turn"
+            assert [item["outcome"] for item in turn_error_done["attempts"]] == ["turn_error", "completed"]
+            print("TURN_ERROR_FAILOVER_SAMPLE", json.dumps(turn_error_done["attempts"], separators=(",", ":")))
+            print("PASS automatic failover advances after turn-ended error")
 
             try: await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "auto"})
             except Exception as exc: assert "LLM router is not configured" in str(exc)

@@ -20,13 +20,22 @@ for line in sys.stdin:
         continue
     if method == "initialize":
         send({"id": request_id, "result": {"userAgent": "mock-codex/1"}})
+    elif method == "model/list":
+        send({"id": request_id, "result": {"models": [{"id": "gpt-test"}, {"id": "fail-start"}]}})
     elif method == "thread/start":
-        send({"id": request_id, "result": {"thread": {"id": "mock-thread"}}})
+        if params.get("model") == "fail-start":
+            send({"id": request_id, "error": {"code": -32000, "message": "mock start failure"}})
+        else:
+            send({"id": request_id, "result": {"thread": {"id": "mock-thread"}}})
     elif method == "thread/resume":
         send({"id": request_id, "result": {"thread": {"id": params["threadId"]}}})
     elif method == "turn/start":
         send({"id": request_id, "result": {"turn": {"id": "mock-turn", "status": "inProgress"}}})
         thread_id = params["threadId"]
+        prompt = " ".join(item.get("text", "") for item in params.get("input", []))
+        if "mock turn error" in prompt:
+            send({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": "mock-turn", "status": "failed"}}})
+            continue
         send({"method": "item/reasoning/summaryTextDelta", "params": {"threadId": thread_id, "turnId": "mock-turn", "itemId": "reason-1", "delta": "thinking"}})
         send({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": "mock-turn", "itemId": "answer-1", "delta": "mock answer"}})
         send({"method": "item/commandExecution/outputDelta", "params": {"threadId": thread_id, "turnId": "mock-turn", "itemId": "command-1", "delta": "command output"}})

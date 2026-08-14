@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 
+	"viewer/internal/plugins/agentcodex"
 	"viewer/internal/plugins/agenthermes"
 	"viewer/internal/plugins/chat"
 	"viewer/internal/plugins/configstore"
@@ -22,12 +23,21 @@ var Registry = []Entry{
 	{ID: inspector.Manifest.ID, Factory: newInspector},
 	{ID: configstore.Manifest.ID, Factory: newConfigStore},
 	{ID: agenthermes.Manifest.ID, Factory: newAgentHermes},
+	{ID: agentcodex.Manifest.ID, Factory: newAgentCodex},
 	{ID: instancestore.Manifest.ID, Factory: newInstanceStore},
 	{ID: fileservice.Manifest.ID, Factory: newFileService},
 	{ID: chat.Manifest.ID, Factory: newChat},
 	{ID: terminal.Manifest.ID, Factory: newTerminal},
 	{ID: supervisor.Manifest.ID, Factory: newSupervisor},
 	{ID: "gateway", Factory: newGateway},
+}
+
+func newAgentCodex(config RuntimeConfig) (Plugin, error) {
+	plugin := agentcodex.New()
+	return lifecycleAdapter{
+		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
+		wait:  waitContext, close: func(context.Context) error { return plugin.Close() },
+	}, nil
 }
 
 func newAgentHermes(config RuntimeConfig) (Plugin, error) {

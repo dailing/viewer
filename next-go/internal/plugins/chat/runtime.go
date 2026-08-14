@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -200,15 +198,15 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		}
 		candidates, err := p.resolveCandidates(chat, workspace, role)
 		reason, summaryProvider := "error", role.Provider
+		attempts := []map[string]any{}
 		for _, candidate := range candidates {
 			var current *runtime
 			var fresh bool
-			if candidate.target.Agent == "codex-app-server" {
-				current, fresh, err = p.ensureInprocRuntime(p.ctx, chat, role)
-			} else {
-				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate)
-			}
+			attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
+			current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate)
 			if err != nil {
+				attempt["outcome"], attempt["error"] = "start_error", err.Error()
+				attempts = append(attempts, attempt)
 				continue
 			}
 			summaryProvider = candidate.target.Agent
@@ -220,16 +218,12 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 				prompt = bridge + "\n\nCurrent routed message follows:\n" + message
 			}
 			p.mu.Lock()
-			current.activeTurn, current.cancelRequested, current.roleName, current.eventSeq = turnID, false, role.Name, 0
+			current.activeTurn, current.cancelRequested, current.roleName = turnID, false, role.Name
 			if current.ended == nil {
 				current.ended = make(chan string, 1)
 			}
 			p.mu.Unlock()
-			if current.pluginID != "" {
-				reason, err = p.promptBus(p.ctx, current, prompt)
-			} else {
-				reason, err = current.agent.Prompt(p.ctx, current.sessionID, prompt)
-			}
+			reason, err = p.promptBus(p.ctx, current, prompt)
 			p.mu.Lock()
 			cancelled := current.cancelRequested
 			if current.activeTurn == turnID {
@@ -237,9 +231,6 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			}
 			if err != nil {
 				delete(p.runtimes, runtimeKey(chat.ID, role.ID))
-				if current.agent != nil {
-					_ = current.agent.Close()
-				}
 			}
 			p.mu.Unlock()
 			if cancelled {
@@ -249,17 +240,32 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			} else if reason == "" {
 				reason = "end_turn"
 			}
-			if err == nil || reason == "cancelled" {
+			if cancelled || reason == "cancelled" {
+				attempt["outcome"] = "cancelled"
+				attempts = append(attempts, attempt)
 				break
 			}
+			if err != nil {
+				attempt["outcome"], attempt["error"] = "prompt_error", err.Error()
+				attempts = append(attempts, attempt)
+				continue
+			}
+			if reason == "error" {
+				attempt["outcome"] = "turn_error"
+				attempts = append(attempts, attempt)
+				continue
+			}
+			attempt["outcome"] = "completed"
+			attempts = append(attempts, attempt)
+			break
 		}
 		_ = p.store.completeTurn(turnID, reason)
-		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
+		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "attempts": attempts, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
 		if reason != "cancelled" {
 			p.wg.Add(1)
 			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, summaryProvider)
 		}
-		if err != nil || reason == "cancelled" {
+		if err != nil || reason == "error" || reason == "cancelled" {
 			break
 		}
 	}
@@ -310,130 +316,6 @@ func (p *Plugin) historyPrompt(chatID string, before int64, budget int) (string,
 	return "Recent visible chat history:\n" + strings.Join(lines, "\n"), nil
 }
 
-func (p *Plugin) ensureInprocRuntime(ctx context.Context, chat Chat, role SuperRole) (*runtime, bool, error) {
-	key := runtimeKey(chat.ID, role.ID)
-	effectiveCWD := chat.Root
-	if role.CWD != "" {
-		if filepath.IsAbs(role.CWD) {
-			effectiveCWD = role.CWD
-		} else {
-			effectiveCWD = filepath.Join(chat.Root, role.CWD)
-		}
-	}
-	absolute, err := filepath.Abs(effectiveCWD)
-	if err != nil {
-		return nil, false, err
-	}
-	p.mu.Lock()
-	existing := p.runtimes[key]
-	if existing != nil && role.SessionPolicy != "new_each_run" && existing.cwd == absolute {
-		p.mu.Unlock()
-		return existing, false, nil
-	}
-	if existing != nil {
-		delete(p.runtimes, key)
-	}
-	p.mu.Unlock()
-	if existing != nil {
-		if existing.agent != nil {
-			_ = existing.agent.Close()
-		}
-	}
-	process, profile, err := p.agentForRole(ctx, role)
-	if err != nil {
-		return nil, false, err
-	}
-	current := &runtime{agent: process, profile: profile, cwd: absolute, roleID: role.ID, roleName: role.Name}
-	process.OnUpdate(func(update driverEvent) { p.handleUpdate(chat.ID, role.ID, update) })
-	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if _, err = process.Initialize(initCtx); err != nil {
-		_ = process.Close()
-		return nil, false, fmt.Errorf("initialize %s driver: %w", role.Provider, err)
-	}
-	state, err := p.store.roleSession(chat.ID, role.ID)
-	if err != nil {
-		_ = process.Close()
-		return nil, false, err
-	}
-	sessionID := ""
-	newSession := true
-	if role.SessionPolicy != "new_each_run" && state != nil && state.Provider == role.Provider && state.ProviderProfile == profile && state.CWD == absolute {
-		if process.LoadSession(initCtx, state.ProviderSessionID, absolute) == nil {
-			sessionID = state.ProviderSessionID
-			newSession = false
-		}
-	}
-	if sessionID == "" {
-		sessionID, err = process.NewSession(initCtx, absolute)
-		if err != nil {
-			_ = process.Close()
-			return nil, false, fmt.Errorf("create %s session: %w", role.Provider, err)
-		}
-		err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: role.Provider, ProviderProfile: profile, ProviderSessionID: sessionID, CWD: absolute, UpdatedAt: nowMillis()})
-		if err != nil {
-			_ = process.Close()
-			return nil, false, err
-		}
-	}
-	current.sessionID = sessionID
-	p.mu.Lock()
-	p.runtimes[key] = current
-	p.mu.Unlock()
-	return current, newSession, nil
-}
-
-// ensureRuntime remains as a test seam for the in-process Codex/fake driver.
-func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (*runtime, bool, error) {
-	return p.ensureInprocRuntime(ctx, chat, role)
-}
-
-func (p *Plugin) handleUpdate(chatID, roleID string, update driverEvent) {
-	p.mu.Lock()
-	current := p.runtimes[runtimeKey(chatID, roleID)]
-	if current == nil || current.activeTurn == "" || update.SessionID != current.sessionID {
-		p.mu.Unlock()
-		return
-	}
-	turnID, roleName, seq := current.activeTurn, current.roleName, current.eventSeq
-	current.eventSeq++
-	p.mu.Unlock()
-	occurredAt := nowMillis()
-	kind := update.Kind
-	if kind == "" {
-		kind = "unknown"
-	}
-	event := &TurnEvent{ID: newID(), ChatID: chatID, TurnID: turnID, RoleID: roleID, Provider: update.Provider, SessionID: update.SessionID, Seq: seq, Kind: kind, RawJSON: string(update.Raw), OccurredAt: occurredAt}
-	if err := p.store.addTurnEvent(event); err != nil {
-		log.Printf("viewer-chat raw event persistence failed chat_id=%s turn_id=%s provider=%s kind=%s: %v", chatID, turnID, update.Provider, kind, err)
-	} else if block, err := deriveMessageBlock(event, update.Data); err != nil {
-		log.Printf("viewer-chat message block derivation failed event_id=%s: %v", event.ID, err)
-	} else if err = p.store.addMessageBlock(block); err != nil {
-		log.Printf("viewer-chat message block persistence failed event_id=%s kind=%s: %v", event.ID, block.Kind, err)
-	}
-	if text := update.Text; text != "" {
-		message := &Message{ID: newID(), ChatID: chatID, TurnID: turnID, Role: "assistant", Text: text, SenderFrom: "role", RoleID: roleID, RoleName: roleName, CreatedAt: nowMillis()}
-		if p.store.addMessage(message) == nil {
-			p.publishMessage(message)
-		}
-	}
-}
-func updateText(value map[string]any) string {
-	kind, _ := value["sessionUpdate"].(string)
-	if kind == "" {
-		kind, _ = value["session_update"].(string)
-	}
-	if kind != "agent_message_chunk" {
-		return ""
-	}
-	if content, ok := value["content"].(map[string]any); ok {
-		text, _ := content["text"].(string)
-		return text
-	}
-	text, _ := value["text"].(string)
-	return text
-}
-
 func (p *Plugin) handleStop(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
@@ -461,11 +343,7 @@ func (p *Plugin) stopTurn(chatID, roleID string) (bool, error) {
 	for _, current := range targets {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		var err error
-		if current.pluginID != "" {
-			_, err = p.client.Request(ctx, current.pluginID+":_:cancel", map[string]any{"session_id": current.sessionID}, 5*time.Second)
-		} else {
-			err = current.agent.Cancel(ctx, current.sessionID)
-		}
+		_, err = p.client.Request(ctx, current.pluginID+":_:cancel", map[string]any{"session_id": current.sessionID}, 5*time.Second)
 		cancel()
 		result = errors.Join(result, err)
 	}

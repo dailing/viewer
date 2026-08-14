@@ -1,47 +1,25 @@
-package chat
+package codexserver
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"viewer/internal/agentdriver"
 )
 
-type driverEvent struct {
-	Provider  string
-	SessionID string
-	Kind      string
-	Raw       json.RawMessage
-	Data      map[string]any
-	Text      string
-}
-
-func deriveMessageBlock(event *TurnEvent, data map[string]any) (*MessageBlock, error) {
-	kind, text := "other", ""
-	payload := map[string]any{}
-	if event.Provider == "codex-app-server" {
-		kind, text, payload = deriveCodexBlock(event.Kind, data)
-	} else {
-		payload["provider"] = event.Provider
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("encode %s block payload: %w", kind, err)
-	}
-	return &MessageBlock{
-		ID: newID(), EventID: event.ID, ChatID: event.ChatID, TurnID: event.TurnID,
-		Kind: kind, Text: text, Payload: string(encoded), OccurredAt: event.OccurredAt,
-	}, nil
-}
-
-func deriveCodexBlock(method string, data map[string]any) (string, string, map[string]any) {
+// ParseBlock normalizes one Codex App Server notification into the shared
+// agent-driver block contract. Unknown methods are retained as other blocks.
+func ParseBlock(method string, data map[string]any) agentdriver.Block {
+	kind, text, payload := agentdriver.KindOther, "", map[string]any{"method": method}
 	lower := strings.ToLower(method)
 	switch {
 	case method == "item/agentMessage/delta":
-		return "agent_text", stringField(data, "delta", "text"), map[string]any{}
+		kind, text, payload = agentdriver.KindAgentText, stringField(data, "delta", "text"), map[string]any{}
 	case strings.Contains(lower, "reasoning"):
-		return "thinking", stringField(data, "delta", "text", "summary"), map[string]any{"method": method}
+		kind, text, payload = agentdriver.KindThinking, stringField(data, "delta", "text", "summary"), map[string]any{"method": method}
 	case strings.Contains(lower, "commandexecution") || strings.Contains(lower, "/command/"):
-		payload := selectedPayload(data, "command", "status", "output")
+		kind, payload = agentdriver.KindCommand, selectedPayload(data, "command", "status", "output")
 		if item, ok := data["item"].(map[string]any); ok {
 			mergeMissing(payload, selectedPayload(item, "command", "status", "output"))
 		}
@@ -50,9 +28,9 @@ func deriveCodexBlock(method string, data map[string]any) (string, string, map[s
 				payload["output"] = delta
 			}
 		}
-		return "command", stringField(data, "delta", "output", "command"), payload
+		text = stringField(data, "delta", "output", "command")
 	case strings.Contains(lower, "filechange") || strings.Contains(lower, "patch") || method == "turn/diff/updated":
-		payload := selectedPayload(data, "path", "patch", "diff")
+		kind, payload = agentdriver.KindFileChange, selectedPayload(data, "path", "patch", "diff")
 		if _, ok := payload["patch"]; !ok {
 			if diff, ok := payload["diff"]; ok {
 				payload["patch"] = diff
@@ -62,18 +40,20 @@ func deriveCodexBlock(method string, data map[string]any) (string, string, map[s
 		if first := firstObject(data["changes"]); first != nil {
 			mergeMissing(payload, selectedPayload(first, "path", "patch", "diff"))
 		}
-		return "file_change", stringField(data, "diff", "patch", "delta"), payload
+		text = stringField(data, "diff", "patch", "delta")
 	case strings.Contains(lower, "toolresult"):
-		return "tool_result", readableText(data), selectedPayload(data, "name", "arguments", "status", "output", "result")
+		kind, text, payload = agentdriver.KindToolResult, readableText(data), selectedPayload(data, "name", "arguments", "status", "output", "result")
 	case strings.Contains(lower, "toolcall"):
-		payload := selectedPayload(data, "name", "arguments", "status")
+		kind, text, payload = agentdriver.KindToolCall, readableText(data), selectedPayload(data, "name", "arguments", "status")
 		if item, ok := data["item"].(map[string]any); ok {
 			mergeMissing(payload, selectedPayload(item, "name", "arguments", "status"))
 		}
-		return "tool_call", readableText(data), payload
-	default:
-		return "other", readableText(data), map[string]any{"method": method}
 	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		encoded = []byte(`{"method":"` + method + `"}`)
+	}
+	return agentdriver.Block{Kind: kind, Text: text, Payload: string(encoded)}
 }
 
 func firstObject(value any) map[string]any {
@@ -91,15 +71,13 @@ func firstObject(value any) map[string]any {
 	return nil
 }
 
-func contentText(data map[string]any) string {
-	if content, ok := data["content"].(map[string]any); ok {
-		return stringField(content, "text")
-	}
-	return stringField(data, "text", "delta")
-}
-
 func readableText(data map[string]any) string {
-	if text := contentText(data); text != "" {
+	if content, ok := data["content"].(map[string]any); ok {
+		if text := stringField(content, "text"); text != "" {
+			return text
+		}
+	}
+	if text := stringField(data, "text", "delta"); text != "" {
 		return text
 	}
 	for _, key := range []string{"output", "result", "rawOutput", "title", "name", "command"} {

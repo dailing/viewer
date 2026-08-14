@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"viewer/internal/agentdriver"
+	"viewer/internal/busclient"
 )
 
 type fakeAgent struct {
@@ -148,14 +151,32 @@ func TestUpdateTextOnly(t *testing.T) {
 	}
 }
 
-func TestDeriveMessageBlocks(t *testing.T) {
-	event := &TurnEvent{ID: "event", ChatID: "chat", TurnID: "turn", Provider: "hermes", Kind: "tool_call", OccurredAt: 42}
-	block, err := deriveMessageBlock(event, map[string]any{"title": "Read", "status": "completed", "arguments": map[string]any{"path": "a.txt"}})
-	if err != nil || block.Kind != "tool_call" || !strings.Contains(block.Payload, `"name":"Read"`) {
-		t.Fatalf("block=%#v err=%v", block, err)
+func TestRoutingPolicySelectsEnabledOnlineCandidates(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer p.Close()
+	p.catalogs["viewer.agent-hermes"] = agentdriver.Catalog{Agent: "hermes"}
+	workspace := Workspace{RoutingPolicies: []RoutingPolicyConfig{{
+		ID: "policy", Enabled: true, AutoFailover: true, MaxAttempts: 2,
+		Candidates: []RoutingCandidateConfig{
+			{ID: "disabled", AgentID: "hermes", ProviderID: "skip", Enabled: false},
+			{ID: "offline", AgentID: "opencode", ProviderID: "default", Enabled: true},
+			{ID: "first", AgentID: "hermes", ProviderID: "one", ModelID: "m1", Enabled: true, Parameters: map[string]any{"x": "opaque"}},
+			{ID: "second", AgentID: "hermes", ProviderID: "two", ModelID: "m2", Enabled: true},
+			{ID: "capped", AgentID: "hermes", ProviderID: "three", Enabled: true},
+		},
+	}}}
+	resolved, err := p.resolveCandidates(Chat{}, workspace, SuperRole{RoutingPolicyID: "policy"})
+	if err != nil || len(resolved) != 2 || resolved[0].target.Provider != "one" || resolved[1].target.Provider != "two" || resolved[0].target.Parameters["x"] != "opaque" {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+}
+
+func TestDeriveMessageBlocks(t *testing.T) {
 	codex := &TurnEvent{ID: "codex-event", ChatID: "chat", TurnID: "turn", Provider: "codex-app-server", Kind: "item/commandExecution/outputDelta", OccurredAt: 43}
-	block, err = deriveMessageBlock(codex, map[string]any{"command": "go test ./...", "status": "running", "delta": "ok"})
+	block, err := deriveMessageBlock(codex, map[string]any{"command": "go test ./...", "status": "running", "delta": "ok"})
 	if err != nil || block.Kind != "command" || transcriptBlockLine(*block) != "[cmd: go test ./... → running]" {
 		t.Fatalf("block=%#v err=%v", block, err)
 	}
@@ -170,9 +191,9 @@ func TestHandleUpdatePersistsRawBeforeVisibleTextFilter(t *testing.T) {
 		delete(p.runtimes, runtimeKey("chat", "role"))
 		_ = p.Close()
 	}()
-	p.runtimes[runtimeKey("chat", "role")] = &runtime{sessionID: "session", activeTurn: "turn", roleName: "Role"}
+	p.runtimes[runtimeKey("chat", "role")] = &runtime{sessionID: "session", activeTurn: "turn", roleID: "role", roleName: "Role", pluginID: "viewer.agent-hermes", providerKey: "hermes/default"}
 	raw := json.RawMessage(`{"sessionId":"session","update":{"sessionUpdate":"tool_call","title":"Read","status":"pending"}}`)
-	p.handleUpdate("chat", "role", driverEvent{Provider: "hermes", SessionID: "session", Kind: "tool_call", Raw: raw, Data: map[string]any{"title": "Read", "status": "pending"}})
+	p.handleAgentEvent(busclient.Frame{Channel: "viewer.agent-hermes:_:event", Value: agentdriver.EventFrame{SessionID: "session", Kind: "tool_call", RawJSON: string(raw), Block: agentdriver.Block{Kind: "tool_call", Text: "Read", Payload: `{"name":"Read","status":"pending"}`}}})
 	var events []TurnEvent
 	if err := p.store.db.Find(&events).Error; err != nil || len(events) != 1 || events[0].RawJSON != string(raw) || events[0].Seq != 0 {
 		t.Fatalf("events=%#v err=%v", events, err)

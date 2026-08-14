@@ -19,7 +19,7 @@ const (
 )
 
 var (
-	normalField   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	normalField   = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 	reservedField = regexp.MustCompile(`^_[a-z0-9_-]*$`)
 	uuidV4        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 )

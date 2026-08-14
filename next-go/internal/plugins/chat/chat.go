@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"viewer/internal/acp"
+	"viewer/internal/agentdriver"
 	"viewer/internal/busclient"
 	"viewer/internal/plugins/pluginrpc"
 )
@@ -27,6 +27,7 @@ var Manifest = busclient.Manifest{
 		"chat:_:routing:get": map[string]any{}, "chat:_:routing:put": map[string]any{},
 		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
 		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
+		"chat:_:agent-catalog": map[string]any{},
 	},
 	Emits: map[string]any{
 		"chat:*:message": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
@@ -52,6 +53,9 @@ func WithHTTPClient(client *http.Client) Option    { return func(p *Plugin) { p.
 type runtime struct {
 	agent                                                 agent
 	sessionID, profile, cwd, activeTurn, roleID, roleName string
+	pluginID, providerKey                                 string
+	target                                                agentdriver.Target
+	ended                                                 chan string
 	cancelRequested                                       bool
 	eventSeq                                              int
 }
@@ -66,6 +70,8 @@ type Plugin struct {
 	mu           sync.Mutex
 	runtimes     map[string]*runtime
 	busy         map[string]bool
+	agents       map[string]string
+	catalogs     map[string]agentdriver.Catalog
 	activeChatID string
 	closed       bool
 	wg           sync.WaitGroup
@@ -85,33 +91,11 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, httpClient: defaultHTTPClient()}
-	p.factory = p.hermesAgent
+	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
 	return p, nil
-}
-
-func (p *Plugin) hermesAgent(ctx context.Context) (agent, string, error) {
-	command := strings.TrimSpace(os.Getenv("VIEWER_HERMES_COMMAND"))
-	if command == "" {
-		command = "hermes"
-	}
-	profile := strings.TrimSpace(os.Getenv("VIEWER_HERMES_PROFILE"))
-	if profile == "" {
-		profile = "default"
-	}
-	arguments := []string{"-p", profile}
-	if envBool("VIEWER_HERMES_YOLO", true) {
-		arguments = append(arguments, "--yolo")
-	}
-	arguments = append(arguments, "acp")
-	client, err := acp.New(ctx, command, arguments...)
-	if err != nil {
-		return nil, "", err
-	}
-	return &acpAgent{Client: client}, profile, nil
 }
 
 func (p *Plugin) agentForRole(ctx context.Context, role SuperRole) (agent, string, error) {
@@ -146,6 +130,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:routing:get": p.handleRoutingGet, "chat:_:routing:put": p.handleRoutingPut,
 		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
 		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
+		"chat:_:agent-catalog": p.handleAgentCatalog,
 	}
 	for pattern, handler := range handlers {
 		asyncHandler := handler
@@ -153,8 +138,19 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 			return err
 		}
 	}
+	if _, err := p.client.Subscribe("*:_", p.handleAgentBusFrame); err != nil {
+		return err
+	}
 	if err := p.client.Connect(ctx); err != nil {
 		return err
+	}
+	var configured map[string]string
+	if err := p.configGet(ctx, "agents", &configured); err == nil && len(configured) > 0 {
+		for agentID, pluginID := range configured {
+			if strings.TrimSpace(pluginID) != "" {
+				p.agents[agentID] = strings.TrimSpace(pluginID)
+			}
+		}
 	}
 	activeID, err := p.store.activeChatID()
 	if err != nil {
@@ -551,7 +547,9 @@ func (p *Plugin) Close() error {
 	}
 	p.mu.Unlock()
 	for _, item := range items {
-		_ = item.agent.Close()
+		if item.agent != nil {
+			_ = item.agent.Close()
+		}
 	}
 	p.wg.Wait()
 	var busErr error

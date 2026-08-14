@@ -198,9 +198,20 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		if p.store.beginTurn(turn) != nil {
 			continue
 		}
-		current, fresh, err := p.ensureRuntime(p.ctx, chat, role)
-		reason := "error"
-		if err == nil {
+		candidates, err := p.resolveCandidates(chat, workspace, role)
+		reason, summaryProvider := "error", role.Provider
+		for _, candidate := range candidates {
+			var current *runtime
+			var fresh bool
+			if candidate.target.Agent == "codex-app-server" {
+				current, fresh, err = p.ensureInprocRuntime(p.ctx, chat, role)
+			} else {
+				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate)
+			}
+			if err != nil {
+				continue
+			}
+			summaryProvider = candidate.target.Agent
 			prompt := message
 			if fresh {
 				contextBridge := p.buildNewSessionContext(chat, message, before)
@@ -210,8 +221,15 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			}
 			p.mu.Lock()
 			current.activeTurn, current.cancelRequested, current.roleName, current.eventSeq = turnID, false, role.Name, 0
+			if current.ended == nil {
+				current.ended = make(chan string, 1)
+			}
 			p.mu.Unlock()
-			reason, err = current.agent.Prompt(p.ctx, current.sessionID, prompt)
+			if current.pluginID != "" {
+				reason, err = p.promptBus(p.ctx, current, prompt)
+			} else {
+				reason, err = current.agent.Prompt(p.ctx, current.sessionID, prompt)
+			}
 			p.mu.Lock()
 			cancelled := current.cancelRequested
 			if current.activeTurn == turnID {
@@ -219,7 +237,9 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			}
 			if err != nil {
 				delete(p.runtimes, runtimeKey(chat.ID, role.ID))
-				_ = current.agent.Close()
+				if current.agent != nil {
+					_ = current.agent.Close()
+				}
 			}
 			p.mu.Unlock()
 			if cancelled {
@@ -229,12 +249,15 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			} else if reason == "" {
 				reason = "end_turn"
 			}
+			if err == nil || reason == "cancelled" {
+				break
+			}
 		}
 		_ = p.store.completeTurn(turnID, reason)
 		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
 		if reason != "cancelled" {
 			p.wg.Add(1)
-			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, role.Provider)
+			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, summaryProvider)
 		}
 		if err != nil || reason == "cancelled" {
 			break
@@ -287,7 +310,7 @@ func (p *Plugin) historyPrompt(chatID string, before int64, budget int) (string,
 	return "Recent visible chat history:\n" + strings.Join(lines, "\n"), nil
 }
 
-func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (*runtime, bool, error) {
+func (p *Plugin) ensureInprocRuntime(ctx context.Context, chat Chat, role SuperRole) (*runtime, bool, error) {
 	key := runtimeKey(chat.ID, role.ID)
 	effectiveCWD := chat.Root
 	if role.CWD != "" {
@@ -312,7 +335,9 @@ func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (
 	}
 	p.mu.Unlock()
 	if existing != nil {
-		_ = existing.agent.Close()
+		if existing.agent != nil {
+			_ = existing.agent.Close()
+		}
 	}
 	process, profile, err := p.agentForRole(ctx, role)
 	if err != nil {
@@ -356,6 +381,11 @@ func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (
 	p.runtimes[key] = current
 	p.mu.Unlock()
 	return current, newSession, nil
+}
+
+// ensureRuntime remains as a test seam for the in-process Codex/fake driver.
+func (p *Plugin) ensureRuntime(ctx context.Context, chat Chat, role SuperRole) (*runtime, bool, error) {
+	return p.ensureInprocRuntime(ctx, chat, role)
 }
 
 func (p *Plugin) handleUpdate(chatID, roleID string, update driverEvent) {
@@ -430,7 +460,12 @@ func (p *Plugin) stopTurn(chatID, roleID string) (bool, error) {
 	var result error
 	for _, current := range targets {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := current.agent.Cancel(ctx, current.sessionID)
+		var err error
+		if current.pluginID != "" {
+			_, err = p.client.Request(ctx, current.pluginID+":_:cancel", map[string]any{"session_id": current.sessionID}, 5*time.Second)
+		} else {
+			err = current.agent.Cancel(ctx, current.sessionID)
+		}
 		cancel()
 		result = errors.Join(result, err)
 	}

@@ -32,9 +32,9 @@ async def run() -> None:
         data_dir, log_path = Path(temp) / "data", Path(temp) / "viewerd.log"
         environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true"}
         with log_path.open("wb") as log:
-            process = subprocess.Popen([str(viewerd), "--plugins=config-store,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(viewerd), "--plugins=config-store,viewer.agent-hermes,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
         client = BusClient(f"ws://127.0.0.1:{port}/ws", CALLER, request_timeout=25.0)
-        messages: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []
+        messages: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []; catalogs: list[Any] = []; agent_events: list[dict[str, Any]] = []
         try:
             await wait_port(port)
             registry: list[list[dict[str, Any]]] = []
@@ -42,14 +42,22 @@ async def run() -> None:
             async def collect_completions(frame: dict[str, Any]) -> None: completions.append(frame["value"])
             async def collect_active(frame: dict[str, Any]) -> None: active.append(frame["value"])
             async def collect_registry(frame: dict[str, Any]) -> None: registry.append(frame["value"])
+            async def collect_catalog(frame: dict[str, Any]) -> None: catalogs.append(frame["value"])
+            async def collect_agent_event(frame: dict[str, Any]) -> None: agent_events.append(frame["value"])
             await client.subscribe("chat:*:message", collect_messages)
             await client.subscribe("chat:*:turn-completed", collect_completions)
             await client.subscribe("chat:_:active", collect_active)
             await client.subscribe("plugins:_:list", collect_registry)
+            await client.subscribe("viewer.agent-hermes:_:catalog", collect_catalog)
+            await client.subscribe("viewer.agent-hermes:_:event", collect_agent_event)
             await client.connect()
-            await wait_for(lambda: registry and {item["manifest"]["id"] for item in registry[-1]} >= {"chat", "config-store"})
-            first = await client.request("chat:_:roles:create", {"name": "Planner", "description": "plans", "prompt": "PLAN-RULE", "provider": "hermes"})
-            second = await client.request("chat:_:roles:create", {"name": "Builder", "description": "builds", "prompt": "BUILD-RULE", "provider": "hermes"})
+            await wait_for(lambda: registry and {item["manifest"]["id"] for item in registry[-1]} >= {"chat", "config-store", "viewer.agent-hermes"})
+            await wait_for(lambda: catalogs and catalogs[-1] and catalogs[-1]["agent"] == "hermes")
+            print("CATALOG_MAILBOX_SAMPLE", json.dumps(catalogs[-1], separators=(",", ":")))
+            routing = {"default_routing_policy_id": "hermes-policy", "routing_policies": [{"id": "hermes-policy", "name": "Hermes", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "hermes-default", "name": "Hermes default", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]}]}
+            await client.request("chat:_:routing:put", routing)
+            first = await client.request("chat:_:roles:create", {"name": "Planner", "description": "plans", "prompt": "PLAN-RULE", "provider": "hermes", "routing_policy_id": "hermes-policy"})
+            second = await client.request("chat:_:roles:create", {"name": "Builder", "description": "builds", "prompt": "BUILD-RULE", "provider": "hermes", "routing_policy_id": "hermes-policy"})
             await client.request("chat:_:workspace:patch", {"common_prompt": "COMMON-RULE"})
             chat = await client.request("chat:_:chats:create", {"name": "Relay", "root": str(ROOT), "type": "group", "member_role_ids": [first["id"], second["id"]], "common_prompt": "CHAT-RULE"})
             activated = await client.request("chat:_:chats:activate", {"id": chat["id"]})
@@ -59,6 +67,7 @@ async def run() -> None:
 
             dispatched = await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "relay hello", "role_ids": [first["id"], second["id"]]})
             assert dispatched["role_ids"] == [first["id"], second["id"]]
+            print("POLICY_ROUTE_SAMPLE", json.dumps({"policy_id": "hermes-policy", "candidate": "hermes/default", "dispatch_id": dispatched["dispatch_id"]}, separators=(",", ":")))
             await wait_for(lambda: len([item for item in completions if item["chat_id"] == chat["id"]]) == 2)
             done = [item for item in completions if item["chat_id"] == chat["id"]]
             assert [item["role_id"] for item in done] == [first["id"], second["id"]]
@@ -83,6 +92,21 @@ async def run() -> None:
                 print("MESSAGE_BLOCK_SAMPLE", json.dumps({"kind": block_row[0], "payload": json.loads(block_row[1])}, separators=(",", ":")))
             finally: database.close()
             print("PASS explicit dual-role ordered relay, sender frames, raw events, parsed blocks, and DB rows")
+
+            aggregate = await client.request("chat:_:agent-catalog", {})
+            assert any(item["agent"] == "hermes" and item["online"] and item["providers"] for item in aggregate)
+            print("AGGREGATE_CATALOG_SAMPLE", json.dumps(aggregate, separators=(",", ":")))
+
+            prior_events = len(agent_events)
+            await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "long cancellation", "role_ids": [first["id"]]})
+            await wait_for(lambda: len(agent_events) > prior_events)
+            stopped = await client.request("chat:_:stop", {"chat_id": chat["id"], "role_id": first["id"]})
+            assert stopped["stopped"] is True
+            await wait_for(lambda: len(completions) >= 3 and completions[-1]["stop_reason"] == "cancelled")
+            stopped_again = await client.request("chat:_:stop", {"chat_id": chat["id"], "role_id": first["id"]})
+            assert stopped_again["stopped"] is False
+            print("AGENT_EVENT_SAMPLE", json.dumps(agent_events[0], separators=(",", ":")))
+            print("PASS routing policy, catalog aggregation, async agent event, and idempotent stop")
 
             try: await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "auto"})
             except Exception as exc: assert "LLM router is not configured" in str(exc)

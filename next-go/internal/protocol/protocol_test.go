@@ -44,7 +44,7 @@ func TestValidationTables(t *testing.T) {
 			t.Errorf("ValidatePattern(%q) unexpectedly succeeded", pattern)
 		}
 	}
-	for _, valid := range []string{"*", "chat", "chat:*:status", ">", "_inbox:*", "plugins:_"} {
+	for _, valid := range []string{"*", "chat", "chat:*:status", "viewer.agent-hermes:_:event", ">", "_inbox:*", "plugins:_"} {
 		if err := ValidatePattern(valid); err != nil {
 			t.Errorf("ValidatePattern(%q): %v", valid, err)
 		}

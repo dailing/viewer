@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"viewer/internal/acp"
 )
 
 type driverEvent struct {
@@ -17,32 +15,10 @@ type driverEvent struct {
 	Text      string
 }
 
-type acpAgent struct {
-	*acp.Client
-}
-
-func (a *acpAgent) OnUpdate(callback func(driverEvent)) {
-	a.Client.OnUpdate(func(update acp.Update) {
-		kind, _ := update.Value["sessionUpdate"].(string)
-		if kind == "" {
-			kind, _ = update.Value["session_update"].(string)
-		}
-		if kind == "" {
-			kind = "unknown"
-		}
-		callback(driverEvent{
-			Provider: "hermes", SessionID: update.SessionID, Kind: kind,
-			Raw: update.Raw, Data: update.Value, Text: updateText(update.Value),
-		})
-	})
-}
-
 func deriveMessageBlock(event *TurnEvent, data map[string]any) (*MessageBlock, error) {
 	kind, text := "other", ""
 	payload := map[string]any{}
-	if event.Provider == "hermes" {
-		kind, text, payload = deriveACPBlock(event.Kind, data)
-	} else if event.Provider == "codex-app-server" {
+	if event.Provider == "codex-app-server" {
 		kind, text, payload = deriveCodexBlock(event.Kind, data)
 	} else {
 		payload["provider"] = event.Provider
@@ -55,30 +31,6 @@ func deriveMessageBlock(event *TurnEvent, data map[string]any) (*MessageBlock, e
 		ID: newID(), EventID: event.ID, ChatID: event.ChatID, TurnID: event.TurnID,
 		Kind: kind, Text: text, Payload: string(encoded), OccurredAt: event.OccurredAt,
 	}, nil
-}
-
-func deriveACPBlock(updateKind string, data map[string]any) (string, string, map[string]any) {
-	switch updateKind {
-	case "agent_message_chunk":
-		return "agent_text", updateText(data), map[string]any{}
-	case "agent_thought_chunk":
-		return "thinking", contentText(data), map[string]any{}
-	case "tool_call", "tool_call_update":
-		payload := selectedPayload(data, "name", "title", "arguments", "status")
-		if _, ok := payload["name"]; !ok {
-			if title, ok := payload["title"]; ok {
-				payload["name"] = title
-				delete(payload, "title")
-			} else if callID := stringField(data, "toolCallId", "tool_call_id"); callID != "" {
-				payload["name"] = callID
-			}
-		}
-		return "tool_call", readableText(data), payload
-	case "plan":
-		return "other", readableText(data), map[string]any{"session_update": updateKind, "entries": data["entries"]}
-	default:
-		return "other", readableText(data), map[string]any{"session_update": updateKind}
-	}
 }
 
 func deriveCodexBlock(method string, data map[string]any) (string, string, map[string]any) {

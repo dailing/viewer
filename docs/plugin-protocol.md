@@ -1,6 +1,7 @@
 # Viewer Plugin Protocol Specification
 
-> 状态：**草案 v0.1**（2026-08-12，**未冻结**）。本文档是插件协议在线路级（wire-level）的唯一权威来源；架构层决策见 `docs/plugin-framework.md`（§5/§6/§9）。Phase 0 要求：**本规范评审冻结后才写码**。
+> 状态：**草案 v0.2**（2026-08-13，**未冻结**）。本文档是插件协议在线路级（wire-level）的唯一权威来源；架构层决策见 `docs/plugin-framework.md`（§5/§6/§9）。Phase 0 要求：**本规范评审冻结后才写码**。
+> v0.2 变更：channel field 语法允许点号（`[a-z0-9][a-z0-9_.-]*`）——agent 插件族 id（如 `viewer.agent-hermes`）含点号并进入 channel 第一段（framework v0.23）。
 >
 > 范围：单机 localhost。多机 federation 暂缓（framework §16-11）。不向后兼容（§12）。
 
@@ -37,7 +38,7 @@
 
 ```
 channel := field (":" field)*
-field   := [a-z0-9][a-z0-9_-]*
+field   := [a-z0-9][a-z0-9_.-]*
 ```
 
 - **前三层语义固定**：`plugin:instance:message`；第四层起插件内部自由 grouping（如 `gateway:_:assets:push`）。

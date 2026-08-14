@@ -25,6 +25,7 @@ from sdk import BusClient  # noqa: E402
 CORE_IDS = {
     "bus-inspector",
     "config-store",
+    "viewer.agent-hermes",
     "instance-store",
     "file-service",
     "chat",
@@ -152,7 +153,7 @@ async def run(args: argparse.Namespace) -> None:
             assert all(
                 registry_entries[plugin_id]["managed"] is False for plugin_id in CORE_IDS
             )
-            print("PASS gateway /ws registry contains all 8 resident plugins")
+            print("PASS gateway /ws registry contains all 9 resident plugins")
 
             await gateway.request(
                 "config:_:set",

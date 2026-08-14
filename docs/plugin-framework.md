@@ -603,7 +603,7 @@ my-plugin/
 - **会话生命周期**：final / error / cancel 结束；单条录音设安全上限（默认 10 分钟，超时发 error 并清理）——协议安全帽，非 idle reap。
 - **并发**：多 rec 并行；ASR 串行化由 voice-service 自身保证（其全局转写锁）。
 - **前端**：`src/plugins/voice/`（无 components/dock）：`voiceStore`（per-composer 状态 + 分段合成，移植生产版语义）+ `VoiceInputButton.vue`（mic/hourglass/record/check 状态机不变）；chat 插件 ChatPane composer **直接 import** 引用（`ctx.input` 共享输入机制不建——单一机制优于特判，Stage A 同 bundle 直接 import 即可）。
-- **前端降级（v0.29）**：voice 后端插件缺席时（activate 时查 `plugins:_:list`，无 `voice` 即缺席），VoiceInputButton 置灰禁用、tooltip 说明原因；chat 不硬依赖 voice，其余功能不受影响。总线重连后重新探测。
+- **前端降级（v0.29）**：voice 后端插件缺席时（订阅 retained mailbox `plugins:_:list`——非 RPC——清单无 `voice` 即缺席），VoiceInputButton 置灰禁用、tooltip 说明原因；chat 不硬依赖 voice，其余功能不受影响。插件上线/下线经 mailbox 更新自动反映。
 - **外部依赖**：voice-service（默认 `ws://127.0.0.1:8765/v1/voice/ws`，Docker，faster-whisper + 可选 LLM refine）维持外部服务。
 
 ### A.9 display 层（layout/shell）

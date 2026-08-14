@@ -1,8 +1,6 @@
 import type { BusFrame } from "@viewer/bus-sdk";
 import { defineStore } from "pinia";
-import { watch } from "vue";
 
-import { busState } from "../../shell/bus";
 import type { PluginCtx } from "../../shell/ctx";
 
 export type VoiceJobStatus =
@@ -64,44 +62,22 @@ interface PluginRegistryEntry {
 export function setVoiceCtx(ctx: PluginCtx): void {
   voiceCtx = ctx;
   const store = useVoiceStore();
-  let probeGeneration = 0;
+  const handlePluginRegistryFrame = (frame: BusFrame): void => {
+    store.backendAvailable =
+      Array.isArray(frame.value) &&
+      frame.value.some(
+        (entry: PluginRegistryEntry) => entry?.manifest?.id === "voice",
+      );
+  };
   store.languageModelRefine = ctx.storage.get("languageModelRefine", true);
   ctx.bus.subscribe("voice:*:event", handleVoiceFrame);
-  const stopConnectionWatch = watch(
-    () => busState.connected,
-    (connected) => {
-      const generation = ++probeGeneration;
-      store.backendAvailable = false;
-      if (!connected) return;
-      void probeBackendAvailability(ctx).then((available) => {
-        if (voiceCtx === ctx && generation === probeGeneration && busState.connected) {
-          store.backendAvailable = available;
-        }
-      });
-    },
-    { immediate: true },
-  );
+  ctx.bus.subscribe("plugins:_:list", handlePluginRegistryFrame);
   ctx.onDispose(() => {
-    stopConnectionWatch();
-    probeGeneration += 1;
+    ctx.bus.unsubscribe("plugins:_:list", handlePluginRegistryFrame);
     store.backendAvailable = false;
     voiceCtx = null;
     for (const job of [...runtimeJobs.values()]) void cancelRuntime(job);
   });
-}
-
-async function probeBackendAvailability(ctx: PluginCtx): Promise<boolean> {
-  try {
-    const result = (await ctx.bus.request("plugins:_:list", {}, { timeout: 3000 })) as unknown;
-    return (
-      Array.isArray(result) &&
-      result.some(
-        (entry: PluginRegistryEntry) => entry?.manifest?.id === "voice",
-      )
-    );
-  } catch {
-    return false;
-  }
 }
 
 function handleVoiceFrame(frame: BusFrame): void {

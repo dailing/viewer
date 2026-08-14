@@ -248,7 +248,7 @@ function togglePin(entry: DockEntry): void {
 }
 
 .dock-inner {
-  align-items: center;
+  align-items: flex-start;
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
   display: flex;
@@ -256,7 +256,10 @@ function togglePin(entry: DockEntry): void {
   height: 100%;
   left: 0;
   overflow: visible;
-  padding: 6px 0;
+  /* Left inset pins the icon column to its collapsed-center position, so
+     icons never move while the width transition runs (35px = 34px button
+     + 1px border-right, border-box). */
+  padding: 6px 0 6px calc((var(--dock-width) - 35px) / 2);
   position: absolute;
   top: 0;
   transition: width 160ms ease;
@@ -299,12 +302,12 @@ function togglePin(entry: DockEntry): void {
 .dock-sep {
   background: var(--color-border);
   flex: 0 0 1px;
-  margin: 6px 0;
+  margin: 6px 0 6px 5px;
   width: 24px;
 }
 
 .dock-items {
-  align-items: center;
+  align-items: flex-start;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -324,7 +327,7 @@ function togglePin(entry: DockEntry): void {
 }
 
 .dock.expanded .dock-item {
-  width: calc(100% - 12px);
+  width: calc(100% - 6px);
 }
 
 .dock.expanded .dock-item > .dock-btn {

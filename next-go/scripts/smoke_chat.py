@@ -27,14 +27,14 @@ async def wait_port(port: int) -> None:
     raise TimeoutError(f"kernel port {port} did not open")
 
 async def run() -> None:
-    viewerd, mock, codex_mock, port = Path(os.environ["VIEWERD_BIN"]), Path(__file__).with_name("mock_acp_agent.py"), Path(__file__).with_name("mock_codex_server.py"), free_port()
+    viewerd, mock, codex_mock, opencode_mock, port = Path(os.environ["VIEWERD_BIN"]), Path(__file__).with_name("mock_acp_agent.py"), Path(__file__).with_name("mock_codex_server.py"), Path(__file__).with_name("mock_opencode_agent.py"), free_port()
     with tempfile.TemporaryDirectory(prefix="viewer-chat-smoke-") as temp:
         data_dir, log_path = Path(temp) / "data", Path(temp) / "viewerd.log"
-        environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true", "VIEWER_CODEX_APP_SERVER_COMMAND": str(codex_mock), "VIEWER_CODEX_APP_SERVER_YOLO": "true"}
+        environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true", "VIEWER_CODEX_APP_SERVER_COMMAND": str(codex_mock), "VIEWER_CODEX_APP_SERVER_YOLO": "true", "VIEWER_OPENCODE_COMMAND": str(opencode_mock), "VIEWER_OPENCODE_ARGS": "acp"}
         with log_path.open("wb") as log:
-            process = subprocess.Popen([str(viewerd), "--plugins=config-store,viewer.agent-hermes,viewer.agent-codex,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(viewerd), "--plugins=config-store,viewer.agent-hermes,viewer.agent-codex,viewer.agent-opencode,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
         client = BusClient(f"ws://127.0.0.1:{port}/ws", CALLER, request_timeout=25.0)
-        messages: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []; catalogs: list[Any] = []; codex_catalogs: list[Any] = []; agent_events: list[dict[str, Any]] = []; codex_events: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []; catalogs: list[Any] = []; codex_catalogs: list[Any] = []; opencode_catalogs: list[Any] = []; agent_events: list[dict[str, Any]] = []; codex_events: list[dict[str, Any]] = []; opencode_events: list[dict[str, Any]] = []
         try:
             await wait_port(port)
             registry: list[list[dict[str, Any]]] = []
@@ -44,8 +44,10 @@ async def run() -> None:
             async def collect_registry(frame: dict[str, Any]) -> None: registry.append(frame["value"])
             async def collect_catalog(frame: dict[str, Any]) -> None: catalogs.append(frame["value"])
             async def collect_codex_catalog(frame: dict[str, Any]) -> None: codex_catalogs.append(frame["value"])
+            async def collect_opencode_catalog(frame: dict[str, Any]) -> None: opencode_catalogs.append(frame["value"])
             async def collect_agent_event(frame: dict[str, Any]) -> None: agent_events.append(frame["value"])
             async def collect_codex_event(frame: dict[str, Any]) -> None: codex_events.append(frame["value"])
+            async def collect_opencode_event(frame: dict[str, Any]) -> None: opencode_events.append(frame["value"])
             await client.subscribe("chat:*:message", collect_messages)
             await client.subscribe("chat:*:turn-completed", collect_completions)
             await client.subscribe("chat:_:active", collect_active)
@@ -54,12 +56,16 @@ async def run() -> None:
             await client.subscribe("viewer.agent-hermes:_:event", collect_agent_event)
             await client.subscribe("viewer.agent-codex:_:catalog", collect_codex_catalog)
             await client.subscribe("viewer.agent-codex:_:event", collect_codex_event)
+            await client.subscribe("viewer.agent-opencode:_:catalog", collect_opencode_catalog)
+            await client.subscribe("viewer.agent-opencode:_:event", collect_opencode_event)
             await client.connect()
-            await wait_for(lambda: registry and {item["manifest"]["id"] for item in registry[-1]} >= {"chat", "config-store", "viewer.agent-hermes", "viewer.agent-codex"})
+            await wait_for(lambda: registry and {item["manifest"]["id"] for item in registry[-1]} >= {"chat", "config-store", "viewer.agent-hermes", "viewer.agent-codex", "viewer.agent-opencode"})
             await wait_for(lambda: catalogs and catalogs[-1] and catalogs[-1]["agent"] == "hermes")
             await wait_for(lambda: codex_catalogs and codex_catalogs[-1] and codex_catalogs[-1]["agent"] == "codex")
+            await wait_for(lambda: opencode_catalogs and opencode_catalogs[-1] and opencode_catalogs[-1]["agent"] == "opencode")
             print("CATALOG_MAILBOX_SAMPLE", json.dumps(catalogs[-1], separators=(",", ":")))
             print("CODEX_CATALOG_MAILBOX_SAMPLE", json.dumps(codex_catalogs[-1], separators=(",", ":")))
+            print("OPENCODE_CATALOG_MAILBOX_SAMPLE", json.dumps(opencode_catalogs[-1], separators=(",", ":")))
             routing = {"default_routing_policy_id": "hermes-policy", "routing_policies": [{"id": "hermes-policy", "name": "Hermes", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "hermes-default", "name": "Hermes default", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]}]}
             await client.request("chat:_:routing:put", routing)
             first = await client.request("chat:_:roles:create", {"name": "Planner", "description": "plans", "prompt": "PLAN-RULE", "provider": "hermes", "routing_policy_id": "hermes-policy"})
@@ -101,6 +107,7 @@ async def run() -> None:
 
             aggregate = await client.request("chat:_:agent-catalog", {})
             assert any(item["agent"] == "hermes" and item["online"] and item["providers"] for item in aggregate)
+            assert any(item["agent"] == "opencode" and item["online"] and item["providers"] for item in aggregate)
             print("AGGREGATE_CATALOG_SAMPLE", json.dumps(aggregate, separators=(",", ":")))
 
             prior_events = len(agent_events)
@@ -118,6 +125,7 @@ async def run() -> None:
                 {"id": "codex-policy", "name": "Codex", "enabled": True, "auto_failover": False, "max_attempts": 0, "candidates": [{"id": "codex-default", "name": "Codex mock", "agent_id": "codex-app-server", "provider_id": "openai-subscription", "model_id": "gpt-test", "enabled": True, "parameters": {}}]},
                 {"id": "failover-policy", "name": "Failover", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "codex-fails", "name": "Failing Codex", "agent_id": "codex-app-server", "provider_id": "openai-subscription", "model_id": "fail-start", "enabled": True, "parameters": {}}, {"id": "hermes-fallback", "name": "Hermes fallback", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]},
                 {"id": "turn-error-policy", "name": "Turn error failover", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "codex-turn-error", "name": "Codex turn error", "agent_id": "codex-app-server", "provider_id": "openai-subscription", "model_id": "gpt-test", "enabled": True, "parameters": {}}, {"id": "hermes-after-turn-error", "name": "Hermes fallback", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]},
+                {"id": "opencode-policy", "name": "OpenCode", "enabled": True, "auto_failover": False, "max_attempts": 1, "candidates": [{"id": "opencode-default", "name": "OpenCode mock", "agent_id": "opencode", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {}}]},
             ])
             await client.request("chat:_:routing:put", routing)
 
@@ -136,6 +144,22 @@ async def run() -> None:
             finally: database.close()
             print("CODEX_BUS_EVENT_SAMPLE", json.dumps(next(item for item in codex_events if item["block"]["kind"] == "agent_text"), separators=(",", ":")))
             print("PASS codex bus start -> prompt -> event persistence -> turn-ended")
+
+            opencode_role = await client.request("chat:_:roles:create", {"name": "OpenCode", "description": "opencode", "prompt": "OPENCODE-RULE", "provider": "opencode", "routing_policy_id": "opencode-policy"})
+            opencode_chat = await client.request("chat:_:chats:create", {"name": "OpenCode bus", "root": str(ROOT), "type": "direct", "member_role_ids": [opencode_role["id"]]})
+            await client.request("chat:_:dispatch", {"chat_id": opencode_chat["id"], "message": "opencode hello", "role_ids": [opencode_role["id"]]})
+            await wait_for(lambda: any(item["chat_id"] == opencode_chat["id"] for item in completions))
+            opencode_done = next(item for item in completions if item["chat_id"] == opencode_chat["id"])
+            assert opencode_done["stop_reason"] == "end_turn" and opencode_done["attempts"][0]["outcome"] == "completed"
+            await wait_for(lambda: any(item["chat_id"] == opencode_chat["id"] and item.get("text") == "opencode: " for item in messages))
+            assert any(item["kind"] == "opencode_step" and item["block"]["kind"] == "other" and json.loads(item["block"]["payload"])["session_update"] == "opencode_step" for item in opencode_events)
+            database = sqlite3.connect(data_dir / "chat.sqlite3")
+            try:
+                assert database.execute("select count(*) from turn_events where chat_id=? and provider='opencode/default'", (opencode_chat["id"],)).fetchone()[0] >= 3
+                assert database.execute("select count(*) from message_blocks where chat_id=? and kind='other'", (opencode_chat["id"],)).fetchone()[0] >= 1
+            finally: database.close()
+            print("OPENCODE_BUS_EVENT_SAMPLE", json.dumps(next(item for item in opencode_events if item["kind"] == "opencode_step"), separators=(",", ":")))
+            print("PASS opencode bus start -> prompt -> event persistence -> turn-ended")
 
             failover_role = await client.request("chat:_:roles:create", {"name": "Fallback", "description": "fallback", "prompt": "FALLBACK-RULE", "provider": "codex-app-server", "routing_policy_id": "failover-policy"})
             failover_chat = await client.request("chat:_:chats:create", {"name": "Failover", "root": str(ROOT), "type": "direct", "member_role_ids": [failover_role["id"]]})

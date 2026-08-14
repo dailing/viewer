@@ -63,9 +63,8 @@ type Plugin struct {
 }
 
 var (
-	errBadRequest  = errors.New("chat_id and message are required")
-	errTurnActive  = errors.New("RoutingTargetBusy: chat role already has a turn in progress")
-	errProviderM6c = errors.New("provider must be hermes or codex-app-server; opencode is not implemented")
+	errBadRequest = errors.New("chat_id and message are required")
+	errTurnActive = errors.New("RoutingTargetBusy: chat role already has a turn in progress")
 )
 
 func New(dataDir string, options ...Option) (*Plugin, error) {
@@ -138,9 +137,6 @@ func (p *Plugin) reply(frame busclient.Frame, value any, err error) {
 	}
 	if errors.Is(err, errTurnActive) {
 		code = "routing_target_busy"
-	}
-	if errors.Is(err, errProviderM6c) {
-		code = "unsupported_provider"
 	}
 	_ = pluginrpc.RespondError(p.client, frame, code, err.Error())
 }

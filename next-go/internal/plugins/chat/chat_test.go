@@ -3,7 +3,6 @@ package chat
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,9 +57,9 @@ func TestProviderValidationAndMessageSender(t *testing.T) {
 	if err := normalizeRole(&codex, true); err != nil {
 		t.Fatalf("codex-app-server should be accepted: %v", err)
 	}
-	role := SuperRole{Name: "X", Provider: "codex"}
-	if !errors.Is(normalizeRole(&role, true), errProviderM6c) {
-		t.Fatal("expected M6c provider error")
+	opencode := SuperRole{Name: "OpenCode", Provider: "opencode"}
+	if err := normalizeRole(&opencode, true); err != nil {
+		t.Fatalf("provider-neutral role validation rejected opencode: %v", err)
 	}
 	message := Message{ID: "m", ChatID: "c", TurnID: "t", Role: "assistant", Text: "x", SenderFrom: "role", RoleID: "r", RoleName: "R"}
 	sender := message.payload()["sender"].(map[string]any)

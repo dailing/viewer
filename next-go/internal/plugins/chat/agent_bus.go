@@ -15,7 +15,7 @@ import (
 )
 
 func defaultAgents() map[string]string {
-	return map[string]string{"hermes": "viewer.agent-hermes", "codex-app-server": "viewer.agent-codex"}
+	return map[string]string{"hermes": "viewer.agent-hermes", "codex-app-server": "viewer.agent-codex", "opencode": "viewer.agent-opencode"}
 }
 
 func pluginFromChannel(channel string) string {

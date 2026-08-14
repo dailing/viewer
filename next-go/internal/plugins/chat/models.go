@@ -91,9 +91,6 @@ func normalizeRole(role *SuperRole, creating bool) error {
 	if role.Provider == "" {
 		role.Provider = "hermes"
 	}
-	if role.Provider != "hermes" && role.Provider != "codex-app-server" {
-		return errProviderM6c
-	}
 	if role.SessionPolicy == "" {
 		role.SessionPolicy = "reuse"
 	}

@@ -27,6 +27,7 @@ CORE_IDS = {
     "config-store",
     "viewer.agent-hermes",
     "viewer.agent-codex",
+    "viewer.agent-opencode",
     "instance-store",
     "file-service",
     "chat",
@@ -154,7 +155,7 @@ async def run(args: argparse.Namespace) -> None:
             assert all(
                 registry_entries[plugin_id]["managed"] is False for plugin_id in CORE_IDS
             )
-            print("PASS gateway /ws registry contains all 9 resident plugins")
+            print("PASS gateway /ws registry contains all 11 resident plugins")
 
             await gateway.request(
                 "config:_:set",

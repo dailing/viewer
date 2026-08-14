@@ -31,6 +31,7 @@ CORE_IDS = {
     "instance-store",
     "file-service",
     "chat",
+    "voice",
     "terminal",
     "supervisor",
     "gateway",
@@ -155,7 +156,7 @@ async def run(args: argparse.Namespace) -> None:
             assert all(
                 registry_entries[plugin_id]["managed"] is False for plugin_id in CORE_IDS
             )
-            print("PASS gateway /ws registry contains all 11 resident plugins")
+            print("PASS gateway /ws registry contains all 12 resident plugins")
 
             await gateway.request(
                 "config:_:set",

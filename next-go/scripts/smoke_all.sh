@@ -17,7 +17,8 @@ BIN=$LOG/bin; mkdir -p "$BIN"
 echo "== building binaries =="
 cd "$NEXT_GO"
 for b in viewerd viewer-terminal viewer-gateway viewer-configstore \
-         viewer-instancestore viewer-fileservice viewer-supervisor viewer-inspector; do
+         viewer-instancestore viewer-fileservice viewer-supervisor viewer-inspector \
+         viewer-voice; do
   go build -o "$BIN/$b" "./cmd/$b" || { echo "BUILD FAIL $b"; exit 1; }
 done
 export VIEWERD_BIN=$BIN/viewerd
@@ -26,6 +27,7 @@ export VIEWER_INSPECTOR_BIN=$BIN/viewer-inspector
 export VIEWER_CONFIGSTORE_BIN=$BIN/viewer-configstore
 export VIEWER_INSTANCESTORE_BIN=$BIN/viewer-instancestore
 export VIEWER_FILESERVICE_BIN=$BIN/viewer-fileservice
+export VIEWER_VOICE_BIN=$BIN/viewer-voice
 
 PASS=0; FAIL=0
 run_suite() {
@@ -80,7 +82,10 @@ run_suite inspector "$PY" "$SCRIPT_DIR/smoke_inspector.py"
 # 4. chat 单独拉起按需白名单 viewerd，并以 mock ACP agent 验证 turn/DB/cancel。
 run_suite chat "$PY" "$SCRIPT_DIR/smoke_chat.py"
 
-# 5. gateway 最后跑——smoke 会 SIGTERM 内核验证关闭传导
+# 5. voice 单独拉起 config-store + voice，并 relay 到 mock voice-service。
+run_suite voice "$PY" "$SCRIPT_DIR/smoke_voice.py"
+
+# 6. gateway 最后跑——smoke 会 SIGTERM 内核验证关闭传导
 STATIC=$(mktemp -d)
 printf '<html><body>viewer-static</body></html>\n' > "$STATIC/index.html"
 printf 'body{color:red}\n' > "$STATIC/style.css"
@@ -95,7 +100,7 @@ run_suite gateway "$PY" "$SCRIPT_DIR/smoke_gateway.py" \
 kill "$GW" "$K29200" 2>/dev/null
 rm -rf "$STATIC"
 
-# 6. 单二进制装配冒烟（M4 落地后存在则跑）
+# 7. 单二进制装配冒烟（M4 落地后存在则跑）
 if [ -f "$SCRIPT_DIR/smoke_single_binary.py" ]; then
   run_suite single-binary "$PY" "$SCRIPT_DIR/smoke_single_binary.py" --viewerd-bin "$BIN/viewerd"
 fi

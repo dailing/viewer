@@ -16,6 +16,7 @@ import (
 	"viewer/internal/plugins/instancestore"
 	"viewer/internal/plugins/supervisor"
 	"viewer/internal/plugins/terminal"
+	"viewer/internal/plugins/voice"
 )
 
 // Registry is the complete resident core set. Inspector starts first so it can
@@ -29,9 +30,21 @@ var Registry = []Entry{
 	{ID: instancestore.Manifest.ID, Factory: newInstanceStore},
 	{ID: fileservice.Manifest.ID, Factory: newFileService},
 	{ID: chat.Manifest.ID, Factory: newChat},
+	{ID: voice.Manifest.ID, Factory: newVoice},
 	{ID: terminal.Manifest.ID, Factory: newTerminal},
 	{ID: supervisor.Manifest.ID, Factory: newSupervisor},
 	{ID: "gateway", Factory: newGateway},
+}
+
+func newVoice(config RuntimeConfig) (Plugin, error) {
+	plugin, err := voice.New(voice.Config{KernelWS: config.KernelWS})
+	if err != nil {
+		return nil, err
+	}
+	return lifecycleAdapter{
+		start: func(ctx context.Context) error { return plugin.StartWithManaged(ctx, false) },
+		wait:  waitContext, close: func(context.Context) error { return plugin.Close() },
+	}, nil
 }
 
 func newAgentOpenCode(config RuntimeConfig) (Plugin, error) {

@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.24**（2026-08-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.25**（2026-08-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.25 变更：**pane chrome 注册机制**——移植老版 paneToolbar：插件经 ctx 注册 title/status/actions/controls，由 shell 的 pane title bar 统一渲染，插件不再自渲染标题栏；chat dock 实例列表收窄为 pinned ∪ 已开（§8.8）。
 > v0.24 变更：**chat 体验与 shell 语义定稿**——①agent 契约加 `turn_id` 贯穿（`start`/`prompt` 携带、`event`/`turn-ended` echo，chat 按 turn_id 解复用，删 session→turn 映射）；②idle reap 否决（agent 子进程常驻不自动回收，用户随时重开网页须看到原状）；③shell 两条行为定稿（§8.7）：`openInstance` 不再覆盖已占用 pane（已开→聚焦；有空 pane→用之；否则自动 split，默认垂直）；dock singleton 条目引入 **pin**（pinned 常驻，可切换）；④chat 前端拆为 `chat`（ChatPane + 实例 dock 列表）与 `chat-manager`（singleton 管理面板：聊天/Roles/路由三 tab）两个前端插件，后端 `viewer.chat` 单插件不变；⑤roles/routing policies 从 C1 迁入 chat 插件 DB（领域数据归 source-of-truth 插件），C1 只留插件级配置（agents 映射/LLM router/预算）。
 > v0.23 变更：**agent 实现拆为独立 headless 插件族**——`viewer.agent-hermes`（ACP）/ `viewer.agent-codex`（app-server）/ `viewer.agent-opencode`（ACP，新建）为无 UI 单实例服务插件，统一总线契约：RPC `start`（`target={agent,provider,model,parameters}` opaque 透传 + cwd + session_id?）/ `prompt`（立即 ack，turn 异步）/ `cancel`；事件 `event`（seq + kind + raw_json + 已解析 block 同帧）/ `turn-ended`；retained mailbox `catalog` 公布 agent-provider-model 清单。chat 瘦身为纯编排（roles/routing/relay/DB/summaries），经 C1 `plugins.viewer-chat.agents` 映射发现 agent 插件并聚合 catalog；**profile = routing policy**（既有模型不造新概念）：role 挂 policy，candidates = 有序三元组参数包，turn 开始按序解析首个 enabled 且在线者，`auto_failover` 接回失败按序尝试语义；`role.provider/model` 降为迁移输入。opencode 由"不实现"（v0.22）转为新建（ACP 第二租户）。
 > v0.22 变更：**chat 数据面与 provider 面定稿**——①原始事件全量保留：ACP/codex 两个 driver 的每条 session update 原文落 `turn_events`（append-only，per-turn seq），解析结果单独存 `message_blocks`（归一化 kind：agent_text/thinking/tool_call/tool_result/file_change/command/other），`messages` 表仍是用户可见文本视图；②接力定案：插件内顺序执行即最终形态，worker 队列/lease/failover 永久废弃；③codex provider 仅 app-server（原生协议库 `internal/codexserver/`），旧 codex-acp 路径不移植；④历史迁移把生产版 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`。
@@ -275,6 +276,13 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 - **Dock singleton 条目 = pin 制**：singleton provider（bus-inspector、chat-manager 等）默认 **pinned**——图标常驻 dock，点击 = 打开或聚焦；用户可 unpin（hover 上的 pin 切换），unpin 后回到"开着才显示"。pin 状态属 view state（F6），当前实现持久化在浏览器 localStorage，按 provider type 键控。
 - **Dock 分区契约不变**：一个前端插件贡献一个 DockProvider（一个 dock 分区 + instances 列表）；一个插件可注册任意数量 pane 组件类型。需要第二个 dock 分区时拆第二个前端插件（如 chat / chat-manager），shell 契约零改动。
 
+### 8.8 Pane chrome 注册（v0.25 定稿）
+
+- **单一 title bar**：pane 标题栏只有 shell 渲染的一条（图标 + 标题 + 状态 + 插件 actions/controls + 标准布局按钮 refresh/split/close）。**插件禁止自渲染标题栏**；插件自定义标题/按钮一律走注册。
+- **注册 API**：`ctx.setChrome({title?, status?, statusClass?, actions?, controls?})`，按 instance uid（`paneType:instanceId`）键控；ctx dispose 时自动清除。actions = `{id, title, icon?, label?, active?, variant?, run()}`；controls = `select`（options + onChange）或 `chips`（只读条目）——类型移植自老版 `stores/paneToolbar.ts`，语义不变。
+- **标题回退**：未注册时 shell 沿用自动标题（provider title + instance 标识）。
+- **dock 实例过滤**：instance 型 DockProvider 的 dock 列表 = **pinned ∪ 当前已开**（与 singleton unpin 后"开着才显示"同一条语义）；完整列表永远在管理界面（chat → chat-manager 聊天 tab）。
+
 ## 9. 进程模型与监督
 
 - **内核只剩 message system + 唯一 autostart**：WS 端点、broker（publish 路由 + mailbox retained）、连接注册表（`plugins:_:list` mailbox + lifecycle 事件，WS 端点的自然副产品）。内核唯一的进程职责：拉起 `viewer.supervisor` 进程并在其崩溃时重生——bootstrap 的最小代价；除此之外内核无任何监督职能。
@@ -488,6 +496,7 @@ my-plugin/
 - **v0.21**（2026-08-13）：**file-service 目录列表定稿**——新增 RPC `file:_:list`：输入 `{path}`（与 resolve 同一解析语义），输出 `{path, entries[]}`；entry 字段对齐生产版 FileEntry（name/path/type(file|directory|symlink|other)/size/mtime/mime/is_dir/is_symlink/link_target）；排序 = 目录优先 + name 字典序；一次性全量返回不分页；隐藏文件过滤归 file-service 插件配置。用途：viewer.files 文件树（A.5）的唯一取数通道。
 - **v0.22**（2026-08-13）：**chat 数据面与 provider 面定稿**——数据面三层：`turn_events`（append-only raw 帧全量，per-turn seq，过滤前落库）→ `message_blocks`（归一化解析块单独存，event_id 回指）→ `messages`（用户可见文本视图）；接力 = 插件内顺序执行即最终形态；provider = hermes + codex-app-server 唯二（codex-acp 不移植，opencode 暂不实现）；历史迁移 `super_workspace_messages.raw_json` 幂等迁入 `turn_events`。
 - **v0.23**（2026-08-13）：**agent 实现拆为独立 headless 插件族**——`viewer.agent-hermes`（ACP）/ `viewer.agent-codex`（app-server）/ `viewer.agent-opencode`（ACP，新建）；统一契约：RPC `start`/`prompt`（ack 异步）/`cancel` + 事件 `event`（seq/kind/raw_json/block 同帧）/`turn-ended` + retained mailbox `catalog`；chat 瘦身为纯编排，经 C1 `plugins.viewer-chat.agents` 映射发现并聚合 catalog；profile = routing policy（既有模型），role 挂 policy，turn 开始按序解析 candidates，`auto_failover` 接回；`role.provider/model` 降为迁移输入；opencode 转为新建（ACP 第二租户）；§16-6 敲定。
+- **v0.25**（2026-08-14）：**pane chrome 注册机制**（§8.8）——移植老版 paneToolbar 到插件契约：`ctx.setChrome` 注册 title/status/actions/controls，shell title bar 统一渲染，插件禁自渲染标题栏；ChatPane 拆除内部 header 改用 chrome（标题 = chat 名，config 按钮 → chat-manager）。chat dock 实例收窄为 pinned ∪ 已开。
 - **v0.24**（2026-08-14）：**chat 体验与 shell 语义定稿**——①agent 契约加 `turn_id` 贯穿：`start`/`prompt` payload 携带，`event`/`turn-ended` 帧 echo，chat 按 turn_id 解复用（删 session→turn 映射，同 session 连续 turn 消歧）；②**idle reap 否决**：agent 子进程常驻不自动回收（用户随时重开网页须看到原状；常用 chat 个位数，开销可忽略）；③shell 行为定稿（新增 §8.7）：`openInstance` 不再覆盖已占用 pane（聚焦/空 pane/自动 split 三级），dock singleton 条目改 pin 制（默认 pinned 常驻，可切换）；④chat 前端拆为 `chat` + `chat-manager` 两个前端插件（后者 = singleton 三 tab 管理面板：聊天/Roles/路由），后端 `viewer.chat` 保持单插件；⑤roles/routing policies 从 C1 config-store 迁入 chat 插件 DB（GORM 表，对齐生产版 `super_workspace_roles`/routing 模型），C1 收缩为纯插件级配置。
 
 ---

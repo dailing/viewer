@@ -1,21 +1,29 @@
 <script setup lang="ts">
 /**
  * The Dock (framework section 8.5): every running instance across all dock
- * providers, macOS-style. "+" creates a new instance; the bottom plug shows
- * the bus connection state. There is deliberately no other chrome — the old
- * top NavBar is gone.
+ * providers, macOS-style. "+" creates a new instance and the bottom gear
+ * owns Dock-local display settings. There is deliberately no other chrome.
  */
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { useLayoutStore } from "../stores/layout";
-import { busState } from "./bus";
 import type { DockInstance, DockProvider } from "./definePlugin";
 import { dockProviders } from "./registries";
 
+const HOVER_EXPAND_STORAGE_KEY = "viewer.dock.hoverExpandMs.v1";
+const DEFAULT_HOVER_EXPAND_MS = 500;
+
+function readHoverExpandMs(): number {
+  const stored = Number(localStorage.getItem(HOVER_EXPAND_STORAGE_KEY));
+  return Number.isFinite(stored) && stored >= 0 ? stored : DEFAULT_HOVER_EXPAND_MS;
+}
+
 const layout = useLayoutStore();
 const menuOpen = ref(false);
+const settingsOpen = ref(false);
 const pinRevision = ref(0);
 const expanded = ref(false);
+const hoverExpandMs = ref(readHoverExpandMs());
 let expandTimer: ReturnType<typeof setTimeout> | null = null;
 
 function clearExpandTimer(): void {
@@ -26,10 +34,14 @@ function clearExpandTimer(): void {
 
 function handlePointerEnter(event: PointerEvent): void {
   if (event.pointerType === "touch" || expanded.value || expandTimer !== null) return;
+  if (hoverExpandMs.value === 0) {
+    expanded.value = true;
+    return;
+  }
   expandTimer = setTimeout(() => {
     expandTimer = null;
     expanded.value = true;
-  }, 500);
+  }, hoverExpandMs.value);
 }
 
 function handlePointerLeave(): void {
@@ -37,7 +49,26 @@ function handlePointerLeave(): void {
   expanded.value = false;
 }
 
-onBeforeUnmount(clearExpandTimer);
+function saveHoverExpandMs(): void {
+  const normalized = Math.max(0, Number.isFinite(hoverExpandMs.value) ? hoverExpandMs.value : DEFAULT_HOVER_EXPAND_MS);
+  hoverExpandMs.value = normalized;
+  localStorage.setItem(HOVER_EXPAND_STORAGE_KEY, String(normalized));
+}
+
+function closePopovers(): void {
+  menuOpen.value = false;
+  settingsOpen.value = false;
+}
+
+function handleKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") closePopovers();
+}
+
+onMounted(() => window.addEventListener("keydown", handleKeydown));
+onBeforeUnmount(() => {
+  clearExpandTimer();
+  window.removeEventListener("keydown", handleKeydown);
+});
 
 function pinStorageKey(type: string): string {
   return `viewer.dock.singletonPinned.v1.${type}`;
@@ -118,11 +149,6 @@ const activeUid = computed(() => {
 
 const creatable = computed(() => dockProviders);
 
-const plugClass = computed(() => (busState.connected ? "bi-plug-fill ok" : "bi-plug bad"));
-const plugTip = computed(() =>
-  busState.connected ? `已连接${busState.conn !== null ? ` · ${busState.conn}` : ""}` : "连接中…",
-);
-
 function openEntry(entry: DockEntry): void {
   layout.openInstance(entry.provider.type, entry.instance?.id ?? "main");
 }
@@ -155,101 +181,91 @@ function togglePin(entry: DockEntry): void {
     @pointerenter="handlePointerEnter"
     @pointerleave="handlePointerLeave"
   >
-    <div class="dock-plus-wrap">
-      <button
-        type="button"
-        class="dock-btn dock-plus"
-        title="新建 instance"
-        @click="menuOpen = !menuOpen"
-      >
-        <i class="bi bi-plus-lg"></i>
-      </button>
-      <div v-if="menuOpen" class="dock-menu-overlay" @click="menuOpen = false"></div>
-      <div v-if="menuOpen" class="dock-menu">
+    <div class="dock-inner">
+      <div class="dock-plus-wrap">
         <button
-          v-for="provider in creatable"
-          :key="provider.type"
           type="button"
-          class="dock-menu-item"
-          @click="createFrom(provider)"
+          class="dock-btn dock-plus"
+          title="新建 instance"
+          @click="settingsOpen = false; menuOpen = !menuOpen"
         >
-          <i class="bi" :class="provider.icon"></i>
-          <span>{{ provider.title }}</span>
+          <i class="bi bi-plus-lg"></i>
         </button>
-        <div v-if="creatable.length === 0" class="dock-menu-empty">没有可用的插件</div>
+        <div v-if="menuOpen" class="dock-menu-overlay" @click="menuOpen = false"></div>
+        <div v-if="menuOpen" class="dock-menu">
+          <button
+            v-for="provider in creatable"
+            :key="provider.type"
+            type="button"
+            class="dock-menu-item"
+            @click="createFrom(provider)"
+          >
+            <i class="bi" :class="provider.icon"></i>
+            <span>{{ provider.title }}</span>
+          </button>
+          <div v-if="creatable.length === 0" class="dock-menu-empty">没有可用的插件</div>
+        </div>
       </div>
-    </div>
 
-    <div class="dock-sep"></div>
+      <div class="dock-sep"></div>
 
-    <div class="dock-items">
-      <div
-        v-for="entry in entries"
-        :key="entry.key"
-        class="dock-item"
-        :class="{ active: entry.uid === activeUid }"
-      >
-        <button
-          type="button"
-          class="dock-btn"
-          :title="entry.label"
-          :aria-label="entry.label"
-          @click="openEntry(entry)"
+      <div class="dock-items">
+        <div
+          v-for="entry in entries"
+          :key="entry.key"
+          class="dock-item"
+          :class="{ active: entry.uid === activeUid }"
         >
-          <i class="bi" :class="entry.icon"></i>
-          <span v-if="expanded" class="dock-label">{{ entry.displayLabel }}</span>
-        </button>
-        <span
-          v-if="entry.state !== undefined"
-          class="dock-dot"
-          :class="entry.state === 'running' ? 'running' : 'dead'"
-        ></span>
-        <button
-          v-if="entry.provider.remove !== undefined && entry.instance !== undefined"
-          type="button"
-          class="dock-remove"
-          title="终止"
-          @click="removeEntry(entry)"
-        >
-          <i class="bi bi-x"></i>
-        </button>
-        <button
-          v-if="entry.provider.singleton === true"
-          type="button"
-          class="dock-pin"
-          :title="entry.pinned === false ? '固定到 Dock' : '从 Dock 取消固定'"
-          @click="togglePin(entry)"
-        >
-          <i class="bi" :class="entry.pinned === false ? 'bi-pin-angle' : 'bi-pin-angle-fill'"></i>
-        </button>
+          <button type="button" class="dock-btn" :title="entry.label" :aria-label="entry.label" @click="openEntry(entry)">
+            <i class="bi" :class="entry.icon"></i>
+            <span v-if="expanded" class="dock-label">{{ entry.displayLabel }}</span>
+          </button>
+          <span v-if="entry.state !== undefined" class="dock-dot" :class="entry.state === 'running' ? 'running' : 'dead'"></span>
+          <button v-if="entry.provider.remove !== undefined && entry.instance !== undefined" type="button" class="dock-remove" title="终止" @click="removeEntry(entry)"><i class="bi bi-x"></i></button>
+          <button v-if="entry.provider.singleton === true" type="button" class="dock-pin" :title="entry.pinned === false ? '固定到 Dock' : '从 Dock 取消固定'" @click="togglePin(entry)"><i class="bi" :class="entry.pinned === false ? 'bi-pin-angle' : 'bi-pin-angle-fill'"></i></button>
+        </div>
+        <div v-if="entries.length === 0" class="dock-empty" title="没有正在运行的 instance"><i class="bi bi-dash-lg"></i></div>
       </div>
-      <div v-if="entries.length === 0" class="dock-empty" title="没有正在运行的 instance">
-        <i class="bi bi-dash-lg"></i>
-      </div>
-    </div>
 
-    <div class="dock-foot">
-      <i class="bi" :class="plugClass" :title="plugTip"></i>
+      <div class="dock-foot">
+        <button type="button" class="dock-btn" title="Dock 设置" aria-label="Dock 设置" @click="menuOpen = false; settingsOpen = !settingsOpen"><i class="bi bi-gear"></i></button>
+        <div v-if="settingsOpen" class="dock-menu-overlay" @click="settingsOpen = false"></div>
+        <div v-if="settingsOpen" class="dock-menu dock-settings">
+          <label for="dock-hover-expand-ms">悬停展开延迟（ms）</label>
+          <input id="dock-hover-expand-ms" v-model.number="hoverExpandMs" type="number" min="0" step="100" class="form-control form-control-sm" @change="saveHoverExpandMs">
+        </div>
+      </div>
     </div>
   </nav>
 </template>
 
 <style scoped>
 .dock {
+  flex: 0 0 var(--dock-width);
+  min-height: 0;
+  position: relative;
+  width: var(--dock-width);
+}
+
+.dock-inner {
   align-items: center;
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
   display: flex;
-  flex: 0 0 var(--dock-width);
   flex-direction: column;
-  min-height: 0;
+  height: 100%;
+  left: 0;
+  overflow: visible;
   padding: 6px 0;
-  transition: flex-basis 160ms ease, width 160ms ease;
+  position: absolute;
+  top: 0;
+  transition: width 160ms ease;
   width: var(--dock-width);
 }
 
-.dock.expanded {
-  flex-basis: 220px;
+.dock.expanded .dock-inner {
+  box-shadow: 4px 0 12px rgb(0 0 0 / 0.12);
+  z-index: 40;
   width: 220px;
 }
 
@@ -445,17 +461,18 @@ function togglePin(entry: DockEntry): void {
 .dock-foot {
   flex: 0 0 auto;
   padding-top: 4px;
+  position: relative;
 }
 
-.dock-foot .bi {
-  font-size: 14px;
+.dock-settings {
+  bottom: 0;
+  min-width: 220px;
+  top: auto;
 }
 
-.dock-foot .ok {
-  color: var(--color-success);
-}
-
-.dock-foot .bad {
-  color: var(--color-danger);
+.dock-settings label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui-small);
+  padding: 5px 5px 3px;
 }
 </style>

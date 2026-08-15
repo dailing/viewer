@@ -153,10 +153,11 @@ function activityHasBody(segment: Segment): boolean {
   return Boolean(segment.block && (segment.block.text.trim() || blockPayloadPretty(segment.block)));
 }
 
-// Kinds with a meaningful one-line summary; anything else (the `other`
-// catch-all holds raw protocol noise like turn/started, tokenUsage) renders
-// only when it carries actual text — a bare JSON payload is not displayable.
-const ACTIVITY_KINDS = new Set(["thinking", "tool_call", "tool_result", "file_change", "command"]);
+// Only action rows display (matches the old viewer's effective surface):
+// tool/method calls, file changes, commands. Thinking, tool results, and
+// the `other` catch-all (raw protocol noise) stay hidden unless they carry
+// actual text — a bare JSON payload is not displayable.
+const ACTIVITY_KINDS = new Set(["tool_call", "file_change", "command"]);
 function activityDisplayable(block: ChatBlock): boolean {
   if (ACTIVITY_KINDS.has(block.kind)) return true;
   return block.text.trim() !== "";

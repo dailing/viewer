@@ -153,14 +153,12 @@ function activityHasBody(segment: Segment): boolean {
   return Boolean(segment.block && (segment.block.text.trim() || blockPayloadPretty(segment.block)));
 }
 
-// Only action rows display (matches the old viewer's effective surface):
-// tool/method calls, file changes, commands. Thinking, tool results, and
-// the `other` catch-all (raw protocol noise) stay hidden unless they carry
-// actual text — a bare JSON payload is not displayable.
-const ACTIVITY_KINDS = new Set(["tool_call", "file_change", "command"]);
+// Display whitelist: actions (tool/file/command) plus thinking and tool
+// results — the user wants those visible. `other` (raw protocol noise) and
+// any unknown kind stay hidden entirely, even if they carry text.
+const ACTIVITY_KINDS = new Set(["tool_call", "file_change", "command", "thinking", "tool_result"]);
 function activityDisplayable(block: ChatBlock): boolean {
-  if (ACTIVITY_KINDS.has(block.kind)) return true;
-  return block.text.trim() !== "";
+  return ACTIVITY_KINDS.has(block.kind);
 }
 
 async function load(): Promise<void> {
@@ -474,10 +472,9 @@ onMounted(() => {
 }
 
 .chat-activity-details {
-  background: color-mix(in srgb, var(--color-surface-muted) 45%, transparent);
-  border: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
-  border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
+  /* Intentionally unboxed (user direction): activity rows are low-key
+     one-liners — no panel background/border, just a dimmed single line. */
+  color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
   min-width: 0;
 }
 
@@ -485,14 +482,14 @@ onMounted(() => {
   align-items: center;
   cursor: pointer;
   display: grid;
-  font-size: 10.5px;
-  gap: 5px;
+  font-size: 10px;
+  gap: 4px;
   grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   line-height: 1.3;
   list-style: none;
-  min-height: 22px;
+  min-height: 16px;
   min-width: 0;
-  padding: 2px 6px;
+  padding: 0 2px;
   user-select: none;
 }
 
@@ -501,8 +498,7 @@ onMounted(() => {
 }
 
 .chat-activity-summary:hover {
-  background: var(--color-surface-hover);
-  color: var(--color-text);
+  color: var(--color-text-muted);
 }
 
 .chat-activity-flat {
@@ -511,16 +507,16 @@ onMounted(() => {
 }
 
 .chat-activity-flat:hover {
-  background: transparent;
-  color: var(--color-text-muted);
+  color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
 }
 
 .chat-activity-icon {
-  color: var(--color-text-muted);
+  color: inherit;
+  font-size: 9.5px;
 }
 
 .chat-activity-label {
-  color: var(--color-text-muted);
+  color: inherit;
   font-weight: 500;
   white-space: nowrap;
 }
@@ -542,20 +538,19 @@ onMounted(() => {
 }
 
 .chat-activity-body {
-  border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
   max-height: min(420px, 55vh);
   overflow: auto;
-  padding: 6px;
+  padding: 2px 2px 4px 18px;
   user-select: text;
 }
 
 .chat-activity-body pre {
-  background: var(--color-surface-raised);
+  background: color-mix(in srgb, var(--color-surface-muted) 35%, transparent);
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 10.5px;
-  margin: 0 0 6px;
+  margin: 0 0 4px;
   overflow: auto;
   padding: 6px;
   white-space: pre-wrap;

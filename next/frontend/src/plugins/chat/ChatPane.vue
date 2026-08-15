@@ -28,6 +28,7 @@ const markdownStyle = useMarkdownStyleStore();
 const messages = ref<ChatMessage[]>([]);
 const blocks = ref<ChatBlock[]>([]);
 const roles = ref<Role[]>([]);
+const workspace = ref<Workspace | null>(null);
 const chat = ref<Chat | null>(null);
 const draft = ref("");
 const selected = ref<string[]>([]);
@@ -37,7 +38,7 @@ const threadRef = ref<HTMLElement | null>(null);
 const styleOpen = ref(false);
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
-interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; ts: number; segments: Segment[] }
+interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[] }
 
 const ACTIVITY_LABELS: Record<string, string> = {
   thinking: "Reasoning",
@@ -54,14 +55,14 @@ const timeline = computed<TimelineBox[]>(() => {
   for (const message of messages.value) {
     if (message.role === "user") {
       boxes.push({
-        key: `u:${message.id}`, kind: "user", label: "You", roleId: "", ts: message.created_at,
+        key: `u:${message.id}`, kind: "user", label: "You", roleId: "", turnId: "", ts: message.created_at,
         segments: [{ id: message.id, kind: "text", ts: message.created_at, text: message.text }],
       });
       continue;
     }
     let box = turns.get(message.turn_id);
     if (!box) {
-      box = { key: `t:${message.turn_id}`, kind: "role", label: "", roleId: "", ts: message.created_at, segments: [] };
+      box = { key: `t:${message.turn_id}`, kind: "role", label: "", roleId: "", turnId: message.turn_id, ts: message.created_at, segments: [] };
       turns.set(message.turn_id, box);
       boxes.push(box);
     }
@@ -75,7 +76,7 @@ const timeline = computed<TimelineBox[]>(() => {
     if (!activityDisplayable(block)) continue; // drop empty noise rows
     let box = turns.get(block.turn_id);
     if (!box) {
-      box = { key: `t:${block.turn_id}`, kind: "role", label: "", roleId: "", ts: block.occurred_at, segments: [] };
+      box = { key: `t:${block.turn_id}`, kind: "role", label: "", roleId: "", turnId: block.turn_id, ts: block.occurred_at, segments: [] };
       turns.set(block.turn_id, box);
       boxes.push(box);
     }
@@ -111,6 +112,58 @@ function formatTime(ms: number): string {
 
 function turnActive(box: TimelineBox): boolean {
   return box.roleId !== "" && activeRoles.value.has(box.roleId);
+}
+
+/** Role's configured execution target: agent / provider / model (first enabled candidate). */
+function roleTargetLabel(roleId: string): string {
+  const ws = workspace.value;
+  if (!ws || !roleId) return "";
+  const role = ws.roles.find((item) => item.id === roleId);
+  if (!role) return "";
+  const policyId = role.routing_policy_id || ws.default_routing_policy_id;
+  const policy = ws.routing_policies.find((item) => item.id === policyId);
+  const candidate = policy?.candidates.find((item) => item.enabled);
+  if (!candidate) return "";
+  return [candidate.agent_id, candidate.provider_id, candidate.model_id].filter(Boolean).join(" / ");
+}
+
+interface CtxUsage { used: number; size: number }
+
+/** Latest token_usage block per turn — those blocks are hidden from the
+ *  timeline and surfaced here in the box header instead (old-viewer parity). */
+const turnUsage = computed<Map<string, CtxUsage>>(() => {
+  const latest = new Map<string, { usage: CtxUsage; ts: number }>();
+  for (const block of blocks.value) {
+    if (block.kind !== "token_usage") continue;
+    const payload = parseBlockPayload(block);
+    const used = typeof payload?.total_tokens === "number" ? payload.total_tokens : 0;
+    const size = typeof payload?.model_context_window === "number" ? payload.model_context_window : 0;
+    if (!used && !size) continue;
+    const existing = latest.get(block.turn_id);
+    if (!existing || block.occurred_at >= existing.ts) latest.set(block.turn_id, { usage: { used, size }, ts: block.occurred_at });
+  }
+  return new Map([...latest].map(([key, value]) => [key, value.usage]));
+});
+
+function compactTokenCount(value: number): string {
+  const units = value >= 1_000_000 ? { size: 1_000_000, suffix: "M" } : { size: 1000, suffix: "K" };
+  const scaled = value / units.size;
+  return `${scaled.toFixed(scaled >= 100 ? 0 : 1).replace(/\.0$/, "")}${units.suffix}`;
+}
+
+function usageLabel(box: TimelineBox): string {
+  const usage = turnUsage.value.get(box.turnId);
+  if (!usage) return "";
+  const parts: string[] = [];
+  if (usage.used && usage.size) parts.push(`${((usage.used / usage.size) * 100).toFixed(1)}% ctx`);
+  if (usage.used) parts.push(usage.size ? `${compactTokenCount(usage.used)} / ${compactTokenCount(usage.size)}` : compactTokenCount(usage.used));
+  return parts.join(" · ");
+}
+
+function usageTitle(box: TimelineBox): string {
+  const usage = turnUsage.value.get(box.turnId);
+  if (!usage) return "";
+  return `${usage.used.toLocaleString()} of ${usage.size ? usage.size.toLocaleString() : "?"} context tokens`;
 }
 
 function activityIcon(block?: ChatBlock): string {
@@ -162,7 +215,7 @@ function activityDisplayable(block: ChatBlock): boolean {
 }
 
 async function load(): Promise<void> {
-  const [list, blockList, workspace] = await Promise.all([
+  const [list, blockList, workspaceData] = await Promise.all([
     ctx.bus.request("chat:_:chats:list", { chat_id: ctx.instanceId, include_messages: true }) as Promise<ChatList>,
     ctx.bus.request("chat:_:blocks:list", { chat_id: ctx.instanceId }) as Promise<ChatBlockList>,
     ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
@@ -170,7 +223,8 @@ async function load(): Promise<void> {
   chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
   messages.value = list.messages ?? [];
   blocks.value = blockList.blocks ?? [];
-  roles.value = workspace.roles;
+  roles.value = workspaceData.roles;
+  workspace.value = workspaceData;
   ctx.setChrome({
     title: chat.value?.name ?? "Chat",
     actions: [
@@ -265,6 +319,8 @@ onMounted(() => {
             <span v-if="turnActive(box)" class="chat-turn-status">
               <span class="spinner-border spinner-border-sm" aria-hidden="true" /> running
             </span>
+            <span v-if="box.kind === 'role' && roleTargetLabel(box.roleId)" class="chat-meta-detail">{{ roleTargetLabel(box.roleId) }}</span>
+            <span v-if="box.kind === 'role' && usageLabel(box)" class="chat-meta-detail" :title="usageTitle(box)">{{ usageLabel(box) }}</span>
             <span class="chat-time">{{ formatTime(box.ts) }}</span>
           </div>
         </div>
@@ -423,6 +479,19 @@ onMounted(() => {
   flex: 0 0 auto;
   font-size: 11px;
   line-height: 1.2;
+}
+
+/* Role target (agent / provider / model) and ctx usage in the box header —
+ * low-key like the activity lines, no highlighting. */
+.chat-meta-detail {
+  color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
+  flex: 0 1 auto;
+  font-size: 10px;
+  line-height: 1.2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-box-body {

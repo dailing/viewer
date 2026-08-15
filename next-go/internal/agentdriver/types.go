@@ -9,6 +9,9 @@ const (
 	KindToolResult = "tool_result"
 	KindFileChange = "file_change"
 	KindCommand    = "command"
+	// KindTokenUsage carries context-window fill; hidden from the timeline,
+	// consumed by the turn header's ctx indicator.
+	KindTokenUsage = "token_usage"
 	KindOther      = "other"
 )
 

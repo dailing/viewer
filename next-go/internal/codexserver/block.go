@@ -41,6 +41,10 @@ func ParseBlock(method string, data map[string]any) agentdriver.Block {
 			mergeMissing(payload, selectedPayload(first, "path", "patch", "diff"))
 		}
 		text = stringField(data, "diff", "patch", "delta")
+	case strings.Contains(lower, "tokenusage"):
+		// Codex reports cumulative thread fill under tokenUsage.total plus the
+		// window size; normalize both into the shared token_usage payload.
+		kind, payload = agentdriver.KindTokenUsage, tokenUsagePayload(data["tokenUsage"])
 	case strings.Contains(lower, "toolresult"):
 		kind, text, payload = agentdriver.KindToolResult, readableText(data), selectedPayload(data, "name", "arguments", "status", "output", "result")
 	case strings.Contains(lower, "toolcall"):
@@ -128,4 +132,20 @@ func mergeMissing(target, source map[string]any) {
 			target[key] = value
 		}
 	}
+}
+
+// tokenUsagePayload normalizes a Codex tokenUsage object into the shared
+// {total_tokens, model_context_window} shape consumed by the ctx indicator.
+func tokenUsagePayload(value any) map[string]any {
+	usage, _ := value.(map[string]any)
+	payload := map[string]any{}
+	if total, ok := usage["total"].(map[string]any); ok {
+		if tokens, ok := total["totalTokens"].(float64); ok {
+			payload["total_tokens"] = int64(tokens)
+		}
+	}
+	if window, ok := usage["modelContextWindow"].(float64); ok {
+		payload["model_context_window"] = int64(window)
+	}
+	return payload
 }

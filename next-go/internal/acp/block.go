@@ -27,6 +27,16 @@ func ParseBlock(updateKind string, data map[string]any) agentdriver.Block {
 		}
 	case "plan":
 		text, payload = readableText(data), map[string]any{"session_update": updateKind, "entries": data["entries"]}
+	case "usage_update":
+		// ACP reports context fill as used/size; normalize to the shared
+		// token_usage payload shape (same keys as the codex driver).
+		kind, payload = agentdriver.KindTokenUsage, map[string]any{}
+		if used, ok := data["used"].(float64); ok {
+			payload["total_tokens"] = int64(used)
+		}
+		if size, ok := data["size"].(float64); ok {
+			payload["model_context_window"] = int64(size)
+		}
 	default:
 		text, payload = readableText(data), map[string]any{"session_update": updateKind}
 	}

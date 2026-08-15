@@ -172,7 +172,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
-		CompressionMode:    websocket.CompressionDisabled,
+		CompressionMode:    websocket.CompressionContextTakeover,
 	})
 	if err != nil {
 		slog.Warn("websocket accept failed", "error", err)

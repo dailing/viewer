@@ -2,6 +2,8 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -132,7 +134,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveBrowser(w http.ResponseWriter, r *http.Request) {
 	browser, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, CompressionMode: websocket.CompressionDisabled,
+		InsecureSkipVerify: true, CompressionMode: websocket.CompressionContextTakeover,
 	})
 	if err != nil {
 		return
@@ -336,9 +338,48 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
+	if acceptsGzip(r) && isCompressible(contentType) && len(data) >= 512 {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		if _, err := gz.Write(data); err == nil && gz.Close() == nil {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Add("Vary", "Accept-Encoding")
+			w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(buf.Bytes())
+			return
+		}
+	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// acceptsGzip reports whether the request advertises gzip (or x-gzip) in
+// Accept-Encoding, ignoring q-values and other encodings.
+func acceptsGzip(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		encoding := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		if strings.EqualFold(encoding, "gzip") || strings.EqualFold(encoding, "x-gzip") {
+			return true
+		}
+	}
+	return false
+}
+
+// isCompressible reports whether a Content-Type benefits from on-the-fly
+// gzip. Binary formats (images, fonts, wasm) are already compressed or
+// negotiated separately.
+func isCompressible(contentType string) bool {
+	base := strings.ToLower(contentType)
+	if strings.HasPrefix(base, "text/") {
+		return true
+	}
+	switch base {
+	case "application/javascript", "application/json", "application/xml", "image/svg+xml":
+		return true
+	}
+	return false
 }
 
 func hasParentSegment(value string) bool {

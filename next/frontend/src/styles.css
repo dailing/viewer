@@ -183,3 +183,259 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/**
+ * Markdown rendering theme (framework v0.30): --markdown-* / --syntax-*
+ * variables style .markdown-content blocks (chat messages). Defaults below
+ * follow the app theme; user overrides layer on top via the markdownStyle
+ * store (inline vars on .app-shell, localStorage viewer.markdownTheme.v1).
+ * Values mirror the production viewer's Default / Dark markdown themes.
+ */
+:root {
+  --markdown-body-font-size: 15px;
+  --markdown-body-color: #404449;
+  --markdown-body-line-height: 1.65;
+  --markdown-h1-font-size: 28px;
+  --markdown-h1-color: #30343a;
+  --markdown-h1-font-weight: 700;
+  --markdown-h1-line-height: 1.2;
+  --markdown-h2-font-size: 23px;
+  --markdown-h2-color: #30343a;
+  --markdown-h2-font-weight: 700;
+  --markdown-h2-line-height: 1.25;
+  --markdown-h3-font-size: 19px;
+  --markdown-h3-color: #34383d;
+  --markdown-h3-font-weight: 700;
+  --markdown-h3-line-height: 1.3;
+  --markdown-h4-font-size: 16px;
+  --markdown-h4-color: #34383d;
+  --markdown-h4-font-weight: 700;
+  --markdown-h4-line-height: 1.35;
+  --markdown-paragraph-font-size: 15px;
+  --markdown-paragraph-color: #404449;
+  --markdown-paragraph-line-height: 1.65;
+  --markdown-strong-color: #1f4e79;
+  --markdown-strong-font-weight: 700;
+  --markdown-code-font-size: 13px;
+  --markdown-code-color: #4a4e53;
+  --markdown-code-background: #f5f5f5;
+  --markdown-link-color: #58749a;
+  --markdown-border-color: #e3e4e6;
+  --syntax-background: #f5f5f5;
+  --syntax-text: #4a4e53;
+  --syntax-keyword: #8f5f63;
+  --syntax-string: #55706b;
+  --syntax-number: #627796;
+  --syntax-title: #766b8c;
+  --syntax-comment: #8a8e93;
+  --syntax-meta: #72777c;
+}
+
+.app-shell[data-theme="dark"] {
+  --markdown-body-color: #d8dee9;
+  --markdown-h1-color: #f8fafc;
+  --markdown-h2-color: #f1f5f9;
+  --markdown-h3-color: #e5edf7;
+  --markdown-h4-color: #dbe7f3;
+  --markdown-paragraph-color: #d8dee9;
+  --markdown-strong-color: #f2d675;
+  --markdown-code-color: #e6edf3;
+  --markdown-code-background: #161b22;
+  --markdown-link-color: #79c0ff;
+  --markdown-border-color: #30363d;
+  --syntax-background: #0d1117;
+  --syntax-text: #e6edf3;
+  --syntax-keyword: #ff7b72;
+  --syntax-string: #a5d6ff;
+  --syntax-number: #79c0ff;
+  --syntax-title: #d2a8ff;
+  --syntax-comment: #8b949e;
+  --syntax-meta: #ffa657;
+}
+
+.markdown-content {
+  color: var(--markdown-body-color);
+  font-size: var(--markdown-render-body-size, var(--markdown-body-font-size));
+  line-height: var(--markdown-render-body-line-height, var(--markdown-body-line-height));
+}
+
+.markdown-content :first-child {
+  margin-top: 0;
+}
+
+.markdown-content :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content h1 {
+  color: var(--markdown-h1-color);
+  font-size: var(--markdown-render-h1-size, var(--markdown-h1-font-size));
+  font-weight: var(--markdown-h1-font-weight);
+  line-height: var(--markdown-h1-line-height);
+}
+
+.markdown-content h2 {
+  color: var(--markdown-h2-color);
+  font-size: var(--markdown-render-h2-size, var(--markdown-h2-font-size));
+  font-weight: var(--markdown-h2-font-weight);
+  line-height: var(--markdown-h2-line-height);
+}
+
+.markdown-content h3 {
+  color: var(--markdown-h3-color);
+  font-size: var(--markdown-render-h3-size, var(--markdown-h3-font-size));
+  font-weight: var(--markdown-h3-font-weight);
+  line-height: var(--markdown-h3-line-height);
+}
+
+.markdown-content h4 {
+  color: var(--markdown-h4-color, var(--markdown-h3-color));
+  font-size: var(--markdown-render-h4-size, var(--markdown-h4-font-size));
+  font-weight: var(--markdown-h4-font-weight);
+  line-height: var(--markdown-h4-line-height);
+}
+
+.markdown-content p,
+.markdown-content li {
+  color: var(--markdown-paragraph-color);
+  font-size: var(--markdown-render-paragraph-size, var(--markdown-paragraph-font-size));
+  line-height: var(--markdown-render-paragraph-line-height, var(--markdown-paragraph-line-height));
+}
+
+.markdown-content strong,
+.markdown-content b {
+  color: var(--markdown-strong-color);
+  font-weight: var(--markdown-strong-font-weight);
+}
+
+.markdown-content a {
+  color: var(--markdown-link-color);
+}
+
+.markdown-content img {
+  max-width: 100%;
+}
+
+.markdown-content pre {
+  background: var(--syntax-background);
+  border-radius: var(--radius-sm);
+  color: var(--syntax-text);
+  overflow: auto;
+  padding: 12px;
+}
+
+.markdown-content .markdown-code-block {
+  white-space: normal;
+}
+
+.markdown-content .markdown-code-block code {
+  display: block;
+}
+
+.markdown-content .markdown-code-line {
+  display: grid;
+  grid-template-columns: calc(var(--markdown-code-line-number-width, 1ch) + 18px) minmax(0, 1fr);
+  min-height: 1.4em;
+}
+
+.markdown-content .markdown-code-line-number {
+  border-right: 1px solid var(--markdown-border-color);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: var(--markdown-code-line-number-width, 1ch);
+  padding-right: 8px;
+  text-align: right;
+  user-select: none;
+}
+
+.markdown-content .markdown-code-line-content {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.markdown-content .markdown-fence-block {
+  background: color-mix(in srgb, var(--syntax-background) 72%, var(--color-surface));
+  border: 1px solid var(--markdown-border-color);
+  border-radius: var(--radius-sm);
+  margin: 0.8em 0;
+  padding: 8px 10px;
+}
+
+.markdown-content code,
+.markdown-syntax code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: var(--markdown-code-font-size);
+}
+
+.markdown-content code {
+  background: var(--markdown-code-background);
+  color: var(--markdown-code-color);
+}
+
+.markdown-content pre code {
+  background: transparent;
+}
+
+.markdown-content table {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  width: max-content;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid var(--markdown-border-color);
+  padding: 6px 8px;
+}
+
+.markdown-content .hljs,
+.markdown-syntax.hljs {
+  background: var(--syntax-background);
+  color: var(--syntax-text);
+}
+
+.markdown-content .hljs-keyword,
+.markdown-content .hljs-selector-tag,
+.markdown-content .hljs-built_in,
+.markdown-syntax .hljs-keyword,
+.markdown-syntax .hljs-selector-tag,
+.markdown-syntax .hljs-built_in {
+  color: var(--syntax-keyword);
+}
+
+.markdown-content .hljs-string,
+.markdown-content .hljs-attr,
+.markdown-syntax .hljs-string,
+.markdown-syntax .hljs-attr {
+  color: var(--syntax-string);
+}
+
+.markdown-content .hljs-number,
+.markdown-content .hljs-literal,
+.markdown-syntax .hljs-number,
+.markdown-syntax .hljs-literal {
+  color: var(--syntax-number);
+}
+
+.markdown-content .hljs-title,
+.markdown-content .hljs-name,
+.markdown-syntax .hljs-title,
+.markdown-syntax .hljs-name {
+  color: var(--syntax-title);
+}
+
+.markdown-content .hljs-comment,
+.markdown-content .hljs-quote,
+.markdown-syntax .hljs-comment,
+.markdown-syntax .hljs-quote {
+  color: var(--syntax-comment);
+}
+
+.markdown-content .hljs-meta,
+.markdown-content .hljs-doctag,
+.markdown-syntax .hljs-meta,
+.markdown-syntax .hljs-doctag {
+  color: var(--syntax-meta);
+}

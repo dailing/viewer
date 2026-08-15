@@ -360,7 +360,17 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 	result := map[string]any{"chats": payload, "active_chat_id": p.activeChatID}
 	if request != nil && request["include_messages"] == true {
 		chatID, _ := request["chat_id"].(string)
-		messages, hasMore, historyErr := p.store.historyPage(chatID, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
+		var messages []Message
+		var hasMore bool
+		var historyErr error
+		if requestInt64(request, "after") > 0 {
+			// Incremental fetch (v0.32): messages at-or-newer than the client's
+			// newest cached message; the inclusive boundary row is re-fetched so
+			// a still-streaming cached copy is replaced with its final text.
+			messages, hasMore, historyErr = p.store.historyPageAfter(chatID, requestInt64(request, "after"), requestString(request, "after_id"), int(requestInt64(request, "limit")))
+		} else {
+			messages, hasMore, historyErr = p.store.historyPage(chatID, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
+		}
 		if historyErr != nil {
 			p.reply(frame, nil, historyErr)
 			return

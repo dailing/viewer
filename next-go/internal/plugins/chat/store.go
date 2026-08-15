@@ -431,6 +431,37 @@ func (s *store) historyPage(chatID string, beforeTs int64, beforeID string, limi
 	return values, hasMore, nil
 }
 
+// historyPageAfter returns messages at-or-newer than the composite cursor
+// (created_at, id) in ascending display order — the incremental half of the
+// frontend chat cache: a reconnecting pane asks for everything newer than its
+// newest cached message and merges the delta. A non-empty afterID makes the
+// boundary inclusive, so the boundary row itself is re-fetched: its cached
+// copy may still be streaming and must be replaced with the final text.
+// hasMore reports whether even newer messages exist beyond the page. A zero
+// afterTs means "from the oldest end" (no cursor).
+func (s *store) historyPageAfter(chatID string, afterTs int64, afterID string, limit int) ([]Message, bool, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := s.db.Where("chat_id = ?", chatID)
+	if afterTs > 0 {
+		if afterID != "" {
+			query = query.Where("(created_at > ? OR (created_at = ? AND id >= ?))", afterTs, afterTs, afterID)
+		} else {
+			query = query.Where("created_at >= ?", afterTs)
+		}
+	}
+	var values []Message
+	if err := query.Order("created_at asc, id asc").Limit(limit + 1).Find(&values).Error; err != nil {
+		return nil, false, err
+	}
+	hasMore := len(values) > limit
+	if hasMore {
+		values = values[:limit]
+	}
+	return values, hasMore, nil
+}
+
 func (s *store) chatTurns(chatID string) ([]Turn, error) {
 	var values []Turn
 	err := s.db.Where("chat_id = ?", chatID).Find(&values).Error

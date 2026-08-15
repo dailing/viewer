@@ -379,3 +379,99 @@ func TestHistoryPagePagination(t *testing.T) {
 		t.Fatalf("timestamp-only page=%#v more=%v err=%v", page, more, err)
 	}
 }
+
+func TestHistoryPageAfterCursor(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	// Same seed shape as TestHistoryPagePagination: m5/m6 share created_at so
+	// the composite (created_at, id) boundary is exercised.
+	seeds := []*Message{
+		{ID: "m1", ChatID: "chat", TurnID: "t1", Role: "user", Text: "1", CreatedAt: 1000},
+		{ID: "m2", ChatID: "chat", TurnID: "t2", Role: "assistant", Text: "2", CreatedAt: 2000},
+		{ID: "m3", ChatID: "chat", TurnID: "t3", Role: "user", Text: "3", CreatedAt: 3000},
+		{ID: "m4", ChatID: "chat", TurnID: "t4", Role: "assistant", Text: "4", CreatedAt: 4000},
+		{ID: "m5", ChatID: "chat", TurnID: "t5", Role: "user", Text: "5", CreatedAt: 5000},
+		{ID: "m6", ChatID: "chat", TurnID: "t6", Role: "assistant", Text: "6", CreatedAt: 5000},
+		{ID: "m7", ChatID: "chat", TurnID: "t7", Role: "user", Text: "7", CreatedAt: 6000},
+		{ID: "m8", ChatID: "chat", TurnID: "t8", Role: "assistant", Text: "8", CreatedAt: 7000},
+		{ID: "other", ChatID: "other-chat", TurnID: "t9", Role: "user", Text: "x", CreatedAt: 9000},
+	}
+	for _, message := range seeds {
+		if err := p.store.addMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := func(values []Message) []string {
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			out = append(out, value.ID)
+		}
+		return out
+	}
+	// Composite inclusive cursor: the boundary row itself is re-fetched so a
+	// reconnecting client can replace its possibly-still-streaming copy.
+	page, more, err := p.store.historyPageAfter("chat", 5000, "m5", 50)
+	if err != nil || more || strings.Join(ids(page), ",") != "m5,m6,m7,m8" {
+		t.Fatalf("inclusive page=%v more=%v err=%v", ids(page), more, err)
+	}
+	// Same created_at, newer id: the older row stays outside the boundary.
+	page, more, err = p.store.historyPageAfter("chat", 5000, "m6", 50)
+	if err != nil || more || strings.Join(ids(page), ",") != "m6,m7,m8" {
+		t.Fatalf("tie page=%v more=%v err=%v", ids(page), more, err)
+	}
+	// Newest row alone, then nothing past the end.
+	page, more, err = p.store.historyPageAfter("chat", 7000, "m8", 50)
+	if err != nil || more || strings.Join(ids(page), ",") != "m8" {
+		t.Fatalf("top page=%v more=%v err=%v", ids(page), more, err)
+	}
+	page, more, err = p.store.historyPageAfter("chat", 8000, "", 50)
+	if err != nil || more || len(page) != 0 {
+		t.Fatalf("empty page=%v more=%v err=%v", ids(page), more, err)
+	}
+	// A cursor with no id falls back to timestamp-only semantics.
+	page, more, err = p.store.historyPageAfter("chat", 5000, "", 50)
+	if err != nil || more || strings.Join(ids(page), ",") != "m5,m6,m7,m8" {
+		t.Fatalf("timestamp-only page=%v more=%v err=%v", ids(page), more, err)
+	}
+	// Other chats are never returned.
+	for _, value := range page {
+		if value.ChatID != "chat" {
+			t.Fatalf("leaked message from other chat: %#v", value)
+		}
+	}
+	// Limit boundary: walk deltas following the client merge loop (dedupe by
+	// id); pages arrive ascending, the boundary row repeats, and the walk
+	// exhausts without gaps or stalls.
+	var seen []string
+	cursorTs, cursorID := int64(5000), "m5"
+	for pages := 0; pages < 10; pages++ {
+		page, more, err = p.store.historyPageAfter("chat", cursorTs, cursorID, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		seen = append(seen, ids(page)...)
+		cursorTs, cursorID = page[len(page)-1].CreatedAt, page[len(page)-1].ID
+		if !more {
+			break
+		}
+	}
+	unique := map[string]bool{}
+	for _, id := range seen {
+		unique[id] = true
+	}
+	want := map[string]bool{"m5": true, "m6": true, "m7": true, "m8": true}
+	if len(unique) != len(want) {
+		t.Fatalf("delta walk unique=%v want=%v", unique, want)
+	}
+	for id := range want {
+		if !unique[id] {
+			t.Fatalf("delta walk missing %s (seen=%v)", id, seen)
+		}
+	}
+}

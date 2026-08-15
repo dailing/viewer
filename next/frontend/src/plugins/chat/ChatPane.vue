@@ -16,6 +16,8 @@ import { useMarkdownStyleStore } from "../../stores/markdownStyle";
 import type { MarkdownStyleOverrides } from "../../stores/markdownStyle";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
+import { loadEntry, removeEntry, saveEntry } from "./chatCache";
+import type { ChatCacheEntry, MessageCursor } from "./chatCache";
 import type { Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, Role, Workspace } from "./types";
 import { errorText } from "./types";
 
@@ -48,6 +50,8 @@ const hasOlder = ref(false);
 const loadedLo = ref(0); // oldest loaded message created_at (ms); 0 = unbounded
 const olderCursor = ref<{ ts: number; id: string } | null>(null);
 let everLoaded = false;
+let userScrolled = false; // manual scroll wins over the cache-hit auto-scroll
+let lastProgrammaticScrollAt = 0; // suppresses the scroll-event echo of scrollThreadTop
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
 interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[] }
@@ -226,9 +230,84 @@ function activityDisplayable(block: ChatBlock): boolean {
   return ACTIVITY_KINDS.has(block.kind);
 }
 
+/** Capture the current pane state into a cache entry. Array references are
+ *  shared with the component, so the data stays in sync; this only records
+ *  the metadata and touches the LRU. */
+function writeBack(): void {
+  let blockHigh = 0;
+  for (const block of blocks.value) if (block.occurred_at > blockHigh) blockHigh = block.occurred_at;
+  const entry: ChatCacheEntry = {
+    chat: chat.value,
+    messages: messages.value,
+    blocks: blocks.value,
+    roles: roles.value,
+    workspace: workspace.value,
+    hasOlder: hasOlder.value,
+    olderCursor: olderCursor.value ? { ...olderCursor.value } : null,
+    loadedLo: loadedLo.value,
+    blockHigh,
+  };
+  saveEntry(ctx.instanceId, entry);
+}
+
+/** Restore pane state from a cache entry without any network traffic. */
+function hydrate(entry: ChatCacheEntry): void {
+  messages.value = entry.messages;
+  blocks.value = entry.blocks;
+  roles.value = entry.roles;
+  workspace.value = entry.workspace;
+  chat.value = entry.chat;
+  hasOlder.value = entry.hasOlder;
+  olderCursor.value = entry.olderCursor ? { ...entry.olderCursor } : null;
+  loadedLo.value = entry.loadedLo;
+  setChrome();
+}
+
+function setChrome(): void {
+  ctx.setChrome({
+    title: chat.value?.name ?? "Chat",
+    actions: [
+      { id: "chat-style", title: "消息样式", icon: "bi-palette", run: () => { styleOpen.value = !styleOpen.value; } },
+      { id: "chat-config", title: "聊天管理", icon: "bi-sliders", run: () => layout.openInstance("chat-manager", "main") },
+    ],
+  });
+}
+
+/** Assign scrollTop and remember the timestamp so the resulting scroll event
+ *  is not mistaken for manual user scrolling. */
+function scrollThreadTop(top: number): void {
+  lastProgrammaticScrollAt = Date.now();
+  const thread = threadRef.value;
+  if (thread) thread.scrollTop = top;
+}
+
 async function load(): Promise<void> {
   loadingInitial.value = true;
   try {
+    // Session cache hit (v0.32): hydrate instantly, then merge only the
+    // delta; the pane renders before any network round-trip.
+    const cached = loadEntry(ctx.instanceId);
+    if (cached) {
+      hydrate(cached);
+      loadingInitial.value = false;
+      everLoaded = true;
+      await nextTick();
+      scrollThreadTop(threadRef.value?.scrollHeight ?? 0);
+      const exists = await refreshDelta();
+      if (!exists) {
+        // Chat was deleted while the pane was closed: clear and evict.
+        messages.value = [];
+        blocks.value = [];
+        hasOlder.value = false;
+        olderCursor.value = null;
+        removeEntry(ctx.instanceId);
+        return;
+      }
+      // Land on the true newest end once the delta has been folded in, unless
+      // the user already started reading during the delta window.
+      if (!userScrolled) scrollThreadTop(threadRef.value?.scrollHeight ?? 0);
+      return;
+    }
     const list = await (ctx.bus.request("chat:_:chats:list", {
       chat_id: ctx.instanceId, include_messages: true, limit: PAGE_SIZE,
     }) as Promise<ChatList>);
@@ -250,68 +329,88 @@ async function load(): Promise<void> {
     blocks.value = blockList.blocks ?? [];
     roles.value = workspaceData.roles;
     workspace.value = workspaceData;
-    ctx.setChrome({
-      title: chat.value?.name ?? "Chat",
-      actions: [
-        { id: "chat-style", title: "消息样式", icon: "bi-palette", run: () => { styleOpen.value = !styleOpen.value; } },
-        { id: "chat-config", title: "聊天管理", icon: "bi-sliders", run: () => layout.openInstance("chat-manager", "main") },
-      ],
-    });
+    setChrome();
+    writeBack();
     // First open lands on the newest end (old-viewer parity); later reloads
     // keep the user's scroll position.
     if (!everLoaded) {
       everLoaded = true;
       await nextTick();
-      const thread = threadRef.value;
-      if (thread) thread.scrollTop = thread.scrollHeight;
+      scrollThreadTop(threadRef.value?.scrollHeight ?? 0);
     }
   } finally {
     loadingInitial.value = false;
   }
 }
 
-/** Merge-refresh: re-pull the newest page + block window and fold new items
- *  in without disturbing loaded older pages or the scroll position (used for
- *  activation / chat-list mutations, where a full reset would lose the
- *  user's place in a long history). */
-async function refresh(): Promise<void> {
-  if (loadingInitial.value) return; // initial load() already fetches everything
-  const [list, blockList, workspaceData] = await Promise.all([
-    ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true, limit: PAGE_SIZE,
-    }) as Promise<ChatList>,
-    ctx.bus.request("chat:_:blocks:list", { chat_id: ctx.instanceId, after: loadedLo.value }) as Promise<ChatBlockList>,
+/** Merge-refresh (v0.32): fold in only what changed since the last fetch —
+ *  messages at-or-newer than the newest loaded message (inclusive boundary:
+ *  a still-streaming row's final text replaces the cached copy) and blocks
+ *  newer than the cached max occurred_at. Used for activation / chat-list
+ *  mutations; loaded older pages and the scroll position stay untouched.
+ *  Returns false when the chat no longer exists. */
+async function refreshDelta(): Promise<boolean> {
+  const top = messages.value.length > 0 ? messages.value[messages.value.length - 1] : null;
+  const blockAfter = blocks.value.reduce((max, block) => Math.max(max, block.occurred_at), 0);
+  let chats: Chat[] = [];
+  let firstHasMore = false;
+  const fetched: ChatMessage[] = [];
+  let cursor: MessageCursor | null = top ? { ts: top.created_at, id: top.id } : null;
+  const incremental = cursor !== null;
+  for (let pageCount = 0; pageCount < 3; pageCount++) {
+    const list = await (ctx.bus.request("chat:_:chats:list", {
+      chat_id: ctx.instanceId, include_messages: true,
+      ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}),
+      limit: PAGE_SIZE,
+    }) as Promise<ChatList>);
+    if (pageCount === 0) {
+      chats = list.chats;
+      firstHasMore = list.has_more ?? false;
+    }
+    const page = list.messages ?? [];
+    fetched.push(...page);
+    // A no-cursor top page reports "older exist" as has_more — nothing newer
+    // to chase; the incremental cursor page reports "even newer exist".
+    if (!incremental || page.length === 0 || !(list.has_more ?? false)) break;
+    const last = page[page.length - 1];
+    cursor = { ts: last.created_at, id: last.id };
+  }
+  const [blockList, workspaceData] = await Promise.all([
+    ctx.bus.request("chat:_:blocks:list", { chat_id: ctx.instanceId, after: blockAfter || loadedLo.value }) as Promise<ChatBlockList>,
     ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
   ]);
-  chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
-  if (!chat.value) {
+  chat.value = chats.find((item) => item.id === ctx.instanceId) ?? null;
+  if (!chat.value) return false;
+  const byId = new Map(messages.value.map((item) => [item.id, item] as const));
+  for (const item of fetched) byId.set(item.id, item); // delta rows replace cached ones
+  messages.value = [...byId.values()].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
+  if (loadedLo.value === 0 && messages.value.length > 0) {
+    // First load through the cache: adopt the pagination boundary from the page.
+    loadedLo.value = messages.value[0].created_at;
+    olderCursor.value = { ts: messages.value[0].created_at, id: messages.value[0].id };
+    hasOlder.value = firstHasMore;
+  }
+  const blockById = new Map(blocks.value.map((item) => [item.id, item] as const));
+  for (const item of blockList.blocks ?? []) if (!blockById.has(item.id)) blockById.set(item.id, item);
+  blocks.value = [...blockById.values()].sort((a, b) => a.occurred_at - b.occurred_at || a.id.localeCompare(b.id));
+  roles.value = workspaceData.roles;
+  workspace.value = workspaceData;
+  setChrome();
+  writeBack();
+  return true;
+}
+
+/** Merge-refresh entry point for activation / chat-list mutations: evict the
+ *  cache and clear local state when the chat has vanished. */
+async function refresh(): Promise<void> {
+  if (loadingInitial.value) return; // initial load() already fetches everything
+  if (!(await refreshDelta())) {
     messages.value = [];
     blocks.value = [];
     hasOlder.value = false;
     olderCursor.value = null;
-    return;
+    removeEntry(ctx.instanceId);
   }
-  const page = list.messages ?? [];
-  const known = new Set(messages.value.map((item) => item.id));
-  for (const item of page) if (!known.has(item.id)) messages.value.push(item);
-  messages.value.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
-  if (loadedLo.value === 0 && messages.value.length > 0) {
-    loadedLo.value = messages.value[0].created_at;
-    olderCursor.value = { ts: messages.value[0].created_at, id: messages.value[0].id };
-    hasOlder.value = list.has_more ?? false;
-  }
-  for (const block of blockList.blocks ?? []) {
-    if (!blocks.value.some((item) => item.id === block.id)) blocks.value.push(block);
-  }
-  roles.value = workspaceData.roles;
-  workspace.value = workspaceData;
-  ctx.setChrome({
-    title: chat.value?.name ?? "Chat",
-    actions: [
-      { id: "chat-style", title: "消息样式", icon: "bi-palette", run: () => { styleOpen.value = !styleOpen.value; } },
-      { id: "chat-config", title: "聊天管理", icon: "bi-sliders", run: () => layout.openInstance("chat-manager", "main") },
-    ],
-  });
 }
 
 /** Load one older page (composite cursor) plus the blocks in the span it
@@ -344,8 +443,10 @@ async function loadOlder(): Promise<void> {
     hasOlder.value = list.has_more ?? false;
     olderCursor.value = { ts: newLo, id: page[0].id };
     loadedLo.value = newLo;
+    writeBack();
     await nextTick();
-    if (thread) thread.scrollTop = thread.scrollHeight - previousScrollHeight + previousScrollTop;
+    const threadNow = threadRef.value;
+    if (threadNow) scrollThreadTop(threadNow.scrollHeight - previousScrollHeight + previousScrollTop);
   } catch (cause) {
     error.value = errorText(cause);
   } finally {
@@ -354,6 +455,8 @@ async function loadOlder(): Promise<void> {
 }
 
 function handleThreadScroll(): void {
+  if (Date.now() - lastProgrammaticScrollAt < 400) return; // programmatic echo
+  userScrolled = true;
   const thread = threadRef.value;
   if (!thread || thread.scrollTop > OLDER_SCROLL_THRESHOLD) return;
   void loadOlder();
@@ -413,10 +516,12 @@ onMounted(() => {
     const value = frame.value as ChatMessage;
     const index = messages.value.findIndex((item) => item.id === value.id);
     if (index >= 0) messages.value.splice(index, 1, value); else messages.value.push(value);
+    writeBack();
   });
   ctx.bus.subscribe(`chat:${ctx.instanceId}:block`, (frame) => {
     const value = frame.value as ChatBlock;
     if (!blocks.value.some((item) => item.id === value.id)) blocks.value.push(value);
+    writeBack();
   });
   ctx.bus.subscribe(`chat:${ctx.instanceId}:turn-completed`, (frame) => {
     const value = frame.value as { role_id: string };
@@ -428,7 +533,10 @@ onMounted(() => {
     if (frame.value === ctx.instanceId) refreshNow();
   });
   window.addEventListener("viewer:chats-changed", refreshNow);
-  ctx.onDispose(() => window.removeEventListener("viewer:chats-changed", refreshNow));
+  ctx.onDispose(() => {
+    window.removeEventListener("viewer:chats-changed", refreshNow);
+    writeBack();
+  });
   void load().catch((cause) => { error.value = errorText(cause); });
 });
 </script>

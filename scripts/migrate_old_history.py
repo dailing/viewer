@@ -72,14 +72,17 @@ def main() -> None:
     batch_messages, batch_blocks = [], []
 
     rows = old.execute(
-        "select id, conversation_id, turn_id, role, event_type, text, role_id, occurred_at "
+        "select id, conversation_id, turn_id, role, event_type, text, query, role_id, occurred_at "
         "from super_workspace_messages order by occurred_at"
     )
-    for msg_id, chat_id, turn_id, role, event_type, text, role_id, occurred_at in rows:
+    for msg_id, chat_id, turn_id, role, event_type, text, query, role_id, occurred_at in rows:
         ts = ms(occurred_at)
         turn_id = turn_id or msg_id
         if event_type in USER_EVENTS:
-            batch_messages.append((msg_id, chat_id, turn_id, "user", text or "", "user", "", "", ts))
+            # message:query rows store the user's text in the `query` column
+            # (`text` is empty by design); message:user rows use `text`.
+            body = query or text or ""
+            batch_messages.append((msg_id, chat_id, turn_id, "user", body, "user", "", "", ts))
             stats["user"] += 1
             continue
         role_name = turn_role_names.get(turn_id) or role_names.get(role_id or "", "")
@@ -103,6 +106,26 @@ def main() -> None:
         [(tid, t["chat_id"], t["role_id"], t["role_name"], t["start"], t["end"]) for tid, t in turns.items()],
     )
     new.commit()
+
+    # --- repair: query-text backfill (idempotent) --------------------------
+    # message:query rows store the user's text in the `query` column; INSERT OR
+    # IGNORE never updates existing rows, so user messages migrated from the
+    # empty `text` column are still blank. Backfill them from the source
+    # query column (only touches rows whose stored text is empty).
+    fixed = 0
+    for msg_id, q, t in old.execute(
+        "select id, query, text from super_workspace_messages where event_type='message:query'"
+    ):
+        body = (q or t or "").strip()
+        if not body:
+            continue
+        cur = new.execute("select text from messages where id=?", (msg_id,)).fetchone()
+        if cur is not None and not (cur[0] or "").strip():
+            new.execute("update messages set text=? where id=?", (body, msg_id))
+            fixed += 1
+    new.commit()
+    if fixed:
+        print(f"query-text backfill: {fixed} user messages repaired")
 
     # --- verification summary ----------------------------------------------
     print(f"chats added: {chats_added} (pinned synced: {len(pinned)})")

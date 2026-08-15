@@ -152,6 +152,23 @@ func frameObject(frame busclient.Frame) (map[string]any, error) {
 	return value, nil
 }
 
+// requestInt64 reads a JSON-number field from an RPC request (numbers decode
+// as float64), returning 0 when absent or malformed.
+func requestInt64(request map[string]any, field string) int64 {
+	raw, ok := request[field].(float64)
+	if !ok {
+		return 0
+	}
+	return int64(raw)
+}
+
+// requestString reads a JSON-string field from an RPC request, returning ""
+// when absent or malformed.
+func requestString(request map[string]any, field string) string {
+	raw, _ := request[field].(string)
+	return raw
+}
+
 func (p *Plugin) handleWorkspaceGet(frame busclient.Frame) {
 	value, err := p.workspace(p.ctx)
 	p.reply(frame, value, err)
@@ -343,7 +360,7 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 	result := map[string]any{"chats": payload, "active_chat_id": p.activeChatID}
 	if request != nil && request["include_messages"] == true {
 		chatID, _ := request["chat_id"].(string)
-		messages, historyErr := p.store.history(chatID, 0, 0)
+		messages, hasMore, historyErr := p.store.historyPage(chatID, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
 		if historyErr != nil {
 			p.reply(frame, nil, historyErr)
 			return
@@ -353,6 +370,7 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 			values = append(values, message.payload())
 		}
 		result["messages"] = values
+		result["has_more"] = hasMore
 	}
 	p.reply(frame, result, nil)
 }
@@ -363,7 +381,7 @@ func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 		p.reply(frame, nil, errBadRequest)
 		return
 	}
-	blocks, err := p.store.chatMessageBlocks(chatID)
+	blocks, err := p.store.chatMessageBlocks(chatID, requestInt64(request, "after"), requestInt64(request, "before"))
 	if err != nil {
 		p.reply(frame, nil, err)
 		return

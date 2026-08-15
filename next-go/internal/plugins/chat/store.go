@@ -382,13 +382,53 @@ func (s *store) turnMessageBlocks(turnID string) ([]MessageBlock, error) {
 	return values, err
 }
 
-// chatMessageBlocks lists every block of a chat in display order (strictly by
-// observation time), so the frontend timeline can interleave text and
-// tool-activity segments exactly as they happened.
-func (s *store) chatMessageBlocks(chatID string) ([]MessageBlock, error) {
+// chatMessageBlocks lists a chat's activity blocks in display order (strictly
+// by observation time), optionally restricted to a time window [after, before)
+// in ms — the timeline fetches blocks per loaded message span so long chats
+// lazy-load older pages instead of pulling everything at once. Zero bounds
+// mean unbounded.
+func (s *store) chatMessageBlocks(chatID string, after, before int64) ([]MessageBlock, error) {
+	query := s.db.Where("chat_id = ?", chatID)
+	if after > 0 {
+		query = query.Where("occurred_at >= ?", after)
+	}
+	if before > 0 {
+		query = query.Where("occurred_at < ?", before)
+	}
 	var values []MessageBlock
-	err := s.db.Where("chat_id = ?", chatID).Order("occurred_at, id").Find(&values).Error
+	err := query.Order("occurred_at, id").Find(&values).Error
 	return values, err
+}
+
+// historyPage returns one page of a chat's messages for newest-first
+// pagination: at most limit messages strictly older than the composite cursor
+// (created_at, id), in ascending display order (newest of the page last).
+// hasMore reports whether older messages exist beyond the page. A zero
+// beforeTs means "start from the newest end" (no cursor).
+func (s *store) historyPage(chatID string, beforeTs int64, beforeID string, limit int) ([]Message, bool, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := s.db.Where("chat_id = ?", chatID)
+	if beforeTs > 0 {
+		if beforeID != "" {
+			query = query.Where("(created_at < ? OR (created_at = ? AND id < ?))", beforeTs, beforeTs, beforeID)
+		} else {
+			query = query.Where("created_at < ?", beforeTs)
+		}
+	}
+	var values []Message
+	if err := query.Order("created_at desc, id desc").Limit(limit + 1).Find(&values).Error; err != nil {
+		return nil, false, err
+	}
+	hasMore := len(values) > limit
+	if hasMore {
+		values = values[:limit]
+	}
+	for left, right := 0, len(values)-1; left < right; left, right = left+1, right-1 {
+		values[left], values[right] = values[right], values[left]
+	}
+	return values, hasMore, nil
 }
 
 func (s *store) chatTurns(chatID string) ([]Turn, error) {

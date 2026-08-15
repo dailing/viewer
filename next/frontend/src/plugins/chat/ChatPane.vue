@@ -37,6 +37,18 @@ const error = ref("");
 const threadRef = ref<HTMLElement | null>(null);
 const styleOpen = ref(false);
 
+// Newest-first pagination (old-viewer parity): the pane loads one page of
+// the newest messages plus the activity blocks covering that span; scrolling
+// to the top pulls an older page and restores the scroll position.
+const PAGE_SIZE = 50;
+const OLDER_SCROLL_THRESHOLD = 96;
+const loadingInitial = ref(true);
+const loadingOlder = ref(false);
+const hasOlder = ref(false);
+const loadedLo = ref(0); // oldest loaded message created_at (ms); 0 = unbounded
+const olderCursor = ref<{ ts: number; id: string } | null>(null);
+let everLoaded = false;
+
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
 interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[] }
 
@@ -215,14 +227,82 @@ function activityDisplayable(block: ChatBlock): boolean {
 }
 
 async function load(): Promise<void> {
+  loadingInitial.value = true;
+  try {
+    const list = await (ctx.bus.request("chat:_:chats:list", {
+      chat_id: ctx.instanceId, include_messages: true, limit: PAGE_SIZE,
+    }) as Promise<ChatList>);
+    chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
+    const page = list.messages ?? [];
+    messages.value = page;
+    hasOlder.value = list.has_more ?? false;
+    if (page.length > 0) {
+      loadedLo.value = page[0].created_at;
+      olderCursor.value = { ts: page[0].created_at, id: page[0].id };
+    } else {
+      loadedLo.value = 0;
+      olderCursor.value = null;
+    }
+    const [blockList, workspaceData] = await Promise.all([
+      ctx.bus.request("chat:_:blocks:list", { chat_id: ctx.instanceId, after: loadedLo.value }) as Promise<ChatBlockList>,
+      ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
+    ]);
+    blocks.value = blockList.blocks ?? [];
+    roles.value = workspaceData.roles;
+    workspace.value = workspaceData;
+    ctx.setChrome({
+      title: chat.value?.name ?? "Chat",
+      actions: [
+        { id: "chat-style", title: "消息样式", icon: "bi-palette", run: () => { styleOpen.value = !styleOpen.value; } },
+        { id: "chat-config", title: "聊天管理", icon: "bi-sliders", run: () => layout.openInstance("chat-manager", "main") },
+      ],
+    });
+    // First open lands on the newest end (old-viewer parity); later reloads
+    // keep the user's scroll position.
+    if (!everLoaded) {
+      everLoaded = true;
+      await nextTick();
+      const thread = threadRef.value;
+      if (thread) thread.scrollTop = thread.scrollHeight;
+    }
+  } finally {
+    loadingInitial.value = false;
+  }
+}
+
+/** Merge-refresh: re-pull the newest page + block window and fold new items
+ *  in without disturbing loaded older pages or the scroll position (used for
+ *  activation / chat-list mutations, where a full reset would lose the
+ *  user's place in a long history). */
+async function refresh(): Promise<void> {
+  if (loadingInitial.value) return; // initial load() already fetches everything
   const [list, blockList, workspaceData] = await Promise.all([
-    ctx.bus.request("chat:_:chats:list", { chat_id: ctx.instanceId, include_messages: true }) as Promise<ChatList>,
-    ctx.bus.request("chat:_:blocks:list", { chat_id: ctx.instanceId }) as Promise<ChatBlockList>,
+    ctx.bus.request("chat:_:chats:list", {
+      chat_id: ctx.instanceId, include_messages: true, limit: PAGE_SIZE,
+    }) as Promise<ChatList>,
+    ctx.bus.request("chat:_:blocks:list", { chat_id: ctx.instanceId, after: loadedLo.value }) as Promise<ChatBlockList>,
     ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
   ]);
   chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
-  messages.value = list.messages ?? [];
-  blocks.value = blockList.blocks ?? [];
+  if (!chat.value) {
+    messages.value = [];
+    blocks.value = [];
+    hasOlder.value = false;
+    olderCursor.value = null;
+    return;
+  }
+  const page = list.messages ?? [];
+  const known = new Set(messages.value.map((item) => item.id));
+  for (const item of page) if (!known.has(item.id)) messages.value.push(item);
+  messages.value.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
+  if (loadedLo.value === 0 && messages.value.length > 0) {
+    loadedLo.value = messages.value[0].created_at;
+    olderCursor.value = { ts: messages.value[0].created_at, id: messages.value[0].id };
+    hasOlder.value = list.has_more ?? false;
+  }
+  for (const block of blockList.blocks ?? []) {
+    if (!blocks.value.some((item) => item.id === block.id)) blocks.value.push(block);
+  }
   roles.value = workspaceData.roles;
   workspace.value = workspaceData;
   ctx.setChrome({
@@ -232,6 +312,51 @@ async function load(): Promise<void> {
       { id: "chat-config", title: "聊天管理", icon: "bi-sliders", run: () => layout.openInstance("chat-manager", "main") },
     ],
   });
+}
+
+/** Load one older page (composite cursor) plus the blocks in the span it
+ *  newly covers, then restore the scroll position (old-viewer parity). */
+async function loadOlder(): Promise<void> {
+  if (loadingInitial.value || loadingOlder.value || !hasOlder.value || !olderCursor.value) return;
+  loadingOlder.value = true;
+  const thread = threadRef.value;
+  const previousScrollHeight = thread?.scrollHeight ?? 0;
+  const previousScrollTop = thread?.scrollTop ?? 0;
+  try {
+    const list = await (ctx.bus.request("chat:_:chats:list", {
+      chat_id: ctx.instanceId, include_messages: true,
+      before: olderCursor.value.ts, before_id: olderCursor.value.id, limit: PAGE_SIZE,
+    }) as Promise<ChatList>);
+    const page = list.messages ?? [];
+    if (page.length === 0) {
+      hasOlder.value = false;
+      return;
+    }
+    const newLo = page[0].created_at;
+    const blockList = await (ctx.bus.request("chat:_:blocks:list", {
+      chat_id: ctx.instanceId, after: newLo, before: loadedLo.value,
+    }) as Promise<ChatBlockList>);
+    const known = new Set(messages.value.map((item) => item.id));
+    messages.value = [...page.filter((item) => !known.has(item.id)), ...messages.value];
+    for (const block of blockList.blocks ?? []) {
+      if (!blocks.value.some((item) => item.id === block.id)) blocks.value.push(block);
+    }
+    hasOlder.value = list.has_more ?? false;
+    olderCursor.value = { ts: newLo, id: page[0].id };
+    loadedLo.value = newLo;
+    await nextTick();
+    if (thread) thread.scrollTop = thread.scrollHeight - previousScrollHeight + previousScrollTop;
+  } catch (cause) {
+    error.value = errorText(cause);
+  } finally {
+    loadingOlder.value = false;
+  }
+}
+
+function handleThreadScroll(): void {
+  const thread = threadRef.value;
+  if (!thread || thread.scrollTop > OLDER_SCROLL_THRESHOLD) return;
+  void loadOlder();
 }
 
 async function send(): Promise<void> {
@@ -283,7 +408,7 @@ function setOverride(field: keyof MarkdownStyleOverrides, raw: string): void {
 }
 
 onMounted(() => {
-  const reload = (): void => { void load().catch(() => undefined); };
+  const refreshNow = (): void => { void refresh().catch(() => undefined); };
   ctx.bus.subscribe(`chat:${ctx.instanceId}:message`, (frame) => {
     const value = frame.value as ChatMessage;
     const index = messages.value.findIndex((item) => item.id === value.id);
@@ -299,16 +424,23 @@ onMounted(() => {
     next.delete(value.role_id);
     activeRoles.value = next;
   });
-  ctx.bus.subscribe("chat:_:active", reload);
-  window.addEventListener("viewer:chats-changed", reload);
-  ctx.onDispose(() => window.removeEventListener("viewer:chats-changed", reload));
+  ctx.bus.subscribe("chat:_:active", (frame) => {
+    if (frame.value === ctx.instanceId) refreshNow();
+  });
+  window.addEventListener("viewer:chats-changed", refreshNow);
+  ctx.onDispose(() => window.removeEventListener("viewer:chats-changed", refreshNow));
   void load().catch((cause) => { error.value = errorText(cause); });
 });
 </script>
 
 <template>
   <section class="chat-pane d-flex flex-column h-100">
-    <div ref="threadRef" class="chat-thread flex-grow-1 overflow-auto p-2" aria-live="polite">
+    <div ref="threadRef" class="chat-thread flex-grow-1 overflow-auto p-2" aria-live="polite" @scroll.passive="handleThreadScroll">
+      <div v-if="messages.length && (loadingOlder || !hasOlder)" class="chat-history-boundary small text-secondary">
+        <span v-if="loadingOlder" class="spinner-border spinner-border-sm me-1" aria-hidden="true" />
+        <template v-if="loadingOlder">加载更早消息…</template>
+        <template v-else>没有更多消息</template>
+      </div>
       <article v-for="box in timeline" :key="box.key" class="chat-box" :class="box.kind === 'user' ? 'chat-box-user' : 'chat-box-role'">
         <div class="chat-box-top">
           <div class="chat-meta">
@@ -635,6 +767,12 @@ onMounted(() => {
   font-size: var(--font-size-ui);
   padding: 12px 4px;
   text-align: center;
+}
+
+.chat-history-boundary {
+  padding: 6px 0;
+  text-align: center;
+  user-select: none;
 }
 
 .chat-style-panel {

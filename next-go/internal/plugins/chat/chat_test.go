@@ -269,12 +269,113 @@ func TestChatMessageBlocksOrderingAndPayload(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	blocks, err := p.store.chatMessageBlocks("chat")
+	blocks, err := p.store.chatMessageBlocks("chat", 0, 0)
 	if err != nil || len(blocks) != 2 || blocks[0].ID != "b1" || blocks[1].ID != "b2" {
 		t.Fatalf("blocks=%#v err=%v", blocks, err)
 	}
 	payload := blocks[0].payload()
 	if payload["kind"] != "tool_call" || payload["turn_id"] != "turn" || payload["occurred_at"] != int64(1000) || payload["payload"] != `{"name":"Read"}` {
 		t.Fatalf("payload=%#v", payload)
+	}
+}
+
+func TestChatMessageBlocksWindow(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	for _, block := range []*MessageBlock{
+		{ID: "b1", EventID: "e1", ChatID: "chat", TurnID: "turn", Kind: "thinking", Payload: "{}", OccurredAt: 100},
+		{ID: "b2", EventID: "e2", ChatID: "chat", TurnID: "turn", Kind: "tool_call", Payload: "{}", OccurredAt: 1000},
+		{ID: "b3", EventID: "e3", ChatID: "chat", TurnID: "turn", Kind: "tool_result", Payload: "{}", OccurredAt: 1000},
+		{ID: "b4", EventID: "e4", ChatID: "chat", TurnID: "turn", Kind: "thinking", Payload: "{}", OccurredAt: 1999},
+		{ID: "b5", EventID: "e5", ChatID: "chat", TurnID: "turn", Kind: "thinking", Payload: "{}", OccurredAt: 2000},
+		{ID: "b6", EventID: "e6", ChatID: "chat", TurnID: "turn", Kind: "thinking", Payload: "{}", OccurredAt: 9999},
+	} {
+		if err := p.store.addMessageBlock(block); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Window [1000, 2000): lower inclusive, upper exclusive — tiles without
+	// gaps or duplicates when the timeline fetches blocks per loaded span.
+	blocks, err := p.store.chatMessageBlocks("chat", 1000, 2000)
+	if err != nil || len(blocks) != 3 || blocks[0].ID != "b2" || blocks[1].ID != "b3" || blocks[2].ID != "b4" {
+		t.Fatalf("window blocks=%#v err=%v", blocks, err)
+	}
+	// Unbounded still returns everything in display order.
+	blocks, err = p.store.chatMessageBlocks("chat", 0, 0)
+	if err != nil || len(blocks) != 6 {
+		t.Fatalf("full blocks=%#v err=%v", blocks, err)
+	}
+}
+
+func TestHistoryPagePagination(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	// Seed 8 messages; m5/m6 share created_at so the composite cursor
+	// (created_at, id) is exercised at the page boundary.
+	seeds := []*Message{
+		{ID: "m1", ChatID: "chat", TurnID: "t1", Role: "user", Text: "1", CreatedAt: 1000},
+		{ID: "m2", ChatID: "chat", TurnID: "t2", Role: "assistant", Text: "2", CreatedAt: 2000},
+		{ID: "m3", ChatID: "chat", TurnID: "t3", Role: "user", Text: "3", CreatedAt: 3000},
+		{ID: "m4", ChatID: "chat", TurnID: "t4", Role: "assistant", Text: "4", CreatedAt: 4000},
+		{ID: "m5", ChatID: "chat", TurnID: "t5", Role: "user", Text: "5", CreatedAt: 5000},
+		{ID: "m6", ChatID: "chat", TurnID: "t6", Role: "assistant", Text: "6", CreatedAt: 5000},
+		{ID: "m7", ChatID: "chat", TurnID: "t7", Role: "user", Text: "7", CreatedAt: 6000},
+		{ID: "m8", ChatID: "chat", TurnID: "t8", Role: "assistant", Text: "8", CreatedAt: 7000},
+	}
+	for _, message := range seeds {
+		if err := p.store.addMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Walk pages newest-first with a page size of 3, following the same
+	// composite cursor the RPC layer passes through.
+	var seen []string
+	var cursorTs int64
+	var cursorID string
+	hasMore := true
+	pages := 0
+	for hasMore && pages < 10 {
+		page, more, err := p.store.historyPage("chat", cursorTs, cursorID, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		// Pages arrive ascending; within a page ids must be ascending too.
+		for i, message := range page {
+			seen = append(seen, message.ID)
+			if i > 0 && (page[i-1].CreatedAt > message.CreatedAt || (page[i-1].CreatedAt == message.CreatedAt && page[i-1].ID > message.ID)) {
+				t.Fatalf("page %d not ascending: %#v", pages, page)
+			}
+		}
+		if len(page) == 0 {
+			t.Fatalf("empty page with hasMore=true")
+		}
+		cursorTs, cursorID = page[0].CreatedAt, page[0].ID
+		hasMore = more
+	}
+	// Page 1 (newest 3) = [m6 m7 m8], page 2 = [m3 m4 m5], page 3 = [m1 m2]:
+	// consecutive ascending slices of the global order, no gaps, no dupes.
+	want := []string{"m6", "m7", "m8", "m3", "m4", "m5", "m1", "m2"}
+	if len(seen) != len(want) {
+		t.Fatalf("pages=%d seen=%v want=%v", pages, seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("seen=%v want=%v", seen, want)
+		}
+	}
+	if hasMore {
+		t.Fatal("expected no more pages after exhausting")
+	}
+	// A cursor with no id falls back to timestamp-only semantics.
+	page, more, err := p.store.historyPage("chat", 4000, "", 3)
+	if err != nil || more || len(page) != 3 || page[0].ID != "m1" || page[2].ID != "m3" {
+		t.Fatalf("timestamp-only page=%#v more=%v err=%v", page, more, err)
 	}
 }

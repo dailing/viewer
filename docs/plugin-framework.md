@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.32**（2026-08-15）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.33**（2026-08-15）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.33 变更：**仓库结构定稿（Go 主线落地）**——`next/`（Python 参考实现）与 `next-go/` 目录删除：Go 主线（`cmd/`、`internal/`、`web/`、`examples/`、`scripts/`）上移至仓库根，单一 Go module（`viewer`）自根构建；SDK 按语言归入 `sdk/`（`sdk/go` = protocol 帧类型 + busclient，`sdk/python` = Python BusClient/Plugin，`sdk/ts` = @viewer/bus-sdk）；前端在 `frontend/`。测试即规格：`scripts/smoke_*.py`（Python SDK 黑盒）+ `sdk/ts` vitest 直接跑 Go kernel binary（`VIEWER_KERNEL_BIN` 可覆盖）。
 > v0.32 变更：**chat 前端会话缓存（A.7）**——ChatPane 卸载后已加载历史存模块级缓存（LRU 24 聊天；每聊天 messages ≤2000 / blocks ≤4000，超限丢最老半页并重置上翻游标）；重开聊天秒渲染缓存 + 只拉增量：`chats:list` include_messages 增加 `after`/`after_id`（复合游标 `(created_at, id)` **含边界**，升序返回 + `has_more`，边界行重拉以便前端用最终文本替换可能仍在流式的缓存副本），`blocks:list` 取缓存内最大 `occurred_at` 为 after；合并按 id 去重/替换（增量行严格更新），工作区/roles 同增量刷新，聊天删除时逐出缓存；重复打开无新消息 ≈ 16 KiB（chats 列表 + workspace + 空增量），已加载老页零流量。
 > v0.31 变更：**chat 历史懒加载（A.7）**——对齐生产版"最新优先 + 向上翻页"：`chats:list` include_messages 支持 `before`/`before_id`/`limit`（复合游标 `(created_at, id)` 严格小于，返回 `has_more`），`blocks:list` 支持 `after`/`before` 时间窗 [after, before) ms（按已加载消息跨度分窗取块，零缺口零重复）；前端首屏只取最新一页 + 覆盖时间窗的 blocks 并滚到底，滚动到顶加载更早页（插入后按 DOM 高度差恢复滚动位置，顶部显示加载/尽头指示），激活/聊天变更改 merge-refresh 不重置分页。
 > v0.30 变更：**chat 消息时间线渲染**（A.7）——blocks 数据面上总线（RPC `chat:_:blocks:list` + 事件 `chat:{id}:block`），前端一 turn 一盒、文本段 markdown（KaTeX/hljs 行号/mermaid）+ 工具活动折叠行严格按时间交错、盒顶 info 条，样式经 `--markdown-*`/`--syntax-*` CSS 变量主题可定制。
@@ -481,7 +482,7 @@ my-plugin/
 - **核心集 = 单一静态二进制**：内核 + 全部 core plugins（supervisor / config-store / instance-store / file-service / http-gateway / bus-inspector / terminal）+ 前端（`go:embed` 内嵌 dist）用 **Go** 实现为单个二进制，交叉编译分发（无运行时依赖、无 venv、RSS 一个数量级下降）。
 - **进程模型**：核心集从「每插件一进程」收进**单进程 goroutine 插件**（编译期 registry 注册，panic 隔离到插件粒度）；内部通信复用同一线路协议（进程内 transport），总线观察者无法区分。外挂/第三方插件**维持独立进程**连总线，语言无关（v0.13 启动 ABI + wire protocol 保证），不打包进二进制。
 - **数据库访问一律 ORM**，禁止裸 SQL：Go 侧定 **GORM**（AutoMigrate 管 schema 演进）；SQLite 驱动用 **modernc.org/sqlite**（纯 Go，CGO 关闭，交叉编译不受损）。
-- **Python 栈（`next/`）转为协议参考实现**，不再加新功能；**`next-go/` 为新主线**。迁移期 Go 内核必须能被现有测试套件（pytest 协议测试 + TS SDK vitest）直接验证——测试即规格。
+- **仓库结构定稿（v0.33）**：Python 参考实现（`next/`）与 `next-go/` 目录已删除；Go 主线（`cmd/`、`internal/`、`web/`、`scripts/`）上移至仓库根，单一 Go module（`viewer`）自根构建；SDK 按语言归入 `sdk/{go,python,ts}`；前端在 `frontend/`。测试即规格：`scripts/smoke_*.py`（Python SDK 黑盒）+ `sdk/ts` vitest 直接验证 Go 内核（`VIEWER_KERNEL_BIN` 可覆盖）。
 - 迁移顺序：内核 → terminal → gateway（+embed 前端）→ supervisor / config-store / instance-store / file-service / inspector → 前端适配 → chat（最重，附录 A.7 原有排期不变）。
 
 ## 18. 修订记录
@@ -515,6 +516,7 @@ my-plugin/
 - **v0.27**（2026-08-14）：**dock overlay 展开 + 设置入口 + 管理面板版式统一**（§8.8/§8.9）——dock 展开改 overlay（右侧 workspace 不再 reflow），悬停延迟可配（localStorage）；dock 底部连接指示移除、原位换设置按钮；管理面板统一 master-detail（左窄 list 只显名字 + 固定新建按钮，动作归右栏 configuration）；路由编辑器去 select 化（label + 可点击文本弹菜单、分割线中央"+"插入、拖拽排序、底部整体 JSON 预览）。
 - **v0.28**（2026-08-14）：**viewer.voice 契约定稿**（A.8）——音频经总线传输（base64 chunk publish）、文字经总线事件回传（ready/partial/final…）；后端插件只做外部 voice-service 的 WS relay（C1 注入 service_ws/model/language；内嵌 ASR 后端不移植）；前端 voice 插件无 pane（store + 按钮），chat composer 直接 import 引用；录音安全上限 10 分钟。
 - **v0.29**（2026-08-14）：**voice 前端降级**（A.8）——后端 voice 插件缺席时（`plugins:_:list` 探测），composer 麦克风按钮置灰禁用，chat 其余功能不受影响；总线重连后重新探测。
+- **v0.33**（2026-08-15）：**仓库结构定稿（Go 主线落地）**——Python 参考实现（`next/`）与 `next-go/` 目录删除；Go 主线（`cmd/`、`internal/`、`web/`、`examples/`、`scripts/`）上移至仓库根，单一 Go module（`viewer`）自根构建；SDK 按语言归入 `sdk/{go,python,ts}`；前端在 `frontend/`。测试即规格：`scripts/smoke_*.py`（Python SDK 黑盒）+ `sdk/ts` vitest 直接验证 Go 内核（`VIEWER_KERNEL_BIN` 可覆盖）。
 - **v0.32**（2026-08-15）：**chat 前端会话缓存定稿**（A.7）——ChatPane 卸载后已加载历史存模块级缓存（LRU 24 聊天，每聊天 messages ≤2000 / blocks ≤4000，超限丢最老半页重置上翻游标）；重开秒渲染 + 增量合并：`chats:list` include_messages 加 `after`/`after_id`（复合游标含边界，边界行重拉以最终文本替换流式中的缓存副本，升序 + `has_more` 前端循环取完），blocks 按缓存内最大 `occurred_at` 增量取；按 id 去重/替换，聊天删除逐出缓存；重复打开无新消息 ≈16 KiB，已加载老页零流量。
 - **v0.31**（2026-08-15）：**chat 历史懒加载定稿**（A.7）——对齐生产版最新优先 + 向上翻页：`chats:list` include_messages 加 `before`/`before_id`/`limit`（复合游标 `(created_at, id)` 严格小于 + `has_more`），`blocks:list` 加 `after`/`before` 时间窗（按已加载消息跨度分窗，零缺口零重复）；前端首屏只加载最新一页 + 覆盖窗 blocks 并滚到底，滚动到顶触发更早页（DOM 高度差恢复滚动位置，顶部显示加载/尽头指示），激活/聊天变更事件改 merge-refresh（不重置已加载分页、不跳滚动）。
 - **v0.30**（2026-08-15）：**chat 消息时间线渲染定稿**（A.7）——blocks 数据面上总线：RPC `chat:_:blocks:list` + 事件 `chat:{id}:block`（块落库即推）；前端一 turn 一盒、消息文本段与工具活动块严格按时间交错，文本段 markdown 渲染（markdown-it + KaTeX + hljs 行号 + mermaid），工具块折叠 activity 行，盒顶 info 条；样式经 `--markdown-*`/`--syntax-*` CSS 变量主题可定制（亮/暗内置，localStorage 持久化）。

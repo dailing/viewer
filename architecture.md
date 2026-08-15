@@ -2,7 +2,7 @@
 
 This document is the working project map for future agents. Read it before changing code so you can find the right file quickly and understand how the Go kernel, core plugins, frontend, terminal handling, file service, live update flow, and runtime configuration fit together.
 
-Implementation is Go-first: the kernel and all core plugins live under `next-go/` (Go), the frontend under `next/frontend/` (Vue/TS). Python exists only as development tooling under `next-go/scripts/` (smoke tests, mocks, migrations); there is no Python product code. The authoritative design documents are `docs/plugin-framework.md` (plugin framework decisions) and `docs/plugin-protocol.md` (wire-level protocol spec); `next-go/README.md` is the Go-line build/run manual.
+Implementation is Go-first: the kernel and all core plugins live under `` (Go), the frontend under `frontend/` (Vue/TS). Python exists only as development tooling under `scripts/` (smoke tests, mocks, migrations); there is no Python product code. The authoritative design documents are `docs/plugin-framework.md` (plugin framework decisions) and `docs/plugin-protocol.md` (wire-level protocol spec); `README.md` is the Go-line build/run manual.
 
 ## Purpose
 
@@ -13,19 +13,19 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 ## Runtime Flow
 
 1. `viewerd` (single static binary) starts the kernel on loopback `--kernel-host`/`--kernel-port` (defaults `127.0.0.1:8765`) and the gateway on `--host`/`--port` (default `127.0.0.1:18730`). All core plugins are assembled in-process and connect to the kernel over loopback WebSockets through the Go bus SDK — there is no second in-process transport. External plugins connect to the kernel `/ws` directly, and are language-independent.
-2. The browser connects to `ws://<gateway>/ws`; the gateway plugin gives each browser connection a dedicated kernel connection whose hello reuses the browser UUID, then relays every later frame byte-for-byte. The same HTTP port serves the embedded frontend (`next-go/web/` embeds `web/dist`, built from `next/frontend`), with `viewerd --static` as the development override.
-3. The frontend starts in `next/frontend/src/main.ts`: creates the Vue app and Pinia, mounts the shell, and lets the in-repo plugin loader register pane plugins (files, chat, voice, chat-manager). Panes, sidebar, drafts, and scroll positions persist browser-locally; `utils/storage.ts` migrates legacy `.dailing` keys on first access.
+2. The browser connects to `ws://<gateway>/ws`; the gateway plugin gives each browser connection a dedicated kernel connection whose hello reuses the browser UUID, then relays every later frame byte-for-byte. The same HTTP port serves the embedded frontend (`web/` embeds `web/dist`, built from `frontend`), with `viewerd --static` as the development override.
+3. The frontend starts in `frontend/src/main.ts`: creates the Vue app and Pinia, mounts the shell, and lets the in-repo plugin loader register pane plugins (files, chat, voice, chat-manager). Panes, sidebar, drafts, and scroll positions persist browser-locally; `utils/storage.ts` migrates legacy `.dailing` keys on first access.
 4. Chat flow: `ComposerBox.vue` sends the draft through the chat plugin RPC; chat publishes prompt/turn frames over the bus to the selected agent plugin; agent plugins (`viewer.agent-hermes`, `viewer.agent-codex`, `viewer.agent-opencode`) own ACP/App Server stdio subprocesses and publish ordered raw-plus-parsed event frames plus turn-ended events; chat persists turns/blocks in `chat.sqlite3` and the frontend incrementally reloads changed runs. Events are correlated by echoed `turn_id`, never by session-to-turn mapping.
 5. SIGINT/SIGTERM make the kernel broadcast close 4009 to all connections, then shut plugins down in reverse order and close PTYs, bounded by a 10-second deadline.
 
 ## Go Kernel Structure
 
-`next-go/`
+``
 
 - `internal/protocol/` — five wire-frame shapes, strong hello/envelope validation, UUIDv4 and manifest validation, dotted plugin-id-capable channel/pattern grammar, prefix/`*`/`>` matcher. Payload values are arbitrary JSON.
 - `internal/broker/` — serialized subscription table, publish fanout, ordered retained mailbox replacement/replay, atomic subscribe handoff, bounded drop-new outbound queues, protocol-error delivery, depth guard. `registry.go` owns the retained `plugins:_:list` snapshot and lifecycle events.
 - `internal/kernel/` — serves only `/ws`, hello identity, delivery time/origin stamps, oversize-frame rejection, one outbound writer plus ping/pong heartbeat per connection, close 4009 on shutdown. Core assembly and supervisor startup are deliberately outside the kernel.
-- `internal/busclient/` — concurrency-safe Go bus SDK shared by in-process and external Go plugins: transport isolation, hello + registry barrier, retained/live handler workers, protocol-error callbacks, inbox RPC/timeout/cancel mapping, exponential reconnect, state callbacks, panic recovery.
+- `sdk/go/busclient/` — concurrency-safe Go bus SDK shared by in-process and external Go plugins: transport isolation, hello + registry barrier, retained/live handler workers, protocol-error callbacks, inbox RPC/timeout/cancel mapping, exponential reconnect, state callbacks, panic recovery.
 - `internal/pluginapi/` — in-process plugin contract, compile-time registry, inspector-first startup, reverse shutdown, loopback kernel-WS wiring, startup deadlines, plugin-level panic isolation.
 - `cmd/viewerd/main.go` — assembled single binary: kernel + all core plugins + embedded frontend. Flags: `--host`, `--port`, `--kernel-host`, `--kernel-port`, `--data-dir`, `--static`, `--plugins`. Standalone forms: `cmd/viewer-kernel`, `cmd/viewer-gateway`, `cmd/viewer-terminal`, `cmd/viewer-supervisor`, `cmd/viewer-inspector`, `cmd/viewer-configstore`, `cmd/viewer-instancestore`, `cmd/viewer-fileservice`, `cmd/viewer-voice`.
 
@@ -45,11 +45,11 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 ### External plugins and tooling
 
 - External plugins connect to the kernel `/ws` directly (`ws://<kernel-host>:<kernel-port>/ws`); kernel defaults to loopback. `examples/pingpong/` demonstrates two Go SDK clients making RPC calls in both directions.
-- `next-go/scripts/` holds the Python black-box tooling (test-only): `sdk/` (moved from the old `next/sdk`, now the smoke-test client library), `smoke_*.py` suites, `mock_*.py` deterministic Agent fixtures, `migrate_*.py` data migrations. `smoke_all.sh` orchestrates the full suite with `next/.venv/bin/python`. There is no Python product code.
+- `scripts/` holds the Python black-box tooling (test-only): `smoke_*.py` suites, `mock_*.py` deterministic Agent fixtures, `migrate_*.py` data migrations. The Python SDK itself lives in `sdk/python/`. `smoke_all.sh` orchestrates the full suite with `.venv/bin/python`. There is no Python product code.
 
 ## Frontend Structure
 
-`next/frontend/src/`
+`frontend/src/`
 
 - `main.ts` — Vue app bootstrap, Pinia install, shell mount.
 - Shell — split-pane shell with pane chrome (title bar, actions), sidebar, Settings; browser-local layout persistence; no global navbar.
@@ -58,17 +58,17 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 - `plugins/chat/` — per-chat module: `ChatPane.vue` (dispatch semantics, incremental run reload, lazy per-segment markdown rendering with `renderedHtmlFor()`), `ComposerBox.vue` (local draft state, 300 ms debounced auto-grow, voice input, explicit/automatic Role selection, send/stop). Chat-manager mutations emit the frontend-local `viewer:chats-changed` event.
 - `plugins/voice/` — headless plugin: `voiceStore.ts` owns per-composer recording/processing/ready state, one globally active MediaRecorder, 250 ms chunk encoding and bus delivery, cancellation cleanup; `VoiceInputButton.vue` binds state to a draft through `defineModel`.
 - `plugins/chat-manager/` — chat list / Dock management.
-- `next/frontend/README.md` — short manual loop for serving `next/frontend/dist` through `viewerd --static`, using the embedded UI, or running Vite with its `/ws` gateway proxy.
+- `frontend/README.md` — short manual loop for serving `frontend/dist` through `viewerd --static`, using the embedded UI, or running Vite with its `/ws` gateway proxy.
 
 ## Root And Build Files
 
-`next-go/` — Go 1.26 implementation line for the Viewer microkernel. The assembled `cmd/viewerd` includes twelve resident plugins, including chat, voice, and the headless agent services, plus the embedded frontend. See "Go Kernel Structure" above for per-package responsibilities, and `scripts/` for the smoke/mock/migration tooling (test-only, Python).
+`` — Go 1.26 implementation line for the Viewer microkernel. The assembled `cmd/viewerd` includes twelve resident plugins, including chat, voice, and the headless agent services, plus the embedded frontend. See "Go Kernel Structure" above for per-package responsibilities, and `scripts/` for the smoke/mock/migration tooling (test-only, Python).
 
-`next/frontend/package.json` — frontend metadata, scripts, dependencies. Scripts: `dev`, `build` (`vue-tsc --noEmit && vite build`), `preview`. Main libraries: Vue, Vite, Pinia, Bootstrap, Bootstrap Icons, xterm, markdown-it plugins, KaTeX, Mermaid, Highlight.js.
+`frontend/package.json` — frontend metadata, scripts, dependencies. Scripts: `dev`, `build` (`vue-tsc --noEmit && vite build`), `preview`. Main libraries: Vue, Vite, Pinia, Bootstrap, Bootstrap Icons, xterm, markdown-it plugins, KaTeX, Mermaid, Highlight.js.
 
-`next/frontend/package-lock.json` / `tsconfig.json` / `vite.config.ts` / `index.html` — locked dependency graph (do not hand-edit), TS config, Vite config with Vue plugin, minimal HTML entry.
+`frontend/package-lock.json` / `tsconfig.json` / `vite.config.ts` / `index.html` — locked dependency graph (do not hand-edit), TS config, Vite config with Vue plugin, minimal HTML entry.
 
-`next-go/web/` — `go:embed` mount point for the built frontend (`web/dist`, generated by `web/build-release.sh`, which builds `next/frontend`, syncs its dist into the embed tree, then builds the release binary to `next-go/dist/viewerd`; `scripts/build-release.sh` remains the compatibility entry point).
+`web/` — `go:embed` mount point for the built frontend (`web/dist`, generated by `web/build-release.sh`, which builds `frontend`, syncs its dist into the embed tree, then builds the release binary to `dist/viewerd`; `scripts/build-release.sh` remains the compatibility entry point).
 
 `docs/plugin-framework.md` — authoritative plugin framework design (iteration rules: version bumps per ratified section). `docs/plugin-protocol.md` — wire-level protocol spec.
 
@@ -76,7 +76,7 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 
 - Wire protocol: five frame types (hello/event/rpc/…), three-segment channels, inbox RPC conventions, retained mailbox semantics — see `docs/plugin-protocol.md` and `internal/protocol/protocol.go`.
 - Channel grammar: dotted plugin-id-capable patterns with prefix/`*`/`>` matching; payload values are arbitrary JSON.
-- Frontend types in `next/frontend/src/plugins/*/types.ts` mirror backend bus payloads; if a payload field changes, update the matching frontend type and all consumers.
+- Frontend types in `frontend/src/plugins/*/types.ts` mirror backend bus payloads; if a payload field changes, update the matching frontend type and all consumers.
 
 ## Persistence
 
@@ -98,6 +98,6 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 
 - Keep this file synchronized with code when responsibilities move or files are added/removed.
 - Keep bus payloads and frontend TypeScript interfaces aligned.
-- Do not hand-edit generated artifacts (`next/frontend/package-lock.json`, `next/frontend/dist/`, `next-go/web/dist/`, `next/frontend/node_modules/`).
-- Standard checks: frontend `cd next/frontend && npx vue-tsc --noEmit && npm run build`; backend `cd next-go && gofmt -l . && go build ./... && go test ./...`; black-box `bash next-go/scripts/smoke_all.sh`.
+- Do not hand-edit generated artifacts (`frontend/package-lock.json`, `frontend/dist/`, `web/dist/`, `frontend/node_modules/`).
+- Standard checks: frontend `cd frontend && npx vue-tsc --noEmit && npm run build`; backend `gofmt -l . && go build ./... && go test ./...`; black-box `bash scripts/smoke_all.sh`.
 - The app is read-only for served files except terminal/Agent/loop processes, which can modify files because they run real commands in the served root. Viewer-owned config/state/log files live under the configured data directory.

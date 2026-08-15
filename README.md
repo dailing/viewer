@@ -2,9 +2,40 @@
 
 Local Live File Viewer is a private-network workspace for coordinating Codex, Hermes, and OpenCode roles while browsing and editing local files. A Go microkernel (`viewerd`) exposes a WebSocket bus, runs all core plugins in-process, and serves the built Vue application on the same HTTP port; the normal frontend is a single Super Workspace shell with chats, roles, files, Git changes, terminals, Settings, and recursively split panes.
 
-The implementation is Go-first: kernel and core plugins live under `next-go/`, frontend under `next/frontend/`. Python exists only as development tooling under `next-go/scripts/` (smoke tests, mocks, migrations) — there is no Python product code. Design decisions: `docs/plugin-framework.md` (authoritative) and `docs/plugin-protocol.md` (wire-level protocol spec).
+The implementation is Go-first: kernel and core plugins live under `cmd/` and `internal/`, frontend under `frontend/`. Language SDKs live under `sdk/` (`sdk/go`, `sdk/python`, `sdk/ts`). Python exists only as development tooling under `scripts/` (smoke tests, mocks, migrations) — there is no Python product code. Design decisions: `docs/plugin-framework.md` (authoritative) and `docs/plugin-protocol.md` (wire-level protocol spec).
 
 The application assumes a trusted machine and trusted LAN. Terminal, Git, file editing, and Agent processes can modify local files.
+
+## Layout
+
+```
+cmd/                 single-binary entry (kernel + core plugin set + embedded frontend)
+internal/            kernel and core plugins (broker/kernel/pluginapi/plugins/...)
+sdk/
+  go/                Go bus SDK: protocol frame types + BusClient (RPC, subscribe, reconnect)
+  python/            Python bus SDK: BusClient + Plugin base
+  ts/                TS bus SDK (@viewer/bus-sdk, browser/Node>=22)
+frontend/            Vue 3 + Pinia frontend; in-repo plugins at src/plugins/<id>/
+web/                 go:embed mount point for the frontend dist + build-release.sh
+scripts/             black-box smoke suites, mock services, migration tools
+examples/pingpong/   two-way RPC example against the kernel
+docs/                architecture decisions (plugin-framework.md) + wire protocol (plugin-protocol.md)
+```
+
+## SDKs
+
+Each language SDK implements the same bus duties over the kernel WebSocket
+(`ws://<host>:<kernel-port>/ws`): connect + hello, RPC requests, event
+subscriptions, retained-state mailbox reads, and automatic reconnect.
+
+- `sdk/go` — part of the root Go module (`module viewer`); import
+  `viewer/sdk/go/busclient` and `viewer/sdk/go/protocol`. External projects
+  can copy the directory as its own module (busclient depends only on
+  protocol, no other kernel packages).
+- `sdk/python` — standalone package (`viewer-plugin-sdk`): `BusClient` +
+  `Plugin`. Also used by the smoke suites.
+- `sdk/ts` — npm package `@viewer/bus-sdk`; vitest suite in `sdk/ts/tests`
+  runs against the Go kernel binary (`VIEWER_KERNEL_BIN` override supported).
 
 ## Features
 
@@ -57,19 +88,19 @@ Codex uses its native App Server protocol; Hermes and OpenCode use ACP. Hermes r
 Build the frontend and the single-binary release (kernel + core plugins + embedded UI):
 
 ```bash
-cd next-go && ./web/build-release.sh
+./web/build-release.sh
 ```
 
 Or build only the Go binaries:
 
 ```bash
-cd next-go && go build ./...
+go build ./...
 ```
 
 ## Run
 
 ```bash
-next-go/dist/viewerd \
+dist/viewerd \
   --host 127.0.0.1 --port 18730 \
   --kernel-host 127.0.0.1 --kernel-port 8765 \
   --data-dir ~/.local/share/viewer
@@ -78,7 +109,7 @@ next-go/dist/viewerd \
 - Browser and SDK connect to `ws://127.0.0.1:18730/ws` (gateway); HTTP static assets on the same port.
 - External plugins connect to `ws://127.0.0.1:8765/ws` (kernel). The kernel defaults to and should stay loopback; `--kernel-host` changes it only when explicitly set.
 - `--data-dir` defaults to `$XDG_DATA_HOME/viewer` (or `~/.local/share/viewer`): `config.json`, `instance.json`, external-plugin registry, and logs.
-- Development: `--static ../next/frontend/dist` overrides the embedded UI. Frontend dev manual: `next/frontend/README.md`.
+- Development: `--static frontend/dist` overrides the embedded UI. Frontend dev manual: `frontend/README.md`.
 - `--plugins` selects core plugins: `"all"`, `"none"`, or a comma-separated list.
 
 SIGINT/SIGTERM make the kernel broadcast close 4009 to all connections, then shut plugins down in reverse order and close PTYs, bounded by a 10-second deadline.
@@ -88,9 +119,16 @@ SIGINT/SIGTERM make the kernel broadcast close 4009 to all connections, then shu
 Do not start the frontend development server for routine verification.
 
 ```bash
-cd next/frontend && npx vue-tsc --noEmit && npm run build
-cd next-go && gofmt -l . && go build ./... && go test ./...
-bash next-go/scripts/smoke_all.sh   # black-box suites; uses next/.venv python
+cd frontend && npx vue-tsc --noEmit && npm run build
+gofmt -l . && go build ./... && go test ./...
+bash scripts/smoke_all.sh   # black-box suites; uses .venv python
+cd sdk/ts && npm test       # TS SDK vitest against the Go kernel
+```
+
+Single-binary black-box acceptance (after `./web/build-release.sh`):
+
+```bash
+.venv/bin/python scripts/smoke_single_binary.py --viewerd-bin dist/viewerd
 ```
 
 For the detailed module map, data flow, wire protocol, and fault locations, see [`architecture.md`](architecture.md), `docs/plugin-framework.md`, and `docs/plugin-protocol.md`.

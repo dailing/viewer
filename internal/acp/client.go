@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -64,8 +65,15 @@ type Client struct {
 }
 
 // New starts an ACP subprocess with stdin/stdout/stderr pipes.
+// The child process runs with a stable working directory (the user's home
+// directory) instead of inheriting the parent's cwd: a deleted or
+// inaccessible parent cwd makes Python-based agents (e.g. `hermes acp`)
+// crash during startup before any ACP frame is exchanged.
 func New(ctx context.Context, command string, arguments ...string) (*Client, error) {
 	cmd := exec.CommandContext(ctx, command, arguments...)
+	if dir, err := os.UserHomeDir(); err == nil && dir != "" {
+		cmd.Dir = dir
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

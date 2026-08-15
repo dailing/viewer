@@ -1,16 +1,69 @@
 package gateway
 
 import (
+	"context"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 
 	"github.com/coder/websocket"
 )
+
+func TestRestartHandler(t *testing.T) {
+	server := New(DefaultConfig())
+
+	t.Run("accepted", func(t *testing.T) {
+		var spawned atomic.Bool
+		original := restartSelf
+		restartSelf = func(_ context.Context) error { spawned.Store(true); return nil }
+		defer func() { restartSelf = original }()
+
+		rec := httptest.NewRecorder()
+		server.serveHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/admin/restart", nil))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("restart status = %d, want %d", rec.Code, http.StatusAccepted)
+		}
+		if body := rec.Body.String(); body != `{"status":"restarting"}` {
+			t.Fatalf("restart body = %q", body)
+		}
+		if !spawned.Load() {
+			t.Fatal("restartSelf was not called")
+		}
+	})
+
+	t.Run("spawn failure returns 500 and keeps serving", func(t *testing.T) {
+		original := restartSelf
+		restartSelf = func(_ context.Context) error { return errors.New("boom") }
+		defer func() { restartSelf = original }()
+
+		rec := httptest.NewRecorder()
+		server.serveHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/admin/restart", nil))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("restart failure status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("get is not a restart", func(t *testing.T) {
+		original := restartSelf
+		restartSelf = func(_ context.Context) error { t.Fatal("GET must not restart"); return nil }
+		defer func() { restartSelf = original }()
+
+		server := New(Config{StaticFS: fstest.MapFS{
+			"index.html": &fstest.MapFile{Data: []byte("<h1>viewer</h1>")},
+		}})
+		rec := httptest.NewRecorder()
+		server.serveHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/admin/restart", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET restart status = %d, want static 404", rec.Code)
+		}
+	})
+}
 
 func TestBrowserHello(t *testing.T) {
 	const conn = "11111111-1111-4111-8111-111111111111"

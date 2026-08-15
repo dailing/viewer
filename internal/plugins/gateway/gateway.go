@@ -16,10 +16,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -125,11 +127,76 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/ws" {
+	switch {
+	case r.URL.Path == "/ws":
 		s.serveBrowser(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/restart":
+		s.handleRestart(w, r)
+	default:
+		s.serveStatic(w, r)
+	}
+}
+
+// handleRestart gracefully restarts the whole process: it spawns a fresh
+// copy of the binary (same args, plus --wait-pid <self>) and then signals
+// itself to shut down. The shutdown path drains running turns before
+// exiting; the replacement waits for this pid to disappear before binding
+// the listen ports, so there is no hand-off gap or port race. The new
+// process detaches (Setsid) and logs to /tmp/viewerd.log so the old
+// process can exit without taking its stdio pipes down.
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if err := restartSelf(r.Context()); err != nil {
+		slog.Error("restart failed", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.serveStatic(w, r)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(`{"status":"restarting"}`))
+}
+
+// restartSelf is a variable so tests can inject a fake spawner.
+var restartSelf = func(ctx context.Context) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve own executable: %w", err)
+	}
+	// Strip any accumulated --wait-pid flags from previous restarts so
+	// each generation only waits on its direct predecessor.
+	raw := os.Args[1:]
+	args := make([]string, 0, len(raw)+2)
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == "--wait-pid" || strings.HasPrefix(raw[i], "--wait-pid=") {
+			if raw[i] == "--wait-pid" && i+1 < len(raw) {
+				i++
+			}
+			continue
+		}
+		args = append(args, raw[i])
+	}
+	args = append(args, "--wait-pid", strconv.Itoa(os.Getpid()))
+	cmd := exec.Command(exe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	logFile, err := os.OpenFile("/tmp/viewerd.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open restart log: %w", err)
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start replacement: %w", err)
+	}
+	slog.Info("replacement spawned, shutting down for restart", "pid", cmd.Process.Pid)
+	// Give the HTTP response time to reach the caller, then take the
+	// graceful shutdown path (drains running turns; replacement waits on
+	// --wait-pid before binding ports).
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			slog.Error("self-signal for restart failed", "error", err)
+		}
+	}()
+	return nil
 }
 
 func (s *Server) serveBrowser(w http.ResponseWriter, r *http.Request) {

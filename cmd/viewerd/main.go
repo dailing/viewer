@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -29,6 +31,7 @@ func main() {
 	dataDir := flag.String("data-dir", dataDefault, "store data directory")
 	staticDir := flag.String("static", "", "frontend directory overriding embedded assets")
 	pluginsFlag := flag.String("plugins", "all", `core plugins to run: "all", "none", or comma-separated plugin ids`)
+	waitPID := flag.Int("wait-pid", 0, "wait for this pid to exit before starting (used by graceful self-restart)")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
@@ -53,6 +56,16 @@ func main() {
 	if err != nil {
 		slog.Error("invalid assembly configuration", "error", err)
 		os.Exit(2)
+	}
+	if *waitPID > 0 {
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+		err := waitForPIDExit(waitCtx, *waitPID)
+		cancelWait()
+		if err != nil {
+			slog.Error("previous process did not exit in time", "pid", *waitPID, "error", err)
+			os.Exit(1)
+		}
+		slog.Info("previous process exited, taking over", "pid", *waitPID)
 	}
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := assembly.Start(startupCtx); err != nil {
@@ -115,4 +128,26 @@ func waitForAssembly(assembly *pluginapi.Assembly) <-chan error {
 	result := make(chan error, 1)
 	go func() { result <- assembly.Wait() }()
 	return result
+}
+
+// waitForPIDExit polls pid with signal 0 until it disappears, so a
+// replacement process never races the previous one for the listen ports.
+// syscall.Kill(pid, 0) returns ESRCH once the process has been reaped
+// (orphans are reaped by init after the parent exits).
+func waitForPIDExit(ctx context.Context, pid int) error {
+	const pollInterval = 200 * time.Millisecond
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("signal check for pid %d: %w", pid, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("pid %d still alive after %v", pid, 30*time.Second)
+		case <-time.After(pollInterval):
+		}
+	}
 }

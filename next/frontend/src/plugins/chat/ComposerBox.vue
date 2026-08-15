@@ -4,7 +4,6 @@ import VoiceInputButton from "../voice/VoiceInputButton.vue";
 import type { Role } from "./types";
 
 const props = defineProps<{
-  modelValue: string;
   selectedRoleIds: string[];
   roles: Role[];
   contextId: string;
@@ -12,17 +11,17 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "update:modelValue": [value: string];
   "update:selectedRoleIds": [value: string[]];
-  send: [];
+  send: [value: string];
   stop: [];
 }>();
 
+// The draft text lives inside the composer (not the pane), so keystrokes only
+// re-render this small component instead of the whole timeline. `send` carries
+// the final text up.
+const draft = ref("");
+
 const textarea = ref<HTMLTextAreaElement | null>(null);
-const text = computed({
-  get: () => props.modelValue,
-  set: (value: string) => emit("update:modelValue", value),
-});
 const selectedRoles = computed(() => {
   const selected = new Set(props.selectedRoleIds);
   return props.roles.filter((role) => selected.has(role.id));
@@ -34,24 +33,30 @@ const dispatchPickerTitle = computed(() =>
 );
 
 watch(
-  () => props.modelValue,
+  draft,
   () => resizeTextarea(),
 );
 
 onMounted(() => resizeTextarea());
 
+// Grow the textarea only after a pause, never mid-keystroke: resizing on every
+// input forces a full-document layout (~150-200ms with thousands of messages
+// in the DOM), which made typing freeze. While the user types continuously the
+// height stays fixed (overflow scrolls), then it auto-grows once they pause.
+let resizeTimer: number | undefined;
 function resizeTextarea(): void {
-  void nextTick(() => {
+  window.clearTimeout(resizeTimer);
+  resizeTimer = window.setTimeout(() => {
     const element = textarea.value;
     if (element === null) return;
     element.style.height = "auto";
     element.style.height = `${element.scrollHeight}px`;
-  });
+  }, 300);
 }
 
 function clearText(): void {
-  if (props.modelValue === "") return;
-  emit("update:modelValue", "");
+  if (draft.value === "") return;
+  draft.value = "";
   void nextTick(() => textarea.value?.focus());
 }
 
@@ -101,15 +106,15 @@ function handlePickerFocusOut(event: FocusEvent): void {
   <div class="composer-card">
     <textarea
       ref="textarea"
-      v-model="text"
+      v-model="draft"
       rows="2"
       placeholder="Message"
       @input="resizeTextarea"
-      @keydown.ctrl.enter.prevent="emit('send')"
+      @keydown.ctrl.enter.prevent="emit('send', draft)"
     />
     <div class="composer-actions">
       <div class="composer-actions-main">
-        <VoiceInputButton v-model="text" :context-id="contextId" />
+        <VoiceInputButton v-model="draft" :context-id="contextId" />
         <details
           class="dispatch-picker"
           :class="{ active: selectedRoles.length > 0 }"
@@ -148,7 +153,7 @@ function handlePickerFocusOut(event: FocusEvent): void {
             </button>
           </div>
         </details>
-        <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="emit('send')">
+        <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="emit('send', draft)">
           <i class="bi bi-send" />
         </button>
       </div>
@@ -156,7 +161,7 @@ function handlePickerFocusOut(event: FocusEvent): void {
         <button v-if="hasActiveRoles" class="btn btn-sm btn-outline-danger action-button" type="button" title="Stop active turn" aria-label="Stop active turn" @click="emit('stop')">
           <i class="bi bi-stop-fill" />
         </button>
-        <button class="btn btn-sm btn-outline-secondary action-button" type="button" title="Clear text" aria-label="Clear text" :disabled="modelValue === ''" @click="clearText">
+        <button class="btn btn-sm btn-outline-secondary action-button" type="button" title="Clear text" aria-label="Clear text" :disabled="draft === ''" @click="clearText">
           <i class="bi bi-eraser" />
         </button>
       </div>

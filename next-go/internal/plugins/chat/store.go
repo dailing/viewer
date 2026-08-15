@@ -144,6 +144,13 @@ func openStore(dataDir string) (*store, error) {
 	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
+	// The timeline queries blocks by (chat_id, occurred_at) windows; the
+	// single-column chat_id index alone forces a scan of every block in the
+	// chat (tens of thousands for long histories), which made page loads and
+	// the cache delta sluggish. Idempotent — safe on pre-existing databases.
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_message_blocks_chat_occurred ON message_blocks(chat_id, occurred_at)").Error; err != nil {
+		return nil, fmt.Errorf("index chat message blocks: %w", err)
+	}
 	return &store{db: db}, nil
 }
 

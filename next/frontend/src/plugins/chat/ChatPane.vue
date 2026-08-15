@@ -32,7 +32,6 @@ const blocks = ref<ChatBlock[]>([]);
 const roles = ref<Role[]>([]);
 const workspace = ref<Workspace | null>(null);
 const chat = ref<Chat | null>(null);
-const draft = ref("");
 const selected = ref<string[]>([]);
 const activeRoles = ref(new Set<string>());
 const error = ref("");
@@ -105,18 +104,29 @@ const timeline = computed<TimelineBox[]>(() => {
   return boxes.sort((a, b) => a.ts - b.ts || a.key.localeCompare(b.key));
 });
 
-/** Cached markdown HTML per text segment (recomputed when timeline data changes). */
-const renderedHtml = computed<Map<string, string>>(() => {
-  const map = new Map<string, string>();
-  for (const box of timeline.value) {
-    for (const segment of box.segments) {
-      if (segment.kind === "text" && box.kind === "role") map.set(segment.id, renderMarkdown(segment.text ?? ""));
-    }
+/**
+ * Per-segment markdown HTML, rendered lazily and cached by message id.
+ * Incremental (not a computed over the whole timeline): loading an older page
+ * renders only the newly added segments instead of re-running renderMarkdown
+ * on every loaded message, which made typing and paging stutter once a long
+ * history was in the DOM. Entries are invalidated when the text changes
+ * (streaming updates replace the row) and pruned to a bounded size.
+ */
+const markdownCache = new Map<string, { text: string; html: string }>();
+const MARKDOWN_CACHE_MAX = 3000;
+function renderedHtmlFor(id: string, text: string): string {
+  const hit = markdownCache.get(id);
+  if (hit !== undefined && hit.text === text) return hit.html;
+  const html = renderMarkdown(text);
+  markdownCache.set(id, { text, html });
+  if (markdownCache.size > MARKDOWN_CACHE_MAX) {
+    const oldest = markdownCache.keys().next().value;
+    if (oldest !== undefined) markdownCache.delete(oldest);
   }
-  return map;
-});
+  return html;
+}
 
-watch(renderedHtml, () => {
+watch(timeline, () => {
   void nextTick(() => void renderMermaidIn(threadRef.value, "chat-mermaid"));
 }, { flush: "post" });
 
@@ -462,8 +472,8 @@ function handleThreadScroll(): void {
   void loadOlder();
 }
 
-async function send(): Promise<void> {
-  const message = draft.value.trim();
+async function send(text: string): Promise<void> {
+  const message = text.trim();
   if (message === "") return;
   error.value = "";
   try {
@@ -471,7 +481,6 @@ async function send(): Promise<void> {
     if (selected.value.length > 0) payload.role_ids = selected.value;
     const result = await ctx.bus.request("chat:_:dispatch", payload) as { role_ids: string[] };
     activeRoles.value = new Set([...activeRoles.value, ...result.role_ids]);
-    draft.value = "";
   } catch (cause) {
     error.value = errorText(cause);
   }
@@ -570,7 +579,7 @@ onMounted(() => {
             <div
               v-else-if="segment.kind === 'text' && (segment.text ?? '').trim()"
               class="markdown-content chat-response-body"
-              v-html="renderedHtml.get(segment.id) ?? ''"
+              v-html="renderedHtmlFor(segment.id, segment.text ?? '')"
             />
             <div v-else-if="segment.kind === 'activity'" class="chat-activity">
               <details v-if="activityHasBody(segment)" class="chat-activity-details">
@@ -649,7 +658,6 @@ onMounted(() => {
     <div class="composer-shell">
       <div v-if="error" class="small text-danger mb-1">{{ error }}</div>
       <ComposerBox
-        v-model="draft"
         v-model:selected-role-ids="selected"
         :roles="members"
         :context-id="'chat:' + ctx.instanceId"
@@ -664,6 +672,15 @@ onMounted(() => {
 <style scoped>
 .chat-pane {
   position: relative;
+}
+
+/* Size containment isolates the (potentially tens of thousands of) message
+ * nodes from layout propagation: without it, every keystroke in the composer
+ * triggered a full-document reflow (~200-250ms once many pages were loaded,
+ * freezing the input). The thread size comes from flex (external), so strict
+ * containment does not change its box or scroll metrics. */
+.chat-thread {
+  contain: strict;
 }
 
 .chat-box {

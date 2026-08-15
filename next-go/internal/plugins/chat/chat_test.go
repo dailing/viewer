@@ -216,3 +216,65 @@ func TestHandleUpdatePersistsRawBeforeVisibleTextFilter(t *testing.T) {
 		t.Log(schema)
 	}
 }
+
+func TestAgentTextDeltasAggregatePerSegment(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		delete(p.runtimes, runtimeKey("chat", "role"))
+		_ = p.Close()
+	}()
+	p.runtimes[runtimeKey("chat", "role")] = &runtime{sessionID: "session", activeTurn: "turn", roleID: "role", roleName: "Role", pluginID: "viewer.agent-hermes", providerKey: "hermes/default"}
+	send := func(kind, text string) {
+		p.handleAgentEvent(busclient.Frame{Channel: "viewer.agent-hermes:_:event", Value: agentdriver.EventFrame{SessionID: "session", TurnID: "turn", Kind: kind, Block: agentdriver.Block{Kind: kind, Text: text}}})
+	}
+	send("agent_text", "Hello")
+	send("agent_text", " world")
+	messages, err := p.store.turnMessages("turn")
+	if err != nil || len(messages) != 1 || messages[0].Text != "Hello world" {
+		t.Fatalf("after deltas messages=%#v err=%v", messages, err)
+	}
+	firstID, firstCreated := messages[0].ID, messages[0].CreatedAt
+	send("tool_call", "Read") // seals the current text segment
+	send("agent_text", "next")
+	messages, err = p.store.turnMessages("turn")
+	if err != nil || len(messages) != 2 || messages[1].Text != "next" || messages[1].ID == firstID {
+		t.Fatalf("after seal messages=%#v err=%v", messages, err)
+	}
+	if messages[0].Text != "Hello world" || messages[0].CreatedAt != firstCreated {
+		t.Fatalf("first segment mutated: %#v", messages[0])
+	}
+	p.handleAgentTurnEnded(busclient.Frame{Channel: "viewer.agent-hermes:_:turn-ended", Value: agentdriver.TurnEndedFrame{TurnID: "turn", StopReason: "end_turn"}})
+	send("agent_text", "later") // after turn end a delta starts a fresh row
+	messages, err = p.store.turnMessages("turn")
+	if err != nil || len(messages) != 3 || messages[2].Text != "later" {
+		t.Fatalf("after turn end messages=%#v err=%v", messages, err)
+	}
+}
+
+func TestChatMessageBlocksOrderingAndPayload(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	// Insert out of chronological order; listing must sort by occurred_at, id.
+	later := &MessageBlock{ID: "b2", EventID: "e2", ChatID: "chat", TurnID: "turn", Kind: "tool_result", Text: "ok", Payload: `{"status":"completed"}`, OccurredAt: 2000}
+	earlier := &MessageBlock{ID: "b1", EventID: "e1", ChatID: "chat", TurnID: "turn", Kind: "tool_call", Text: "Read", Payload: `{"name":"Read"}`, OccurredAt: 1000}
+	other := &MessageBlock{ID: "b3", EventID: "e3", ChatID: "other-chat", TurnID: "turn", Kind: "thinking", Payload: "{}", OccurredAt: 500}
+	for _, block := range []*MessageBlock{later, other, earlier} {
+		if err := p.store.addMessageBlock(block); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocks, err := p.store.chatMessageBlocks("chat")
+	if err != nil || len(blocks) != 2 || blocks[0].ID != "b1" || blocks[1].ID != "b2" {
+		t.Fatalf("blocks=%#v err=%v", blocks, err)
+	}
+	payload := blocks[0].payload()
+	if payload["kind"] != "tool_call" || payload["turn_id"] != "turn" || payload["occurred_at"] != int64(1000) || payload["payload"] != `{"name":"Read"}` {
+		t.Fatalf("payload=%#v", payload)
+	}
+}

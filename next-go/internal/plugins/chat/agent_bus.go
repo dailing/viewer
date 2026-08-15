@@ -105,13 +105,39 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 		}
 		if err := p.store.addMessageBlock(block); err != nil {
 			log.Printf("viewer-chat message block persistence failed event_id=%s: %v", event.ID, err)
+		} else {
+			payload := block.payload()
+			payload["role_id"] = roleID
+			payload["role_name"] = roleName
+			p.publish("chat:"+block.ChatID+":block", payload)
 		}
 	}
 	if update.Block.Kind == agentdriver.KindAgentText && update.Block.Text != "" {
-		message := &Message{ID: newID(), ChatID: event.ChatID, TurnID: turnID, Role: "assistant", Text: update.Block.Text, SenderFrom: "role", RoleID: roleID, RoleName: roleName, CreatedAt: nowMillis()}
-		if p.store.addMessage(message) == nil {
-			p.publishMessage(message)
+		// Deltas aggregate into one open message per segment: append while no
+		// non-text block intervenes, keep created_at at first-chunk time.
+		p.mu.Lock()
+		open, exists := p.openText[turnID]
+		if !exists {
+			open = &Message{ID: newID(), ChatID: event.ChatID, TurnID: turnID, Role: "assistant", SenderFrom: "role", RoleID: roleID, RoleName: roleName, CreatedAt: occurredAt}
+			p.openText[turnID] = open
 		}
+		open.Text += update.Block.Text
+		message := *open
+		p.mu.Unlock()
+		var err error
+		if exists {
+			err = p.store.updateMessageText(message.ID, message.Text)
+		} else {
+			err = p.store.addMessage(&message)
+		}
+		if err == nil {
+			p.publishMessage(&message)
+		}
+	} else if update.Block.Kind != agentdriver.KindAgentText {
+		// A non-text block seals the current text segment; the next delta opens a new one.
+		p.mu.Lock()
+		delete(p.openText, turnID)
+		p.mu.Unlock()
 	}
 }
 
@@ -133,6 +159,7 @@ func (p *Plugin) handleAgentTurnEnded(frame busclient.Frame) {
 	}
 	pluginID := pluginFromChannel(frame.Channel)
 	p.mu.Lock()
+	delete(p.openText, update.TurnID)
 	for _, current := range p.runtimes {
 		if current.pluginID == pluginID && current.activeTurn == update.TurnID && current.ended != nil {
 			select {

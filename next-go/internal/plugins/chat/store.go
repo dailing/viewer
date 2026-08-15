@@ -328,8 +328,11 @@ func (s *store) setActiveChatID(id string) error {
 	return s.db.Save(&PluginState{Key: "active_chat_id", Value: id}).Error
 }
 
-func (s *store) beginTurn(turn *Turn) error                { return s.db.Create(turn).Error }
-func (s *store) addMessage(message *Message) error         { return s.db.Create(message).Error }
+func (s *store) beginTurn(turn *Turn) error        { return s.db.Create(turn).Error }
+func (s *store) addMessage(message *Message) error { return s.db.Create(message).Error }
+func (s *store) updateMessageText(id, text string) error {
+	return s.db.Model(&Message{}).Where("id = ?", id).Update("text", text).Error
+}
 func (s *store) addTurnEvent(event *TurnEvent) error       { return s.db.Create(event).Error }
 func (s *store) addMessageBlock(block *MessageBlock) error { return s.db.Create(block).Error }
 
@@ -379,6 +382,21 @@ func (s *store) turnMessageBlocks(turnID string) ([]MessageBlock, error) {
 	return values, err
 }
 
+// chatMessageBlocks lists every block of a chat in display order (strictly by
+// observation time), so the frontend timeline can interleave text and
+// tool-activity segments exactly as they happened.
+func (s *store) chatMessageBlocks(chatID string) ([]MessageBlock, error) {
+	var values []MessageBlock
+	err := s.db.Where("chat_id = ?", chatID).Order("occurred_at, id").Find(&values).Error
+	return values, err
+}
+
+func (s *store) chatTurns(chatID string) ([]Turn, error) {
+	var values []Turn
+	err := s.db.Where("chat_id = ?", chatID).Find(&values).Error
+	return values, err
+}
+
 func (s *store) latestUserMessage(chatID string, before int64) (*Message, error) {
 	var value Message
 	result := s.db.Where("chat_id = ? AND role = ? AND created_at <= ?", chatID, "user", before).Order("created_at desc").Limit(1).Find(&value)
@@ -389,6 +407,13 @@ func (s *store) latestUserMessage(chatID string, before int64) (*Message, error)
 		return nil, nil
 	}
 	return &value, nil
+}
+
+func (m MessageBlock) payload() map[string]any {
+	return map[string]any{
+		"id": m.ID, "chat_id": m.ChatID, "turn_id": m.TurnID, "kind": m.Kind,
+		"text": m.Text, "payload": m.Payload, "occurred_at": m.OccurredAt,
+	}
 }
 
 func (s *store) saveTurnSummary(value *TurnSummary) error { return s.db.Save(value).Error }

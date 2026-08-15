@@ -93,7 +93,10 @@ async def run() -> None:
                 assert database.execute("select count(*) from chats").fetchone()[0] == 1
                 assert database.execute("select count(*) from role_sessions").fetchone()[0] == 2
                 assert database.execute("select count(*) from turns").fetchone()[0] == 2
-                assert database.execute("select count(*) from messages").fetchone()[0] == 5
+                assert database.execute("select count(*) from messages").fetchone()[0] == 3
+                # streaming deltas aggregate into one message per role turn (was one row per delta)
+                texts = [row[0] for row in database.execute("select text from messages where role='assistant' order by created_at").fetchall()]
+                assert all(text.startswith("mock: ") and len(text) > 20 for text in texts)
                 assert database.execute("select count(distinct role_id) from role_sessions where chat_id=?", (chat["id"],)).fetchone()[0] == 2
                 raw_rows = database.execute("select raw_json from turn_events where chat_id=? order by turn_id,seq", (chat["id"],)).fetchall()
                 assert len(raw_rows) >= 6  # mock emits tool_call + two text updates for each Role turn

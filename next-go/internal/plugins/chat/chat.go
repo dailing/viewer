@@ -27,10 +27,10 @@ var Manifest = busclient.Manifest{
 		"chat:_:routing:get": map[string]any{}, "chat:_:routing:put": map[string]any{},
 		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
 		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
-		"chat:_:agent-catalog": map[string]any{},
+		"chat:_:agent-catalog": map[string]any{}, "chat:_:blocks:list": map[string]any{},
 	},
 	Emits: map[string]any{
-		"chat:*:message": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
+		"chat:*:message": map[string]any{}, "chat:*:block": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
 	},
 }
 
@@ -57,6 +57,7 @@ type Plugin struct {
 	busy         map[string]bool
 	agents       map[string]string
 	catalogs     map[string]agentdriver.Catalog
+	openText     map[string]*Message // turnID → currently open assistant text message (deltas append until sealed)
 	activeChatID string
 	closed       bool
 	wg           sync.WaitGroup
@@ -75,7 +76,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -91,7 +92,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:routing:get": p.handleRoutingGet, "chat:_:routing:put": p.handleRoutingPut,
 		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
 		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
-		"chat:_:agent-catalog": p.handleAgentCatalog,
+		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:blocks:list": p.handleBlocksList,
 	}
 	for pattern, handler := range handlers {
 		asyncHandler := handler
@@ -354,6 +355,38 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 		result["messages"] = values
 	}
 	p.reply(frame, result, nil)
+}
+func (p *Plugin) handleBlocksList(frame busclient.Frame) {
+	request, _ := pluginrpc.Object(frame)
+	chatID, _ := request["chat_id"].(string)
+	if chatID == "" {
+		p.reply(frame, nil, errBadRequest)
+		return
+	}
+	blocks, err := p.store.chatMessageBlocks(chatID)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	turns, err := p.store.chatTurns(chatID)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	turnRoles := make(map[string]Turn, len(turns))
+	for _, turn := range turns {
+		turnRoles[turn.ID] = turn
+	}
+	values := make([]map[string]any, 0, len(blocks))
+	for _, block := range blocks {
+		payload := block.payload()
+		if turn, ok := turnRoles[block.TurnID]; ok {
+			payload["role_id"] = turn.RoleID
+			payload["role_name"] = turn.RoleName
+		}
+		values = append(values, payload)
+	}
+	p.reply(frame, map[string]any{"blocks": values}, nil)
 }
 func (p *Plugin) handleChatsCreate(frame busclient.Frame) {
 	value, err := frameObject(frame)

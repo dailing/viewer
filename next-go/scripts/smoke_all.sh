@@ -7,7 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 NEXT_GO=$(cd -- "$SCRIPT_DIR/.." && pwd)
 ROOT=$(cd -- "$NEXT_GO/.." && pwd)
 PY=${VIEWER_PYTHON:-$ROOT/next/.venv/bin/python}
-export VIEWER_SMOKE_NEXT=$ROOT/next
+export VIEWER_SMOKE_NEXT=$NEXT_GO/scripts
 export PATH="$HOME/.local/go/bin:$PATH"
 
 LOG=${SMOKE_LOG_DIR:-/tmp/viewer-smoke-all}

@@ -13,8 +13,8 @@ htmlcov/
 .uv-cache/
 
 # Frontend dependencies and build output
-frontend/node_modules/
-frontend/dist/
+next/frontend/node_modules/
+next/frontend/dist/
 
 # Local viewer/user state
 .viewer.env
@@ -34,3 +34,6 @@ logs/
 .DS_Store
 node_modules/
 dist/
+
+# Hermes milestone scratch notes (not committed)
+.hermes-task-*.md

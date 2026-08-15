@@ -1,14 +1,16 @@
 # Local Live File Viewer
 
-Local Live File Viewer is a private-network workspace for coordinating Codex and Hermes roles while browsing and editing local files. A FastAPI backend serves the API and built Vue application; the normal frontend is a single Super Workspace shell with chats, roles, files, Git changes, terminals, Settings, and recursively split panes.
+Local Live File Viewer is a private-network workspace for coordinating Codex, Hermes, and OpenCode roles while browsing and editing local files. A Go microkernel (`viewerd`) exposes a WebSocket bus, runs all core plugins in-process, and serves the built Vue application on the same HTTP port; the normal frontend is a single Super Workspace shell with chats, roles, files, Git changes, terminals, Settings, and recursively split panes.
+
+The implementation is Go-first: kernel and core plugins live under `next-go/`, frontend under `next/frontend/`. Python exists only as development tooling under `next-go/scripts/` (smoke tests, mocks, migrations) — there is no Python product code. Design decisions: `docs/plugin-framework.md` (authoritative) and `docs/plugin-protocol.md` (wire-level protocol spec).
 
 The application assumes a trusted machine and trusted LAN. Terminal, Git, file editing, and Agent processes can modify local files.
 
 ## Features
 
 - Create direct or group chats and assign member roles.
-- Route a message automatically through an OpenAI-compatible dispatcher or target roles explicitly.
-- Run Codex App Server, Hermes, and OpenCode roles in the background and stream their persisted output into Chat panes.
+- Route a message through an OpenAI-compatible dispatcher or target roles explicitly.
+- Run Codex (App Server), Hermes (ACP), and OpenCode (ACP) roles in the background and stream their persisted output into Chat panes.
 - Retain visible Super Workspace chat messages to an optional chat-scoped Hindsight memory bank.
 - Stop a running role with a two-click confirmation.
 - Give each role a dispatcher-facing description and a separate Agent-facing prompt.
@@ -20,7 +22,7 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 - Render Markdown with KaTeX, Mermaid, Highlight.js, tables, task lists, footnotes, and local links.
 - Stage, revert, commit, and push changes from Git diff panes.
 - Open reconnectable PTY terminals through WebSockets.
-- Use optional voice dictation and LLM refinement.
+- Use optional voice dictation and LLM refinement (voice plugin relays to a configurable upstream service; `service_ws`/`model`/`language` are configurable).
 - Arrange chats, files, diffs, and terminals in persisted recursive split panes.
 - Configure appearance, Markdown themes, routing profiles, dispatcher profiles, voice, and server controls.
 
@@ -28,179 +30,67 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 
 The application has one Super Workspace, persisted under the fixed owner `dailing:default`. It contains user-created chats and globally available roles.
 
-Every chat requires a `root`, relative to the server's `VIEWER_ROOT` filesystem boundary. Files, Git, terminals, Codex, and Hermes use that Chat Root. A role may optionally add a subdirectory beneath it; there is no profile or global-working-directory fallback.
+Every chat requires a `root`, relative to the server's filesystem boundary. Files, Git, terminals, and Agents use that Chat Root. A role may optionally add a subdirectory beneath it; there is no profile or global-working-directory fallback.
 
 A role has two distinct instruction fields:
 
 - `description`: routing metadata for the dispatcher. It describes when the role should be selected, its capabilities, and its dispatch constraints.
 - `prompt`: operating instructions delivered directly to the selected Agent. It defines workflow, standards, style, and execution rules.
 
-The dispatcher receives descriptions but not prompts. A role Agent receives its prompt but not its description. A Role selects a reusable routing profile; a Chat may override it for one Role. Profiles contain ordered targets discovered as Agent/provider/model combinations. Viewer treats each driver's model selection value as opaque and never modifies Agent credentials or Agent-owned configuration. Changing a prompt or route clears that role's reusable chat-session mappings so the next run starts with the new rules.
+The dispatcher receives descriptions but not prompts. A role Agent receives its prompt but not its description. A Role selects a reusable routing profile; a Chat may override it for one Role. Viewer treats each driver's model selection value as opaque and never modifies Agent credentials or Agent-owned configuration.
 
-Normal message delivery is asynchronous:
+Normal message delivery is asynchronous: the chat plugin persists the user query and dispatch tasks; agent service plugins create or resume ACP/App Server sessions for the selected targets; events stream back over the bus with an echoed `turn_id`; the Chat pane incrementally reloads the changed run.
 
-1. The backend persists the user query and one dispatch task for each selected role.
-2. The independent Super Workspace worker claims queued tasks while serializing work per chat and role.
-3. The worker resolves `Chat override → Role profile → Workspace default`, filters targets against the Role requirements, and attempts eligible targets in order.
-4. A Codex App Server, Hermes, or OpenCode session is created or resumed for the selected opaque target. Structured target/provider/Agent failures persist a cooldown and may advance safely to the next target; a provider cooldown covers every model under that Agent/provider.
-5. Provider output and the immutable execution target/attempt log are persisted in the configured data directory and announced through Super Workspace SSE.
-6. The Chat pane incrementally reloads the changed run.
-
-Codex uses its native App Server protocol; Hermes and OpenCode use ACP. Hermes runs through the user-selected Hermes Profile, preserving Hermes-owned configuration, memory, history, channels, and credentials. Viewer only selects a discovered model when starting or continuing a session.
-
-## Persistence
-
-Viewer-owned state defaults to `~/.view`, but configuration and mutable data may be isolated with `VIEWER_CONFIG_DIR` and `VIEWER_DATA_DIR` (or the matching CLI flags):
-
-- `config.json`: appearance, Markdown, Voice, dispatcher, and ordered routing profiles. Agent credentials and provider/model configuration stay in each Agent's own files.
-- `agent-history.sqlite3`: Super Workspace, chats, roles, route overrides, dispatch tasks, execution attempts, scoped target health, messages, citations, and reusable session mappings.
-- `logs/codex-app-server-sessions/`: Viewer metadata for Codex App Server sessions.
-- `logs/hermes-sessions/`: Viewer metadata for Hermes provider sessions.
-- `logs/terminals/`: reconnectable terminal output logs.
-- `logs/`: backend, worker, manager, and voice logs.
-
-Lightweight worker and detached process state defaults to `/tmp/viewer_run`.
-
-Browser-local state stores pane layout, sidebar state, pins, drafts, dispatch selection, and scroll positions. Legacy `*.dailing` keys are migrated to their non-namespaced equivalents when first read.
-
-## Hindsight memory
-
-Hindsight retention is owned by Viewer, not by individual Agent processes. When `super_workspace.hindsight_retain_enabled` is enabled in `~/.view/config.json`, Viewer retains each visible user query and final assistant response into the current chat's bank:
-
-```text
-{hindsight_bank_prefix}::{user_id}::{workspace_id}::chat::{chat_id}
-```
-
-The default prefix is `super-workspace`. Each Viewer message uses a stable document id, so streaming updates and retries upsert the same memory instead of retaining an entire Codex transcript repeatedly.
-
-Codex and Hermes do not need their own Hindsight retain hooks. In particular, do not register Hindsight `SessionStart`, `UserPromptSubmit`, or `Stop` commands in `~/.codex/hooks.json` for Viewer-managed roles. Viewer retention is provider-independent and applies to messages after they enter the Super Workspace history database.
-
-The Hindsight API URL is resolved in this order:
-
-1. `VIEWER_HINDSIGHT_API_URL`
-2. `super_workspace.hindsight_api_url` in `~/.view/config.json`
-3. `hindsightApiUrl` in `~/.hindsight/codex.json`
-
-The API token uses `VIEWER_HINDSIGHT_API_TOKEN`, falling back to `hindsightApiToken` in `~/.hindsight/codex.json`. Retention failures are non-blocking. Viewer currently performs retain only; it does not recall Hindsight memories into provider prompts.
+Codex uses its native App Server protocol; Hermes and OpenCode use ACP. Hermes runs through the user-selected Hermes Profile, preserving Hermes-owned configuration, memory, history, channels, and credentials.
 
 ## Requirements
 
-- Python 3.11 or newer
-- Node.js and npm
+- Go 1.26+
+- Node.js and npm (frontend build)
 - `codex` on `PATH` with App Server support for Codex roles
 - `hermes` on `PATH` with the ACP optional dependency for Hermes roles
+- `opencode` on `PATH` for OpenCode roles
 - An OpenAI-compatible chat-completions endpoint for automatic routing
 
-## Install
+## Build
 
-Install backend dependencies:
+Build the frontend and the single-binary release (kernel + core plugins + embedded UI):
 
 ```bash
-uv sync
+cd next-go && ./web/build-release.sh
 ```
 
-Install frontend dependencies:
+Or build only the Go binaries:
 
 ```bash
-cd frontend
-npm install
-```
-
-Build the frontend:
-
-```bash
-cd frontend
-npm run build
+cd next-go && go build ./...
 ```
 
 ## Run
 
-Start the backend and serve the built frontend:
-
 ```bash
-uv run python run.py
+next-go/dist/viewerd \
+  --host 127.0.0.1 --port 18730 \
+  --kernel-host 127.0.0.1 --kernel-port 8765 \
+  --data-dir ~/.local/share/viewer
 ```
 
-The default bind address is `0.0.0.0:18989`. To select another root or port:
+- Browser and SDK connect to `ws://127.0.0.1:18730/ws` (gateway); HTTP static assets on the same port.
+- External plugins connect to `ws://127.0.0.1:8765/ws` (kernel). The kernel defaults to and should stay loopback; `--kernel-host` changes it only when explicitly set.
+- `--data-dir` defaults to `$XDG_DATA_HOME/viewer` (or `~/.local/share/viewer`): `config.json`, `instance.json`, external-plugin registry, and logs.
+- Development: `--static ../next/frontend/dist` overrides the embedded UI. Frontend dev manual: `next/frontend/README.md`.
+- `--plugins` selects core plugins: `"all"`, `"none"`, or a comma-separated list.
 
-```bash
-uv run python run.py --serve-dir /path/to/root --port 8000
-```
-
-Build before starting:
-
-```bash
-uv run python run.py --build-frontend
-```
-
-Useful options:
-
-```bash
-uv run python run.py --host 127.0.0.1
-uv run python run.py --reload
-uv run python run.py --debug
-uv run python run.py --config-dir ~/.viewer-test/config --data-dir ~/.viewer-test/data --port 19089
-uv run python run.py --log-dir ~/.view/logs
-uv run python run.py --log-file /tmp/viewer.log
-```
-
-`--debug` enables verbose backend logging and frontend source maps when used with `--build-frontend`.
-
-### systemd and graceful restart
-
-`deploy/systemd/viewer.service` runs a stable supervisor as systemd's MainPID. Install that unit in the user systemd directory and reload systemd before the first supervised start. The backend inherits the exact command embedded in `ExecStart`.
-
-- `POST /api/admin/restart` (or the Settings button) gracefully replaces the backend generation. The old Super Workspace worker remains alive until its running turns finish and persist their terminal status; the replacement worker owns new work.
-- `systemctl --user restart viewer.service` is a hard restart of the complete cgroup. It is reserved for an explicitly requested clean reset and can interrupt active turns.
-- The first migration from the former direct-backend unit to the supervisor requires one hard systemd restart. Subsequent development restarts should use the API.
-
-## Configuration
-
-The main environment variables are:
-
-- `VIEWER_ROOT`: fallback served root.
-- `VIEWER_CONFIG_DIR`: directory containing `config.json`; defaults through `VIEWER_HOME` to `~/.view`.
-- `VIEWER_DATA_DIR`: directory containing SQLite state, logs, and session metadata; defaults through `VIEWER_HOME` to `~/.view`.
-- `VIEWER_FRONTEND_DIST`: built frontend directory.
-- `VIEWER_LOG_FILE`: backend log file.
-- `VIEWER_MAX_TEXT_PREVIEW_BYTES`: large-text preview threshold.
-- `VIEWER_SHOW_HIDDEN`: whether hidden files appear.
-- `VIEWER_TERMINAL_SHELL`: terminal shell.
-- `VIEWER_CODEX_APP_SERVER_COMMAND`: Codex executable used for `app-server --stdio`; defaults to `codex`.
-- `VIEWER_WEAVER_RUN_DIR`: Super Workspace worker and provider-driver registry directory.
-- `VIEWER_HERMES_ACP_ENABLED`: start Hermes ACP with the worker; defaults to `true`.
-- `VIEWER_HERMES_PROFILE`: Hermes Profile used by ACP; defaults to `default`.
-- `VIEWER_HERMES_YOLO`: start only the Viewer-owned Hermes ACP process with `--yolo`; defaults to `true`. Hermes' gateway/profile approval configuration is not changed.
-- `VIEWER_HERMES_COMMAND`: Hermes executable; defaults to `hermes`.
-- `VIEWER_HINDSIGHT_API_URL`: optional Hindsight API URL override for Viewer-managed chat retention.
-- `VIEWER_HINDSIGHT_API_TOKEN`: optional Hindsight API token override.
-- `VIEWER_SUPER_DISPATCH_URL`: fallback automatic-dispatch endpoint.
-
-Most user-facing settings are managed from Settings and persisted in the configured `config.json` (legacy default `~/.view/config.json`).
-
-For a non-polluting worktree test, copy the current config and database into `.test-instance`, then launch on the isolated default port `19089`:
-
-```bash
-uv run python scripts/prepare_isolated_instance.py --replace
-uv run python scripts/run_isolated_instance.py --build-frontend --debug
-```
+SIGINT/SIGTERM make the kernel broadcast close 4009 to all connections, then shut plugins down in reverse order and close PTYs, bounded by a 10-second deadline.
 
 ## Standard checks
 
-Do not start the frontend development server for routine verification. Use:
+Do not start the frontend development server for routine verification.
 
 ```bash
-cd frontend && npm run build
+cd next/frontend && npx vue-tsc --noEmit && npm run build
+cd next-go && gofmt -l . && go build ./... && go test ./...
+bash next-go/scripts/smoke_all.sh   # black-box suites; uses next/.venv python
 ```
 
-```bash
-uv run python -m compileall backend/app
-```
-
-Role routing, prompt-boundary, and Hermes ACP tests:
-
-```bash
-PYTHONPATH=. uv run pytest -q
-```
-
-For the detailed module map, data flow, API inventory, and fault locations, see [`architecture.md`](architecture.md).
+For the detailed module map, data flow, wire protocol, and fault locations, see [`architecture.md`](architecture.md), `docs/plugin-framework.md`, and `docs/plugin-protocol.md`.

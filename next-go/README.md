@@ -49,9 +49,8 @@ stack 的 panic 防护。
 内核 → terminal → gateway(+embed) → supervisor / config-store /
 instance-store / file-service / inspector → 前端适配 → chat。
 
-每一步的验收标准：现有测试套件（`next/tests/` pytest + `next/ts-sdk/`
-vitest）直接对新栈通过——测试即规格。Python 栈（`next/`）为协议参考实现。
-`next/ts-sdk` vitest 直接运行 Go kernel binary，可用 `VIEWER_KERNEL_BIN` 覆盖路径。
+每一步的验收标准：现有测试套件（`next-go/scripts/` smoke + `next/ts-sdk/`
+vitest）直接对新栈通过——测试即规格。`next/ts-sdk` vitest 直接运行 Go kernel binary，可用 `VIEWER_KERNEL_BIN` 覆盖路径。
 
 ## 构建
 

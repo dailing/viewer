@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "next"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sdk import BusClient, RpcError  # noqa: E402
 
@@ -105,7 +105,7 @@ asyncio.run(main())
         run = backend / "run"
         run.write_text(
             "#!/bin/sh\nVIEWER_SMOKE_NEXT="
-            + shlex.quote(str(ROOT / "next"))
+            + shlex.quote(str(ROOT / "next-go" / "scripts"))
             + " exec "
             + shlex.quote(str(PYTHON))
             + " "

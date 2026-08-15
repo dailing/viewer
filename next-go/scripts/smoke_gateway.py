@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "next"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import websockets  # noqa: E402
 from websockets.exceptions import ConnectionClosed  # noqa: E402

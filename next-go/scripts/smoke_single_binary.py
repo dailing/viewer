@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "next"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sdk import BusClient  # noqa: E402
 

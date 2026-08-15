@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(Path(os.environ.get("VIEWER_SMOKE_NEXT", ROOT / "next"))))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 BusClient = importlib.import_module("sdk").BusClient
 

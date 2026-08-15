@@ -13,8 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-NEXT = Path(__file__).resolve().parents[2] / "next"
-sys.path.insert(0, str(NEXT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sdk import BusClient  # noqa: E402
 

@@ -16,8 +16,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
-NEXT = ROOT / "next"
-sys.path.insert(0, str(NEXT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import websockets  # noqa: E402
 from websockets.exceptions import ConnectionClosed  # noqa: E402

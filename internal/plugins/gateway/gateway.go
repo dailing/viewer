@@ -157,6 +157,27 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 
 // restartSelf is a variable so tests can inject a fake spawner.
 var restartSelf = func(ctx context.Context) error {
+	// systemd-aware restart. When the service manager runs us
+	// (INVOCATION_ID is set by systemd), spawning our own replacement
+	// would drop an orphan into the unit's cgroup: on stop the manager
+	// tears the whole cgroup down (KillMode=control-group) and a clean
+	// exit does not trigger Restart=on-failure, so the restart button
+	// would STOP the service instead of restarting it. Instead, exit
+	// cleanly and let the unit's Restart=always bring up a fresh
+	// instance — systemd only starts it after this process is gone, so
+	// there is no port race and no orphan. Standalone runs (no
+	// INVOCATION_ID: dev, or a hand-started binary) keep the
+	// spawn + --wait-pid handoff below.
+	if os.Getenv("INVOCATION_ID") != "" {
+		slog.Info("systemd detected, exiting for supervised restart")
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+				slog.Error("self-signal for restart failed", "error", err)
+			}
+		}()
+		return nil
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve own executable: %w", err)

@@ -8,8 +8,14 @@ Type=simple
 WorkingDirectory=/mnt/oldroot/home/d/Sync/viewer
 Environment="PATH=/mnt/oldroot/home/d/.local/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/mnt/oldroot/home/d/Sync/viewer/dist/viewerd --host 0.0.0.0 --port 18100 --kernel-host 127.0.0.1 --kernel-port 18101 --data-dir /mnt/oldroot/home/d/.local/share/viewer
-Restart=on-failure
-RestartSec=5
+# Restart=always is REQUIRED for the in-app restart button: under systemd the
+# gateway exits cleanly (exit 0) after POST /api/admin/restart and systemd is
+# the one that brings up the fresh binary. Restart=on-failure would treat a
+# clean exit as "done" and never restart — the button would stop the service.
+# systemd starts the new instance only after this process is gone, so there is
+# no port race. RestartSec keeps the bounce short.
+Restart=always
+RestartSec=2
 KillMode=control-group
 TimeoutStopSec=30
 StandardOutput=journal

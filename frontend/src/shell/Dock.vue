@@ -12,6 +12,8 @@ import { dockProviders } from "./registries";
 
 const HOVER_EXPAND_STORAGE_KEY = "viewer.dock.hoverExpandMs.v1";
 const DEFAULT_HOVER_EXPAND_MS = 500;
+const RESTART_POLL_MS = 800;
+const RESTART_TIMEOUT_MS = 60_000;
 
 function readHoverExpandMs(): number {
   const stored = Number(localStorage.getItem(HOVER_EXPAND_STORAGE_KEY));
@@ -172,6 +174,57 @@ function togglePin(entry: DockEntry): void {
   localStorage.setItem(pinStorageKey(entry.provider.type), pinned ? "false" : "true");
   pinRevision.value += 1;
 }
+
+const restarting = ref(false);
+
+/**
+ * Graceful backend restart (gateway admin API, framework v0.34):
+ * POST /api/admin/restart → the gateway spawns a same-args replacement and
+ * takes the graceful shutdown path (drains running turns ≤10s); the
+ * replacement binds the ports only after the old pid is gone. We poll GET /
+ * until the new gateway answers, then reload the shell. The TS BusClient
+ * auto-reconnects, but a fresh page load is the cleanest recovery for the
+ * whole UI (all stores re-init; module chat cache resets).
+ */
+async function restartBackend(): Promise<void> {
+  if (restarting.value) return;
+  const confirmed = window.confirm(
+    "重启后端（viewerd）？\n在途任务会先排空（最多 10 秒），完成后页面将自动刷新恢复。"
+  );
+  if (!confirmed) return;
+  restarting.value = true;
+  try {
+    const resp = await fetch("/api/admin/restart", { method: "POST" });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      window.alert(`重启失败：HTTP ${resp.status} ${body}`);
+      restarting.value = false;
+      return;
+    }
+  } catch {
+    // The 202 may be lost when the gateway closes right after accepting the
+    // restart (connection reset before the body arrives) — treat it as
+    // accepted and keep polling for the new gateway.
+  }
+  const deadline = Date.now() + RESTART_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const probe = await fetch("/", { cache: "no-store" });
+      if (probe.ok) {
+        location.reload();
+        return;
+      }
+    } catch {
+      // Gateway not up yet (old process draining / replacement binding).
+    }
+    if (Date.now() > deadline) {
+      window.alert("重启超时，请检查服务状态后手动刷新页面。");
+      restarting.value = false;
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_MS));
+  }
+}
 </script>
 
 <template>
@@ -233,6 +286,11 @@ function togglePin(entry: DockEntry): void {
         <div v-if="settingsOpen" class="dock-menu dock-settings">
           <label for="dock-hover-expand-ms">悬停展开延迟（ms）</label>
           <input id="dock-hover-expand-ms" v-model.number="hoverExpandMs" type="number" min="0" step="100" class="form-control form-control-sm" @change="saveHoverExpandMs">
+          <div class="dock-settings-sep"></div>
+          <button type="button" class="dock-menu-item" :disabled="restarting" title="重启后端（viewerd）：排空在途任务后重启整个服务，完成后页面自动刷新" @click="restartBackend">
+            <i class="bi" :class="restarting ? 'bi-arrow-repeat' : 'bi-arrow-clockwise'"></i>
+            <span>{{ restarting ? "重启中…" : "重启后端" }}</span>
+          </button>
         </div>
       </div>
     </div>
@@ -477,5 +535,20 @@ function togglePin(entry: DockEntry): void {
   color: var(--color-text-muted);
   font-size: var(--font-size-ui-small);
   padding: 5px 5px 3px;
+}
+
+.dock-settings-sep {
+  background: var(--color-border);
+  height: 1px;
+  margin: 4px 5px;
+}
+
+.dock-menu-item:disabled {
+  color: var(--color-text-subtle);
+  cursor: default;
+}
+
+.dock-menu-item:disabled:hover {
+  background: transparent;
 }
 </style>

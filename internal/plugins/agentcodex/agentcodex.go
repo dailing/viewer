@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -23,9 +24,10 @@ const (
 )
 
 var Manifest = busclient.Manifest{
-	ID: PluginID, Version: "0.1.0",
+	ID: PluginID, Version: "0.2.0",
 	Slots: map[string]any{
 		PluginID + ":_:start": map[string]any{}, PluginID + ":_:prompt": map[string]any{}, PluginID + ":_:cancel": map[string]any{},
+		PluginID + ":_:catalog-refresh": map[string]any{},
 	},
 	Emits: map[string]any{
 		PluginID + ":_:event": map[string]any{}, PluginID + ":_:turn-ended": map[string]any{}, PluginID + ":_:catalog": map[string]any{},
@@ -42,19 +44,26 @@ type session struct {
 }
 
 type Plugin struct {
-	client   *busclient.Client
-	mu       sync.Mutex
-	sessions map[string]*session
-	wg       sync.WaitGroup
-	closed   bool
+	client       *busclient.Client
+	mu           sync.Mutex
+	sessions     map[string]*session
+	wg           sync.WaitGroup
+	closed       bool
+	catalogCache *agentdriver.CatalogCache
 }
 
-func New() *Plugin { return &Plugin{sessions: map[string]*session{}} }
+func New() *Plugin {
+	p := &Plugin{sessions: map[string]*session{}}
+	fallback := agentdriver.Catalog{Agent: "codex", Providers: []agentdriver.ProviderCatalog{{Provider: "openai-subscription", Models: []string{}}}}
+	p.catalogCache = agentdriver.NewCatalogCache(fallback, discoverCatalog)
+	return p
+}
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed), busclient.WithInstanceID("_"))
 	for channel, handler := range map[string]func(busclient.Frame){
 		PluginID + ":_:start": p.handleStart, PluginID + ":_:prompt": p.handlePrompt, PluginID + ":_:cancel": p.handleCancel,
+		PluginID + ":_:catalog-refresh": p.handleCatalogRefresh,
 	} {
 		if _, err := p.client.Subscribe(channel, func(frame busclient.Frame) { go handler(frame) }); err != nil {
 			return err
@@ -63,7 +72,15 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	if err := p.client.Connect(ctx); err != nil {
 		return err
 	}
-	return p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(ctx))
+	if err := p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(ctx)); err != nil {
+		return err
+	}
+	go p.catalogCache.StartOnce(context.Background(), func(agentdriver.Catalog) {
+		if err := p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(context.Background())); err != nil {
+			log.Printf("viewer-agent-codex catalog publish failed: %v", err)
+		}
+	})
+	return nil
 }
 
 func (p *Plugin) handleStart(frame busclient.Frame) {
@@ -208,7 +225,7 @@ func newClient(ctx context.Context) (*codexserver.Client, error) {
 }
 
 func (p *Plugin) catalog(ctx context.Context) agentdriver.Catalog {
-	result := discoverCatalog(ctx)
+	result := p.catalogCache.Current()
 	var override agentdriver.Catalog
 	value, err := p.client.Request(ctx, "config:_:get", map[string]any{"plugin": configNamespace, "key": "catalog"}, 5*time.Second)
 	if err == nil && decode(value, &override) == nil && override.Agent != "" {
@@ -220,25 +237,42 @@ func (p *Plugin) catalog(ctx context.Context) agentdriver.Catalog {
 	return result
 }
 
-func discoverCatalog(ctx context.Context) agentdriver.Catalog {
-	fallback := agentdriver.Catalog{Agent: "codex", Providers: []agentdriver.ProviderCatalog{{Provider: "openai-subscription", Models: []string{}}}}
+// discoverCatalog enumerates codex models over the app-server wire protocol
+// (model/list). It returns an error when discovery fails or yields nothing —
+// the CatalogCache then keeps the previous catalog instead of blanking it.
+func discoverCatalog(ctx context.Context) (agentdriver.Catalog, error) {
 	if !envBool("VIEWER_CODEX_APP_SERVER_ENABLED", true) {
-		return fallback
+		return agentdriver.Catalog{}, errors.New("codex app-server is disabled")
 	}
-	discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	client, err := newClient(discoveryCtx)
 	if err != nil {
-		return fallback
+		return agentdriver.Catalog{}, err
 	}
 	defer client.Close()
 	value, err := client.ModelList(discoveryCtx)
 	if err != nil {
-		return fallback
+		return agentdriver.Catalog{}, err
 	}
 	models := modelIDs(value)
-	fallback.Providers[0].Models = models
-	return fallback
+	if len(models) == 0 {
+		return agentdriver.Catalog{}, errors.New("codex app-server model/list returned no models")
+	}
+	return agentdriver.Catalog{Agent: "codex", Providers: []agentdriver.ProviderCatalog{{Provider: "openai-subscription", Models: models}}}, nil
+}
+
+// handleCatalogRefresh forces one discovery round and republishes the
+// retained catalog mailbox. The previous catalog is kept when discovery
+// fails, so a manual refresh can never blank the RoutesPanel pickers.
+func (p *Plugin) handleCatalogRefresh(frame busclient.Frame) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	_, err := p.catalogCache.Refresh(ctx)
+	if err == nil {
+		err = p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(context.Background()))
+	}
+	p.respond(frame, map[string]any{"catalog": p.catalog(context.Background())}, err)
 }
 
 func modelIDs(value map[string]any) []string {

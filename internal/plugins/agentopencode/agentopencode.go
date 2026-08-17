@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -23,9 +24,10 @@ const (
 )
 
 var Manifest = busclient.Manifest{
-	ID: PluginID, Version: "0.1.0",
+	ID: PluginID, Version: "0.2.0",
 	Slots: map[string]any{
 		PluginID + ":_:start": map[string]any{}, PluginID + ":_:prompt": map[string]any{}, PluginID + ":_:cancel": map[string]any{},
+		PluginID + ":_:catalog-refresh": map[string]any{},
 	},
 	Emits: map[string]any{
 		PluginID + ":_:event": map[string]any{}, PluginID + ":_:turn-ended": map[string]any{}, PluginID + ":_:catalog": map[string]any{},
@@ -41,19 +43,26 @@ type session struct {
 }
 
 type Plugin struct {
-	client   *busclient.Client
-	mu       sync.Mutex
-	sessions map[string]*session
-	wg       sync.WaitGroup
-	closed   bool
+	client       *busclient.Client
+	mu           sync.Mutex
+	sessions     map[string]*session
+	wg           sync.WaitGroup
+	closed       bool
+	catalogCache *agentdriver.CatalogCache
 }
 
-func New() *Plugin { return &Plugin{sessions: map[string]*session{}} }
+func New() *Plugin {
+	p := &Plugin{sessions: map[string]*session{}}
+	fallback := agentdriver.Catalog{Agent: "opencode", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{}}}}
+	p.catalogCache = agentdriver.NewCatalogCache(fallback, p.discoverCatalog)
+	return p
+}
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed), busclient.WithInstanceID("_"))
 	for channel, handler := range map[string]func(busclient.Frame){
 		PluginID + ":_:start": p.handleStart, PluginID + ":_:prompt": p.handlePrompt, PluginID + ":_:cancel": p.handleCancel,
+		PluginID + ":_:catalog-refresh": p.handleCatalogRefresh,
 	} {
 		if _, err := p.client.Subscribe(channel, func(frame busclient.Frame) { go handler(frame) }); err != nil {
 			return err
@@ -62,7 +71,15 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	if err := p.client.Connect(ctx); err != nil {
 		return err
 	}
-	return p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(ctx))
+	if err := p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(ctx)); err != nil {
+		return err
+	}
+	go p.catalogCache.StartOnce(context.Background(), func(agentdriver.Catalog) {
+		if err := p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(context.Background())); err != nil {
+			log.Printf("viewer-agent-opencode catalog publish failed: %v", err)
+		}
+	})
+	return nil
 }
 
 func (p *Plugin) handleStart(frame busclient.Frame) {
@@ -101,12 +118,24 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 	if sessionID != "" && client.LoadSession(initCtx, sessionID, request.CWD) == nil {
 		resumed = true
 	} else {
-		sessionID, err = client.NewSession(initCtx, request.CWD)
+		var info acp.SessionInfo
+		info, err = client.NewSession(initCtx, request.CWD)
+		sessionID = info.ID
 	}
 	if err != nil {
 		_ = client.Close()
 		p.respond(frame, nil, fmt.Errorf("start opencode session: %w", err))
 		return
+	}
+	// Enforce the routing profile's model choice over ACP: opencode validates
+	// the value server-side, so an unroutable selection fails the start instead
+	// of silently running the default model.
+	if value := opencodeModelValue(request.Target); value != "" {
+		if err = client.SetConfigOption(initCtx, sessionID, "model", value); err != nil {
+			_ = client.Close()
+			p.respond(frame, nil, fmt.Errorf("set opencode model %q: %w", value, err))
+			return
+		}
 	}
 	current := &session{client: client}
 	client.OnUpdate(func(update acp.Update) { p.handleUpdate(sessionID, current, update) })
@@ -158,7 +187,11 @@ func (p *Plugin) handlePrompt(frame busclient.Frame) {
 		} else if reason == "" {
 			reason = "end_turn"
 		}
-		_ = p.client.Publish(context.Background(), PluginID+":_:turn-ended", agentdriver.TurnEndedFrame{SessionID: request.SessionID, TurnID: request.TurnID, StopReason: reason})
+		payload := agentdriver.TurnEndedFrame{SessionID: request.SessionID, TurnID: request.TurnID, StopReason: reason}
+		if promptErr != nil {
+			payload.Error = promptErr.Error()
+		}
+		_ = p.client.Publish(context.Background(), PluginID+":_:turn-ended", payload)
 	}()
 	p.respond(frame, map[string]any{"accepted": true}, nil)
 	close(gate)
@@ -215,8 +248,24 @@ func (p *Plugin) newClient(ctx context.Context) (*acp.Client, error) {
 	return acp.New(ctx, command, strings.Fields(arguments)...)
 }
 
+// opencodeModelValue encodes the routing profile's provider+model using
+// opencode's "provider/model" selection syntax (session/set_config_option
+// configId "model"). An empty or "default" provider means "keep the agent's
+// own default model", i.e. no enforcement.
+func opencodeModelValue(target agentdriver.Target) string {
+	model := strings.TrimSpace(target.Model)
+	if model == "" {
+		return ""
+	}
+	provider := strings.TrimSpace(target.Provider)
+	if provider == "" || provider == "default" {
+		return ""
+	}
+	return provider + "/" + model
+}
+
 func (p *Plugin) catalog(ctx context.Context) agentdriver.Catalog {
-	result := agentdriver.Catalog{Agent: "opencode", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{}}}}
+	result := p.catalogCache.Current()
 	var override agentdriver.Catalog
 	value, err := p.client.Request(ctx, "config:_:get", map[string]any{"plugin": configNamespace, "key": "catalog"}, 5*time.Second)
 	if err == nil && decode(value, &override) == nil && override.Agent != "" {
@@ -226,6 +275,66 @@ func (p *Plugin) catalog(ctx context.Context) agentdriver.Catalog {
 		result.Providers = []agentdriver.ProviderCatalog{}
 	}
 	return result
+}
+
+// discoverCatalog enumerates providers/models over ACP: opencode does not
+// implement SessionModelState, but session/new returns configOptions whose
+// select-typed "model" option lists every configured "provider/model" choice
+// (values validated server-side by session/set_config_option). The discovery
+// session is closed immediately; no prompt is ever sent.
+func (p *Plugin) discoverCatalog(ctx context.Context) (agentdriver.Catalog, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client, err := p.newClient(ctx)
+	if err != nil {
+		return agentdriver.Catalog{}, err
+	}
+	defer func() { _ = client.Close() }()
+	if _, err = client.Initialize(ctx); err != nil {
+		return agentdriver.Catalog{}, fmt.Errorf("initialize opencode: %w", err)
+	}
+	cwd, err := os.UserHomeDir()
+	if err != nil || cwd == "" {
+		cwd = "/"
+	}
+	info, err := client.NewSession(ctx, cwd)
+	if err != nil {
+		return agentdriver.Catalog{}, fmt.Errorf("opencode session/new: %w", err)
+	}
+	providers := agentdriver.GroupModelIDs(modelOptionValues(info.ConfigOptions), "/")
+	if len(providers) == 0 {
+		return agentdriver.Catalog{}, errors.New("opencode ACP session/new returned no model options")
+	}
+	return agentdriver.Catalog{Agent: "opencode", Providers: providers}, nil
+}
+
+// modelOptionValues extracts the choices of the ACP config option carrying
+// opencode's model picker (select-typed, id "model").
+func modelOptionValues(options []acp.ConfigOption) []string {
+	for _, option := range options {
+		if option.ID != "model" {
+			continue
+		}
+		values := make([]string, 0, len(option.Options))
+		for _, choice := range option.Options {
+			values = append(values, choice.Value)
+		}
+		return values
+	}
+	return nil
+}
+
+// handleCatalogRefresh forces one discovery round and republishes the
+// retained catalog mailbox. The previous catalog is kept when discovery
+// fails, so a manual refresh can never blank the RoutesPanel pickers.
+func (p *Plugin) handleCatalogRefresh(frame busclient.Frame) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	_, err := p.catalogCache.Refresh(ctx)
+	if err == nil {
+		err = p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(context.Background()))
+	}
+	p.respond(frame, map[string]any{"catalog": p.catalog(context.Background())}, err)
 }
 
 func decodeFrame(frame busclient.Frame, target any) error { return decode(frame.Value, target) }

@@ -78,13 +78,16 @@ func TestCodexBusContractWithMockServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer caller.Close()
-	select {
-	case catalog := <-catalogs:
-		if catalog.Agent != "codex" || len(catalog.Providers) != 1 || len(catalog.Providers[0].Models) != 2 {
-			t.Fatalf("catalog=%#v", catalog)
+	// The boot fallback catalog (empty models) may arrive first; wait for the
+	// background discovery refresh to republish the catalog with models.
+	catalogOK := false
+	for !catalogOK {
+		select {
+		case catalog := <-catalogs:
+			catalogOK = catalog.Agent == "codex" && len(catalog.Providers) == 1 && len(catalog.Providers[0].Models) == 2
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
 		}
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
 	}
 
 	startedValue, err := caller.Request(ctx, agentcodex.PluginID+":_:start", map[string]any{"cwd": t.TempDir(), "target": agentdriver.Target{Agent: "codex-app-server", Provider: "openai-subscription", Model: "gpt-test", Parameters: map[string]any{}}})

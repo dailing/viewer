@@ -32,6 +32,43 @@ type RPCError struct {
 
 func (e *RPCError) Error() string { return fmt.Sprintf("ACP RPC error %d: %s", e.Code, e.Message) }
 
+// ModelChoice is one entry of the ACP SessionModelState availableModels array.
+// hermes encodes modelId as "provider:model"; the same string is accepted by
+// session/set_model, so discovery and enforcement share one identifier.
+type ModelChoice struct {
+	ID          string `json:"modelId"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// ConfigOptionChoice is one selectable value of an ACP session config option.
+type ConfigOptionChoice struct {
+	Name        string `json:"name"`
+	Value       string `json:"value"`
+	Description string `json:"description"`
+}
+
+// ConfigOption is one ACP session config option. opencode (which does not
+// implement SessionModelState) exposes its model picker this way: a
+// select-typed option with id "model" whose choice values are "provider/model".
+type ConfigOption struct {
+	ID           string               `json:"id"`
+	Category     string               `json:"category"`
+	Name         string               `json:"name"`
+	Type         string               `json:"type"`
+	CurrentValue string               `json:"currentValue"`
+	Options      []ConfigOptionChoice `json:"options"`
+}
+
+// SessionInfo is the parsed result of session/new. Agents that predate the
+// models/configOptions protocol extensions simply leave the slices empty.
+type SessionInfo struct {
+	ID            string
+	Models        []ModelChoice
+	CurrentModel  string
+	ConfigOptions []ConfigOption
+}
+
 type response struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -128,29 +165,64 @@ func (c *Client) Initialize(ctx context.Context) (map[string]any, error) {
 }
 
 // NewSession creates an agent session rooted at cwd.
-func (c *Client) NewSession(ctx context.Context, cwd string) (string, error) {
+// hermes v0.20.0 made `mcpServers` a required field of session/new: the agent's
+// pydantic schema rejects a request without it (-32602 Invalid params). Viewer
+// never wires MCP servers into agent sessions, so an empty array satisfies the
+// schema while keeping the session server-free.
+func (c *Client) NewSession(ctx context.Context, cwd string) (SessionInfo, error) {
 	var result struct {
 		SessionID string `json:"sessionId"`
+		Models    *struct {
+			AvailableModels []ModelChoice `json:"availableModels"`
+			CurrentModelID  string        `json:"currentModelId"`
+		} `json:"models"`
+		ConfigOptions []ConfigOption `json:"configOptions"`
 	}
-	if err := c.request(ctx, "session/new", map[string]any{"cwd": cwd}, &result); err != nil {
-		return "", err
+	if err := c.request(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}}, &result); err != nil {
+		return SessionInfo{}, err
 	}
 	if result.SessionID == "" {
-		return "", errors.New("ACP session/new returned no sessionId")
+		return SessionInfo{}, errors.New("ACP session/new returned no sessionId")
 	}
-	return result.SessionID, nil
+	info := SessionInfo{ID: result.SessionID, ConfigOptions: result.ConfigOptions}
+	if result.Models != nil {
+		info.Models = result.Models.AvailableModels
+		info.CurrentModel = result.Models.CurrentModelID
+	}
+	return info, nil
 }
 
 // LoadSession binds a persisted provider session to this new transport.
+// Same required-field rule as session/new: `mcpServers` must be present (can
+// be empty) or hermes v0.20.0+ rejects the call with -32602.
 func (c *Client) LoadSession(ctx context.Context, sessionID, cwd string) error {
 	var result any
-	if err := c.request(ctx, "session/load", map[string]any{"sessionId": sessionID, "cwd": cwd}, &result); err != nil {
+	if err := c.request(ctx, "session/load", map[string]any{"sessionId": sessionID, "cwd": cwd, "mcpServers": []any{}}, &result); err != nil {
 		return err
 	}
 	if result == nil {
 		return errors.New("ACP session/load returned null")
 	}
 	return nil
+}
+
+// SetSessionModel switches the session to the given model selection. hermes
+// resolves "provider:model" via parse_model_input, so one call sets both the
+// provider and the model for the session (acp_adapter.set_session_model
+// rebuilds the agent with the requested provider). This is how viewerd
+// enforces the routing profile's provider/model choice on the hermes side —
+// CLI flags alone do not reach the ACP runtime model selection.
+func (c *Client) SetSessionModel(ctx context.Context, sessionID, modelID string) error {
+	var result any
+	return c.request(ctx, "session/set_model", map[string]any{"sessionId": sessionID, "modelId": modelID}, &result)
+}
+
+// SetConfigOption sets one session config option. opencode routes model
+// selection through this RPC (configId "model", value "provider/model") and
+// validates the value server-side, rejecting unknown models with -32602.
+func (c *Client) SetConfigOption(ctx context.Context, sessionID, configID, value string) error {
+	var result any
+	return c.request(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": configID, "value": value}, &result)
 }
 
 // Prompt sends one text-only turn and returns its stop reason.
@@ -262,7 +334,7 @@ func (c *Client) dispatch(line []byte) {
 	if json.Unmarshal(line, &envelope) != nil || envelope.JSONRPC != "2.0" {
 		return // malformed/foreign stdout is tolerated; later valid frames still work
 	}
-	if len(envelope.ID) > 0 && string(envelope.ID) != "null" {
+	if len(envelope.ID) > 0 && string(envelope.ID) != "null" && envelope.Method == "" {
 		var item response
 		if json.Unmarshal(line, &item) != nil {
 			return
@@ -281,6 +353,14 @@ func (c *Client) dispatch(line []byte) {
 		}
 		return
 	}
+	// Incoming request from the agent (method + id). Viewer auto-approves every
+	// permission request and rejects anything else it does not implement, so an
+	// agent asking session/request_permission never stalls the turn waiting for
+	// a human answer that has no UI in Viewer.
+	if len(envelope.ID) > 0 && string(envelope.ID) != "null" && envelope.Method != "" {
+		c.answerAgentRequest(envelope.ID, envelope.Method, envelope.Params)
+		return
+	}
 	if envelope.Method != "session/update" {
 		return
 	}
@@ -297,6 +377,60 @@ func (c *Client) dispatch(line []byte) {
 	if callback != nil {
 		callback(Update{SessionID: params.SessionID, Value: params.Update, Raw: append(json.RawMessage(nil), envelope.Params...)})
 	}
+}
+
+// answerAgentRequest replies to a request the agent sent to the client.
+// session/request_permission is always approved (Viewer has no approval UI and
+// the user policy is to allow everything); any other agent→client request gets
+// a JSON-RPC method-not-found error so the agent unblocks immediately instead
+// of waiting out its own timeout.
+func (c *Client) answerAgentRequest(id json.RawMessage, method string, params json.RawMessage) {
+	var result any
+	var rpcErr *RPCError
+	if method == "session/request_permission" {
+		result = map[string]any{"outcome": map[string]any{
+			"outcome":  "selected",
+			"optionId": pickAllowOption(params),
+		}}
+	} else {
+		rpcErr = &RPCError{Code: -32601, Message: "viewer-chat does not implement " + method}
+	}
+	frame := map[string]any{"jsonrpc": "2.0", "id": id}
+	if rpcErr != nil {
+		frame["error"] = map[string]any{"code": rpcErr.Code, "message": rpcErr.Message}
+	} else {
+		frame["result"] = result
+	}
+	_ = c.write(context.Background(), frame)
+}
+
+// pickAllowOption chooses the strongest allow option offered by a
+// session/request_permission call: allow_always when present, otherwise the
+// first option whose kind starts with "allow", otherwise the first option.
+// With no usable options it returns the conventional "allow_once" id.
+func pickAllowOption(params json.RawMessage) string {
+	var parsed struct {
+		Options []struct {
+			OptionID string `json:"optionId"`
+			Kind     string `json:"kind"`
+		} `json:"options"`
+	}
+	if json.Unmarshal(params, &parsed) != nil || len(parsed.Options) == 0 {
+		return "allow_once"
+	}
+	fallback := ""
+	for _, option := range parsed.Options {
+		if option.OptionID == "allow_always" {
+			return option.OptionID
+		}
+		if fallback == "" && strings.HasPrefix(option.Kind, "allow") {
+			fallback = option.OptionID
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return parsed.Options[0].OptionID
 }
 
 func (c *Client) fail(err error) {

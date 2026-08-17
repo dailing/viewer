@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,9 +26,10 @@ const (
 )
 
 var Manifest = busclient.Manifest{
-	ID: PluginID, Version: "0.1.0",
+	ID: PluginID, Version: "0.2.0",
 	Slots: map[string]any{
 		PluginID + ":_:start": map[string]any{}, PluginID + ":_:prompt": map[string]any{}, PluginID + ":_:cancel": map[string]any{},
+		PluginID + ":_:catalog-refresh": map[string]any{},
 	},
 	Emits: map[string]any{
 		PluginID + ":_:event": map[string]any{}, PluginID + ":_:turn-ended": map[string]any{}, PluginID + ":_:catalog": map[string]any{},
@@ -43,21 +45,28 @@ type session struct {
 }
 
 type Plugin struct {
-	client   *busclient.Client
-	mu       sync.Mutex
-	sessions map[string]*session
-	wg       sync.WaitGroup
-	closed   bool
+	client       *busclient.Client
+	mu           sync.Mutex
+	sessions     map[string]*session
+	wg           sync.WaitGroup
+	closed       bool
+	catalogCache *agentdriver.CatalogCache
 }
 
-func New() *Plugin { return &Plugin{sessions: map[string]*session{}} }
+func New() *Plugin {
+	p := &Plugin{sessions: map[string]*session{}}
+	// The static catalog (parsed from ~/.hermes/config.yaml) is published
+	// immediately at boot; the cache replaces it with the ACP-discovered one
+	// as soon as the first refresh round succeeds.
+	p.catalogCache = agentdriver.NewCatalogCache(discoverConfigCatalog(), p.discoverCatalog)
+	return p
+}
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed), busclient.WithInstanceID("_"))
 	for channel, handler := range map[string]func(busclient.Frame){
-		PluginID + ":_:start":  p.handleStart,
-		PluginID + ":_:prompt": p.handlePrompt,
-		PluginID + ":_:cancel": p.handleCancel,
+		PluginID + ":_:start": p.handleStart, PluginID + ":_:prompt": p.handlePrompt, PluginID + ":_:cancel": p.handleCancel,
+		PluginID + ":_:catalog-refresh": p.handleCatalogRefresh,
 	} {
 		if _, err := p.client.Subscribe(channel, func(frame busclient.Frame) { go handler(frame) }); err != nil {
 			return err
@@ -66,7 +75,15 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	if err := p.client.Connect(ctx); err != nil {
 		return err
 	}
-	return p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(ctx))
+	if err := p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(ctx)); err != nil {
+		return err
+	}
+	go p.catalogCache.StartOnce(context.Background(), func(agentdriver.Catalog) {
+		if err := p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(context.Background())); err != nil {
+			log.Printf("viewer-agent-hermes catalog publish failed: %v", err)
+		}
+	})
+	return nil
 }
 
 func (p *Plugin) handleStart(frame busclient.Frame) {
@@ -89,7 +106,7 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 		p.respond(frame, map[string]any{"session_id": request.SessionID, "resumed": true}, nil)
 		return
 	}
-	client, err := p.newClient(context.Background(), request.Target.Parameters)
+	client, err := p.newClient(context.Background(), request.Target)
 	if err != nil {
 		p.respond(frame, nil, err)
 		return
@@ -105,12 +122,24 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 	if sessionID != "" && client.LoadSession(initCtx, sessionID, request.CWD) == nil {
 		resumed = true
 	} else {
-		sessionID, err = client.NewSession(initCtx, request.CWD)
+		var info acp.SessionInfo
+		info, err = client.NewSession(initCtx, request.CWD)
+		sessionID = info.ID
 	}
 	if err != nil {
 		_ = client.Close()
 		p.respond(frame, nil, fmt.Errorf("start hermes session: %w", err))
 		return
+	}
+	// Enforce the routing profile's provider/model on the hermes session via
+	// ACP session/set_model. Failure here must fail the start so the
+	// dispatcher freezes this candidate and fails over to the next one.
+	if modelID := acpModelID(request.Target); modelID != "" {
+		if err = client.SetSessionModel(initCtx, sessionID, modelID); err != nil {
+			_ = client.Close()
+			p.respond(frame, nil, fmt.Errorf("set hermes session model %q: %w", modelID, err))
+			return
+		}
 	}
 	current := &session{client: client}
 	client.OnUpdate(func(update acp.Update) { p.handleUpdate(sessionID, current, update) })
@@ -162,7 +191,11 @@ func (p *Plugin) handlePrompt(frame busclient.Frame) {
 		} else if reason == "" {
 			reason = "end_turn"
 		}
-		_ = p.client.Publish(context.Background(), PluginID+":_:turn-ended", agentdriver.TurnEndedFrame{SessionID: request.SessionID, TurnID: request.TurnID, StopReason: reason})
+		payload := agentdriver.TurnEndedFrame{SessionID: request.SessionID, TurnID: request.TurnID, StopReason: reason}
+		if promptErr != nil {
+			payload.Error = promptErr.Error()
+		}
+		_ = p.client.Publish(context.Background(), PluginID+":_:turn-ended", payload)
 	}()
 	p.respond(frame, map[string]any{"accepted": true}, nil)
 	close(gate)
@@ -207,7 +240,22 @@ func (p *Plugin) handleUpdate(sessionID string, current *session, update acp.Upd
 	_ = p.client.Publish(context.Background(), PluginID+":_:event", frame)
 }
 
-func (p *Plugin) newClient(ctx context.Context, parameters map[string]any) (*acp.Client, error) {
+// acpModelID encodes the routing profile's provider+model using hermes'
+// "provider:model" selection syntax (parse_model_input). A bare model is
+// valid too — hermes then keeps the provider from the CLI --provider flag.
+func acpModelID(target agentdriver.Target) string {
+	model := strings.TrimSpace(target.Model)
+	if model == "" {
+		return ""
+	}
+	provider := strings.TrimSpace(target.Provider)
+	if provider == "" {
+		return model
+	}
+	return provider + ":" + model
+}
+
+func (p *Plugin) newClient(ctx context.Context, target agentdriver.Target) (*acp.Client, error) {
 	command := strings.TrimSpace(os.Getenv("VIEWER_HERMES_COMMAND"))
 	if command == "" {
 		command = "hermes"
@@ -217,22 +265,35 @@ func (p *Plugin) newClient(ctx context.Context, parameters map[string]any) (*acp
 		profile = "default"
 	}
 	yolo := envBool("VIEWER_HERMES_YOLO", true)
-	if value, ok := parameters["profile"].(string); ok && strings.TrimSpace(value) != "" {
+	if value, ok := target.Parameters["profile"].(string); ok && strings.TrimSpace(value) != "" {
 		profile = strings.TrimSpace(value)
 	}
-	if value, ok := parameters["yolo"].(bool); ok {
+	if value, ok := target.Parameters["yolo"].(bool); ok {
 		yolo = value
 	}
+	// The routing profile is a project concept (agent-provider-model priority
+	// list); the chosen provider/model must be passed to hermes explicitly.
+	// Without this, hermes falls back to its own config default (kimi-coding/k3)
+	// and the project's cheap profile (hermes/deepseek/deepseek-v4-flash) would
+	// silently hit the wrong LLM.
+	provider := strings.TrimSpace(target.Provider)
+	model := strings.TrimSpace(target.Model)
 	args := []string{"-p", profile}
 	if yolo {
 		args = append(args, "--yolo")
+	}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	if model != "" {
+		args = append(args, "-m", model)
 	}
 	args = append(args, "acp")
 	return acp.New(ctx, command, args...)
 }
 
 func (p *Plugin) catalog(ctx context.Context) agentdriver.Catalog {
-	result := discoverCatalog()
+	result := p.catalogCache.Current()
 	var override agentdriver.Catalog
 	value, err := p.client.Request(ctx, "config:_:get", map[string]any{"plugin": configNamespace, "key": "catalog"}, 5*time.Second)
 	if err == nil && decode(value, &override) == nil && override.Agent != "" {
@@ -244,7 +305,59 @@ func (p *Plugin) catalog(ctx context.Context) agentdriver.Catalog {
 	return result
 }
 
-func discoverCatalog() agentdriver.Catalog {
+// discoverCatalog enumerates providers/models over ACP: hermes returns a
+// SessionModelState in session/new whose availableModels entries are
+// "provider:model" identifiers — the same strings session/set_model accepts,
+// so routing selections discovered here round-trip into enforcement. Only
+// authenticated providers appear, i.e. the list reflects what can actually
+// run. The discovery session is closed immediately; no prompt is ever sent.
+func (p *Plugin) discoverCatalog(ctx context.Context) (agentdriver.Catalog, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client, err := p.newClient(ctx, agentdriver.Target{Agent: "hermes"})
+	if err != nil {
+		return agentdriver.Catalog{}, err
+	}
+	defer func() { _ = client.Close() }()
+	if _, err = client.Initialize(ctx); err != nil {
+		return agentdriver.Catalog{}, fmt.Errorf("initialize hermes: %w", err)
+	}
+	cwd, err := os.UserHomeDir()
+	if err != nil || cwd == "" {
+		cwd = "/"
+	}
+	info, err := client.NewSession(ctx, cwd)
+	if err != nil {
+		return agentdriver.Catalog{}, fmt.Errorf("hermes session/new: %w", err)
+	}
+	ids := make([]string, 0, len(info.Models))
+	for _, choice := range info.Models {
+		ids = append(ids, choice.ID)
+	}
+	providers := agentdriver.GroupModelIDs(ids, ":")
+	if len(providers) == 0 {
+		return agentdriver.Catalog{}, errors.New("hermes ACP session/new returned no models")
+	}
+	return agentdriver.Catalog{Agent: "hermes", Providers: providers}, nil
+}
+
+// handleCatalogRefresh forces one discovery round and republishes the
+// retained catalog mailbox. The previous catalog is kept when discovery
+// fails, so a manual refresh can never blank the RoutesPanel pickers.
+func (p *Plugin) handleCatalogRefresh(frame busclient.Frame) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	_, err := p.catalogCache.Refresh(ctx)
+	if err == nil {
+		err = p.client.Set(context.Background(), PluginID+":_:catalog", p.catalog(context.Background()))
+	}
+	p.respond(frame, map[string]any{"catalog": p.catalog(context.Background())}, err)
+}
+
+// discoverConfigCatalog is the static boot-time fallback: provider names and
+// the default model parsed from ~/.hermes/config.yaml. The ACP discovery path
+// (Plugin.discoverCatalog) replaces it with real per-provider model lists.
+func discoverConfigCatalog() agentdriver.Catalog {
 	fallback := agentdriver.Catalog{Agent: "hermes", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{}}}}
 	home, err := os.UserHomeDir()
 	if err != nil {

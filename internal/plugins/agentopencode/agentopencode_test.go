@@ -161,3 +161,64 @@ func TestOpenCodeBusContractWithMockACP(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 }
+
+// TestOpenCodeStartEnforcesModel covers the routing-profile model enforcement
+// added alongside ACP catalog discovery: a valid "provider/model" selection is
+// applied via session/set_config_option, while a bogus model fails the start
+// with the agent's server-side validation error instead of silently running
+// the default model.
+func TestOpenCodeStartEnforcesModel(t *testing.T) {
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+
+	configClient := busclient.New(url, busclient.Manifest{ID: "agentopencode-model-test-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	if _, err := configClient.Subscribe("config:_:get", func(frame busclient.Frame) { _ = pluginrpc.Respond(configClient, frame, nil) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	mock, err := filepath.Abs("../../../scripts/mock_opencode_agent.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIEWER_OPENCODE_COMMAND", mock)
+	t.Setenv("VIEWER_OPENCODE_ARGS", "acp --mock")
+	plugin := agentopencode.New()
+	if err := plugin.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer plugin.Close()
+
+	caller := busclient.New(url, busclient.Manifest{ID: "agentopencode-model-test-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+
+	startedValue, err := caller.Request(ctx, agentopencode.PluginID+":_:start", map[string]any{"cwd": t.TempDir(), "target": agentdriver.Target{Agent: "opencode", Provider: "mockzen", Model: "model-b", Parameters: map[string]any{}}})
+	if err != nil {
+		t.Fatalf("valid model selection must start: %v", err)
+	}
+	var started struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := decode(startedValue, &started); err != nil || started.SessionID == "" {
+		t.Fatalf("started=%#v err=%v", started, err)
+	}
+
+	_, err = caller.Request(ctx, agentopencode.PluginID+":_:start", map[string]any{"cwd": t.TempDir(), "target": agentdriver.Target{Agent: "opencode", Provider: "mockzen", Model: "no-such-model", Parameters: map[string]any{}}})
+	if err == nil || !strings.Contains(err.Error(), "model not found") {
+		t.Fatalf("bogus model must fail the start with the agent validation error: err=%v", err)
+	}
+}

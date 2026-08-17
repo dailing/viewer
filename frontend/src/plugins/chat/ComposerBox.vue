@@ -7,13 +7,11 @@ const props = defineProps<{
   selectedRoleIds: string[];
   roles: Role[];
   contextId: string;
-  hasActiveRoles: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:selectedRoleIds": [value: string[]];
   send: [value: string, forceNewSession: boolean];
-  stop: [];
 }>();
 
 // The draft text lives inside the composer (not the pane), so keystrokes only
@@ -188,9 +186,6 @@ function handlePickerFocusOut(event: FocusEvent): void {
         </button>
       </div>
       <div class="composer-actions-trailing">
-        <button v-if="hasActiveRoles" class="btn btn-sm btn-outline-danger action-button" type="button" title="Stop active turn" aria-label="Stop active turn" @click="emit('stop')">
-          <i class="bi bi-stop-fill" />
-        </button>
         <button class="btn btn-sm btn-outline-secondary action-button" type="button" title="Clear text" aria-label="Clear text" :disabled="draft === ''" @click="clearText">
           <i class="bi bi-eraser" />
         </button>

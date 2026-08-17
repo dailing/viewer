@@ -12,7 +12,6 @@
 import { computed, inject, nextTick, onMounted, ref, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
-import { useLayoutStore } from "../../stores/layout";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
@@ -23,7 +22,6 @@ import { errorText } from "./types";
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("ChatPane requires PluginPaneHost");
 const ctx: PluginCtx = injectedCtx;
-const layout = useLayoutStore();
 const chatSettings = useChatSettingsStore();
 
 const messages = ref<ChatMessage[]>([]);
@@ -170,13 +168,15 @@ function resolvePendingTurn(roleId: string | undefined): void {
   pendingTurns.value = next;
 }
 
-/** Role's configured execution target: agent / provider / model (first enabled candidate). */
+/** Role's configured execution target: agent / provider / model (first enabled candidate).
+ *  Honors chat-level routing override before falling back to the role's own
+ *  policy and then the workspace default. */
 function roleTargetLabel(roleId: string): string {
   const ws = workspace.value;
   if (!ws || !roleId) return "";
   const role = ws.roles.find((item) => item.id === roleId);
   if (!role) return "";
-  const policyId = role.routing_policy_id || ws.default_routing_policy_id;
+  const policyId = chat.value?.role_routing_policy_overrides?.[roleId] || role.routing_policy_id || ws.default_routing_policy_id;
   const policy = ws.routing_policies.find((item) => item.id === policyId);
   const candidate = policy?.candidates.find((item) => item.enabled);
   if (!candidate) return "";
@@ -307,18 +307,8 @@ function hydrate(entry: ChatCacheEntry): void {
 }
 
 function setChrome(): void {
-  ctx.setChrome({
-    title: chat.value?.name ?? "Chat",
-    actions: [
-      { id: "chat-virtual-space", title: "阅读留白（消息末尾留一屏空白）", icon: "bi-distribute-vertical", active: chatSettings.virtualSpace, run: () => { chatSettings.toggleVirtualSpace(); } },
-      { id: "chat-style", title: "消息样式（在设置页中编辑）", icon: "bi-palette", run: () => layout.openInstance("settings", "main") },
-      { id: "chat-config", title: "聊天管理", icon: "bi-sliders", run: () => layout.openInstance("chat-manager", "main") },
-    ],
-  });
+  ctx.setChrome({ title: chat.value?.name ?? "Chat" });
 }
-
-// Keep every open chat pane's toggle state in sync with the store.
-watch(() => chatSettings.virtualSpace, () => setChrome());
 
 /** Assign scrollTop and remember the timestamp so the resulting scroll event
  *  is not mistaken for manual user scrolling. */
@@ -556,12 +546,19 @@ async function send(text: string, forceNewSession = false): Promise<void> {
   }
 }
 
-async function stop(): Promise<void> {
+async function stop(roleId?: string): Promise<void> {
   try {
-    await ctx.bus.request("chat:_:stop", { chat_id: ctx.instanceId });
+    const payload: Record<string, unknown> = { chat_id: ctx.instanceId };
+    if (roleId) payload.role_id = roleId;
+    await ctx.bus.request("chat:_:stop", payload);
   } catch (cause) {
     error.value = errorText(cause);
   }
+}
+
+function confirmStop(roleId: string, roleName: string): void {
+  if (!confirm(`确认停止 ${roleName} 的当前回复？`)) return;
+  void stop(roleId);
 }
 
 onMounted(() => {
@@ -623,6 +620,16 @@ onMounted(() => {
             <span v-if="turnActive(box)" class="chat-turn-status">
               <span class="spinner-border spinner-border-sm" aria-hidden="true" /> running
             </span>
+            <button
+              v-if="turnActive(box)"
+              class="btn btn-sm btn-link chat-stop-turn"
+              type="button"
+              title="停止当前回复"
+              :aria-label="`停止 ${box.label} 的当前回复`"
+              @click="confirmStop(box.roleId, box.label)"
+            >
+              <i class="bi bi-stop-fill" />
+            </button>
             <span v-if="box.kind === 'role' && roleTargetLabel(box.roleId)" class="chat-meta-detail">{{ roleTargetLabel(box.roleId) }}</span>
             <span v-if="box.kind === 'role' && usageLabel(box)" class="chat-meta-detail" :title="usageTitle(box)">{{ usageLabel(box) }}</span>
             <span class="chat-time">{{ formatTime(box.ts) }}</span>
@@ -671,9 +678,7 @@ onMounted(() => {
         v-model:selected-role-ids="selected"
         :roles="members"
         :context-id="'chat:' + ctx.instanceId"
-        :has-active-roles="activeRoles.size > 0"
         @send="send"
-        @stop="stop"
       />
     </div>
   </section>
@@ -739,6 +744,18 @@ onMounted(() => {
 .chat-turn-status .spinner-border {
   height: 10px;
   width: 10px;
+}
+
+.chat-stop-turn {
+  color: var(--bs-danger);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  text-decoration: none;
+}
+
+.chat-stop-turn:hover {
+  color: var(--bs-danger-text-emphasis, var(--bs-danger));
 }
 
 .chat-time {

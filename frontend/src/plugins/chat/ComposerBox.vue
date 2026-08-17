@@ -12,7 +12,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:selectedRoleIds": [value: string[]];
-  send: [value: string];
+  send: [value: string, forceNewSession: boolean];
   stop: [];
 }>();
 
@@ -20,6 +20,11 @@ const emit = defineEmits<{
 // re-render this small component instead of the whole timeline. `send` carries
 // the final text up.
 const draft = ref("");
+
+// One-shot new-session toggle: when armed, the next send carries
+// force_new_session=true (each selected role starts a fresh agent session
+// instead of resuming the stored one) and the toggle resets itself.
+const forceNewSession = ref(false);
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
 const selectedRoles = computed(() => {
@@ -56,6 +61,20 @@ function resizeTextarea(): void {
 
 function clearText(): void {
   if (draft.value === "") return;
+  draft.value = "";
+  void nextTick(() => textarea.value?.focus());
+}
+
+// Send takes a snapshot of the draft, clears the box, and refocuses it.
+// Clearing after send prevents duplicate sends: the previous code emitted the
+// raw `draft` ref from both send paths and never reset it, so the message
+// stayed in the box and a second click re-sent it (chat 9475ce5db012 has 3
+// identical user rows from that). Empty/whitespace input is a no-op.
+function handleSend(): void {
+  const text = draft.value;
+  if (text.trim() === "") return;
+  emit("send", text, forceNewSession.value);
+  forceNewSession.value = false;
   draft.value = "";
   void nextTick(() => textarea.value?.focus());
 }
@@ -110,7 +129,7 @@ function handlePickerFocusOut(event: FocusEvent): void {
       rows="2"
       placeholder="Message"
       @input="resizeTextarea"
-      @keydown.ctrl.enter.prevent="emit('send', draft)"
+      @keydown.ctrl.enter.prevent="handleSend"
     />
     <div class="composer-actions">
       <div class="composer-actions-main">
@@ -153,7 +172,18 @@ function handlePickerFocusOut(event: FocusEvent): void {
             </button>
           </div>
         </details>
-        <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="emit('send', draft)">
+        <button
+          class="btn btn-sm btn-outline-secondary action-button"
+          :class="{ active: forceNewSession }"
+          type="button"
+          :title="forceNewSession ? 'New session armed: next send starts a fresh agent session' : 'Start new session on next send (one-shot)'"
+          :aria-pressed="forceNewSession"
+          aria-label="Start new session on next send"
+          @click="forceNewSession = !forceNewSession"
+        >
+          <i class="bi" :class="forceNewSession ? 'bi-plus-square-fill' : 'bi-plus-square'" />
+        </button>
+        <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="handleSend">
           <i class="bi bi-send" />
         </button>
       </div>
@@ -239,6 +269,11 @@ function handlePickerFocusOut(event: FocusEvent): void {
   min-width: 0;
   padding: 0;
   width: 32px;
+}
+
+.action-button.active {
+  background: var(--color-surface-selected, var(--bs-secondary-bg));
+  color: var(--bs-body-color);
 }
 
 .composer-actions :deep(.bi) {

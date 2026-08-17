@@ -73,11 +73,21 @@ function collectPanes(node: LayoutNode, into: PaneNode[]): PaneNode[] {
 const RATIO_MIN = 0.15;
 const RATIO_MAX = 0.85;
 
+/** How openInstance places new content: split a fresh pane, or replace the active pane's content. */
+export type OpenMode = "new" | "replace";
+
+const OPEN_MODE_STORAGE_KEY = "viewer.layout.openMode.v1";
+
+function readOpenMode(): OpenMode {
+  return localStorage.getItem(OPEN_MODE_STORAGE_KEY) === "replace" ? "replace" : "new";
+}
+
 export const useLayoutStore = defineStore("layout", {
   state: () => ({
     root: { type: "pane", id: "p1", content: null, epoch: 0 } as LayoutNode,
     activePaneId: "p1",
     nextId: 2,
+    openMode: readOpenMode() as OpenMode,
   }),
   getters: {
     panes(state): PaneNode[] {
@@ -97,7 +107,11 @@ export const useLayoutStore = defineStore("layout", {
     isUidOpen(uid: string): boolean {
       return this.panes.some((pane) => pane.content !== null && contentUid(pane.content) === uid);
     },
-    /** Focus an open instance, reuse an empty pane, or split without replacing content. */
+    /**
+     * Focus an open instance, reuse an empty pane, or place new content:
+     * "new" mode splits without replacing content; "replace" mode swaps the
+     * active pane's content in place (mobile-friendly single-pane flow).
+     */
     openInstance(paneType: string, instanceId: string): void {
       const uid = `${paneType}:${instanceId}`;
       const existing = this.panes.find(
@@ -112,13 +126,17 @@ export const useLayoutStore = defineStore("layout", {
         const empty = this.panes.find((pane) => pane.content === null);
         if (empty !== undefined) {
           target = empty;
-        } else {
+        } else if (this.openMode !== "replace") {
           this.splitPane(target.id, "vertical");
           target = this.activePane;
         }
       }
       target.content = { paneType, instanceId };
       this.activePaneId = target.id;
+    },
+    setOpenMode(mode: OpenMode): void {
+      this.openMode = mode;
+      localStorage.setItem(OPEN_MODE_STORAGE_KEY, mode);
     },
     setActivePane(paneId: string): void {
       this.activePaneId = paneId;

@@ -142,9 +142,13 @@ function endDrag(): void {
 }
 
 async function load(): Promise<void> {
+  // agent-catalog-refresh (not the plain agent-catalog read): opening this
+  // panel re-runs protocol discovery in every agent plugin so provider/model
+  // lists always reflect the live agents. Discovery spawns each agent, so the
+  // request takes a few seconds.
   const [routing, loadedCatalogs] = await Promise.all([
     ctx.bus.request("chat:_:routing:get", {}) as Promise<RoutingConfig>,
-    ctx.bus.request("chat:_:agent-catalog", {}) as Promise<AgentCatalog[]>,
+    ctx.bus.request("chat:_:agent-catalog-refresh", {}) as Promise<AgentCatalog[]>,
   ]);
   catalogs.value = loadedCatalogs;
   state.default_routing_policy_id = routing.default_routing_policy_id;

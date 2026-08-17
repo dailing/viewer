@@ -28,9 +28,13 @@ watch(() => target.agent, () => syncTarget(true));
 watch(() => target.provider, () => { if (target.model && !modelOptions.value.includes(target.model)) target.model = modelOptions.value[0] ?? ""; });
 
 async function load(): Promise<void> {
+  // agent-catalog-refresh (not the plain agent-catalog read): opening this
+  // panel re-runs protocol discovery in every agent plugin so provider/model
+  // lists always reflect the live agents. Discovery spawns each agent, so the
+  // request takes a few seconds.
   const [loadedRoles, loadedCatalogs, loadedRouting] = await Promise.all([
     ctx.bus.request("chat:_:roles:list", {}) as Promise<Role[]>,
-    ctx.bus.request("chat:_:agent-catalog", {}) as Promise<AgentCatalog[]>,
+    ctx.bus.request("chat:_:agent-catalog-refresh", {}) as Promise<AgentCatalog[]>,
     ctx.bus.request("chat:_:routing:get", {}) as Promise<RoutingConfig>,
   ]);
   roles.value = loadedRoles;

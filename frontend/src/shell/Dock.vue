@@ -2,30 +2,22 @@
 /**
  * The Dock (framework section 8.5): every running instance across all dock
  * providers, macOS-style. "+" creates a new instance and the bottom gear
- * owns Dock-local display settings. There is deliberately no other chrome.
+ * opens the unified settings pane (`settings:main`). There is deliberately
+ * no other chrome.
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
+import { useDockSettingsStore } from "../stores/dockSettings";
 import { useLayoutStore } from "../stores/layout";
 import type { DockInstance, DockProvider } from "./definePlugin";
 import { dockProviders } from "./registries";
 
-const HOVER_EXPAND_STORAGE_KEY = "viewer.dock.hoverExpandMs.v1";
-const DEFAULT_HOVER_EXPAND_MS = 500;
-const RESTART_POLL_MS = 800;
-const RESTART_TIMEOUT_MS = 60_000;
-
-function readHoverExpandMs(): number {
-  const stored = Number(localStorage.getItem(HOVER_EXPAND_STORAGE_KEY));
-  return Number.isFinite(stored) && stored >= 0 ? stored : DEFAULT_HOVER_EXPAND_MS;
-}
-
 const layout = useLayoutStore();
+const dockSettings = useDockSettingsStore();
 const menuOpen = ref(false);
-const settingsOpen = ref(false);
 const pinRevision = ref(0);
 const expanded = ref(false);
-const hoverExpandMs = ref(readHoverExpandMs());
+const hoverExpandMs = computed(() => dockSettings.hoverExpandMs);
 let expandTimer: ReturnType<typeof setTimeout> | null = null;
 
 function clearExpandTimer(): void {
@@ -51,15 +43,8 @@ function handlePointerLeave(): void {
   expanded.value = false;
 }
 
-function saveHoverExpandMs(): void {
-  const normalized = Math.max(0, Number.isFinite(hoverExpandMs.value) ? hoverExpandMs.value : DEFAULT_HOVER_EXPAND_MS);
-  hoverExpandMs.value = normalized;
-  localStorage.setItem(HOVER_EXPAND_STORAGE_KEY, String(normalized));
-}
-
 function closePopovers(): void {
   menuOpen.value = false;
-  settingsOpen.value = false;
 }
 
 function handleKeydown(event: KeyboardEvent): void {
@@ -175,55 +160,9 @@ function togglePin(entry: DockEntry): void {
   pinRevision.value += 1;
 }
 
-const restarting = ref(false);
-
-/**
- * Graceful backend restart (gateway admin API, framework v0.34):
- * POST /api/admin/restart → the gateway spawns a same-args replacement and
- * takes the graceful shutdown path (drains running turns ≤10s); the
- * replacement binds the ports only after the old pid is gone. We poll GET /
- * until the new gateway answers, then reload the shell. The TS BusClient
- * auto-reconnects, but a fresh page load is the cleanest recovery for the
- * whole UI (all stores re-init; module chat cache resets).
- */
-async function restartBackend(): Promise<void> {
-  if (restarting.value) return;
-  const confirmed = window.confirm(
-    "重启后端（viewerd）？\n在途任务会先排空（最多 10 秒），完成后页面将自动刷新恢复。"
-  );
-  if (!confirmed) return;
-  restarting.value = true;
-  try {
-    const resp = await fetch("/api/admin/restart", { method: "POST" });
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      window.alert(`重启失败：HTTP ${resp.status} ${body}`);
-      restarting.value = false;
-      return;
-    }
-  } catch {
-    // The 202 may be lost when the gateway closes right after accepting the
-    // restart (connection reset before the body arrives) — treat it as
-    // accepted and keep polling for the new gateway.
-  }
-  const deadline = Date.now() + RESTART_TIMEOUT_MS;
-  for (;;) {
-    try {
-      const probe = await fetch("/", { cache: "no-store" });
-      if (probe.ok) {
-        location.reload();
-        return;
-      }
-    } catch {
-      // Gateway not up yet (old process draining / replacement binding).
-    }
-    if (Date.now() > deadline) {
-      window.alert("重启超时，请检查服务状态后手动刷新页面。");
-      restarting.value = false;
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_MS));
-  }
+function openSettings(): void {
+  menuOpen.value = false;
+  layout.openInstance("settings", "main");
 }
 </script>
 
@@ -240,7 +179,7 @@ async function restartBackend(): Promise<void> {
           type="button"
           class="dock-btn dock-plus"
           title="新建 instance"
-          @click="settingsOpen = false; menuOpen = !menuOpen"
+          @click="menuOpen = !menuOpen"
         >
           <i class="bi bi-plus-lg"></i>
         </button>
@@ -281,17 +220,7 @@ async function restartBackend(): Promise<void> {
       </div>
 
       <div class="dock-foot">
-        <button type="button" class="dock-btn" title="Dock 设置" aria-label="Dock 设置" @click="menuOpen = false; settingsOpen = !settingsOpen"><i class="bi bi-gear"></i></button>
-        <div v-if="settingsOpen" class="dock-menu-overlay" @click="settingsOpen = false"></div>
-        <div v-if="settingsOpen" class="dock-menu dock-settings">
-          <label for="dock-hover-expand-ms">悬停展开延迟（ms）</label>
-          <input id="dock-hover-expand-ms" v-model.number="hoverExpandMs" type="number" min="0" step="100" class="form-control form-control-sm" @change="saveHoverExpandMs">
-          <div class="dock-settings-sep"></div>
-          <button type="button" class="dock-menu-item" :disabled="restarting" title="重启后端（viewerd）：排空在途任务后重启整个服务，完成后页面自动刷新" @click="restartBackend">
-            <i class="bi" :class="restarting ? 'bi-arrow-repeat' : 'bi-arrow-clockwise'"></i>
-            <span>{{ restarting ? "重启中…" : "重启后端" }}</span>
-          </button>
-        </div>
+        <button type="button" class="dock-btn" title="设置" aria-label="设置" @click="openSettings"><i class="bi bi-gear"></i></button>
       </div>
     </div>
   </nav>
@@ -523,24 +452,6 @@ async function restartBackend(): Promise<void> {
   flex: 0 0 auto;
   padding-top: 4px;
   position: relative;
-}
-
-.dock-settings {
-  bottom: 0;
-  min-width: 220px;
-  top: auto;
-}
-
-.dock-settings label {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-ui-small);
-  padding: 5px 5px 3px;
-}
-
-.dock-settings-sep {
-  background: var(--color-border);
-  height: 1px;
-  margin: 4px 5px;
 }
 
 .dock-menu-item:disabled {

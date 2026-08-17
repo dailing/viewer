@@ -7,13 +7,12 @@
  * carries the info strip: role icon + name, running status, time. Markdown
  * goes through renderMarkdown (markdown-it + KaTeX + hljs line numbers +
  * mermaid); styling follows the --markdown-* theme variables (markdownStyle
- * store, customizable via the 消息样式 panel).
+ * store, customizable via the settings pane).
  */
 import { computed, inject, nextTick, onMounted, ref, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
+import { useChatSettingsStore } from "../../stores/chatSettings";
 import { useLayoutStore } from "../../stores/layout";
-import { useMarkdownStyleStore } from "../../stores/markdownStyle";
-import type { MarkdownStyleOverrides } from "../../stores/markdownStyle";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
@@ -25,7 +24,7 @@ const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("ChatPane requires PluginPaneHost");
 const ctx: PluginCtx = injectedCtx;
 const layout = useLayoutStore();
-const markdownStyle = useMarkdownStyleStore();
+const chatSettings = useChatSettingsStore();
 
 const messages = ref<ChatMessage[]>([]);
 const blocks = ref<ChatBlock[]>([]);
@@ -34,9 +33,13 @@ const workspace = ref<Workspace | null>(null);
 const chat = ref<Chat | null>(null);
 const selected = ref<string[]>([]);
 const activeRoles = ref(new Set<string>());
+// Optimistic per-role placeholder boxes: created the moment dispatch returns
+// so a response box appears immediately, and resolved when the turn's first
+// live message/block arrives (the real turn box takes over) or the turn ends.
+const pendingTurns = ref(new Map<string, { key: string; roleId: string; label: string; ts: number }>());
 const error = ref("");
 const threadRef = ref<HTMLElement | null>(null);
-const styleOpen = ref(false);
+const messageEndRef = ref<HTMLElement | null>(null);
 
 // Newest-first pagination (old-viewer parity): the pane loads one page of
 // the newest messages plus the activity blocks covering that span; scrolling
@@ -53,7 +56,7 @@ let userScrolled = false; // manual scroll wins over the cache-hit auto-scroll
 let lastProgrammaticScrollAt = 0; // suppresses the scroll-event echo of scrollThreadTop
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
-interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[] }
+interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[]; pending?: boolean }
 
 const ACTIVITY_LABELS: Record<string, string> = {
   thinking: "Reasoning",
@@ -61,6 +64,7 @@ const ACTIVITY_LABELS: Record<string, string> = {
   tool_result: "Tool result",
   file_change: "Edit",
   command: "Command",
+  error: "Error",
   other: "Activity",
 };
 
@@ -101,6 +105,11 @@ const timeline = computed<TimelineBox[]>(() => {
     box.segments.push({ id: block.id, kind: "activity", ts: block.occurred_at, block });
   }
   for (const box of boxes) box.segments.sort((a, b) => a.ts - b.ts || a.id.localeCompare(b.id));
+  // Optimistic placeholders for just-dispatched roles ride the same timeline;
+  // their ts (dispatch time) keeps them at the end until real events land.
+  for (const pending of pendingTurns.value.values()) {
+    boxes.push({ key: pending.key, kind: "role", label: pending.label, roleId: pending.roleId, turnId: "", ts: pending.ts, segments: [], pending: true });
+  }
   return boxes.sort((a, b) => a.ts - b.ts || a.key.localeCompare(b.key));
 });
 
@@ -136,8 +145,29 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+/** Latest timeline box per role: the running indicator lives only on that
+ *  one box, so historical turns of an active role no longer all spin. */
+const latestBoxKeyByRole = computed<Map<string, string>>(() => {
+  const latest = new Map<string, { key: string; ts: number }>();
+  for (const box of timeline.value) {
+    if (box.kind !== "role" || box.roleId === "") continue;
+    const current = latest.get(box.roleId);
+    if (!current || box.ts >= current.ts) latest.set(box.roleId, { key: box.key, ts: box.ts });
+  }
+  return new Map([...latest].map(([role, value]) => [role, value.key]));
+});
+
 function turnActive(box: TimelineBox): boolean {
-  return box.roleId !== "" && activeRoles.value.has(box.roleId);
+  return box.roleId !== "" && activeRoles.value.has(box.roleId) && latestBoxKeyByRole.value.get(box.roleId) === box.key;
+}
+
+/** Drop a role's optimistic placeholder once its turn produces visible
+ *  output (or ends) — the real turn box / final state takes over. */
+function resolvePendingTurn(roleId: string | undefined): void {
+  if (!roleId || !pendingTurns.value.has(roleId)) return;
+  const next = new Map(pendingTurns.value);
+  next.delete(roleId);
+  pendingTurns.value = next;
 }
 
 /** Role's configured execution target: agent / provider / model (first enabled candidate). */
@@ -198,6 +228,7 @@ function activityIcon(block?: ChatBlock): string {
     case "file_change": return "bi-pencil-square";
     case "command": return "bi-terminal";
     case "tool_result": return "bi-check-circle";
+    case "error": return "bi-exclamation-triangle";
     default: return "bi-tools";
   }
 }
@@ -233,9 +264,11 @@ function activityHasBody(segment: Segment): boolean {
 }
 
 // Display whitelist: actions (tool/file/command) plus thinking and tool
-// results — the user wants those visible. `other` (raw protocol noise) and
-// any unknown kind stay hidden entirely, even if they carry text.
-const ACTIVITY_KINDS = new Set(["tool_call", "file_change", "command", "thinking", "tool_result"]);
+// results — the user wants those visible. `error` rows are emitted by the
+// chat plugin itself when a turn fails or stops abnormally. `other` (raw
+// protocol noise) and any unknown kind stay hidden entirely, even if they
+// carry text.
+const ACTIVITY_KINDS = new Set(["tool_call", "file_change", "command", "thinking", "tool_result", "error"]);
 function activityDisplayable(block: ChatBlock): boolean {
   return ACTIVITY_KINDS.has(block.kind);
 }
@@ -277,11 +310,15 @@ function setChrome(): void {
   ctx.setChrome({
     title: chat.value?.name ?? "Chat",
     actions: [
-      { id: "chat-style", title: "消息样式", icon: "bi-palette", run: () => { styleOpen.value = !styleOpen.value; } },
+      { id: "chat-virtual-space", title: "阅读留白（消息末尾留一屏空白）", icon: "bi-distribute-vertical", active: chatSettings.virtualSpace, run: () => { chatSettings.toggleVirtualSpace(); } },
+      { id: "chat-style", title: "消息样式（在设置页中编辑）", icon: "bi-palette", run: () => layout.openInstance("settings", "main") },
       { id: "chat-config", title: "聊天管理", icon: "bi-sliders", run: () => layout.openInstance("chat-manager", "main") },
     ],
   });
 }
+
+// Keep every open chat pane's toggle state in sync with the store.
+watch(() => chatSettings.virtualSpace, () => setChrome());
 
 /** Assign scrollTop and remember the timestamp so the resulting scroll event
  *  is not mistaken for manual user scrolling. */
@@ -290,6 +327,26 @@ function scrollThreadTop(top: number): void {
   const thread = threadRef.value;
   if (thread) thread.scrollTop = top;
 }
+
+/** Scroll so the message-end anchor sits at the viewport's lower edge, with
+ *  the virtual space (when enabled) below it — old-viewer parity. Used for
+ *  initial loads and after the user sends a query; streaming updates never
+ *  auto-scroll. With virtual space off this equals the absolute end. */
+function scrollThreadToMessageEnd(): void {
+  const thread = threadRef.value;
+  if (!thread) return;
+  const end = messageEndRef.value;
+  if (!end) {
+    scrollThreadTop(thread.scrollHeight);
+    return;
+  }
+  const delta = end.getBoundingClientRect().top - thread.getBoundingClientRect().top;
+  scrollThreadTop(Math.max(0, thread.scrollTop + delta - thread.clientHeight));
+}
+
+// Set by send(): the next user message landing in the thread is the one the
+// user just dispatched, so the thread scrolls it into view once it arrives.
+let scrollOnNextUserMessage = false;
 
 async function load(): Promise<void> {
   loadingInitial.value = true;
@@ -302,7 +359,7 @@ async function load(): Promise<void> {
       loadingInitial.value = false;
       everLoaded = true;
       await nextTick();
-      scrollThreadTop(threadRef.value?.scrollHeight ?? 0);
+      scrollThreadToMessageEnd();
       const exists = await refreshDelta();
       if (!exists) {
         // Chat was deleted while the pane was closed: clear and evict.
@@ -313,9 +370,9 @@ async function load(): Promise<void> {
         removeEntry(ctx.instanceId);
         return;
       }
-      // Land on the true newest end once the delta has been folded in, unless
-      // the user already started reading during the delta window.
-      if (!userScrolled) scrollThreadTop(threadRef.value?.scrollHeight ?? 0);
+      // Land on the message-end anchor once the delta has been folded in,
+      // unless the user already started reading during the delta window.
+      if (!userScrolled) scrollThreadToMessageEnd();
       return;
     }
     const list = await (ctx.bus.request("chat:_:chats:list", {
@@ -341,12 +398,12 @@ async function load(): Promise<void> {
     workspace.value = workspaceData;
     setChrome();
     writeBack();
-    // First open lands on the newest end (old-viewer parity); later reloads
-    // keep the user's scroll position.
+    // First open lands on the message-end anchor (old-viewer parity); later
+    // reloads keep the user's scroll position.
     if (!everLoaded) {
       everLoaded = true;
       await nextTick();
-      scrollThreadTop(threadRef.value?.scrollHeight ?? 0);
+      scrollThreadToMessageEnd();
     }
   } finally {
     loadingInitial.value = false;
@@ -401,7 +458,9 @@ async function refreshDelta(): Promise<boolean> {
     hasOlder.value = firstHasMore;
   }
   const blockById = new Map(blocks.value.map((item) => [item.id, item] as const));
-  for (const item of blockList.blocks ?? []) if (!blockById.has(item.id)) blockById.set(item.id, item);
+  // Merged streaming blocks mutate in place (text grows under the same id), so
+  // delta rows must REPLACE cached ones, not dedupe-skip like immutable rows.
+  for (const item of blockList.blocks ?? []) blockById.set(item.id, item);
   blocks.value = [...blockById.values()].sort((a, b) => a.occurred_at - b.occurred_at || a.id.localeCompare(b.id));
   roles.value = workspaceData.roles;
   workspace.value = workspaceData;
@@ -472,15 +531,26 @@ function handleThreadScroll(): void {
   void loadOlder();
 }
 
-async function send(text: string): Promise<void> {
+async function send(text: string, forceNewSession = false): Promise<void> {
   const message = text.trim();
   if (message === "") return;
   error.value = "";
   try {
     const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message };
     if (selected.value.length > 0) payload.role_ids = selected.value;
+    if (forceNewSession) payload.force_new_session = true;
     const result = await ctx.bus.request("chat:_:dispatch", payload) as { role_ids: string[] };
     activeRoles.value = new Set([...activeRoles.value, ...result.role_ids]);
+    // Show one optimistic response box per dispatched role immediately; each
+    // resolves when that turn's first live event arrives.
+    const now = Date.now();
+    const pending = new Map(pendingTurns.value);
+    for (const roleId of result.role_ids) {
+      const role = roles.value.find((item) => item.id === roleId);
+      pending.set(roleId, { key: `pending:${roleId}:${now}`, roleId, label: role?.name ?? "Agent", ts: now });
+    }
+    pendingTurns.value = pending;
+    scrollOnNextUserMessage = true; // scroll the just-sent query into view when it lands
   } catch (cause) {
     error.value = errorText(cause);
   }
@@ -494,31 +564,6 @@ async function stop(): Promise<void> {
   }
 }
 
-const STYLE_DEFAULTS: Required<MarkdownStyleOverrides> = {
-  bodyFontSize: 15, bodyLineHeight: 1.65, bodyColor: "#404449", strongColor: "#1f4e79",
-  linkColor: "#58749a", codeFontSize: 13, codeBackground: "#f5f5f5", syntaxBackground: "#f5f5f5",
-  borderColor: "#e3e4e6",
-};
-const NUMBER_FIELDS = new Set<keyof MarkdownStyleOverrides>(["bodyFontSize", "bodyLineHeight", "codeFontSize"]);
-
-function overrideValue(field: keyof MarkdownStyleOverrides): string {
-  const value = markdownStyle.overrides[field];
-  return value === undefined ? String(STYLE_DEFAULTS[field]) : String(value);
-}
-
-function setOverride(field: keyof MarkdownStyleOverrides, raw: string): void {
-  if (raw === "") {
-    markdownStyle.set(field, undefined);
-    return;
-  }
-  if (NUMBER_FIELDS.has(field)) {
-    const numeric = Number(raw);
-    markdownStyle.set(field, Number.isFinite(numeric) && numeric > 0 ? numeric : undefined);
-    return;
-  }
-  markdownStyle.set(field, raw);
-}
-
 onMounted(() => {
   const refreshNow = (): void => { void refresh().catch(() => undefined); };
   ctx.bus.subscribe(`chat:${ctx.instanceId}:message`, (frame) => {
@@ -526,17 +571,27 @@ onMounted(() => {
     const index = messages.value.findIndex((item) => item.id === value.id);
     if (index >= 0) messages.value.splice(index, 1, value); else messages.value.push(value);
     writeBack();
+    resolvePendingTurn(value.sender?.role_id);
+    if (scrollOnNextUserMessage && value.role === "user") {
+      scrollOnNextUserMessage = false;
+      void nextTick(() => scrollThreadToMessageEnd());
+    }
   });
   ctx.bus.subscribe(`chat:${ctx.instanceId}:block`, (frame) => {
     const value = frame.value as ChatBlock;
-    if (!blocks.value.some((item) => item.id === value.id)) blocks.value.push(value);
+    // Merged streaming blocks (thinking/agent_text) republish with the same
+    // id as their text grows — upsert by id, never append-if-absent.
+    const index = blocks.value.findIndex((item) => item.id === value.id);
+    if (index >= 0) blocks.value.splice(index, 1, value); else blocks.value.push(value);
     writeBack();
+    resolvePendingTurn(value.role_id);
   });
   ctx.bus.subscribe(`chat:${ctx.instanceId}:turn-completed`, (frame) => {
     const value = frame.value as { role_id: string };
     const next = new Set(activeRoles.value);
     next.delete(value.role_id);
     activeRoles.value = next;
+    resolvePendingTurn(value.role_id);
   });
   ctx.bus.subscribe("chat:_:active", (frame) => {
     if (frame.value === ctx.instanceId) refreshNow();
@@ -574,6 +629,7 @@ onMounted(() => {
           </div>
         </div>
         <div class="chat-box-body chat-timeline">
+          <div v-if="box.pending" class="chat-pending-shimmer" aria-hidden="true" />
           <template v-for="segment in box.segments" :key="segment.id">
             <div v-if="segment.kind === 'text' && box.kind === 'user'" class="chat-user-text">{{ segment.text }}</div>
             <div
@@ -583,7 +639,7 @@ onMounted(() => {
             />
             <div v-else-if="segment.kind === 'activity'" class="chat-activity">
               <details v-if="activityHasBody(segment)" class="chat-activity-details">
-                <summary class="chat-activity-summary">
+                <summary class="chat-activity-summary" :class="{ 'text-danger': segment.block?.kind === 'error' }">
                   <i class="bi chat-activity-icon" :class="activityIcon(segment.block)" />
                   <span class="chat-activity-label">{{ activityLabel(segment.block) }}</span>
                   <span class="chat-activity-text">{{ activitySummary(segment.block) }}</span>
@@ -595,7 +651,7 @@ onMounted(() => {
                   <pre v-if="blockPayloadPretty(segment.block)">{{ blockPayloadPretty(segment.block) }}</pre>
                 </div>
               </details>
-              <div v-else class="chat-activity-summary chat-activity-flat">
+              <div v-else class="chat-activity-summary chat-activity-flat" :class="{ 'text-danger': segment.block?.kind === 'error' }">
                 <i class="bi chat-activity-icon" :class="activityIcon(segment.block)" />
                 <span class="chat-activity-label">{{ activityLabel(segment.block) }}</span>
                 <span class="chat-activity-text">{{ activitySummary(segment.block) }}</span>
@@ -605,55 +661,9 @@ onMounted(() => {
           </template>
         </div>
       </article>
-      <div v-if="activeRoles.size" class="small text-secondary px-1">
-        <span class="spinner-border spinner-border-sm me-1" />{{ activeRoles.size }} role turn(s) active
-      </div>
+      <div v-if="timeline.length" ref="messageEndRef" class="chat-thread-message-end" aria-hidden="true" />
+      <div v-if="timeline.length && chatSettings.virtualSpace" class="chat-thread-virtual-space" aria-hidden="true" />
       <div v-if="!timeline.length" class="chat-empty">Write one message and dispatch it into this chat.</div>
-    </div>
-    <div v-if="styleOpen" class="chat-style-panel" @keydown.esc="styleOpen = false">
-      <div class="chat-style-head">
-        <span>消息样式</span>
-        <button type="button" class="btn btn-sm btn-outline-secondary" @click="markdownStyle.reset()">恢复默认</button>
-        <button type="button" class="btn btn-sm btn-outline-secondary" title="关闭" @click="styleOpen = false">
-          <i class="bi bi-x-lg" />
-        </button>
-      </div>
-      <label class="chat-style-field">
-        <span>正文字号</span>
-        <input type="number" min="10" max="24" step="1" :value="overrideValue('bodyFontSize')" @change="setOverride('bodyFontSize', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="chat-style-field">
-        <span>正文行高</span>
-        <input type="number" min="1.1" max="2.4" step="0.05" :value="overrideValue('bodyLineHeight')" @change="setOverride('bodyLineHeight', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="chat-style-field">
-        <span>正文颜色</span>
-        <input type="color" :value="overrideValue('bodyColor')" @input="setOverride('bodyColor', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="chat-style-field">
-        <span>加粗颜色</span>
-        <input type="color" :value="overrideValue('strongColor')" @input="setOverride('strongColor', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="chat-style-field">
-        <span>链接颜色</span>
-        <input type="color" :value="overrideValue('linkColor')" @input="setOverride('linkColor', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="chat-style-field">
-        <span>代码字号</span>
-        <input type="number" min="9" max="20" step="1" :value="overrideValue('codeFontSize')" @change="setOverride('codeFontSize', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="chat-style-field">
-        <span>行内代码底色</span>
-        <input type="color" :value="overrideValue('codeBackground')" @input="setOverride('codeBackground', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="chat-style-field">
-        <span>代码块底色</span>
-        <input type="color" :value="overrideValue('syntaxBackground')" @input="setOverride('syntaxBackground', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="chat-style-field">
-        <span>边框颜色</span>
-        <input type="color" :value="overrideValue('borderColor')" @input="setOverride('borderColor', ($event.target as HTMLInputElement).value)">
-      </label>
     </div>
     <div class="composer-shell">
       <div v-if="error" class="small text-danger mb-1">{{ error }}</div>
@@ -766,6 +776,32 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* Optimistic running placeholder: a low-contrast shimmer sweep inside the
+   response box until the turn's first live event lands. */
+.chat-pending-shimmer {
+  animation: chat-pending-sweep 1.4s linear infinite;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--color-text-muted) 8%, transparent) 25%,
+    color-mix(in srgb, var(--color-text-muted) 22%, transparent) 50%,
+    color-mix(in srgb, var(--color-text-muted) 8%, transparent) 75%
+  );
+  background-size: 200% 100%;
+  border-radius: var(--radius-sm);
+  height: 14px;
+}
+
+@keyframes chat-pending-sweep {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-pending-shimmer {
+    animation: none;
+  }
 }
 
 .chat-user-text {
@@ -894,63 +930,22 @@ onMounted(() => {
   text-align: center;
 }
 
+.chat-thread-message-end {
+  height: 0;
+}
+
+/* Old-viewer parity: one viewport of empty space after the final message, so
+   the latest turn can be scrolled toward the middle/top of the pane. */
+.chat-thread-virtual-space {
+  height: calc(100% - 20px);
+  min-height: 120px;
+  pointer-events: none;
+}
+
 .chat-history-boundary {
   padding: 6px 0;
   text-align: center;
   user-select: none;
-}
-
-.chat-style-panel {
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  position: absolute;
-  right: 8px;
-  top: 8px;
-  width: 220px;
-  z-index: 20;
-}
-
-.chat-style-head {
-  align-items: center;
-  display: flex;
-  font-size: var(--font-size-ui);
-  font-weight: 700;
-  gap: 6px;
-  justify-content: space-between;
-}
-
-.chat-style-head > span {
-  flex: 1 1 auto;
-}
-
-.chat-style-field {
-  align-items: center;
-  display: grid;
-  font-size: var(--font-size-ui);
-  gap: 8px;
-  grid-template-columns: 1fr auto;
-}
-
-.chat-style-field > span {
-  color: var(--color-text-muted);
-}
-
-.chat-style-field input[type="number"] {
-  width: 72px;
-}
-
-.chat-style-field input[type="color"] {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  height: 22px;
-  padding: 1px;
-  width: 42px;
 }
 
 .composer-shell {

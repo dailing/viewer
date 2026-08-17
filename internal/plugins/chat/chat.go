@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -53,22 +54,23 @@ type runtime struct {
 	cancelRequested                                       bool
 }
 type Plugin struct {
-	dataDir      string
-	store        *store
-	client       *busclient.Client
-	httpClient   *http.Client
-	ctx          context.Context
-	cancel       context.CancelFunc
-	mu           sync.Mutex
-	runtimes     map[string]*runtime
-	busy         map[string]bool
-	agents       map[string]string
-	catalogs     map[string]agentdriver.Catalog
-	openText     map[string]*Message      // turnID → currently open assistant text message (deltas append until sealed)
-	openBlock    map[string]*MessageBlock // turnID → currently open streaming block (agent_text/thinking deltas append until sealed)
-	activeChatID string
-	closed       bool
-	wg           sync.WaitGroup
+	dataDir       string
+	store         *store
+	client        *busclient.Client
+	httpClient    *http.Client
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	runtimes      map[string]*runtime
+	busy          map[string]bool
+	agents        map[string]string
+	catalogs      map[string]agentdriver.Catalog
+	openText      map[string]*Message                 // turnID → currently open assistant text message (deltas append until sealed)
+	openBlock     map[string]*MessageBlock            // turnID → currently open streaming block (agent_text/thinking deltas append until sealed)
+	openToolCalls map[string]map[string]*MessageBlock // turnID → tool_call_id → open tool_call block (status updates merge in place)
+	activeChatID  string
+	closed        bool
+	wg            sync.WaitGroup
 }
 
 var (
@@ -84,7 +86,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -94,6 +96,12 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed))
+	// Protocol errors (e.g. frame_too_large when a reply exceeds the kernel
+	// frame limit) arrive only on this connection's error mailbox; without a
+	// callback they are invisible and the RPC caller just times out.
+	p.client.OnError(func(entry busclient.ErrorEntry) {
+		slog.Warn("bus protocol error", "plugin", Manifest.ID, "code", entry.Code, "message", entry.Message, "detail", entry.Detail)
+	})
 	handlers := map[string]func(busclient.Frame){
 		"chat:_:workspace:get": p.handleWorkspaceGet, "chat:_:workspace:patch": p.handleWorkspacePatch,
 		"chat:_:roles:list": p.handleRolesList, "chat:_:roles:create": p.handleRolesCreate, "chat:_:roles:patch": p.handleRolesPatch, "chat:_:roles:delete": p.handleRolesDelete,
@@ -392,6 +400,15 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 	}
 	p.reply(frame, result, nil)
 }
+
+// blocksReplyBudget approximates the encoded size of one blocks:list reply.
+// The kernel rejects published frames above protocol.DefaultFrameSize (1 MiB)
+// asynchronously (frame_too_large to the publisher's error mailbox only), so
+// an unbounded reply would vanish silently and the caller would hang until
+// its RPC timeout. The estimate charges 2x text+payload length for JSON
+// escaping plus a fixed per-block envelope.
+const blocksReplyBudget = 700 * 1024
+
 func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 	request, _ := pluginrpc.Object(frame)
 	chatID, _ := request["chat_id"].(string)
@@ -413,16 +430,38 @@ func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 	for _, turn := range turns {
 		turnRoles[turn.ID] = turn
 	}
-	values := make([]map[string]any, 0, len(blocks))
-	for _, block := range blocks {
+	values, truncated, nextAfter := budgetBlockPayloads(blocks, turnRoles)
+	result := map[string]any{"blocks": values}
+	if truncated {
+		// Resume with after=next_after; boundary blocks sharing the same
+		// occurred_at are re-sent and deduplicated by id on the client.
+		result["truncated"] = true
+		result["next_after"] = nextAfter
+	}
+	p.reply(frame, result, nil)
+}
+
+// budgetBlockPayloads renders blocks to reply payloads, stopping before the
+// estimated encoded size would exceed blocksReplyBudget (but always emitting
+// at least one block so the cursor keeps advancing). nextAfter is the
+// occurred_at of the first omitted block — an inclusive resume cursor.
+func budgetBlockPayloads(blocks []MessageBlock, turnRoles map[string]Turn) (values []map[string]any, truncated bool, nextAfter int64) {
+	values = make([]map[string]any, 0, len(blocks))
+	size := 0
+	for index, block := range blocks {
+		estimate := 2*(len(block.Text)+len(block.Payload)) + 256
+		if len(values) > 0 && size+estimate > blocksReplyBudget {
+			return values, true, blocks[index].OccurredAt
+		}
 		payload := block.payload()
 		if turn, ok := turnRoles[block.TurnID]; ok {
 			payload["role_id"] = turn.RoleID
 			payload["role_name"] = turn.RoleName
 		}
 		values = append(values, payload)
+		size += estimate
 	}
-	p.reply(frame, map[string]any{"blocks": values}, nil)
+	return values, false, 0
 }
 func (p *Plugin) handleChatsCreate(frame busclient.Frame) {
 	value, err := frameObject(frame)

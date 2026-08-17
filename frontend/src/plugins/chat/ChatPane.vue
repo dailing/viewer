@@ -9,7 +9,7 @@
  * mermaid); styling follows the --markdown-* theme variables (markdownStyle
  * store, customizable via the settings pane).
  */
-import { computed, inject, nextTick, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
@@ -133,9 +133,46 @@ function renderedHtmlFor(id: string, text: string): string {
   return html;
 }
 
+let mermaidRenderTimer: ReturnType<typeof setTimeout> | null = null;
+let mermaidRenderDeadline = 0;
+let streamingMessageId = "";
+
+/** Schedule a mermaid render with a max-wait guarantee. During streaming the
+ *  deadline stays anchored at the earliest requested time so it fires at most
+ *  once per maxWait interval, but message boundaries are allowed to move the
+ *  deadline earlier (see renderMermaidAtBoundary). */
+function scheduleMermaidRender(maxWait = 500): void {
+  const now = Date.now();
+  const deadline = mermaidRenderDeadline || now + maxWait;
+  mermaidRenderDeadline = Math.min(deadline, now + maxWait);
+  if (mermaidRenderTimer !== null) clearTimeout(mermaidRenderTimer);
+  mermaidRenderTimer = setTimeout(() => {
+    mermaidRenderTimer = null;
+    mermaidRenderDeadline = 0;
+    void renderMermaidIn(threadRef.value, "chat-mermaid");
+  }, Math.max(0, mermaidRenderDeadline - now));
+}
+
+/** Called when the current assistant text message is sealed (new message id
+ *  arrived, a non-text block arrived, or the turn completed). Use a short
+ *  delay to batch a rapid sequence of boundaries while still rendering as soon
+ *  as the message is fully known. */
+function renderMermaidAtBoundary(): void {
+  scheduleMermaidRender(50);
+}
+
 watch(timeline, () => {
-  void nextTick(() => void renderMermaidIn(threadRef.value, "chat-mermaid"));
+  scheduleMermaidRender(500);
 }, { flush: "post" });
+
+onBeforeUnmount(() => {
+  if (mermaidRenderTimer !== null) {
+    clearTimeout(mermaidRenderTimer);
+    mermaidRenderTimer = null;
+  }
+  mermaidRenderDeadline = 0;
+  streamingMessageId = "";
+});
 
 const members = computed(() => roles.value.filter((role) => chat.value?.member_role_ids.includes(role.id)));
 
@@ -338,8 +375,27 @@ function scrollThreadToMessageEnd(): void {
 // user just dispatched, so the thread scrolls it into view once it arrives.
 let scrollOnNextUserMessage = false;
 
+/** Fetch every block in [after, before), following the reply's truncation
+ *  cursor (the backend caps one reply near the kernel's 1 MiB frame limit and
+ *  reports truncated/next_after). Overlapping boundary blocks are upserted by
+ *  id, so the result stays ordered with no duplicates. */
+async function fetchBlocks(after: number, before = 0): Promise<ChatBlock[]> {
+  const byId = new Map<string, ChatBlock>();
+  let cursor = after;
+  for (;;) {
+    const list = await (ctx.bus.request("chat:_:blocks:list", {
+      chat_id: ctx.instanceId, after: cursor, ...(before > 0 ? { before } : {}),
+    }) as Promise<ChatBlockList>);
+    for (const block of list.blocks ?? []) byId.set(block.id, block);
+    if (!(list.truncated ?? false) || !list.next_after) break;
+    cursor = list.next_after;
+  }
+  return [...byId.values()];
+}
+
 async function load(): Promise<void> {
   loadingInitial.value = true;
+  streamingMessageId = "";
   try {
     // Session cache hit (v0.32): hydrate instantly, then merge only the
     // delta; the pane renders before any network round-trip.
@@ -379,11 +435,11 @@ async function load(): Promise<void> {
       loadedLo.value = 0;
       olderCursor.value = null;
     }
-    const [blockList, workspaceData] = await Promise.all([
-      ctx.bus.request("chat:_:blocks:list", { chat_id: ctx.instanceId, after: loadedLo.value }) as Promise<ChatBlockList>,
+    const [fetchedBlocks, workspaceData] = await Promise.all([
+      fetchBlocks(loadedLo.value),
       ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
     ]);
-    blocks.value = blockList.blocks ?? [];
+    blocks.value = fetchedBlocks;
     roles.value = workspaceData.roles;
     workspace.value = workspaceData;
     setChrome();
@@ -432,8 +488,8 @@ async function refreshDelta(): Promise<boolean> {
     const last = page[page.length - 1];
     cursor = { ts: last.created_at, id: last.id };
   }
-  const [blockList, workspaceData] = await Promise.all([
-    ctx.bus.request("chat:_:blocks:list", { chat_id: ctx.instanceId, after: blockAfter || loadedLo.value }) as Promise<ChatBlockList>,
+  const [deltaBlocks, workspaceData] = await Promise.all([
+    fetchBlocks(blockAfter || loadedLo.value),
     ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
   ]);
   chat.value = chats.find((item) => item.id === ctx.instanceId) ?? null;
@@ -450,7 +506,7 @@ async function refreshDelta(): Promise<boolean> {
   const blockById = new Map(blocks.value.map((item) => [item.id, item] as const));
   // Merged streaming blocks mutate in place (text grows under the same id), so
   // delta rows must REPLACE cached ones, not dedupe-skip like immutable rows.
-  for (const item of blockList.blocks ?? []) blockById.set(item.id, item);
+  for (const item of deltaBlocks) blockById.set(item.id, item);
   blocks.value = [...blockById.values()].sort((a, b) => a.occurred_at - b.occurred_at || a.id.localeCompare(b.id));
   roles.value = workspaceData.roles;
   workspace.value = workspaceData;
@@ -470,6 +526,7 @@ async function refresh(): Promise<void> {
     olderCursor.value = null;
     removeEntry(ctx.instanceId);
   }
+  streamingMessageId = "";
 }
 
 /** Load one older page (composite cursor) plus the blocks in the span it
@@ -491,12 +548,10 @@ async function loadOlder(): Promise<void> {
       return;
     }
     const newLo = page[0].created_at;
-    const blockList = await (ctx.bus.request("chat:_:blocks:list", {
-      chat_id: ctx.instanceId, after: newLo, before: loadedLo.value,
-    }) as Promise<ChatBlockList>);
+    const spanBlocks = await fetchBlocks(newLo, loadedLo.value);
     const known = new Set(messages.value.map((item) => item.id));
     messages.value = [...page.filter((item) => !known.has(item.id)), ...messages.value];
-    for (const block of blockList.blocks ?? []) {
+    for (const block of spanBlocks) {
       if (!blocks.value.some((item) => item.id === block.id)) blocks.value.push(block);
     }
     hasOlder.value = list.has_more ?? false;
@@ -565,6 +620,10 @@ onMounted(() => {
   const refreshNow = (): void => { void refresh().catch(() => undefined); };
   ctx.bus.subscribe(`chat:${ctx.instanceId}:message`, (frame) => {
     const value = frame.value as ChatMessage;
+    if (value.role === "assistant" && value.id !== streamingMessageId) {
+      if (streamingMessageId !== "") renderMermaidAtBoundary();
+      streamingMessageId = value.id;
+    }
     const index = messages.value.findIndex((item) => item.id === value.id);
     if (index >= 0) messages.value.splice(index, 1, value); else messages.value.push(value);
     writeBack();
@@ -576,6 +635,11 @@ onMounted(() => {
   });
   ctx.bus.subscribe(`chat:${ctx.instanceId}:block`, (frame) => {
     const value = frame.value as ChatBlock;
+    // A non-text block seals the current assistant text message.
+    if (streamingMessageId !== "") {
+      streamingMessageId = "";
+      renderMermaidAtBoundary();
+    }
     // Merged streaming blocks (thinking/agent_text) republish with the same
     // id as their text grows — upsert by id, never append-if-absent.
     const index = blocks.value.findIndex((item) => item.id === value.id);
@@ -589,6 +653,10 @@ onMounted(() => {
     next.delete(value.role_id);
     activeRoles.value = next;
     resolvePendingTurn(value.role_id);
+    if (streamingMessageId !== "") {
+      streamingMessageId = "";
+      renderMermaidAtBoundary();
+    }
   });
   ctx.bus.subscribe("chat:_:active", (frame) => {
     if (frame.value === ctx.instanceId) refreshNow();

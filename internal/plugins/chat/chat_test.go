@@ -354,6 +354,57 @@ func TestHandleUpdatePersistsRawBeforeVisibleTextFilter(t *testing.T) {
 	}
 }
 
+func TestToolCallUpdatesMergeByCallID(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		delete(p.runtimes, runtimeKey("chat", "role"))
+		_ = p.Close()
+	}()
+	p.runtimes[runtimeKey("chat", "role")] = &runtime{sessionID: "session", activeTurn: "turn", roleID: "role", roleName: "Role", pluginID: "viewer.agent-hermes", providerKey: "hermes/default"}
+	send := func(kind string, block agentdriver.Block) {
+		p.handleAgentEvent(busclient.Frame{Channel: "viewer.agent-hermes:_:event", Value: agentdriver.EventFrame{SessionID: "session", TurnID: "turn", Kind: kind, Block: block}})
+	}
+	send("tool_call", agentdriver.Block{Kind: "tool_call", Text: "Read", Payload: `{"name":"Read","status":"pending","tool_call_id":"call-1"}`})
+	send("tool_call_update", agentdriver.Block{Kind: "tool_call", Payload: `{"status":"in_progress","tool_call_id":"call-1"}`})
+	send("tool_call_update", agentdriver.Block{Kind: "tool_call", Payload: `{"status":"completed","tool_call_id":"call-1"}`})
+	send("tool_call", agentdriver.Block{Kind: "tool_call", Text: "Write", Payload: `{"name":"Write","status":"pending","tool_call_id":"call-2"}`})
+	send("tool_call", agentdriver.Block{Kind: "tool_call", Text: "NoID", Payload: `{"name":"NoID","status":"pending"}`})
+	send("tool_call", agentdriver.Block{Kind: "tool_call", Text: "NoID", Payload: `{"name":"NoID","status":"completed"}`})
+
+	var blocks []MessageBlock
+	if err := p.store.db.Find(&blocks).Error; err != nil {
+		t.Fatal(err)
+	}
+	// call-1 collapses to one block; call-2, and the two id-less calls, stay separate.
+	if len(blocks) != 4 {
+		t.Fatalf("blocks=%#v", blocks)
+	}
+	var merged *MessageBlock
+	for index := range blocks {
+		if payloadString(blocks[index].Payload, "tool_call_id") == "call-1" {
+			merged = &blocks[index]
+		}
+	}
+	if merged == nil || merged.Text != "Read" {
+		t.Fatalf("merged=%#v", merged)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(merged.Payload), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["name"] != "Read" || payload["status"] != "completed" || payload["tool_call_id"] != "call-1" {
+		t.Fatalf("merged payload=%v", payload)
+	}
+	// turn-ended drops the open-call index so a later turn can't merge into it.
+	p.handleAgentTurnEnded(busclient.Frame{Channel: "viewer.agent-hermes:_:turn-ended", Value: agentdriver.TurnEndedFrame{SessionID: "session", TurnID: "turn", StopReason: "end_turn"}})
+	if len(p.openToolCalls) != 0 {
+		t.Fatalf("openToolCalls=%v", p.openToolCalls)
+	}
+}
+
 func TestAgentTextDeltasAggregatePerSegment(t *testing.T) {
 	p, err := New(t.TempDir())
 	if err != nil {
@@ -539,6 +590,65 @@ func TestChatMessageBlocksWindow(t *testing.T) {
 	blocks, err = p.store.chatMessageBlocks("chat", 0, 0)
 	if err != nil || len(blocks) != 6 {
 		t.Fatalf("full blocks=%#v err=%v", blocks, err)
+	}
+}
+
+func TestBudgetBlockPayloadsTruncatesAndResumes(t *testing.T) {
+	// Fill past the reply budget: 9 blocks x 100KB text (estimated 2x +
+	// envelope) exceeds the 700KB budget partway through.
+	blocks := make([]MessageBlock, 0, 9)
+	for i := 0; i < 9; i++ {
+		blocks = append(blocks, MessageBlock{
+			ID: "b" + string(rune('a'+i)), ChatID: "chat", TurnID: "turn",
+			Kind: "tool_call", Text: string(make([]byte, 100*1024)), Payload: "{}",
+			OccurredAt: int64(1000 + i),
+		})
+	}
+	// The budget must actually engage on this fixture.
+	first, firstTruncated, firstNext := budgetBlockPayloads(blocks, map[string]Turn{})
+	if !firstTruncated || len(first) == 0 || len(first) >= len(blocks) {
+		t.Fatalf("first page: values=%d truncated=%v", len(first), firstTruncated)
+	}
+	if firstNext != blocks[len(first)].OccurredAt {
+		t.Fatalf("nextAfter=%d want %d", firstNext, blocks[len(first)].OccurredAt)
+	}
+	// Paging forward with after=next_after eventually covers every block
+	// (the client refetches the cut boundary block and dedups by id).
+	covered := map[string]bool{}
+	page := blocks
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("paging did not converge")
+		}
+		values, truncated, nextAfter := budgetBlockPayloads(page, map[string]Turn{})
+		if len(values) == 0 {
+			t.Fatal("empty page")
+		}
+		for _, value := range values {
+			covered[value["id"].(string)] = true
+		}
+		if !truncated {
+			break
+		}
+		var cut int
+		for cut < len(page) && page[cut].OccurredAt < nextAfter {
+			cut++
+		}
+		page = page[cut:]
+	}
+	if len(covered) != len(blocks) {
+		t.Fatalf("pages cover %d of %d blocks", len(covered), len(blocks))
+	}
+	// Small sets pass through untruncated; a single oversize block is still
+	// emitted so the cursor advances.
+	all, truncated, _ := budgetBlockPayloads(blocks[:2], map[string]Turn{})
+	if truncated || len(all) != 2 {
+		t.Fatalf("small set: values=%d truncated=%v", len(all), truncated)
+	}
+	huge := []MessageBlock{{ID: "big", Text: string(make([]byte, blocksReplyBudget)), Payload: "{}", OccurredAt: 5}}
+	one, truncated, _ := budgetBlockPayloads(append(huge, blocks[0]), map[string]Turn{})
+	if len(one) != 1 || !truncated {
+		t.Fatalf("oversize single block: values=%d truncated=%v", len(one), truncated)
 	}
 }
 

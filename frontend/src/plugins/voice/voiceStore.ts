@@ -145,14 +145,17 @@ function composeVoiceText(composition: VoiceComposition): string {
   );
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  const parts: string[] = [];
-  const blockSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += blockSize) {
-    parts.push(String.fromCharCode(...bytes.subarray(offset, offset + blockSize)));
-  }
-  return btoa(parts.join(""));
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result as string;
+      const index = result.indexOf(",");
+      resolve(index >= 0 ? result.slice(index + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read audio chunk as base64"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 async function waitForRecorderStop(recorder: MediaRecorder): Promise<void> {
@@ -286,11 +289,10 @@ export const useVoiceStore = defineStore("next-voice", {
         runtimeJobs.set(jobId, job);
         recorder.addEventListener("dataavailable", (event) => {
           if (job === null || !job.ready || event.data.size <= 0 || job.recId === "") return;
-          const send = event.data
-            .arrayBuffer()
-            .then((buffer) =>
+          const send = blobToBase64(event.data)
+            .then((data) =>
               ctx.bus.publish(`voice:${job?.recId ?? ""}:chunk`, {
-                data: arrayBufferToBase64(buffer),
+                data,
               }),
             )
             .then(() => undefined);

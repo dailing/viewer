@@ -17,6 +17,11 @@ func ParseBlock(updateKind string, data map[string]any) agentdriver.Block {
 		kind, text = agentdriver.KindThinking, contentText(data)
 	case "tool_call", "tool_call_update":
 		kind, text, payload = agentdriver.KindToolCall, readableText(data), selectedPayload(data, "name", "title", "arguments", "status")
+		// The lifecycle id lets the chat plugin merge pending → in_progress →
+		// completed updates into a single block.
+		if callID := stringField(data, "toolCallId", "tool_call_id"); callID != "" {
+			payload["tool_call_id"] = callID
+		}
 		if _, ok := payload["name"]; !ok {
 			if title, ok := payload["title"]; ok {
 				payload["name"] = title

@@ -1,7 +1,7 @@
 export interface Sender { from: "user" | "role"; role_id?: string; role_name?: string }
 export interface ChatMessage { id: string; chat_id: string; turn_id: string; role: "user" | "assistant"; text: string; created_at: number; sender: Sender }
 export interface ChatBlock { id: string; chat_id: string; turn_id: string; kind: string; text: string; payload: string; occurred_at: number; role_id?: string; role_name?: string }
-export interface ChatBlockList { blocks: ChatBlock[] }
+export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number }
 export interface Role { id: string; name: string; description: string; prompt: string; cwd: string; routing_policy_id: string; session_policy: string; context_recycle_percent: number | null; context_recycle_tokens: number | null; created_at: number; updated_at: number }
 export interface Chat { id: string; name: string; type: string; pinned: boolean; root: string; common_prompt: string; member_role_ids: string[]; role_routing_policy_overrides: Record<string, string>; created_at: number; updated_at: number }
 export interface ChatList { chats: Chat[]; active_chat_id: string; messages?: ChatMessage[]; has_more?: boolean }

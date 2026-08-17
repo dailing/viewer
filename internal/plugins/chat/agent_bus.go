@@ -160,6 +160,13 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 		// the frontend renders one activity row, not one row per chunk. A
 		// different kind seals the segment; the next delta opens a new block.
 		streaming := block.Kind == agentdriver.KindAgentText || block.Kind == agentdriver.KindThinking
+		// Tool-call lifecycle updates (pending → in_progress → completed)
+		// share one tool_call_id; merge them into the block opened by the
+		// initial call so the timeline shows a single row per call.
+		toolCallID := ""
+		if block.Kind == agentdriver.KindToolCall {
+			toolCallID = payloadString(block.Payload, "tool_call_id")
+		}
 		p.mu.Lock()
 		open := p.openBlock[turnID]
 		merge := streaming && open != nil && open.Kind == block.Kind
@@ -172,11 +179,30 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 		} else if streaming {
 			p.openBlock[turnID] = block
 		}
+		toolMerge := false
+		if toolCallID != "" {
+			calls := p.openToolCalls[turnID]
+			if calls == nil {
+				calls = map[string]*MessageBlock{}
+				p.openToolCalls[turnID] = calls
+			}
+			if existing := calls[toolCallID]; existing != nil {
+				existing.Text = mergeBlockText(existing.Text, block.Text)
+				existing.Payload = mergeBlockPayload(existing.Payload, block.Payload)
+				block = existing
+				toolMerge = true
+			} else {
+				calls[toolCallID] = block
+			}
+		}
 		p.mu.Unlock()
 		var err error
-		if merge {
+		switch {
+		case merge:
 			err = p.store.updateMessageBlockText(block.ID, block.Text)
-		} else {
+		case toolMerge:
+			err = p.store.updateMessageBlock(block.ID, block.Text, block.Payload)
+		default:
 			err = p.store.addMessageBlock(block)
 		}
 		if err != nil {
@@ -217,6 +243,55 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 	}
 }
 
+// payloadString reads one string field from a JSON payload object; malformed
+// payloads yield "".
+func payloadString(payload, key string) string {
+	var value map[string]any
+	if json.Unmarshal([]byte(payload), &value) != nil {
+		return ""
+	}
+	text, _ := value[key].(string)
+	return text
+}
+
+// mergeBlockText keeps the first non-empty text (the tool label stays stable
+// across status updates); the update's text is only adopted when the existing
+// block has none.
+func mergeBlockText(existing, update string) string {
+	if existing != "" {
+		return existing
+	}
+	return update
+}
+
+// mergeBlockPayload overlays the update's non-empty fields onto the existing
+// payload, so a status-only update can't erase the call's name or arguments.
+func mergeBlockPayload(existing, update string) string {
+	var base, overlay map[string]any
+	if json.Unmarshal([]byte(existing), &base) != nil {
+		return update
+	}
+	if json.Unmarshal([]byte(update), &overlay) != nil {
+		return existing
+	}
+	for key, value := range overlay {
+		switch typed := value.(type) {
+		case nil:
+			continue
+		case string:
+			if typed == "" {
+				continue
+			}
+		}
+		base[key] = value
+	}
+	encoded, err := json.Marshal(base)
+	if err != nil {
+		return existing
+	}
+	return string(encoded)
+}
+
 func chatIDForTurn(p *Plugin, turnID string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -237,6 +312,7 @@ func (p *Plugin) handleAgentTurnEnded(frame busclient.Frame) {
 	p.mu.Lock()
 	delete(p.openText, update.TurnID)
 	delete(p.openBlock, update.TurnID)
+	delete(p.openToolCalls, update.TurnID)
 	for _, current := range p.runtimes {
 		if current.pluginID == pluginID && current.activeTurn == update.TurnID && current.ended != nil {
 			select {

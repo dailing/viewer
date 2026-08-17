@@ -52,6 +52,15 @@ func ParseBlock(method string, data map[string]any) agentdriver.Block {
 		if item, ok := data["item"].(map[string]any); ok {
 			mergeMissing(payload, selectedPayload(item, "name", "arguments", "status"))
 		}
+		// The item id lets the chat plugin merge status updates for the same
+		// call into one block.
+		if callID := stringField(data, "toolCallId", "tool_call_id", "itemId"); callID != "" {
+			payload["tool_call_id"] = callID
+		} else if item, ok := data["item"].(map[string]any); ok {
+			if callID := stringField(item, "id"); callID != "" {
+				payload["tool_call_id"] = callID
+			}
+		}
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

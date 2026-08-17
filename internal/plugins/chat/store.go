@@ -346,6 +346,12 @@ func (s *store) updateMessageBlockText(id, text string) error {
 	return s.db.Model(&MessageBlock{}).Where("id = ?", id).Update("text", text).Error
 }
 
+// updateMessageBlock rewrites text+payload of an existing block — used when a
+// tool_call status update merges into the block opened by the initial call.
+func (s *store) updateMessageBlock(id, text, payload string) error {
+	return s.db.Model(&MessageBlock{}).Where("id = ?", id).Updates(map[string]any{"text": text, "payload": payload}).Error
+}
+
 func (s *store) message(id string) (*Message, error) {
 	var value Message
 	result := s.db.Limit(1).Find(&value, "id = ?", id)

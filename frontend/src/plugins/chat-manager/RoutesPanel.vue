@@ -142,18 +142,21 @@ function endDrag(): void {
 }
 
 async function load(): Promise<void> {
-  // agent-catalog-refresh (not the plain agent-catalog read): opening this
-  // panel re-runs protocol discovery in every agent plugin so provider/model
-  // lists always reflect the live agents. Discovery spawns each agent, so the
-  // request takes a few seconds.
+  // Routing config renders immediately; the live agent discovery
+  // (agent-catalog-refresh spawns every agent — seconds, hermes slowest)
+  // must not block the panel. The candidate pickers hydrate instantly from
+  // the retained catalog and update again when fresh discovery lands.
   const [routing, loadedCatalogs] = await Promise.all([
     ctx.bus.request("chat:_:routing:get", {}) as Promise<RoutingConfig>,
-    ctx.bus.request("chat:_:agent-catalog-refresh", {}) as Promise<AgentCatalog[]>,
+    ctx.bus.request("chat:_:agent-catalog", {}) as Promise<AgentCatalog[]>,
   ]);
   catalogs.value = loadedCatalogs;
   state.default_routing_policy_id = routing.default_routing_policy_id;
   state.routing_policies = routing.routing_policies;
   if (!state.routing_policies.some((policy) => policy.id === selectedID.value)) selectedID.value = state.routing_policies[0]?.id ?? "";
+  void (ctx.bus.request("chat:_:agent-catalog-refresh", {}) as Promise<AgentCatalog[]>)
+    .then((fresh) => { catalogs.value = fresh; })
+    .catch(() => undefined); // failed refresh keeps the previous catalog
 }
 
 async function save(): Promise<void> {

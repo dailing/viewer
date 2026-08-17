@@ -28,13 +28,13 @@ watch(() => target.agent, () => syncTarget(true));
 watch(() => target.provider, () => { if (target.model && !modelOptions.value.includes(target.model)) target.model = modelOptions.value[0] ?? ""; });
 
 async function load(): Promise<void> {
-  // agent-catalog-refresh (not the plain agent-catalog read): opening this
-  // panel re-runs protocol discovery in every agent plugin so provider/model
-  // lists always reflect the live agents. Discovery spawns each agent, so the
-  // request takes a few seconds.
+  // Roles/routing render immediately; the live agent discovery
+  // (agent-catalog-refresh spawns every agent — seconds, hermes slowest)
+  // must not block the panel. The pickers hydrate instantly from the
+  // retained catalog and update again when fresh discovery lands.
   const [loadedRoles, loadedCatalogs, loadedRouting] = await Promise.all([
     ctx.bus.request("chat:_:roles:list", {}) as Promise<Role[]>,
-    ctx.bus.request("chat:_:agent-catalog-refresh", {}) as Promise<AgentCatalog[]>,
+    ctx.bus.request("chat:_:agent-catalog", {}) as Promise<AgentCatalog[]>,
     ctx.bus.request("chat:_:routing:get", {}) as Promise<RoutingConfig>,
   ]);
   roles.value = loadedRoles;
@@ -42,6 +42,13 @@ async function load(): Promise<void> {
   routing.value = loadedRouting;
   if (!catalogs.value.some((item) => item.agent === target.agent)) target.agent = catalogs.value.find((item) => item.online)?.agent ?? catalogs.value[0]?.agent ?? "";
   syncTarget();
+  void (ctx.bus.request("chat:_:agent-catalog-refresh", {}) as Promise<AgentCatalog[]>)
+    .then((fresh) => {
+      catalogs.value = fresh;
+      if (!catalogs.value.some((item) => item.agent === target.agent)) target.agent = catalogs.value.find((item) => item.online)?.agent ?? catalogs.value[0]?.agent ?? "";
+      syncTarget();
+    })
+    .catch(() => undefined); // failed refresh keeps the previous catalog
 }
 
 function editByID(id: string): void {

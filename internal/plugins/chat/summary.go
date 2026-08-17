@@ -218,8 +218,79 @@ func renderHistory(messages []Message, heading string) string {
 	return strings.Join(lines, "\n")
 }
 
-func (p *Plugin) buildUnsummarizedTailSection(chatID string, before, after int64, wordBudget int) string {
-	if wordBudget <= 0 {
+func truncateUTF8Prefix(value string, byteBudget int) string {
+	if byteBudget <= 0 {
+		return ""
+	}
+	if len(value) <= byteBudget {
+		return value
+	}
+	end := byteBudget
+	for end > 0 && (value[end]&0xc0) == 0x80 {
+		end--
+	}
+	return strings.TrimSpace(value[:end])
+}
+
+func truncateUTF8Suffix(value string, byteBudget int) string {
+	if byteBudget <= 0 {
+		return ""
+	}
+	if len(value) <= byteBudget {
+		return value
+	}
+	start := len(value) - byteBudget
+	for start < len(value) && (value[start]&0xc0) == 0x80 {
+		start++
+	}
+	return strings.TrimSpace(value[start:])
+}
+
+func renderRecentHistory(messages []Message, heading string, byteBudget int) string {
+	if len(messages) == 0 || byteBudget <= len(heading)+1 {
+		return ""
+	}
+	remaining := byteBudget - len(heading) - 1
+	newestFirst := make([]string, 0, len(messages))
+	for index := len(messages) - 1; index >= 0 && remaining > 0; index-- {
+		message := messages[index]
+		sender := "User"
+		if message.RoleID != "" {
+			sender = fallback(message.RoleName, "Agent")
+		}
+		line := fmt.Sprintf("%s: %s", sender, message.Text)
+		if len(line) > remaining {
+			line = truncateUTF8Prefix(line, remaining)
+		}
+		if line == "" {
+			break
+		}
+		newestFirst = append(newestFirst, line)
+		remaining -= len(line) + 1
+	}
+	lines := []string{heading}
+	for index := len(newestFirst) - 1; index >= 0; index-- {
+		lines = append(lines, newestFirst[index])
+	}
+	return strings.Join(lines, "\n")
+}
+
+func capRecentContext(value string, byteBudget int) string {
+	if byteBudget <= 0 || value == "" {
+		return ""
+	}
+	if len(value) <= byteBudget {
+		return value
+	}
+	const marker = "Older context omitted to fit the configured byte budget.\n"
+	if byteBudget <= len(marker) {
+		return truncateUTF8Prefix(marker, byteBudget)
+	}
+	return marker + truncateUTF8Suffix(value, byteBudget-len(marker))
+}
+
+func (p *Plugin) buildUnsummarizedTailSection(chatID string, before, after int64, wordBudget, byteBudget int) string {
+	if wordBudget <= 0 || byteBudget <= 0 {
 		return ""
 	}
 	latest, _ := p.store.latestSummaryTime(chatID, before)
@@ -235,7 +306,7 @@ func (p *Plugin) buildUnsummarizedTailSection(chatID string, before, after int64
 	if latest == 0 && after == 0 {
 		heading = "Recent visible chat history before the current message:"
 	}
-	return renderHistory(messages, heading)
+	return renderRecentHistory(messages, heading, byteBudget)
 }
 
 func (p *Plugin) buildNewSessionContext(chat Chat, query string, before int64) string {
@@ -243,11 +314,11 @@ func (p *Plugin) buildNewSessionContext(chat Chat, query string, before int64) s
 	if !config.ContextEnabled {
 		return ""
 	}
-	sections := nonEmpty(p.buildTurnSummariesSection(chat.ID, before, 0, config.SummaryCharBudget, ""), p.buildUnsummarizedTailSection(chat.ID, before, 0, config.TailWordBudget))
+	sections := nonEmpty(p.buildTurnSummariesSection(chat.ID, before, 0, config.SummaryCharBudget, ""), p.buildUnsummarizedTailSection(chat.ID, before, 0, config.TailWordBudget, config.TailByteBudget))
 	if recall := p.buildHindsightRecallSection(chat.ID, query, lastString(sections), before); recall != "" {
 		sections = append(sections, recall)
 	}
-	return strings.Join(sections, "\n\n")
+	return capRecentContext(strings.Join(sections, "\n\n"), config.ContextByteBudget)
 }
 
 func (p *Plugin) buildRoleSwitchBridge(chat Chat, roleID, query string, before int64) string {
@@ -262,14 +333,15 @@ func (p *Plugin) buildRoleSwitchBridge(chat Chat, roleID, query string, before i
 			return ""
 		}
 	}
-	sections := nonEmpty(p.buildTurnSummariesSection(chat.ID, before, last, config.SummaryCharBudget, roleID), p.buildUnsummarizedTailSection(chat.ID, before, last, config.TailWordBudget))
+	sections := nonEmpty(p.buildTurnSummariesSection(chat.ID, before, last, config.SummaryCharBudget, roleID), p.buildUnsummarizedTailSection(chat.ID, before, last, config.TailWordBudget, config.TailByteBudget))
 	if recall := p.buildHindsightRecallSection(chat.ID, query, "", before); recall != "" {
 		sections = append(sections, recall)
 	}
 	if len(sections) == 0 {
 		return ""
 	}
-	return "While you were away, other work happened in this chat that your session did not see. Catch up from this context:\n\n" + strings.Join(sections, "\n\n")
+	bridge := "While you were away, other work happened in this chat that your session did not see. Catch up from this context:\n\n" + strings.Join(sections, "\n\n")
+	return capRecentContext(bridge, config.ContextByteBudget)
 }
 
 func lastString(values []string) string {

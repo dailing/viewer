@@ -2,8 +2,10 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -17,6 +19,10 @@ type dispatchRequest struct {
 	RoleIDs           []string `json:"role_ids"`
 	BeforeMessageID   string   `json:"before_message_id"`
 	HistoryWordBudget *int     `json:"history_word_budget"`
+	// ForceNewSession makes every selected role start a fresh agent session
+	// for this message instead of reusing the stored one (one-shot, set by
+	// the composer's new-session toggle).
+	ForceNewSession bool `json:"force_new_session"`
 }
 
 func runtimeKey(chatID, roleID string) string { return chatID + "\x00" + roleID }
@@ -90,7 +96,7 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		<-startGate
 		defer p.wg.Done()
 		defer p.releaseBusy(keys)
-		p.runRelay(*chat, workspace, selected, request.Message, user.CreatedAt)
+		p.runRelay(*chat, workspace, selected, request.Message, user.CreatedAt, request.ForceNewSession)
 	}()
 	p.reply(frame, map[string]any{"role_ids": roleIDs(selected), "rationale": rationale, "dispatch_id": dispatchID}, nil)
 	close(startGate)
@@ -189,41 +195,61 @@ func (p *Plugin) releaseBusy(keys []string) {
 	p.mu.Unlock()
 }
 
-func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, message string, before int64) {
+func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, message string, before int64, forceNew bool) {
 	for _, role := range roles {
 		turnID := newID()
 		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, StartedAt: nowMillis()}
-		if p.store.beginTurn(turn) != nil {
+		if err := p.store.beginTurn(turn); err != nil {
+			slog.Error("chat turn persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
 			continue
 		}
 		candidates, err := p.resolveCandidates(chat, workspace, role)
 		reason, summaryProvider := "error", ""
+		endErr := ""
 		attempts := []map[string]any{}
+		if err != nil {
+			slog.Warn("chat routing candidate resolution failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
+		}
 		for _, candidate := range candidates {
 			var current *runtime
 			var fresh bool
 			attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
-			current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID)
+			current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, forceNew)
 			if err != nil {
 				attempt["outcome"], attempt["error"] = "start_error", err.Error()
 				attempts = append(attempts, attempt)
+				slog.Warn("agent start failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", err)
 				continue
 			}
 			summaryProvider = candidate.target.Agent
 			prompt := message
+			contextBytes, promptMode := 0, "existing_session"
 			if fresh {
 				contextBridge := p.buildNewSessionContext(chat, message, before)
+				contextBytes, promptMode = len(contextBridge), "new_session"
 				prompt = initialPrompt(workspace, chat, role, contextBridge, message)
 			} else if bridge := p.buildRoleSwitchBridge(chat, role.ID, message, before); bridge != "" {
+				contextBytes, promptMode = len(bridge), "role_switch"
 				prompt = bridge + "\n\nCurrent routed message follows:\n" + message
 			}
+			slog.Info("agent prompt prepared",
+				"chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID,
+				"agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model,
+				"mode", promptMode, "prompt_bytes", len(prompt), "context_bytes", contextBytes,
+				"message_bytes", len(message), "common_prompt_bytes", len(commonPrompt(workspace, chat)), "role_prompt_bytes", len(initialRolePrompt(role)),
+			)
 			p.mu.Lock()
 			current.activeTurn, current.cancelRequested, current.roleName = turnID, false, role.Name
 			if current.ended == nil {
-				current.ended = make(chan string, 1)
+				current.ended = make(chan turnEnd, 1)
 			}
 			p.mu.Unlock()
-			reason, err = p.promptBus(p.ctx, current, turnID, prompt)
+			var end turnEnd
+			end, err = p.promptBus(p.ctx, current, turnID, prompt)
+			reason = end.reason
+			if end.err != "" {
+				endErr = end.err
+			}
 			p.mu.Lock()
 			cancelled := current.cancelRequested
 			if current.activeTurn == turnID {
@@ -248,18 +274,29 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			if err != nil {
 				attempt["outcome"], attempt["error"] = "prompt_error", err.Error()
 				attempts = append(attempts, attempt)
+				slog.Warn("agent prompt failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", err)
 				continue
 			}
 			if reason == "error" {
 				attempt["outcome"] = "turn_error"
+				if endErr != "" {
+					attempt["error"] = endErr
+				}
 				attempts = append(attempts, attempt)
+				slog.Warn("agent turn ended with error", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", endErr)
 				continue
 			}
 			attempt["outcome"] = "completed"
 			attempts = append(attempts, attempt)
 			break
 		}
-		_ = p.store.completeTurn(turnID, reason)
+		if reason != "end_turn" && reason != "cancelled" {
+			p.emitTurnFailure(chat.ID, turnID, role, reason, attempts, err, endErr)
+		}
+		if completeErr := p.store.completeTurn(turnID, reason); completeErr != nil {
+			slog.Error("chat turn completion persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "stop_reason", reason, "error", completeErr)
+		}
+		slog.Info("chat turn completed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "role_name", role.Name, "stop_reason", reason, "latency_ms", nowMillis()-turn.StartedAt, "attempts", attempts)
 		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "attempts": attempts, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
 		if reason != "cancelled" {
 			p.wg.Add(1)
@@ -271,15 +308,90 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 	}
 }
 
+// emitTurnFailure records a failed/aborted turn as a visible "error" message
+// block so the chat timeline shows what went wrong instead of going silent.
+// relayErr is the routing/start/prompt error (may be nil), agentErr the error
+// text the agent plugin reported on turn-ended (may be empty).
+func (p *Plugin) emitTurnFailure(chatID, turnID string, role SuperRole, reason string, attempts []map[string]any, relayErr error, agentErr string) {
+	text := turnFailureText(reason, attempts, relayErr, agentErr)
+	payloadJSON, marshalErr := json.Marshal(map[string]any{"stop_reason": reason, "attempts": attempts})
+	if marshalErr != nil {
+		payloadJSON = []byte("{}")
+	}
+	block := &MessageBlock{ID: newID(), EventID: newID(), ChatID: chatID, TurnID: turnID, Kind: "error", Text: text, Payload: string(payloadJSON), OccurredAt: nowMillis()}
+	if err := p.store.addMessageBlock(block); err != nil {
+		slog.Warn("chat turn failure block persistence failed", "chat_id", chatID, "turn_id", turnID, "error", err)
+		return
+	}
+	payload := block.payload()
+	payload["role_id"] = role.ID
+	payload["role_name"] = role.Name
+	p.publish("chat:"+chatID+":block", payload)
+	slog.Info("chat turn failure surfaced", "chat_id", chatID, "turn_id", turnID, "role_id", role.ID, "stop_reason", reason)
+}
+
+// turnFailureText renders a one-line summary plus per-attempt detail lines.
+func turnFailureText(reason string, attempts []map[string]any, relayErr error, agentErr string) string {
+	summary := "Turn failed"
+	if reason != "" && reason != "error" {
+		summary = "Turn ended: " + reason
+	}
+	details := []string{}
+	for _, attempt := range attempts {
+		attemptErr, _ := attempt["error"].(string)
+		if attemptErr == "" {
+			continue
+		}
+		target := strings.Join(nonEmpty(
+			stringValue(attempt["agent"]), stringValue(attempt["provider"]), stringValue(attempt["model"])), " / ")
+		outcome := stringValue(attempt["outcome"])
+		if target != "" {
+			details = append(details, fmt.Sprintf("%s: %s (%s)", target, attemptErr, outcome))
+		} else {
+			details = append(details, attemptErr)
+		}
+	}
+	if relayErr != nil {
+		details = append(details, relayErr.Error())
+	}
+	if agentErr != "" && !containsString(details, agentErr) {
+		details = append(details, agentErr)
+	}
+	if len(details) == 0 {
+		return summary
+	}
+	return summary + "\n" + strings.Join(details, "\n")
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle || strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func initialPrompt(workspace Workspace, chat Chat, role SuperRole, history, message string) string {
-	common := strings.TrimSpace(strings.Join(nonEmpty(workspace.CommonPrompt, chat.CommonPrompt), "\n\n"))
-	rolePrompt := fmt.Sprintf("You are a persistent Super Workspace role named %q.\n\nRole prompt:\n%s\n\nOperate as this role only. Prefer work that matches the fixed rules, files, topic, and responsibilities above. If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks.", role.Name, fallback(role.Prompt, "(No role-specific prompt was provided.)"))
-	sections := nonEmpty(common, rolePrompt)
+	sections := nonEmpty(commonPrompt(workspace, chat), initialRolePrompt(role))
 	if history != "" {
 		sections = append(sections, history+"\n\nCurrent routed message follows:")
 	}
 	sections = append(sections, message)
 	return strings.Join(sections, "\n\n")
+}
+
+func commonPrompt(workspace Workspace, chat Chat) string {
+	return strings.TrimSpace(strings.Join(nonEmpty(workspace.CommonPrompt, chat.CommonPrompt), "\n\n"))
+}
+
+func initialRolePrompt(role SuperRole) string {
+	return fmt.Sprintf("You are a persistent Super Workspace role named %q.\n\nRole prompt:\n%s\n\nOperate as this role only. Prefer work that matches the fixed rules, files, topic, and responsibilities above. If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks.", role.Name, fallback(role.Prompt, "(No role-specific prompt was provided.)"))
 }
 func nonEmpty(values ...string) []string {
 	result := []string{}
@@ -302,18 +414,7 @@ func (p *Plugin) historyPrompt(chatID string, before int64, budget int) (string,
 	if err != nil {
 		return "", err
 	}
-	lines := []string{}
-	for _, message := range messages {
-		sender := "User"
-		if message.RoleID != "" {
-			sender = message.RoleName
-		}
-		lines = append(lines, fmt.Sprintf("%s: %s", sender, message.Text))
-	}
-	if len(lines) == 0 {
-		return "", nil
-	}
-	return "Recent visible chat history:\n" + strings.Join(lines, "\n"), nil
+	return renderRecentHistory(messages, "Recent visible chat history:", routerHistoryByteBudget), nil
 }
 
 func (p *Plugin) handleStop(frame busclient.Frame) {
@@ -354,6 +455,8 @@ func (p *Plugin) publishMessage(message *Message) {
 }
 func (p *Plugin) publish(channel string, value any) {
 	if p.client != nil {
-		_ = p.client.Publish(context.Background(), channel, value)
+		if err := p.client.Publish(context.Background(), channel, value); err != nil {
+			slog.Warn("chat bus publish failed", "channel", channel, "error", err)
+		}
 	}
 }

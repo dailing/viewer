@@ -3,12 +3,15 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"viewer/internal/agentdriver"
 	"viewer/internal/kernel"
@@ -31,6 +34,45 @@ func TestRenderAndParseRouter(t *testing.T) {
 	ids, rationale, err = parseRoute("乱码", roles)
 	if err != nil || len(ids) != 1 || ids[0] != "one" || !strings.Contains(rationale, "fell back") {
 		t.Fatalf("fallback ids=%v rationale=%q err=%v", ids, rationale, err)
+	}
+}
+
+func TestRenderRecentHistoryCapsBytesAndKeepsNewest(t *testing.T) {
+	messages := []Message{
+		{Role: "assistant", RoleID: "old", RoleName: "old-role", Text: strings.Repeat("old ", 80)},
+		{Role: "user", Text: "最新消息必须保留"},
+	}
+	const budget = 96
+	got := renderRecentHistory(messages, "Recent:", budget)
+	if len(got) > budget {
+		t.Fatalf("rendered history bytes = %d, want <= %d: %q", len(got), budget, got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("rendered history is not valid UTF-8: %q", got)
+	}
+	if !strings.Contains(got, "最新消息必须保留") {
+		t.Fatalf("newest message missing: %q", got)
+	}
+	if strings.Count(got, "old ") >= 80 {
+		t.Fatalf("older content should be truncated before newest content: %q", got)
+	}
+}
+
+func TestCapRecentContextPreservesSuffixWithinByteBudget(t *testing.T) {
+	input := strings.Repeat("较早内容", 80) + "\nLATEST-CONTEXT"
+	const budget = 100
+	got := capRecentContext(input, budget)
+	if len(got) > budget {
+		t.Fatalf("context bytes = %d, want <= %d", len(got), budget)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("context is not valid UTF-8: %q", got)
+	}
+	if !strings.Contains(got, "LATEST-CONTEXT") {
+		t.Fatalf("recent suffix missing: %q", got)
+	}
+	if !strings.HasPrefix(got, "Older context omitted") {
+		t.Fatalf("omission marker missing: %q", got)
 	}
 }
 
@@ -134,6 +176,101 @@ func TestLegacyRolesAndRoutingMigrateFromConfigToPluginDB(t *testing.T) {
 		if column.Name() == "provider" || column.Name() == "model" {
 			t.Fatalf("legacy direct target column persisted: %s", column.Name())
 		}
+	}
+}
+
+func TestForceNewSessionStartsFreshSession(t *testing.T) {
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+
+	configClient := busclient.New(url, busclient.Manifest{ID: "force-new-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = configClient.Subscribe("config:_:get", func(frame busclient.Frame) {
+		_ = pluginrpc.Respond(configClient, frame, nil)
+	})
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	// Fake agent runtime: answers _:start, records the requested session_id
+	// (empty = fresh session wanted) and hands out incrementing session ids.
+	var mu sync.Mutex
+	requestedIDs := []string{}
+	starts := 0
+	agent := busclient.New(url, busclient.Manifest{ID: "viewer.agent-hermes", Version: "0.1.0", Slots: map[string]any{"viewer.agent-hermes:_:start": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:start", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		requested, _ := value["session_id"].(string)
+		mu.Lock()
+		starts++
+		requestedIDs = append(requestedIDs, requested)
+		sessionID := fmt.Sprintf("sess-%d", starts)
+		if requested != "" {
+			sessionID = requested // a real agent resumes and keeps the id
+		}
+		mu.Unlock()
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"session_id": sessionID, "resumed": requested != ""})
+	})
+	if err := agent.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	chat := Chat{ID: "chat-fn", Root: t.TempDir()}
+	role := SuperRole{ID: "role-fn", Name: "FN"}
+	candidate := resolvedCandidate{pluginID: "viewer.agent-hermes", target: agentdriver.Target{Agent: "hermes", Provider: "default", Model: "m"}}
+
+	first, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-1", false)
+	if err != nil || !fresh || first.sessionID != "sess-1" {
+		t.Fatalf("first start: fresh=%v session=%#v err=%v", fresh, first, err)
+	}
+	again, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-2", false)
+	if err != nil || fresh || again.sessionID != "sess-1" {
+		t.Fatalf("second dispatch must reuse the in-memory runtime: fresh=%v session=%s err=%v", fresh, again.sessionID, err)
+	}
+	// Drop the in-memory runtime to also cover the role_sessions restore path:
+	// a normal dispatch must resume sess-1, a forced one must NOT.
+	p.mu.Lock()
+	delete(p.runtimes, runtimeKey(chat.ID, role.ID))
+	p.mu.Unlock()
+	resumed, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-3", false)
+	if err != nil || fresh || resumed.sessionID != "sess-1" {
+		t.Fatalf("dispatch after restart must resume the stored session: fresh=%v session=%s err=%v", fresh, resumed.sessionID, err)
+	}
+	forced, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-4", true)
+	if err != nil || !fresh || forced.sessionID == "sess-1" {
+		t.Fatalf("force_new_session must start a fresh session: fresh=%v session=%s err=%v", fresh, forced.sessionID, err)
+	}
+	after, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-5", false)
+	if err != nil || fresh || after.sessionID != forced.sessionID {
+		t.Fatalf("the session after a forced one must be reused: fresh=%v session=%s err=%v", fresh, after.sessionID, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if starts != 3 {
+		t.Fatalf("expected 3 agent starts (initial, resume, forced), got %d (%v)", starts, requestedIDs)
+	}
+	// turn-3 asked to resume sess-1; turn-4 (forced) must have asked for a
+	// brand-new session (empty session_id).
+	if requestedIDs[1] != "sess-1" || requestedIDs[2] != "" {
+		t.Fatalf("start requests: %v", requestedIDs)
 	}
 }
 
@@ -254,6 +391,60 @@ func TestAgentTextDeltasAggregatePerSegment(t *testing.T) {
 	}
 }
 
+func TestStreamingBlocksAggregatePerSegment(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		delete(p.runtimes, runtimeKey("chat", "role"))
+		_ = p.Close()
+	}()
+	p.runtimes[runtimeKey("chat", "role")] = &runtime{sessionID: "session", activeTurn: "turn", roleID: "role", roleName: "Role", pluginID: "viewer.agent-hermes", providerKey: "hermes/default"}
+	send := func(kind, text string) {
+		p.handleAgentEvent(busclient.Frame{Channel: "viewer.agent-hermes:_:event", Value: agentdriver.EventFrame{SessionID: "session", TurnID: "turn", Kind: kind, Block: agentdriver.Block{Kind: kind, Text: text}}})
+	}
+	blocks := func() []MessageBlock {
+		var rows []MessageBlock
+		if err := p.store.db.Find(&rows).Error; err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	byText := func(rows []MessageBlock, text string) *MessageBlock {
+		for index := range rows {
+			if rows[index].Text == text {
+				return &rows[index]
+			}
+		}
+		return nil
+	}
+	send("thinking", "Let")
+	send("thinking", " me")
+	send("thinking", " think")
+	rows := blocks()
+	if len(rows) != 1 || rows[0].Kind != "thinking" || rows[0].Text != "Let me think" {
+		t.Fatalf("after deltas blocks=%#v", rows)
+	}
+	firstID := rows[0].ID
+	send("agent_text", "answer") // different kind seals the thinking segment
+	send("thinking", "more")     // opens a new thinking block, does not append to the first
+	rows = blocks()
+	if len(rows) != 3 {
+		t.Fatalf("after seal blocks=%#v", rows)
+	}
+	first, more := byText(rows, "Let me think"), byText(rows, "more")
+	if first == nil || first.ID != firstID || more == nil || more.ID == firstID || byText(rows, "answer") == nil {
+		t.Fatalf("after seal blocks=%#v firstID=%s", rows, firstID)
+	}
+	p.handleAgentTurnEnded(busclient.Frame{Channel: "viewer.agent-hermes:_:turn-ended", Value: agentdriver.TurnEndedFrame{TurnID: "turn", StopReason: "end_turn"}})
+	send("thinking", "later") // after turn end a delta starts a fresh block
+	rows = blocks()
+	if len(rows) != 4 || byText(rows, "later") == nil || byText(rows, "morelater") != nil {
+		t.Fatalf("after turn end blocks=%#v", rows)
+	}
+}
+
 func TestChatMessageBlocksOrderingAndPayload(t *testing.T) {
 	p, err := New(t.TempDir())
 	if err != nil {
@@ -276,6 +467,47 @@ func TestChatMessageBlocksOrderingAndPayload(t *testing.T) {
 	payload := blocks[0].payload()
 	if payload["kind"] != "tool_call" || payload["turn_id"] != "turn" || payload["occurred_at"] != int64(1000) || payload["payload"] != `{"name":"Read"}` {
 		t.Fatalf("payload=%#v", payload)
+	}
+}
+
+func TestTurnFailureSurfacedAsErrorBlock(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	attempts := []map[string]any{
+		{"agent": "hermes", "provider": "custom", "model": "k3", "outcome": "turn_error", "error": "boom"},
+		{"agent": "codex-app-server", "provider": "openai", "model": "gpt", "outcome": "start_error", "error": "dial failed"},
+	}
+	p.emitTurnFailure("chat", "turn", SuperRole{ID: "role", Name: "Role"}, "error", attempts, nil, "boom")
+	blocks, err := p.store.chatMessageBlocks("chat", 0, 0)
+	if err != nil || len(blocks) != 1 {
+		t.Fatalf("blocks=%#v err=%v", blocks, err)
+	}
+	block := blocks[0]
+	if block.Kind != "error" || block.TurnID != "turn" {
+		t.Fatalf("block=%#v", block)
+	}
+	for _, want := range []string{"Turn failed", "hermes / custom / k3: boom (turn_error)", "dial failed"} {
+		if !strings.Contains(block.Text, want) {
+			t.Fatalf("text %q missing %q", block.Text, want)
+		}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(block.Payload), &payload); err != nil || payload["stop_reason"] != "error" {
+		t.Fatalf("payload=%q err=%v", block.Payload, err)
+	}
+}
+
+func TestTurnFailureTextNonErrorReason(t *testing.T) {
+	text := turnFailureText("refusal", nil, nil, "")
+	if text != "Turn ended: refusal" {
+		t.Fatalf("text=%q", text)
+	}
+	text = turnFailureText("error", nil, errors.New("no dispatchable chat roles have descriptions"), "")
+	if !strings.Contains(text, "Turn failed") || !strings.Contains(text, "no dispatchable") {
+		t.Fatalf("text=%q", text)
 	}
 }
 
@@ -473,5 +705,53 @@ func TestHistoryPageAfterCursor(t *testing.T) {
 		if !unique[id] {
 			t.Fatalf("delta walk missing %s (seen=%v)", id, seen)
 		}
+	}
+}
+
+// Routing resolution is layered: a chat-level per-role override beats the
+// role's own routing policy, which beats the workspace default policy.
+func TestResolveCandidatesLayeredOverride(t *testing.T) {
+	candidate := func(id, provider string) RoutingCandidateConfig {
+		return RoutingCandidateConfig{ID: id, AgentID: "opencode", ProviderID: provider, ModelID: "m", Enabled: true}
+	}
+	workspace := Workspace{
+		DefaultRoutingPolicyID: "policy-default",
+		RoutingPolicies: []RoutingPolicyConfig{
+			{ID: "policy-default", Enabled: true, Candidates: []RoutingCandidateConfig{candidate("c-default", "p-default")}},
+			{ID: "policy-role", Enabled: true, Candidates: []RoutingCandidateConfig{candidate("c-role", "p-role")}},
+			{ID: "policy-chat", Enabled: true, Candidates: []RoutingCandidateConfig{candidate("c-chat", "p-chat")}},
+		},
+	}
+	plugin := &Plugin{
+		agents:   map[string]string{"opencode": "viewer.agent-opencode"},
+		catalogs: map[string]agentdriver.Catalog{"viewer.agent-opencode": {}},
+	}
+	providerOf := func(chat Chat, role SuperRole) string {
+		resolved, err := plugin.resolveCandidates(chat, workspace, role)
+		if err != nil {
+			t.Fatalf("resolveCandidates: %v", err)
+		}
+		if len(resolved) != 1 {
+			t.Fatalf("resolved=%d candidates, want 1", len(resolved))
+		}
+		return resolved[0].target.Provider
+	}
+
+	plainChat := Chat{ID: "chat", RoleRoutingOverridesJSON: "{}"}
+	roleWithPolicy := SuperRole{ID: "role", RoutingPolicyID: "policy-role"}
+	roleNoPolicy := SuperRole{ID: "role"}
+
+	if got := providerOf(plainChat, roleWithPolicy); got != "p-role" {
+		t.Fatalf("role default layer provider=%q, want p-role", got)
+	}
+	if got := providerOf(plainChat, roleNoPolicy); got != "p-default" {
+		t.Fatalf("workspace default layer provider=%q, want p-default", got)
+	}
+	overrideChat := Chat{ID: "chat", RoleRoutingOverridesJSON: encodeJSON(map[string]string{"role": "policy-chat"})}
+	if got := providerOf(overrideChat, roleWithPolicy); got != "p-chat" {
+		t.Fatalf("chat override layer provider=%q, want p-chat", got)
+	}
+	if got := providerOf(overrideChat, roleNoPolicy); got != "p-chat" {
+		t.Fatalf("chat override over workspace default provider=%q, want p-chat", got)
 	}
 }

@@ -164,7 +164,12 @@ func (p *Plugin) llmConfig(ctx context.Context) (LLMConfig, error) {
 }
 
 func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
-	result := SummaryConfig{Enabled: true, ToolCharBudget: 4000, TimeoutSeconds: 60, ContextEnabled: true, SummaryCharBudget: 8000, TailWordBudget: defaultHistoryWordBudget}
+	result := SummaryConfig{
+		Enabled: true, ToolCharBudget: 4000, TimeoutSeconds: 60,
+		ContextEnabled: true, SummaryCharBudget: 6000,
+		TailWordBudget: 1200, TailByteBudget: 12 * 1024,
+		ContextByteBudget: 24 * 1024,
+	}
 	_ = p.configGet(ctx, "turn_summary", &result)
 	if result.ToolCharBudget < 0 {
 		result.ToolCharBudget = 0
@@ -177,6 +182,12 @@ func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
 	}
 	if result.TailWordBudget < 0 {
 		result.TailWordBudget = 0
+	}
+	if result.TailByteBudget < 0 {
+		result.TailByteBudget = 0
+	}
+	if result.ContextByteBudget < 0 {
+		result.ContextByteBudget = 0
 	}
 	return result
 }

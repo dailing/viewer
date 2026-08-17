@@ -89,6 +89,8 @@ type SummaryConfig struct {
 	ContextEnabled    bool `json:"context_enabled"`
 	SummaryCharBudget int  `json:"summary_char_budget"`
 	TailWordBudget    int  `json:"tail_word_budget"`
+	TailByteBudget    int  `json:"tail_byte_budget"`
+	ContextByteBudget int  `json:"context_byte_budget"`
 }
 
 type HindsightConfig struct {

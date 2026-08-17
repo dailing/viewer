@@ -342,6 +342,9 @@ func (s *store) updateMessageText(id, text string) error {
 }
 func (s *store) addTurnEvent(event *TurnEvent) error       { return s.db.Create(event).Error }
 func (s *store) addMessageBlock(block *MessageBlock) error { return s.db.Create(block).Error }
+func (s *store) updateMessageBlockText(id, text string) error {
+	return s.db.Model(&MessageBlock{}).Where("id = ?", id).Update("text", text).Error
+}
 
 func (s *store) message(id string) (*Message, error) {
 	var value Message

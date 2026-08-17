@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-const defaultHistoryWordBudget = 5000
+const (
+	defaultHistoryWordBudget = 1200
+	routerHistoryByteBudget  = 12 * 1024
+)
 const dispatchTemplate = `You route one user message to persistent agent roles.
 
 Default to exactly one role.

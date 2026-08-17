@@ -23,7 +23,7 @@ The application assumes a trusted machine and trusted LAN. Terminal, Git, file e
 ``
 
 - `internal/protocol/` — five wire-frame shapes, strong hello/envelope validation, UUIDv4 and manifest validation, dotted plugin-id-capable channel/pattern grammar, prefix/`*`/`>` matcher. Payload values are arbitrary JSON.
-- `internal/broker/` — serialized subscription table, publish fanout, ordered retained mailbox replacement/replay, atomic subscribe handoff, bounded drop-new outbound queues, protocol-error delivery, depth guard. `registry.go` owns the retained `plugins:_:list` snapshot and lifecycle events.
+- `internal/broker/` — serialized subscription table, publish fanout, ordered retained mailbox replacement/replay, atomic subscribe handoff, bounded drop-new outbound queues (corr-tagged WARN on dropped RPC frames), protocol-error delivery, depth guard, no_route fast-fail for subscriber-less RPC requests. `registry.go` owns the retained `plugins:_:list` snapshot and lifecycle events.
 - `internal/kernel/` — serves only `/ws`, hello identity, delivery time/origin stamps, oversize-frame rejection, one outbound writer plus ping/pong heartbeat per connection, close 4009 on shutdown. Core assembly and supervisor startup are deliberately outside the kernel.
 - `sdk/go/busclient/` — concurrency-safe Go bus SDK shared by in-process and external Go plugins: transport isolation, hello + registry barrier, retained/live handler workers, protocol-error callbacks, inbox RPC/timeout/cancel mapping, exponential reconnect, state callbacks, panic recovery.
 - `internal/pluginapi/` — in-process plugin contract, compile-time registry, inspector-first startup, reverse shutdown, loopback kernel-WS wiring, startup deadlines, plugin-level panic isolation.

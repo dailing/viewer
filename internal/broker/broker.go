@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -193,12 +194,63 @@ func (b *Broker) Publish(frame protocol.Delivery, sourceConn string) bool {
 		}
 		b.mailbox[frame.Channel] = cloneDelivery(frame)
 	}
+	matched := false
 	for conn, patterns := range b.subscriptions {
 		if matchesAny(patterns, frame.Channel) {
 			b.enqueueLocked(conn, frame)
+			matched = true
 		}
 	}
+	if !matched {
+		b.respondNoRouteLocked(frame, sourceConn)
+	}
 	return true
+}
+
+// rpcEnvelope extracts the inbox-RPC markers from a frame value. Parsed only
+// on the rare no-route/drop paths, never on the hot fanout path.
+type rpcEnvelope struct {
+	ReplyTo string `json:"_reply_to"`
+	Corr    string `json:"_corr"`
+}
+
+func rpcMarkers(value json.RawMessage) rpcEnvelope {
+	var envelope rpcEnvelope
+	if len(value) > 0 && value[0] == '{' {
+		_ = json.Unmarshal(value, &envelope)
+	}
+	return envelope
+}
+
+// respondNoRouteLocked fast-fails an inbox-RPC request whose channel has no
+// subscriber — without it the caller hangs until its client-side timeout
+// (e.g. a request racing a plugin's re-subscription across a restart).
+// Non-RPC frames (no _reply_to/_corr) stay silent: events with zero listeners
+// are legitimate.
+func (b *Broker) respondNoRouteLocked(frame protocol.Delivery, sourceConn string) {
+	envelope := rpcMarkers(frame.Value)
+	if envelope.ReplyTo == "" || envelope.Corr == "" {
+		return
+	}
+	slog.Warn("rpc request unrouted: no subscriber", "channel", frame.Channel, "corr", envelope.Corr, "source", sourceConn)
+	value, err := json.Marshal(map[string]any{
+		"ok":    false,
+		"error": map[string]any{"code": "no_route", "message": fmt.Sprintf("no subscriber for %s", frame.Channel)},
+		"_corr": envelope.Corr,
+	})
+	if err != nil {
+		return
+	}
+	response := protocol.Delivery{
+		Type: "publish", Channel: envelope.ReplyTo, Value: value,
+		TS:     time.Now().UnixMilli(),
+		Origin: protocol.Origin{Plugin: protocol.KernelPluginID, Instance: protocol.DefaultInstanceID},
+	}
+	for conn, patterns := range b.subscriptions {
+		if matchesAny(patterns, envelope.ReplyTo) {
+			b.enqueueLocked(conn, response)
+		}
+	}
 }
 
 func (b *Broker) ReportError(conn, code, message string, detail any) {
@@ -244,6 +296,11 @@ func (b *Broker) enqueueLocked(conn string, frame protocol.Delivery) {
 	state := b.connections[conn]
 	if state == nil || state.enqueue(cloneDelivery(frame)) {
 		return
+	}
+	if envelope := rpcMarkers(frame.Value); envelope.Corr != "" {
+		// A dropped RPC frame means its caller hangs until the client-side
+		// timeout — log each one with its correlation id so it stays traceable.
+		slog.Warn("dropping rpc frame for slow consumer", "conn", conn, "channel", frame.Channel, "corr", envelope.Corr, "dropped", state.dropped)
 	}
 	if state.dropped == 1 || state.dropped >= max(2, state.lastNotice*2) {
 		state.lastNotice = state.dropped

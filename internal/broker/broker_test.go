@@ -115,6 +115,70 @@ func TestBackpressureDropsNewFrameAndReportsError(t *testing.T) {
 	}
 }
 
+func TestNoRouteFastFailsRPCRequest(t *testing.T) {
+	b := New(10)
+	caller, _ := b.AddConnection("caller")
+	if err := b.Subscribe("caller", "_inbox:caller:abc"); err != nil {
+		t.Fatal(err)
+	}
+	request := delivery("publish", "chat:_:blocks:list",
+		`{"chat_id":"x","_reply_to":"_inbox:caller:abc","_corr":"abc"}`, 1)
+	b.Publish(request, "caller")
+	response := next(t, caller)
+	if response.Channel != "_inbox:caller:abc" {
+		t.Fatalf("response channel = %s", response.Channel)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(response.Value, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value["ok"] != false || value["_corr"] != "abc" {
+		t.Fatalf("response = %#v", value)
+	}
+	errValue, ok := value["error"].(map[string]any)
+	if !ok || errValue["code"] != "no_route" {
+		t.Fatalf("error = %#v", value["error"])
+	}
+}
+
+func TestNoRouteSilentForPlainEvents(t *testing.T) {
+	b := New(10)
+	listener, _ := b.AddConnection("listener")
+	if err := b.Subscribe("listener", "other:_"); err != nil {
+		t.Fatal(err)
+	}
+	// An unrouted plain event must vanish without a no_route response.
+	b.Publish(delivery("publish", "demo:_:nobody-listens", `{"n":1}`, 1), "producer")
+	select {
+	case frame := <-listener.queue:
+		t.Fatalf("unexpected frame: %#v", frame)
+	default:
+	}
+}
+
+func TestNoRouteSkippedWhenSubscriberExists(t *testing.T) {
+	b := New(10)
+	handler, _ := b.AddConnection("handler")
+	if err := b.Subscribe("handler", "chat:_"); err != nil {
+		t.Fatal(err)
+	}
+	caller, _ := b.AddConnection("caller")
+	if err := b.Subscribe("caller", "_inbox:caller:abc"); err != nil {
+		t.Fatal(err)
+	}
+	request := delivery("publish", "chat:_:blocks:list",
+		`{"chat_id":"x","_reply_to":"_inbox:caller:abc","_corr":"abc"}`, 1)
+	b.Publish(request, "caller")
+	if got := next(t, handler); got.Channel != "chat:_:blocks:list" {
+		t.Fatalf("handler frame = %s", got.Channel)
+	}
+	select {
+	case frame := <-caller.queue:
+		t.Fatalf("caller got spurious no_route response: %#v", frame)
+	default:
+	}
+}
+
 func TestErrorMailboxRemovedWithConnection(t *testing.T) {
 	b := New(10)
 	b.AddConnection("gone")

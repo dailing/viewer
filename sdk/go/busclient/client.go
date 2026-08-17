@@ -391,12 +391,14 @@ func (c *Client) run(t transport) {
 		c.emitState(StateConnecting)
 		newTransport, conn, openErr := c.open(c.ctx)
 		if openErr != nil {
+			slog.Warn("bus client reconnect failed", "plugin", c.manifest.ID, "attempt", attempt, "error", openErr)
 			continue
 		}
 		t = newTransport
 		if !c.install(t, conn) {
 			return
 		}
+		slog.Info("bus client reconnected", "plugin", c.manifest.ID, "conn", conn, "attempt", attempt)
 		if replayErr := c.replayCurrent(c.ctx); replayErr != nil {
 			c.disconnect(t, replayErr)
 			continue
@@ -439,6 +441,7 @@ func (c *Client) disconnect(t transport, cause error) {
 		}
 	}
 	if !closed {
+		slog.Warn("bus client disconnected", "plugin", c.manifest.ID, "conn", c.Conn(), "pending_rpc", len(pending), "error", cause)
 		c.emitState(StateDisconnected)
 	}
 }

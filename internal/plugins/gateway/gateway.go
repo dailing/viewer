@@ -132,6 +132,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveBrowser(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/restart":
 		s.handleRestart(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/build-restart":
+		s.handleBuildRestart(w, r)
 	default:
 		s.serveStatic(w, r)
 	}
@@ -153,6 +155,73 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte(`{"status":"restarting"}`))
+}
+
+// buildMu serializes build-restart runs: a second click while a build is
+// still running gets a 409 instead of two competing builds.
+var buildMu sync.Mutex
+var buildRunning bool
+
+// handleBuildRestart runs web/build-release.sh and, only on a successful
+// build, takes the same graceful restart path as handleRestart so the fresh
+// binary gets loaded. The build runs in the background (it takes minutes:
+// vite + go build); the endpoint answers 202 immediately and the frontend
+// polls until the gateway goes away and comes back. A failed build only logs
+// — the running binary is left untouched.
+func (s *Server) handleBuildRestart(w http.ResponseWriter, r *http.Request) {
+	buildMu.Lock()
+	if buildRunning {
+		buildMu.Unlock()
+		http.Error(w, "a build is already running", http.StatusConflict)
+		return
+	}
+	buildRunning = true
+	buildMu.Unlock()
+	exe, err := os.Executable()
+	if err != nil {
+		buildMu.Lock()
+		buildRunning = false
+		buildMu.Unlock()
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The deployed binary lives at <repo>/dist/viewerd; the release script is
+	// at <repo>/web/build-release.sh.
+	repoRoot := filepath.Dir(filepath.Dir(exe))
+	script := filepath.Join(repoRoot, "web", "build-release.sh")
+	go func() {
+		defer func() {
+			buildMu.Lock()
+			buildRunning = false
+			buildMu.Unlock()
+		}()
+		slog.Info("build-restart: building", "script", script)
+		cmd := exec.Command("bash", script)
+		cmd.Dir = repoRoot
+		// The release script needs Go, which lives outside the systemd unit's
+		// default PATH (~/.local/go/bin).
+		home, _ := os.UserHomeDir()
+		cmd.Env = append(os.Environ(), "PATH="+filepath.Join(home, ".local", "go", "bin")+":"+os.Getenv("PATH"))
+		logFile, logErr := os.OpenFile("/tmp/viewerd-build.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if logErr == nil {
+			defer logFile.Close()
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+		}
+		if runErr := cmd.Run(); runErr != nil {
+			slog.Error("build-restart: build failed, keeping the running binary", "error", runErr, "log", "/tmp/viewerd-build.log")
+			return
+		}
+		slog.Info("build-restart: build succeeded, restarting")
+		// Background context: the request that triggered us is long gone by
+		// the time the build finishes.
+		if err := restartSelf(context.Background()); err != nil {
+			slog.Error("build-restart: restart after build failed", "error", err)
+		}
+	}()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(`{"status":"building"}`))
 }
 
 // restartSelf is a variable so tests can inject a fake spawner.

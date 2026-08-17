@@ -31,6 +31,10 @@ func dialWebSocket(ctx context.Context, url string) (transport, error) {
 		}
 		return nil, fmt.Errorf("websocket dial failed: %w", err)
 	}
+	// Match the kernel/gateway accept side: no read limit. The default 32KiB
+	// limit kills the connection (and any in-flight RPC) when a large frame —
+	// e.g. an oversized prompt or agent event — is routed back to this plugin.
+	conn.SetReadLimit(-1)
 	return &webSocketTransport{conn: conn}, nil
 }
 

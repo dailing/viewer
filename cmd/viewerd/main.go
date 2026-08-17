@@ -5,6 +5,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -34,7 +36,13 @@ func main() {
 	waitPID := flag.Int("wait-pid", 0, "wait for this pid to exit before starting (used by graceful self-restart)")
 	flag.Parse()
 
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	logFile, err := configureLogging(*dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot initialize viewer log: %v\n", err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
+	slog.Info("file logging initialized", "path", filepath.Join(*dataDir, "viewerd.log"))
 	staticFS, err := viewerweb.Dist()
 	if err != nil {
 		slog.Error("embedded frontend unavailable", "error", err)
@@ -93,6 +101,22 @@ func main() {
 		slog.Error("single-binary shutdown failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func configureLogging(dataDir string) (*os.File, error) {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create data directory: %w", err)
+	}
+	path := filepath.Join(dataDir, "viewerd.log")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	output := io.MultiWriter(os.Stderr, file)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(output, nil)))
+	log.SetOutput(output)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.LUTC)
+	return file, nil
 }
 
 func defaultDataDir() (string, error) {

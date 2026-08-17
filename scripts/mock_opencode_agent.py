@@ -50,6 +50,20 @@ def run_prompt(request_id: Any, params: dict[str, Any]) -> None:
         response(request_id, {"stopReason": "end_turn"})
 
 
+MOCK_MODEL_CONFIG = {
+    "id": "model",
+    "category": "model",
+    "name": "Model",
+    "type": "select",
+    "currentValue": "mockzen/model-a",
+    "options": [
+        {"name": "model-a", "value": "mockzen/model-a"},
+        {"name": "model-b", "value": "mockzen/model-b"},
+        {"name": "model-c", "value": "other/model-c"},
+    ],
+}
+
+
 def main() -> None:
     # The production launch shape is `opencode acp`; CLI arguments are ignored.
     for raw in sys.stdin:
@@ -63,7 +77,19 @@ def main() -> None:
         if method == "initialize":
             response(request_id, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "agentInfo": {"name": "viewer-mock-opencode", "version": "0.1.0"}})
         elif method == "session/new":
-            response(request_id, {"sessionId": "mock-opencode-session-" + uuid.uuid4().hex})
+            result: dict[str, Any] = {"sessionId": "mock-opencode-session-" + uuid.uuid4().hex}
+            if os.environ.get("MOCK_OPENCODE_PLAIN_SESSION_NEW") != "1":
+                result["configOptions"] = [MOCK_MODEL_CONFIG]
+            response(request_id, result)
+        elif method == "session/set_config_option":
+            config_id = str(params.get("configId", ""))
+            value = str(params.get("value", ""))
+            known = {c["value"] for c in MOCK_MODEL_CONFIG["options"]}
+            if config_id == "model" and value in known:
+                MOCK_MODEL_CONFIG["currentValue"] = value
+                response(request_id, {"configOptions": [MOCK_MODEL_CONFIG]})
+            else:
+                response(request_id, error={"code": -32602, "message": f"Invalid params: model not found: {value}"})
         elif method == "session/load":
             if os.environ.get("MOCK_OPENCODE_REJECT_LOAD") == "1":
                 response(request_id, error={"code": -32001, "message": "session not found"})

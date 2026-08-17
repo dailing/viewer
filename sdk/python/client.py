@@ -265,7 +265,9 @@ class BusClient:
         }
         if self.instance_id is not None:
             hello["instance_id"] = self.instance_id
-        async with websockets.connect(self.url) as ws:
+        # max_size=None: kernel imposes no frame limit; the websockets default
+        # (1 MiB) would kill the connection on oversized frames mid-RPC.
+        async with websockets.connect(self.url, max_size=None) as ws:
             self._ws = ws
             await ws.send(json.dumps(hello, separators=(",", ":")))
             # SDK duty: auto-subscribe the per-connection error mailbox.

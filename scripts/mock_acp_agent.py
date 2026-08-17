@@ -81,6 +81,29 @@ def run_prompt(request_id: Any, params: dict[str, Any]) -> None:
         response(request_id, {"stopReason": "end_turn"})
 
 
+MOCK_MODELS = {
+    "availableModels": [
+        {"modelId": "mockprov:mock-model-a", "name": "MockProv · mock-model-a", "description": "Provider: mockprov • current"},
+        {"modelId": "mockprov:mock-model-b", "name": "MockProv · mock-model-b", "description": "Provider: mockprov"},
+        {"modelId": "otherprov:other-model", "name": "OtherProv · other-model", "description": "Provider: otherprov"},
+    ],
+    "currentModelId": "mockprov:mock-model-a",
+}
+
+MOCK_MODEL_CONFIG = {
+    "id": "model",
+    "category": "model",
+    "name": "Model",
+    "type": "select",
+    "currentValue": "mockprov/mock-model-a",
+    "options": [
+        {"name": "mock-model-a", "value": "mockprov/mock-model-a"},
+        {"name": "mock-model-b", "value": "mockprov/mock-model-b"},
+        {"name": "other-model", "value": "otherprov/other-model"},
+    ],
+}
+
+
 def main() -> None:
     # Hermes CLI arguments are intentionally accepted and ignored.
     for raw in sys.stdin:
@@ -101,7 +124,28 @@ def main() -> None:
                 },
             )
         elif method == "session/new":
-            response(request_id, {"sessionId": "mock-session-" + uuid.uuid4().hex})
+            result: dict[str, Any] = {"sessionId": "mock-session-" + uuid.uuid4().hex}
+            if os.environ.get("MOCK_ACP_PLAIN_SESSION_NEW") != "1":
+                result["models"] = MOCK_MODELS
+                result["configOptions"] = [MOCK_MODEL_CONFIG]
+            response(request_id, result)
+        elif method == "session/set_model":
+            model_id = str(params.get("modelId", ""))
+            known = {m["modelId"] for m in MOCK_MODELS["availableModels"]}
+            if model_id in known:
+                MOCK_MODELS["currentModelId"] = model_id
+                response(request_id, {})
+            else:
+                response(request_id, error={"code": -32602, "message": f"unknown model: {model_id}"})
+        elif method == "session/set_config_option":
+            config_id = str(params.get("configId", ""))
+            value = str(params.get("value", ""))
+            known = {c["value"] for c in MOCK_MODEL_CONFIG["options"]}
+            if config_id == "model" and value in known:
+                MOCK_MODEL_CONFIG["currentValue"] = value
+                response(request_id, {"configOptions": [MOCK_MODEL_CONFIG]})
+            else:
+                response(request_id, error={"code": -32602, "message": f"Invalid params: model not found: {value}"})
         elif method == "session/load":
             if os.environ.get("MOCK_ACP_REJECT_LOAD") == "1":
                 response(request_id, error={"code": -32001, "message": "session not found"})

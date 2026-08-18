@@ -293,6 +293,28 @@ func mergeBlockPayload(existing, update string) string {
 	return string(encoded)
 }
 
+// runningChatIDs returns the deduplicated, sorted ids of chats with at
+// least one in-flight turn; chats:list exposes it so the frontend Dock can
+// mark those chats with a running dot even after a full reload.
+func (p *Plugin) runningChatIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seen := map[string]bool{}
+	result := []string{}
+	for key, current := range p.runtimes {
+		if current.activeTurn == "" {
+			continue
+		}
+		chatID := strings.SplitN(key, "\x00", 2)[0]
+		if !seen[chatID] {
+			seen[chatID] = true
+			result = append(result, chatID)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
 func chatIDForTurn(p *Plugin, turnID string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

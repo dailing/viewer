@@ -3,26 +3,45 @@ import type { PluginCtx } from "../../shell/ctx";
 import type { DockInstance, DockProvider } from "../../shell/definePlugin";
 import { definePlugin } from "../../shell/definePlugin";
 import { useLayoutStore } from "../../stores/layout";
+import { dockStateFor, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
 import type { ChatList } from "./types";
 
 function createDockProvider(ctx: PluginCtx): DockProvider {
   const layout = useLayoutStore();
   const instances = reactive<DockInstance[]>([]);
   let chats: ChatList["chats"] = [];
-  let activeChatId = "";
   const sync = (): void => {
+    // Opening a chat marks it read; clear its unread entry before mapping so
+    // the dot disappears in the same rebuild.
+    for (const chat of chats) {
+      if (layout.isUidOpen(`chat:${chat.id}`)) markChatRead(chat.id);
+    }
     instances.splice(0, instances.length, ...chats
       .filter((chat) => chat.pinned || layout.isUidOpen(`chat:${chat.id}`))
-      .map((chat) => ({ id: chat.id, label: `${chat.name} · ${chat.root}`, state: chat.id === activeChatId ? "running" : undefined, icon: "bi-chat-left-text" })));
+      .map((chat) => ({ id: chat.id, label: `${chat.name} · ${chat.root}`, state: dockStateFor(chat.id), icon: "bi-chat-left-text" })));
   };
   const refresh = async (): Promise<void> => {
     const result = (await ctx.bus.request("chat:_:chats:list", {})) as ChatList;
     chats = result.chats;
-    activeChatId = result.active_chat_id;
+    setRunningChats(result.running_chat_ids ?? []);
     sync();
   };
   watch(() => layout.panes.map((pane) => pane.content === null ? "" : `${pane.content.paneType}:${pane.content.instanceId}`), sync);
   ctx.bus.subscribe("chat:_:active", () => { void refresh(); });
+  // Global turn lifecycle feed: green dot while a turn runs; on completion
+  // an amber (unread) or red (failed) dot until the chat is opened.
+  ctx.bus.subscribe("chat:_:turn", (frame) => {
+    const value = frame.value as { chat_id?: string; phase?: string; stop_reason?: string } | undefined;
+    if (value === undefined || typeof value.chat_id !== "string") return;
+    if (value.phase === "started") {
+      markTurnStarted(value.chat_id);
+    } else if (value.phase === "completed") {
+      markTurnCompleted(value.chat_id, typeof value.stop_reason === "string" ? value.stop_reason : "", layout.isUidOpen(`chat:${value.chat_id}`));
+    } else {
+      return;
+    }
+    sync();
+  });
   const handleChatsChanged = (): void => { void refresh(); };
   window.addEventListener("viewer:chats-changed", handleChatsChanged);
   ctx.onDispose(() => window.removeEventListener("viewer:chats-changed", handleChatsChanged));

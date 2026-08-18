@@ -375,7 +375,7 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 	for _, chat := range chats {
 		payload = append(payload, chat.payload())
 	}
-	result := map[string]any{"chats": payload, "active_chat_id": p.activeChatID}
+	result := map[string]any{"chats": payload, "active_chat_id": p.activeChatID, "running_chat_ids": p.runningChatIDs()}
 	if request != nil && request["include_messages"] == true {
 		chatID, _ := request["chat_id"].(string)
 		var messages []Message

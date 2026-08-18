@@ -4,7 +4,7 @@ export interface ChatBlock { id: string; chat_id: string; turn_id: string; kind:
 export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number }
 export interface Role { id: string; name: string; description: string; prompt: string; cwd: string; routing_policy_id: string; session_policy: string; context_recycle_percent: number | null; context_recycle_tokens: number | null; created_at: number; updated_at: number }
 export interface Chat { id: string; name: string; type: string; pinned: boolean; root: string; common_prompt: string; member_role_ids: string[]; role_routing_policy_overrides: Record<string, string>; created_at: number; updated_at: number }
-export interface ChatList { chats: Chat[]; active_chat_id: string; messages?: ChatMessage[]; has_more?: boolean }
+export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; messages?: ChatMessage[]; has_more?: boolean }
 export interface Workspace { id: string; name: string; common_prompt: string; roles: Role[]; routing_policies: RoutingPolicy[]; default_routing_policy_id: string }
 export interface AgentProviderCatalog { provider: string; models: string[]; parameter_schema?: Record<string, unknown> }
 export interface AgentCatalog { agent: string; plugin_id: string; online: boolean; providers: AgentProviderCatalog[] }

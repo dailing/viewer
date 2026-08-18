@@ -321,6 +321,27 @@ func TestRoutingPolicyWithoutFailoverOrZeroMaxAttemptsSelectsOne(t *testing.T) {
 	}
 }
 
+func TestRunningChatIDs(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	if ids := p.runningChatIDs(); len(ids) != 0 {
+		t.Fatalf("expected no running chats, got %v", ids)
+	}
+	p.runtimes[runtimeKey("chat-b", "role-1")] = &runtime{sessionID: "s1", activeTurn: "turn-1"}
+	p.runtimes[runtimeKey("chat-a", "role-1")] = &runtime{sessionID: "s2", activeTurn: "turn-2"}
+	// Second concurrent turn in chat-b must not duplicate the id; an idle
+	// runtime (no active turn) must not appear at all.
+	p.runtimes[runtimeKey("chat-b", "role-2")] = &runtime{sessionID: "s3", activeTurn: "turn-3"}
+	p.runtimes[runtimeKey("chat-c", "role-1")] = &runtime{sessionID: "s4"}
+	ids := p.runningChatIDs()
+	if len(ids) != 2 || ids[0] != "chat-a" || ids[1] != "chat-b" {
+		t.Fatalf("ids=%v", ids)
+	}
+}
+
 func TestHandleUpdatePersistsRawBeforeVisibleTextFilter(t *testing.T) {
 	p, err := New(t.TempDir())
 	if err != nil {

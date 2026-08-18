@@ -141,6 +141,12 @@ function instanceDisplayLabel(provider: DockProvider, instance: DockInstance): s
   return provider.type === "chat" ? chatDisplayLabel(instance.label) : instance.label;
 }
 
+/** Status-dot class for an instance state word; unknown words fall back to the neutral dot. */
+function dockDotClass(state: string): string {
+  if (state === "running" || state === "error" || state === "unread") return state;
+  return "dead";
+}
+
 const entries = computed<DockEntry[]>(() => {
   const result: DockEntry[] = [];
   for (const provider of dockProviders) {
@@ -262,7 +268,7 @@ function openSettings(): void {
             <i class="bi" :class="entry.icon"></i>
             <span v-if="isExpanded" class="dock-label">{{ entry.displayLabel }}</span>
           </button>
-          <span v-if="entry.state !== undefined" class="dock-dot" :class="entry.state === 'running' ? 'running' : 'dead'"></span>
+          <span v-if="entry.state !== undefined" class="dock-dot" :class="dockDotClass(entry.state)"></span>
           <button v-if="entry.provider.remove !== undefined && entry.instance !== undefined" type="button" class="dock-remove" title="终止" @click="removeEntry(entry)"><i class="bi bi-x"></i></button>
           <button v-if="entry.provider.singleton === true" type="button" class="dock-pin" :title="entry.pinned === false ? '固定到 Dock' : '从 Dock 取消固定'" @click="togglePin(entry)"><i class="bi" :class="entry.pinned === false ? 'bi-pin-angle' : 'bi-pin-angle-fill'"></i></button>
         </div>
@@ -452,6 +458,14 @@ function openSettings(): void {
 
 .dock-dot.running {
   background: var(--color-success);
+}
+
+.dock-dot.unread {
+  background: var(--color-warning);
+}
+
+.dock-dot.error {
+  background: var(--color-danger);
 }
 
 .dock-dot.dead {

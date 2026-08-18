@@ -16,7 +16,7 @@ export interface DockInstance {
   id: string;
   /** Tooltip text, e.g. "#3 /usr/bin/zsh · /home/d". */
   label: string;
-  /** Optional state word ("running"…) — drives the status dot color. */
+  /** Optional state word ("running" / "unread" / "error" / …) — drives the status dot color. */
   state?: string;
   /** Per-instance icon override; falls back to the provider's icon. */
   icon?: string;

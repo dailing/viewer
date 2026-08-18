@@ -125,7 +125,12 @@ const timeline = computed<TimelineBox[]>(() => {
       sending: sent.sending, routed: sent.routed, failed: sent.failed,
     });
   }
-  return boxes.sort((a, b) => a.ts - b.ts || a.key.localeCompare(b.key));
+  // Millisecond ties resolve user-before-role: a request is always the cause
+  // of the response, so at equal ts the request box rides on top. (The bare
+  // key compare ordered `pending:`/`t:` before `u:`/`send:` — a fast explicit
+  // dispatch landing in the same ms flashed the response above the request.)
+  const kindRank = (box: TimelineBox): number => (box.kind === "user" ? 0 : 1);
+  return boxes.sort((a, b) => a.ts - b.ts || kindRank(a) - kindRank(b) || a.key.localeCompare(b.key));
 });
 
 /**

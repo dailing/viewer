@@ -7,7 +7,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
-import { useDockSettingsStore } from "../stores/dockSettings";
+import { useDockSettingsStore, clampDockWidth } from "../stores/dockSettings";
 import { useLayoutStore } from "../stores/layout";
 import type { DockInstance, DockProvider } from "./definePlugin";
 import { dockProviders } from "./registries";
@@ -17,7 +17,49 @@ const dockSettings = useDockSettingsStore();
 const menuOpen = ref(false);
 const pinRevision = ref(0);
 const expanded = ref(false);
+const navEl = ref<HTMLElement | null>(null);
+// Pinned: the Dock stays expanded and its width takes real layout space
+// (compressing the panes), instead of overlaying them on hover.
+const pinned = computed(() => dockSettings.pinned);
+const isExpanded = computed(() => pinned.value || expanded.value);
 const hoverExpandMs = computed(() => dockSettings.hoverExpandMs);
+// Width: drag override while resizing, otherwise the persisted setting.
+const dragWidth = ref<number | null>(null);
+const dockWidth = computed(() => dragWidth.value ?? dockSettings.width);
+
+function startResize(event: PointerEvent): void {
+  event.preventDefault();
+  const pointerId = event.pointerId;
+  (event.currentTarget as HTMLElement).setPointerCapture(pointerId);
+  const startX = event.clientX;
+  const startWidth = dockWidth.value;
+
+  const move = (moveEvent: PointerEvent): void => {
+    dragWidth.value = clampDockWidth(startWidth + moveEvent.clientX - startX);
+  };
+
+  const stop = (upEvent: PointerEvent): void => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", stop);
+    window.removeEventListener("pointercancel", stop);
+    dockSettings.setWidth(startWidth + upEvent.clientX - startX);
+    dragWidth.value = null;
+    // Overlay mode: pointerleave was suppressed during the drag, so if the
+    // pointer ended up outside the Dock, collapse it now.
+    if (!pinned.value && navEl.value !== null) {
+      const rect = navEl.value.getBoundingClientRect();
+      // The expanded panel spans [rect.left, rect.left + dockWidth].
+      const inside =
+        upEvent.clientX >= rect.left && upEvent.clientX <= rect.left + dockWidth.value &&
+        upEvent.clientY >= rect.top && upEvent.clientY <= rect.bottom;
+      if (!inside) expanded.value = false;
+    }
+  };
+
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
+}
 let expandTimer: ReturnType<typeof setTimeout> | null = null;
 
 function clearExpandTimer(): void {
@@ -27,7 +69,7 @@ function clearExpandTimer(): void {
 }
 
 function handlePointerEnter(event: PointerEvent): void {
-  if (event.pointerType === "touch" || expanded.value || expandTimer !== null) return;
+  if (event.pointerType === "touch" || isExpanded.value || expandTimer !== null) return;
   if (hoverExpandMs.value === 0) {
     expanded.value = true;
     return;
@@ -40,7 +82,13 @@ function handlePointerEnter(event: PointerEvent): void {
 
 function handlePointerLeave(): void {
   clearExpandTimer();
-  expanded.value = false;
+  // Never collapse mid-resize: the drag handle sits at the expanded panel's
+  // right edge, so a rightward drag immediately leaves the hover region.
+  if (!pinned.value && dragWidth.value === null) expanded.value = false;
+}
+
+function toggleDockPin(): void {
+  dockSettings.setPinned(!pinned.value);
 }
 
 function closePopovers(): void {
@@ -168,8 +216,10 @@ function openSettings(): void {
 
 <template>
   <nav
+    ref="navEl"
     class="dock"
-    :class="{ expanded }"
+    :class="{ expanded: isExpanded, pinned, resizing: dragWidth !== null }"
+    :style="{ '--dock-expanded-width': `${dockWidth}px` }"
     @pointerenter="handlePointerEnter"
     @pointerleave="handlePointerLeave"
   >
@@ -210,7 +260,7 @@ function openSettings(): void {
         >
           <button type="button" class="dock-btn" :title="entry.label" :aria-label="entry.label" @click="openEntry(entry)">
             <i class="bi" :class="entry.icon"></i>
-            <span v-if="expanded" class="dock-label">{{ entry.displayLabel }}</span>
+            <span v-if="isExpanded" class="dock-label">{{ entry.displayLabel }}</span>
           </button>
           <span v-if="entry.state !== undefined" class="dock-dot" :class="entry.state === 'running' ? 'running' : 'dead'"></span>
           <button v-if="entry.provider.remove !== undefined && entry.instance !== undefined" type="button" class="dock-remove" title="终止" @click="removeEntry(entry)"><i class="bi bi-x"></i></button>
@@ -220,8 +270,23 @@ function openSettings(): void {
       </div>
 
       <div class="dock-foot">
+        <button
+          type="button"
+          class="dock-btn"
+          :class="{ 'dock-pin-active': pinned }"
+          :title="pinned ? '取消固定侧边栏' : '固定侧边栏（保持展开）'"
+          :aria-label="pinned ? '取消固定侧边栏' : '固定侧边栏（保持展开）'"
+          @click="toggleDockPin"
+        ><i class="bi" :class="pinned ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i></button>
         <button type="button" class="dock-btn" title="设置" aria-label="设置" @click="openSettings"><i class="bi bi-gear"></i></button>
       </div>
+      <div
+        v-if="isExpanded"
+        class="dock-resizer"
+        role="separator"
+        title="拖动调整侧边栏宽度"
+        @pointerdown="startResize"
+      ></div>
     </div>
   </nav>
 </template>
@@ -231,7 +296,42 @@ function openSettings(): void {
   flex: 0 0 var(--dock-width);
   min-height: 0;
   position: relative;
+  transition: flex-basis 160ms ease;
   width: var(--dock-width);
+}
+
+/* Pinned: the expanded width takes real layout space, compressing the
+   panes to the right instead of overlaying them; no floating shadow. */
+.dock.pinned {
+  flex-basis: var(--dock-expanded-width);
+  width: var(--dock-expanded-width);
+}
+
+.dock.pinned .dock-inner {
+  box-shadow: none;
+}
+
+/* No width animation while dragging the resizer. */
+.dock.resizing,
+.dock.resizing .dock-inner {
+  transition: none;
+}
+
+.dock-resizer {
+  bottom: 0;
+  cursor: col-resize;
+  position: absolute;
+  right: -3px;
+  top: 0;
+  width: 7px;
+  z-index: 45;
+}
+
+.dock-resizer:hover {
+  background: var(--color-accent);
+  opacity: 0.35;
+  right: -1px;
+  width: 3px;
 }
 
 .dock-inner {
@@ -256,7 +356,7 @@ function openSettings(): void {
 .dock.expanded .dock-inner {
   box-shadow: 4px 0 12px rgb(0 0 0 / 0.12);
   z-index: 40;
-  width: 220px;
+  width: var(--dock-expanded-width);
 }
 
 .dock-plus-wrap {
@@ -402,6 +502,10 @@ function openSettings(): void {
 .dock-empty {
   color: var(--color-text-subtle);
   margin-top: 4px;
+}
+
+.dock-pin-active {
+  color: var(--color-accent);
 }
 
 .dock-menu-overlay {

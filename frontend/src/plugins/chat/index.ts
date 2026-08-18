@@ -13,7 +13,7 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   const sync = (): void => {
     instances.splice(0, instances.length, ...chats
       .filter((chat) => chat.pinned || layout.isUidOpen(`chat:${chat.id}`))
-      .map((chat) => ({ id: chat.id, label: `${chat.pinned ? "★ " : ""}${chat.name} · ${chat.root}`, state: chat.id === activeChatId ? "running" : undefined, icon: "bi-chat-left-text" })));
+      .map((chat) => ({ id: chat.id, label: `${chat.name} · ${chat.root}`, state: chat.id === activeChatId ? "running" : undefined, icon: "bi-chat-left-text" })));
   };
   const refresh = async (): Promise<void> => {
     const result = (await ctx.bus.request("chat:_:chats:list", {})) as ChatList;

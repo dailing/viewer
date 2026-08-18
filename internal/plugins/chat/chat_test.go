@@ -562,6 +562,54 @@ func TestTurnFailureTextNonErrorReason(t *testing.T) {
 	}
 }
 
+func TestHermesRefusalFreshRetryGuard(t *testing.T) {
+	tests := []struct {
+		name           string
+		agent          string
+		fresh          bool
+		reason         string
+		hadEvents      bool
+		alreadyRetried bool
+		want           bool
+	}{
+		{name: "stale hermes session", agent: "hermes", reason: "refusal", want: true},
+		{name: "fresh session", agent: "hermes", fresh: true, reason: "refusal"},
+		{name: "visible refusal", agent: "hermes", reason: "refusal", hadEvents: true},
+		{name: "one retry only", agent: "hermes", reason: "refusal", alreadyRetried: true},
+		{name: "other agent", agent: "opencode", reason: "refusal"},
+		{name: "other reason", agent: "hermes", reason: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRetryFreshHermesSession(tt.agent, tt.fresh, tt.reason, tt.hadEvents, tt.alreadyRetried); got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTurnEndReportsWhetherAgentEmittedEvents(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	current := &runtime{sessionID: "session", activeTurn: "turn-1", roleID: "role", roleName: "Role", pluginID: "viewer.agent-hermes", providerKey: "hermes/default", ended: make(chan turnEnd, 1)}
+	p.runtimes[runtimeKey("chat", "role")] = current
+
+	p.handleAgentTurnEnded(busclient.Frame{Channel: "viewer.agent-hermes:_:turn-ended", Value: agentdriver.TurnEndedFrame{TurnID: "turn-1", StopReason: "refusal"}})
+	if end := <-current.ended; end.hadEvents {
+		t.Fatal("turn without events reported hadEvents=true")
+	}
+
+	current.activeTurn, current.sawEvent = "turn-2", false
+	p.handleAgentEvent(busclient.Frame{Channel: "viewer.agent-hermes:_:event", Value: agentdriver.EventFrame{SessionID: "session", TurnID: "turn-2", Kind: "agent_text", Block: agentdriver.Block{Kind: "agent_text", Text: "visible"}}})
+	p.handleAgentTurnEnded(busclient.Frame{Channel: "viewer.agent-hermes:_:turn-ended", Value: agentdriver.TurnEndedFrame{TurnID: "turn-2", StopReason: "refusal"}})
+	if end := <-current.ended; !end.hadEvents {
+		t.Fatal("turn with an event reported hadEvents=false")
+	}
+}
+
 func TestChatMessageBlocksWindow(t *testing.T) {
 	p, err := New(t.TempDir())
 	if err != nil {

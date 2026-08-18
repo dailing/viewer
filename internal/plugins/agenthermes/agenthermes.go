@@ -119,7 +119,11 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 		return
 	}
 	sessionID, resumed := request.SessionID, false
-	if sessionID != "" && client.LoadSession(initCtx, sessionID, request.CWD) == nil {
+	// Hermes returns model/mode metadata for every successful load. Its ACP SDK
+	// normalizes a failed optional response to {}, so require that state here;
+	// otherwise fall back to a genuinely new session instead of accepting a
+	// stale id that will immediately end the prompt with "refusal".
+	if sessionID != "" && client.LoadSessionWithState(initCtx, sessionID, request.CWD) == nil {
 		resumed = true
 	} else {
 		var info acp.SessionInfo

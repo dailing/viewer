@@ -50,11 +50,17 @@ async function startVoiceInput(): Promise<void> {
     await voice.start(props.contextId, model.value);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
+    voice.setContext(props.contextId, { status: "error", error: error.value });
   }
 }
 
 function toggleVoiceInput(): void {
   if (!voice.backendAvailable) return;
+  console.info("[voice] mic button clicked", {
+    contextId: props.contextId,
+    status: state.value.status,
+    secureContext: window.isSecureContext,
+  });
   if (state.value.status === "connecting" || state.value.status === "recording") {
     void voice.stop(props.contextId);
   } else {

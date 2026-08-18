@@ -42,8 +42,9 @@ func WithHTTPClient(client *http.Client) Option { return func(p *Plugin) { p.htt
 // turnEnd carries the terminal outcome of one agent prompt: the wire stop
 // reason plus the agent-reported error text (empty when the agent gave none).
 type turnEnd struct {
-	reason string
-	err    string
+	reason    string
+	err       string
+	hadEvents bool
 }
 
 type runtime struct {
@@ -52,6 +53,7 @@ type runtime struct {
 	target                                                agentdriver.Target
 	ended                                                 chan turnEnd
 	cancelRequested                                       bool
+	sawEvent                                              bool
 }
 type Plugin struct {
 	dataDir       string

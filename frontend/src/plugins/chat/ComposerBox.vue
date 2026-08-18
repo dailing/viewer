@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import VoiceInputButton from "../voice/VoiceInputButton.vue";
+import { useVoiceStore } from "../voice/voiceStore";
 import type { Role } from "./types";
 
 const props = defineProps<{
@@ -23,6 +24,12 @@ const draft = ref("");
 // force_new_session=true (each selected role starts a fresh agent session
 // instead of resuming the stored one) and the toggle resets itself.
 const forceNewSession = ref(false);
+
+const voice = useVoiceStore();
+const voiceError = computed(() => {
+  const state = voice.context(props.contextId);
+  return state.status === "error" ? state.error : "";
+});
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
 const selectedRoles = computed(() => {
@@ -129,6 +136,19 @@ function handlePickerFocusOut(event: FocusEvent): void {
       @input="resizeTextarea"
       @keydown.ctrl.enter.prevent="handleSend"
     />
+    <div v-if="voiceError !== ''" class="voice-error">
+      <i class="bi bi-exclamation-triangle" />
+      <span class="voice-error-text" :title="voiceError">{{ voiceError }}</span>
+      <button
+        class="voice-error-dismiss"
+        type="button"
+        title="Dismiss"
+        aria-label="Dismiss voice error"
+        @click="voice.dismissError(contextId)"
+      >
+        <i class="bi bi-x" />
+      </button>
+    </div>
     <div class="composer-actions">
       <div class="composer-actions-main">
         <VoiceInputButton v-model="draft" :context-id="contextId" />
@@ -226,6 +246,42 @@ function handlePickerFocusOut(event: FocusEvent): void {
 .composer-card textarea:focus {
   border-color: var(--bs-border-color);
   box-shadow: none;
+}
+
+/* Voice failure notice: single low-key line (no box), per activity-row ruling. */
+.voice-error {
+  align-items: center;
+  color: var(--bs-danger-text-emphasis, var(--bs-danger));
+  display: flex;
+  font-size: 11px;
+  gap: 6px;
+  line-height: 1.3;
+  min-height: 18px;
+  padding: 0 4px;
+}
+
+.voice-error-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-error-dismiss {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.7;
+  padding: 0 2px;
+}
+
+.voice-error-dismiss:hover {
+  opacity: 1;
 }
 
 .composer-actions,

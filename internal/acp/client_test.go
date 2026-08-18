@@ -168,6 +168,39 @@ func TestNewSessionWithoutModelsTolerated(t *testing.T) {
 	}
 }
 
+func TestLoadSessionWithStateRejectsEmptyObject(t *testing.T) {
+	p := newPipePeer(t)
+	defer p.client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.client.LoadSessionWithState(ctx, "stale", "/tmp") }()
+	req := p.request(t)
+	if req["method"] != "session/load" {
+		t.Fatalf("method=%v", req["method"])
+	}
+	p.send(t, map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{}})
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "no session state") {
+		t.Fatalf("empty load result must be rejected: err=%v", err)
+	}
+}
+
+func TestLoadSessionWithStateAcceptsHermesMetadata(t *testing.T) {
+	p := newPipePeer(t)
+	defer p.client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.client.LoadSessionWithState(ctx, "session", "/tmp") }()
+	req := p.request(t)
+	p.send(t, map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{
+		"models": map[string]any{"currentModelId": "custom:model"},
+	}})
+	if err := <-done; err != nil {
+		t.Fatalf("metadata-bearing load result must be accepted: %v", err)
+	}
+}
+
 func TestSetConfigOptionSendsRPC(t *testing.T) {
 	p := newPipePeer(t)
 	defer p.client.Close()

@@ -35,6 +35,14 @@ const activeRoles = ref(new Set<string>());
 // so a response box appears immediately, and resolved when the turn's first
 // live message/block arrives (the real turn box takes over) or the turn ends.
 const pendingTurns = ref(new Map<string, { key: string; roleId: string; label: string; ts: number }>());
+// Optimistic user-send boxes: shown the moment the user hits send (with a
+// "sending" marker), annotated with the routed agent/provider when dispatch
+// returns, and replaced by the real user message once the bus delivers it.
+interface PendingSend { key: string; text: string; ts: number; sending: boolean; routed: string; failed: string }
+const pendingSends = ref<PendingSend[]>([]);
+// Routed label transferred onto the real user message (by id) when it lands,
+// so the arrow survives the optimistic box being replaced.
+const routedLabels = new Map<string, string>();
 const error = ref("");
 const threadRef = ref<HTMLElement | null>(null);
 const messageEndRef = ref<HTMLElement | null>(null);
@@ -54,7 +62,7 @@ let userScrolled = false; // manual scroll wins over the cache-hit auto-scroll
 let lastProgrammaticScrollAt = 0; // suppresses the scroll-event echo of scrollThreadTop
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
-interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[]; pending?: boolean }
+interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[]; pending?: boolean; sending?: boolean; routed?: string; failed?: string }
 
 const ACTIVITY_LABELS: Record<string, string> = {
   thinking: "Reasoning",
@@ -74,6 +82,7 @@ const timeline = computed<TimelineBox[]>(() => {
       boxes.push({
         key: `u:${message.id}`, kind: "user", label: "You", roleId: "", turnId: "", ts: message.created_at,
         segments: [{ id: message.id, kind: "text", ts: message.created_at, text: message.text }],
+        routed: routedLabels.get(message.id) ?? "",
       });
       continue;
     }
@@ -107,6 +116,14 @@ const timeline = computed<TimelineBox[]>(() => {
   // their ts (dispatch time) keeps them at the end until real events land.
   for (const pending of pendingTurns.value.values()) {
     boxes.push({ key: pending.key, kind: "role", label: pending.label, roleId: pending.roleId, turnId: "", ts: pending.ts, segments: [], pending: true });
+  }
+  // Optimistic user-send boxes ride the same timeline at the end.
+  for (const sent of pendingSends.value) {
+    boxes.push({
+      key: sent.key, kind: "user", label: "You", roleId: "", turnId: "", ts: sent.ts,
+      segments: [{ id: sent.key, kind: "text", ts: sent.ts, text: sent.text }],
+      sending: sent.sending, routed: sent.routed, failed: sent.failed,
+    });
   }
   return boxes.sort((a, b) => a.ts - b.ts || a.key.localeCompare(b.key));
 });
@@ -576,15 +593,41 @@ function handleThreadScroll(): void {
   void loadOlder();
 }
 
+function patchPendingSend(key: string, patch: Partial<PendingSend>): void {
+  const index = pendingSends.value.findIndex((item) => item.key === key);
+  if (index >= 0) pendingSends.value[index] = { ...pendingSends.value[index], ...patch };
+}
+
+function dismissSend(key: string): void {
+  pendingSends.value = pendingSends.value.filter((item) => item.key !== key);
+}
+
+/** Per-role "RoleName → agent / provider / model" routing summary, shown on
+ *  the user box once dispatch has assigned the message. */
+function routedLabelFor(roleIds: string[]): string {
+  return roleIds.map((roleId) => {
+    const role = roles.value.find((item) => item.id === roleId);
+    const target = roleTargetLabel(roleId);
+    const name = role?.name ?? roleId;
+    return target ? `${name} → ${target}` : name;
+  }).join("  ·  ");
+}
+
 async function send(text: string, forceNewSession = false): Promise<void> {
   const message = text.trim();
   if (message === "") return;
   error.value = "";
+  // Optimistic user box with a sending marker; dispatch latency (routing,
+  // agent spawn) no longer leaves the thread looking idle.
+  const key = `send:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+  pendingSends.value = [...pendingSends.value, { key, text: message, ts: Date.now(), sending: true, routed: "", failed: "" }];
+  void nextTick(() => scrollThreadToMessageEnd());
   try {
     const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message };
     if (selected.value.length > 0) payload.role_ids = selected.value;
     if (forceNewSession) payload.force_new_session = true;
     const result = await ctx.bus.request("chat:_:dispatch", payload) as { role_ids: string[] };
+    patchPendingSend(key, { sending: false, routed: routedLabelFor(result.role_ids) });
     activeRoles.value = new Set([...activeRoles.value, ...result.role_ids]);
     // Show one optimistic response box per dispatched role immediately; each
     // resolves when that turn's first live event arrives.
@@ -597,7 +640,7 @@ async function send(text: string, forceNewSession = false): Promise<void> {
     pendingTurns.value = pending;
     scrollOnNextUserMessage = true; // scroll the just-sent query into view when it lands
   } catch (cause) {
-    error.value = errorText(cause);
+    patchPendingSend(key, { sending: false, failed: errorText(cause) });
   }
 }
 
@@ -626,6 +669,17 @@ onMounted(() => {
     }
     const index = messages.value.findIndex((item) => item.id === value.id);
     if (index >= 0) messages.value.splice(index, 1, value); else messages.value.push(value);
+    if (value.role === "user") {
+      // The real user message supersedes its optimistic send box: transfer
+      // the routed label onto the real box, then drop the placeholder.
+      let sendIndex = pendingSends.value.findIndex((item) => item.text === value.text.trim());
+      if (sendIndex < 0) sendIndex = pendingSends.value.findIndex((item) => !item.sending && !item.failed);
+      if (sendIndex >= 0) {
+        const routed = pendingSends.value[sendIndex].routed;
+        if (routed) routedLabels.set(value.id, routed);
+        pendingSends.value.splice(sendIndex, 1);
+      }
+    }
     writeBack();
     resolvePendingTurn(value.sender?.role_id);
     if (scrollOnNextUserMessage && value.role === "user") {
@@ -685,6 +739,22 @@ onMounted(() => {
               <i class="bi" :class="box.kind === 'user' ? 'bi-person' : 'bi-robot'" />
               {{ box.label }}
             </span>
+            <span v-if="box.sending" class="chat-turn-status">
+              <span class="spinner-border spinner-border-sm" aria-hidden="true" /> 发送中…
+            </span>
+            <template v-else-if="box.failed">
+              <span class="chat-send-failed" :title="box.failed">发送失败</span>
+              <button
+                class="btn btn-sm btn-link chat-stop-turn"
+                type="button"
+                title="移除这条消息"
+                aria-label="移除这条发送失败的消息"
+                @click="dismissSend(box.key)"
+              >
+                <i class="bi bi-x-lg" />
+              </button>
+            </template>
+            <span v-else-if="box.kind === 'user' && box.routed" class="chat-meta-detail">→ {{ box.routed }}</span>
             <span v-if="turnActive(box)" class="chat-turn-status">
               <span class="spinner-border spinner-border-sm" aria-hidden="true" /> running
             </span>
@@ -812,6 +882,12 @@ onMounted(() => {
 .chat-turn-status .spinner-border {
   height: 10px;
   width: 10px;
+}
+
+.chat-send-failed {
+  color: var(--bs-danger);
+  font-size: 10.5px;
+  line-height: 1.2;
 }
 
 .chat-stop-turn {

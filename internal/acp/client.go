@@ -196,12 +196,28 @@ func (c *Client) NewSession(ctx context.Context, cwd string) (SessionInfo, error
 // Same required-field rule as session/new: `mcpServers` must be present (can
 // be empty) or hermes v0.20.0+ rejects the call with -32602.
 func (c *Client) LoadSession(ctx context.Context, sessionID, cwd string) error {
-	var result any
+	return c.loadSession(ctx, sessionID, cwd, false)
+}
+
+// LoadSessionWithState requires the agent to return at least one session-state
+// field. Some ACP SDKs normalize a failed optional load response from null to
+// {}, which is otherwise indistinguishable from success to a generic client.
+// Callers that know their agent returns model/mode/config state on a successful
+// load can use this stricter form and safely fall back to session/new.
+func (c *Client) LoadSessionWithState(ctx context.Context, sessionID, cwd string) error {
+	return c.loadSession(ctx, sessionID, cwd, true)
+}
+
+func (c *Client) loadSession(ctx context.Context, sessionID, cwd string, requireState bool) error {
+	var result map[string]any
 	if err := c.request(ctx, "session/load", map[string]any{"sessionId": sessionID, "cwd": cwd, "mcpServers": []any{}}, &result); err != nil {
 		return err
 	}
 	if result == nil {
 		return errors.New("ACP session/load returned null")
+	}
+	if requireState && len(result) == 0 {
+		return errors.New("ACP session/load returned no session state")
 	}
 	return nil
 }

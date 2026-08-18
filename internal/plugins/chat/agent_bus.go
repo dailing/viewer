@@ -141,6 +141,7 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 		p.mu.Unlock()
 		return
 	}
+	current.sawEvent = true
 	turnID, roleID, roleName, provider := update.TurnID, current.roleID, current.roleName, current.providerKey
 	p.mu.Unlock()
 	occurredAt := nowMillis()
@@ -316,7 +317,7 @@ func (p *Plugin) handleAgentTurnEnded(frame busclient.Frame) {
 	for _, current := range p.runtimes {
 		if current.pluginID == pluginID && current.activeTurn == update.TurnID && current.ended != nil {
 			select {
-			case current.ended <- turnEnd{reason: fallback(update.StopReason, "end_turn"), err: update.Error}:
+			case current.ended <- turnEnd{reason: fallback(update.StopReason, "end_turn"), err: update.Error, hadEvents: current.sawEvent}:
 			default:
 			}
 			break

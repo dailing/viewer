@@ -64,6 +64,9 @@ type session struct {
 	writeMu sync.Mutex
 	subs    []*busclient.Subscription
 	once    sync.Once
+
+	chunksMu sync.Mutex
+	chunks   int
 }
 
 type Plugin struct {
@@ -159,8 +162,10 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 		p.respondError(frame, "invalid_request", "mime_type string and llm_refine bool are required")
 		return
 	}
+	slog.Info("voice start requested", "mime_type", mimeType, "llm_refine", llmRefine)
 	service, err := p.readServiceConfig(p.ctx)
 	if err != nil {
+		slog.Warn("voice config read failed", "error", err)
 		p.respondError(frame, "config_error", err.Error())
 		return
 	}
@@ -173,6 +178,7 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 	conn, err := p.config.Dial(dialCtx, service.URL)
 	cancelDial()
 	if err != nil {
+		slog.Warn("voice service dial failed", "url", service.URL, "error", err)
 		p.respondError(frame, "service_unavailable", err.Error())
 		return
 	}
@@ -214,6 +220,7 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 	}
 	p.sessions[recID] = current
 	p.mu.Unlock()
+	slog.Info("voice session started", "rec", recID, "url", service.URL, "model", service.Model, "language", service.Language)
 	p.wg.Add(1)
 	go current.relay()
 	p.wg.Add(1)
@@ -239,6 +246,7 @@ func (p *Plugin) handleCancel(frame busclient.Frame) {
 	p.mu.RLock()
 	current := p.sessions[recID]
 	p.mu.RUnlock()
+	slog.Info("voice cancel requested", "rec", recID, "active", current != nil)
 	if current != nil {
 		current.close()
 	}
@@ -288,12 +296,23 @@ func (s *session) handleChunk(frame busclient.Frame) {
 		s.fail("invalid base64 audio chunk")
 		return
 	}
+	s.chunksMu.Lock()
+	s.chunks++
+	first := s.chunks == 1
+	s.chunksMu.Unlock()
+	if first {
+		slog.Info("voice first audio chunk", "rec", s.id, "bytes", len(data))
+	}
 	if err := s.write(websocket.MessageBinary, data); err != nil && s.ctx.Err() == nil {
 		s.fail("voice service write failed: " + err.Error())
 	}
 }
 
 func (s *session) handleStop(busclient.Frame) {
+	s.chunksMu.Lock()
+	chunks := s.chunks
+	s.chunksMu.Unlock()
+	slog.Info("voice stop received", "rec", s.id, "chunks", chunks)
 	if err := s.writeJSON(map[string]any{"type": "stop"}); err != nil && s.ctx.Err() == nil {
 		s.fail("voice service stop failed: " + err.Error())
 	}
@@ -321,6 +340,9 @@ func (s *session) relay() {
 	for {
 		kind, data, err := s.conn.Read(s.ctx)
 		if err != nil {
+			if s.ctx.Err() == nil {
+				slog.Warn("voice service read failed", "rec", s.id, "error", err)
+			}
 			return
 		}
 		if kind != websocket.MessageText {
@@ -330,7 +352,13 @@ func (s *session) relay() {
 		if event == nil || event["type"] == "ready" {
 			continue
 		}
+		if event["type"] == "error" {
+			slog.Warn("voice service event", "rec", s.id, "type", event["type"], "message", event["message"])
+		} else {
+			slog.Info("voice service event", "rec", s.id, "type", event["type"])
+		}
 		if err := s.publish(event); err != nil {
+			slog.Warn("voice event publish failed", "rec", s.id, "error", err)
 			return
 		}
 		if event["type"] == "final" || event["type"] == "error" {
@@ -351,6 +379,7 @@ func (s *session) enforceLimit(duration time.Duration) {
 }
 
 func (s *session) fail(message string) {
+	slog.Warn("voice session failed", "rec", s.id, "error", message)
 	_ = s.publish(map[string]any{"type": "error", "message": message})
 	s.close()
 }

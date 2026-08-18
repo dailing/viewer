@@ -88,6 +88,7 @@ function handleVoiceFrame(frame: BusFrame): void {
   if (recId === "" || !isVoiceMessage(frame.value)) return;
   const job = jobsByRecording.get(recId);
   if (job === undefined) {
+    console.info("[voice] event buffered (no job yet)", { recId, type: frame.value.type });
     const pending = earlyEvents.get(recId) ?? [];
     pending.push(frame.value);
     earlyEvents.set(recId, pending);
@@ -124,6 +125,36 @@ function appendTranscription(baseText: string, transcript: string): string {
   if (cleanTranscript === "") return baseText;
   const separator = baseText !== "" && !/\s$/.test(baseText) ? " " : "";
   return `${baseText}${separator}${cleanTranscript}`;
+}
+
+// Map getUserMedia/MediaRecorder DOMExceptions to a readable reason so the
+// composer can show *why* recording failed, not just a bare error icon.
+function describeVoiceError(cause: unknown): string {
+  const name =
+    cause instanceof DOMException
+      ? cause.name
+      : cause instanceof Error
+        ? cause.name
+        : "";
+  switch (name) {
+    case "NotFoundError":
+    case "DevicesNotFoundError":
+      return "麦克风未找到：设备未连接或被系统禁用";
+    case "NotAllowedError":
+    case "PermissionDeniedError":
+      return "麦克风权限被拒绝，请在浏览器地址栏允许麦克风";
+    case "NotReadableError":
+    case "TrackStartError":
+      return "麦克风被其他程序占用，无法启动";
+    case "OverconstrainedError":
+      return "麦克风不满足音频采集要求";
+    case "SecurityError":
+      return "当前页面不是安全上下文（需要 HTTPS 或 localhost）";
+    case "AbortError":
+      return "麦克风初始化被中断";
+    default:
+      return cause instanceof Error ? cause.message : String(cause);
+  }
 }
 
 function contextHasRuntimeJobs(contextId: string): boolean {
@@ -236,19 +267,30 @@ export const useVoiceStore = defineStore("next-voice", {
       compositions.delete(id);
       this.setContext(id, defaultState(""));
     },
+    dismissError(id: string): void {
+      const current = this.ensure(id);
+      if (current.status !== "error") return;
+      this.setContext(id, { status: "idle", error: "" });
+    },
     setLanguageModelRefine(enabled: boolean): void {
       this.languageModelRefine = enabled;
       voiceCtx?.storage.set("languageModelRefine", enabled);
     },
     async start(id: string, baseText: string): Promise<void> {
       const ctx = requireCtx();
+      console.info("[voice] start clicked", { contextId: id, backendAvailable: this.backendAvailable });
       if (this.activeRecordingContextId !== "") {
         throw new Error("Another voice recording is active.");
       }
       if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+        console.warn("[voice] recording unsupported", {
+          secureContext: window.isSecureContext,
+          hasMediaDevices: Boolean(navigator.mediaDevices),
+          hasMediaRecorder: typeof MediaRecorder !== "undefined",
+        });
         this.setContext(id, {
           status: "error",
-          error: "Voice recording is not supported in this browser.",
+          error: "此浏览器不支持录音（需要 HTTPS 或 localhost 安全上下文）",
         });
         return;
       }
@@ -270,6 +312,7 @@ export const useVoiceStore = defineStore("next-voice", {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
         });
+        console.info("[voice] getUserMedia ok");
         const selectedMimeType = supportedVoiceMimeType() ?? "";
         const recorder = new MediaRecorder(
           stream,
@@ -295,7 +338,10 @@ export const useVoiceStore = defineStore("next-voice", {
                 data,
               }),
             )
-            .then(() => undefined);
+            .then(() => undefined)
+            .catch((cause: unknown) => {
+              console.warn("[voice] chunk publish failed", cause);
+            });
           job.pendingChunkSends.push(send);
           void send.finally(() => {
             if (job !== null) {
@@ -310,14 +356,16 @@ export const useVoiceStore = defineStore("next-voice", {
           llm_refine: this.languageModelRefine,
         })) as { rec_id: string };
         job.recId = result.rec_id;
+        console.info("[voice] start RPC ok", { recId: job.recId, mimeType: selectedMimeType });
         jobsByRecording.set(job.recId, job);
         ctx.bus.subscribe(`voice:${job.recId}:event`, handleVoiceFrame);
         for (const message of earlyEvents.get(job.recId) ?? []) this.handleEvent(job, message);
         earlyEvents.delete(job.recId);
       } catch (cause) {
+        console.warn("[voice] start failed", cause);
         this.setContext(id, {
           status: "error",
-          error: cause instanceof Error ? cause.message : String(cause),
+          error: describeVoiceError(cause),
         });
         if (job !== null) await cancelRuntime(job);
         else {
@@ -352,7 +400,9 @@ export const useVoiceStore = defineStore("next-voice", {
       this.setContext(id, { status: "processing" });
       try {
         await requireCtx().bus.publish(`voice:${job.recId}:stop`, {});
+        console.info("[voice] stop published", { recId: job.recId });
       } catch (cause) {
+        console.warn("[voice] stop publish failed", cause);
         this.setContext(id, {
           status: "error",
           error: cause instanceof Error ? cause.message : String(cause),
@@ -368,6 +418,11 @@ export const useVoiceStore = defineStore("next-voice", {
     handleEvent(job: VoiceRuntimeJob, message: VoiceMessage): void {
       if (runtimeJobs.get(job.id) !== job) return;
       const id = job.contextId;
+      if (message.type === "error") {
+        console.warn("[voice] service error event", { recId: job.recId, message: message.message });
+      } else {
+        console.info("[voice] event", { recId: job.recId, type: message.type });
+      }
       if (message.type === "ready") {
         job.ready = true;
         if (job.recorder?.state === "inactive") {

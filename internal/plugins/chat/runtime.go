@@ -210,85 +210,96 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		if err != nil {
 			slog.Warn("chat routing candidate resolution failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
 		}
+	candidateLoop:
 		for _, candidate := range candidates {
-			var current *runtime
-			var fresh bool
-			attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
-			current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, forceNew)
-			if err != nil {
-				attempt["outcome"], attempt["error"] = "start_error", err.Error()
-				attempts = append(attempts, attempt)
-				slog.Warn("agent start failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", err)
-				continue
-			}
-			summaryProvider = candidate.target.Agent
-			prompt := message
-			contextBytes, promptMode := 0, "existing_session"
-			if fresh {
-				contextBridge := p.buildNewSessionContext(chat, message, before)
-				contextBytes, promptMode = len(contextBridge), "new_session"
-				prompt = initialPrompt(workspace, chat, role, contextBridge, message)
-			} else if bridge := p.buildRoleSwitchBridge(chat, role.ID, message, before); bridge != "" {
-				contextBytes, promptMode = len(bridge), "role_switch"
-				prompt = bridge + "\n\nCurrent routed message follows:\n" + message
-			}
-			slog.Info("agent prompt prepared",
-				"chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID,
-				"agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model,
-				"mode", promptMode, "prompt_bytes", len(prompt), "context_bytes", contextBytes,
-				"message_bytes", len(message), "common_prompt_bytes", len(commonPrompt(workspace, chat)), "role_prompt_bytes", len(initialRolePrompt(role)),
-			)
-			p.mu.Lock()
-			current.activeTurn, current.cancelRequested, current.roleName = turnID, false, role.Name
-			if current.ended == nil {
-				current.ended = make(chan turnEnd, 1)
-			}
-			p.mu.Unlock()
-			var end turnEnd
-			end, err = p.promptBus(p.ctx, current, turnID, prompt)
-			reason = end.reason
-			if end.err != "" {
-				endErr = end.err
-			}
-			p.mu.Lock()
-			cancelled := current.cancelRequested
-			if current.activeTurn == turnID {
-				current.activeTurn, current.cancelRequested = "", false
-			}
-			if err != nil {
-				delete(p.runtimes, runtimeKey(chat.ID, role.ID))
-			}
-			p.mu.Unlock()
-			if cancelled {
-				reason = "cancelled"
-			} else if err != nil {
-				reason = "error"
-			} else if reason == "" {
-				reason = "end_turn"
-			}
-			if cancelled || reason == "cancelled" {
-				attempt["outcome"] = "cancelled"
-				attempts = append(attempts, attempt)
-				break
-			}
-			if err != nil {
-				attempt["outcome"], attempt["error"] = "prompt_error", err.Error()
-				attempts = append(attempts, attempt)
-				slog.Warn("agent prompt failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", err)
-				continue
-			}
-			if reason == "error" {
-				attempt["outcome"] = "turn_error"
-				if endErr != "" {
-					attempt["error"] = endErr
+			retryFresh := false
+			for {
+				var current *runtime
+				var fresh bool
+				attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
+				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, forceNew || retryFresh)
+				if err != nil {
+					attempt["outcome"], attempt["error"] = "start_error", err.Error()
+					attempts = append(attempts, attempt)
+					slog.Warn("agent start failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", err)
+					continue candidateLoop
 				}
+				summaryProvider = candidate.target.Agent
+				prompt := message
+				contextBytes, promptMode := 0, "existing_session"
+				if fresh {
+					contextBridge := p.buildNewSessionContext(chat, message, before)
+					contextBytes, promptMode = len(contextBridge), "new_session"
+					prompt = initialPrompt(workspace, chat, role, contextBridge, message)
+				} else if bridge := p.buildRoleSwitchBridge(chat, role.ID, message, before); bridge != "" {
+					contextBytes, promptMode = len(bridge), "role_switch"
+					prompt = bridge + "\n\nCurrent routed message follows:\n" + message
+				}
+				slog.Info("agent prompt prepared",
+					"chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID,
+					"agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model,
+					"mode", promptMode, "prompt_bytes", len(prompt), "context_bytes", contextBytes,
+					"message_bytes", len(message), "common_prompt_bytes", len(commonPrompt(workspace, chat)), "role_prompt_bytes", len(initialRolePrompt(role)),
+				)
+				p.mu.Lock()
+				current.activeTurn, current.cancelRequested, current.sawEvent, current.roleName = turnID, false, false, role.Name
+				if current.ended == nil {
+					current.ended = make(chan turnEnd, 1)
+				}
+				p.mu.Unlock()
+				var end turnEnd
+				end, err = p.promptBus(p.ctx, current, turnID, prompt)
+				reason = end.reason
+				if end.err != "" {
+					endErr = end.err
+				}
+				p.mu.Lock()
+				cancelled := current.cancelRequested
+				if current.activeTurn == turnID {
+					current.activeTurn, current.cancelRequested = "", false
+				}
+				if err != nil {
+					delete(p.runtimes, runtimeKey(chat.ID, role.ID))
+				}
+				p.mu.Unlock()
+				if cancelled {
+					reason = "cancelled"
+				} else if err != nil {
+					reason = "error"
+				} else if reason == "" {
+					reason = "end_turn"
+				}
+				if cancelled || reason == "cancelled" {
+					attempt["outcome"] = "cancelled"
+					attempts = append(attempts, attempt)
+					break candidateLoop
+				}
+				if err != nil {
+					attempt["outcome"], attempt["error"] = "prompt_error", err.Error()
+					attempts = append(attempts, attempt)
+					slog.Warn("agent prompt failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", err)
+					continue candidateLoop
+				}
+				if reason == "error" {
+					attempt["outcome"] = "turn_error"
+					if endErr != "" {
+						attempt["error"] = endErr
+					}
+					attempts = append(attempts, attempt)
+					slog.Warn("agent turn ended with error", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", endErr)
+					continue candidateLoop
+				}
+				if shouldRetryFreshHermesSession(candidate.target.Agent, fresh, reason, end.hadEvents, retryFresh) {
+					attempt["outcome"] = "stale_session_retry"
+					attempts = append(attempts, attempt)
+					slog.Warn("hermes session refused without events; retrying with fresh session", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "session_id", current.sessionID)
+					retryFresh = true
+					continue
+				}
+				attempt["outcome"] = "completed"
 				attempts = append(attempts, attempt)
-				slog.Warn("agent turn ended with error", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model, "error", endErr)
-				continue
+				break candidateLoop
 			}
-			attempt["outcome"] = "completed"
-			attempts = append(attempts, attempt)
-			break
 		}
 		if reason != "end_turn" && reason != "cancelled" {
 			p.emitTurnFailure(chat.ID, turnID, role, reason, attempts, err, endErr)
@@ -306,6 +317,10 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			break
 		}
 	}
+}
+
+func shouldRetryFreshHermesSession(agent string, fresh bool, reason string, hadEvents, alreadyRetried bool) bool {
+	return agent == "hermes" && !fresh && reason == "refusal" && !hadEvents && !alreadyRetried
 }
 
 // emitTurnFailure records a failed/aborted turn as a visible "error" message

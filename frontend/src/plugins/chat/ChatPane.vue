@@ -608,17 +608,20 @@ function dismissSend(key: string): void {
 }
 
 /** Per-role "RoleName → agent / provider / model" routing summary, shown on
- *  the user box once dispatch has assigned the message. */
-function routedLabelFor(roleIds: string[]): string {
-  return roleIds.map((roleId) => {
+ *  the user box once dispatch has assigned the message. Queued roles (waiting
+ *  for an in-flight turn) are annotated with 排队中. */
+function routedLabelFor(startedIds: string[], queuedIds: string[]): string {
+  const label = (roleId: string, queued: boolean): string => {
     const role = roles.value.find((item) => item.id === roleId);
-    const target = roleTargetLabel(roleId);
     const name = role?.name ?? roleId;
-    return target ? `${name} → ${target}` : name;
-  }).join("  ·  ");
+    const target = roleTargetLabel(roleId);
+    const base = target ? `${name} → ${target}` : name;
+    return queued ? `${base}（排队中）` : base;
+  };
+  return [...startedIds.map((id) => label(id, false)), ...queuedIds.map((id) => label(id, true))].join("  ·  ");
 }
 
-async function send(text: string, forceNewSession = false): Promise<void> {
+async function send(text: string, forceNewSession = false, parallel = false): Promise<void> {
   const message = text.trim();
   if (message === "") return;
   error.value = "";
@@ -631,14 +634,20 @@ async function send(text: string, forceNewSession = false): Promise<void> {
     const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message };
     if (selected.value.length > 0) payload.role_ids = selected.value;
     if (forceNewSession) payload.force_new_session = true;
-    const result = await ctx.bus.request("chat:_:dispatch", payload) as { role_ids: string[] };
-    patchPendingSend(key, { sending: false, routed: routedLabelFor(result.role_ids) });
-    activeRoles.value = new Set([...activeRoles.value, ...result.role_ids]);
+    if (parallel) payload.parallel_dispatch = true;
+    const result = await ctx.bus.request("chat:_:dispatch", payload) as { role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[] };
+    // Busy roles come back in queued_role_ids: their message is held in the
+    // per-role queue and starts when the in-flight turn ends, so no
+    // optimistic response box yet — the user box carries the 排队中 label.
+    const started = result.started_role_ids ?? result.role_ids;
+    const queued = result.queued_role_ids ?? [];
+    patchPendingSend(key, { sending: false, routed: routedLabelFor(started, queued) });
+    activeRoles.value = new Set([...activeRoles.value, ...started]);
     // Show one optimistic response box per dispatched role immediately; each
     // resolves when that turn's first live event arrives.
     const now = Date.now();
     const pending = new Map(pendingTurns.value);
-    for (const roleId of result.role_ids) {
+    for (const roleId of started) {
       const role = roles.value.find((item) => item.id === roleId);
       pending.set(roleId, { key: `pending:${roleId}:${now}`, roleId, label: role?.name ?? "Agent", ts: now });
     }
@@ -705,6 +714,16 @@ onMounted(() => {
     if (index >= 0) blocks.value.splice(index, 1, value); else blocks.value.push(value);
     writeBack();
     resolvePendingTurn(value.role_id);
+  });
+  // A queued message starts its turn only when the in-flight turn ends; the
+  // global turn feed marks the role active at that point so the running
+  // indicator and stop button appear for the dequeued turn as well.
+  ctx.bus.subscribe("chat:_:turn", (frame) => {
+    const value = frame.value as { chat_id: string; role_id: string; phase: string };
+    if (value.chat_id !== ctx.instanceId || value.phase !== "started") return;
+    if (!activeRoles.value.has(value.role_id)) {
+      activeRoles.value = new Set([...activeRoles.value, value.role_id]);
+    }
   });
   ctx.bus.subscribe(`chat:${ctx.instanceId}:turn-completed`, (frame) => {
     const value = frame.value as { role_id: string };

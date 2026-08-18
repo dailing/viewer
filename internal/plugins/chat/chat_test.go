@@ -236,12 +236,13 @@ func TestForceNewSessionStartsFreshSession(t *testing.T) {
 	chat := Chat{ID: "chat-fn", Root: t.TempDir()}
 	role := SuperRole{ID: "role-fn", Name: "FN"}
 	candidate := resolvedCandidate{pluginID: "viewer.agent-hermes", target: agentdriver.Target{Agent: "hermes", Provider: "default", Model: "m"}}
+	canonicalKey := runtimeKey(chat.ID, role.ID)
 
-	first, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-1", false)
+	first, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-1", canonicalKey, false, false)
 	if err != nil || !fresh || first.sessionID != "sess-1" {
 		t.Fatalf("first start: fresh=%v session=%#v err=%v", fresh, first, err)
 	}
-	again, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-2", false)
+	again, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-2", canonicalKey, false, false)
 	if err != nil || fresh || again.sessionID != "sess-1" {
 		t.Fatalf("second dispatch must reuse the in-memory runtime: fresh=%v session=%s err=%v", fresh, again.sessionID, err)
 	}
@@ -250,27 +251,229 @@ func TestForceNewSessionStartsFreshSession(t *testing.T) {
 	p.mu.Lock()
 	delete(p.runtimes, runtimeKey(chat.ID, role.ID))
 	p.mu.Unlock()
-	resumed, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-3", false)
+	resumed, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-3", canonicalKey, false, false)
 	if err != nil || fresh || resumed.sessionID != "sess-1" {
 		t.Fatalf("dispatch after restart must resume the stored session: fresh=%v session=%s err=%v", fresh, resumed.sessionID, err)
 	}
-	forced, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-4", true)
+	forced, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-4", canonicalKey, true, false)
 	if err != nil || !fresh || forced.sessionID == "sess-1" {
 		t.Fatalf("force_new_session must start a fresh session: fresh=%v session=%s err=%v", fresh, forced.sessionID, err)
 	}
-	after, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-5", false)
+	after, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-5", canonicalKey, false, false)
 	if err != nil || fresh || after.sessionID != forced.sessionID {
 		t.Fatalf("the session after a forced one must be reused: fresh=%v session=%s err=%v", fresh, after.sessionID, err)
 	}
+	// Ephemeral (parallel send-now) runtimes must neither resume nor overwrite
+	// the stored role session.
+	ephemeral, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-6", canonicalKey+"\x00turn-6", true, true)
+	if err != nil || !fresh || ephemeral.sessionID == after.sessionID {
+		t.Fatalf("ephemeral runtime must start a fresh session: fresh=%v session=%s err=%v", fresh, ephemeral.sessionID, err)
+	}
+	stored, err := p.store.roleSession(chat.ID, role.ID)
+	if err != nil || stored == nil || stored.ProviderSessionID != after.sessionID {
+		t.Fatalf("ephemeral runtime must not overwrite the stored session: stored=%#v err=%v", stored, err)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if starts != 3 {
-		t.Fatalf("expected 3 agent starts (initial, resume, forced), got %d (%v)", starts, requestedIDs)
+	if starts != 4 {
+		t.Fatalf("expected 4 agent starts (initial, resume, forced, ephemeral), got %d (%v)", starts, requestedIDs)
 	}
-	// turn-3 asked to resume sess-1; turn-4 (forced) must have asked for a
-	// brand-new session (empty session_id).
-	if requestedIDs[1] != "sess-1" || requestedIDs[2] != "" {
+	// turn-3 asked to resume sess-1; turn-4 (forced) and turn-6 (ephemeral)
+	// must have asked for brand-new sessions (empty session_id).
+	if requestedIDs[1] != "sess-1" || requestedIDs[2] != "" || requestedIDs[3] != "" {
 		t.Fatalf("start requests: %v", requestedIDs)
+	}
+}
+
+// TestQueuedAndParallelDispatch covers the message-queue semantics end to end
+// over a real kernel: a dispatch to a busy chat+role is queued and starts only
+// after the in-flight turn ends, while a parallel dispatch bypasses the busy
+// lock immediately on a throwaway session that never touches the stored role
+// session.
+func TestQueuedAndParallelDispatch(t *testing.T) {
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+
+	configClient := busclient.New(url, busclient.Manifest{ID: "queue-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = configClient.Subscribe("config:_:get", func(frame busclient.Frame) {
+		_ = pluginrpc.Respond(configClient, frame, nil)
+	})
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	// Fake agent: answers _:start with incrementing session ids (echoing a
+	// requested resume id), records every _:prompt, and lets the test drive
+	// turn ends by publishing _:turn-ended frames manually.
+	type promptRecord struct{ sessionID, turnID, text string }
+	prompts := make(chan promptRecord, 16)
+	var mu sync.Mutex
+	starts := 0
+	agent := busclient.New(url, busclient.Manifest{
+		ID:      "viewer.agent-hermes",
+		Version: "0.1.0",
+		Slots:   map[string]any{"viewer.agent-hermes:_:start": map[string]any{}, "viewer.agent-hermes:_:prompt": map[string]any{}},
+		Emits:   map[string]any{"viewer.agent-hermes:_:catalog": map[string]any{}, "viewer.agent-hermes:_:event": map[string]any{}, "viewer.agent-hermes:_:turn-ended": map[string]any{}},
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:start", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		requested, _ := value["session_id"].(string)
+		mu.Lock()
+		starts++
+		sessionID := fmt.Sprintf("sess-%d", starts)
+		if requested != "" {
+			sessionID = requested
+		}
+		mu.Unlock()
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"session_id": sessionID, "resumed": requested != ""})
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:prompt", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		record := promptRecord{}
+		record.sessionID, _ = value["session_id"].(string)
+		record.turnID, _ = value["turn_id"].(string)
+		record.text, _ = value["text"].(string)
+		prompts <- record
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"ok": true})
+	})
+	if err := agent.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	if err := agent.Set(ctx, "viewer.agent-hermes:_:catalog", agentdriver.Catalog{Agent: "hermes", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{"m"}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	role := SuperRole{ID: "role-q", Name: "Q", Description: "queue test role", RoutingPolicyID: "pol-q", CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	policy := RoutingPolicyConfig{ID: "pol-q", Name: "Q policy", Enabled: true, Candidates: []RoutingCandidateConfig{{ID: "cand-q", AgentID: "hermes", ProviderID: "default", ModelID: "m", Enabled: true}}}
+	if err := p.store.importDomain([]SuperRole{role}, RoutingConfig{DefaultRoutingPolicyID: "pol-q", RoutingPolicies: []RoutingPolicyConfig{policy}}); err != nil {
+		t.Fatal(err)
+	}
+	chat := Chat{ID: "chat-q", Name: "Q chat", Root: t.TempDir(), MemberRoleIDsJSON: `["role-q"]`, CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	if err := p.store.saveChat(&chat); err != nil {
+		t.Fatal(err)
+	}
+
+	caller := busclient.New(url, busclient.Manifest{ID: "queue-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+
+	type dispatchReply struct {
+		Started []string `json:"started_role_ids"`
+		Queued  []string `json:"queued_role_ids"`
+	}
+	dispatch := func(payload map[string]any) dispatchReply {
+		value, err := caller.Request(ctx, "chat:_:dispatch", payload, 10*time.Second)
+		if err != nil {
+			t.Fatalf("dispatch %v: %v", payload, err)
+		}
+		var reply dispatchReply
+		raw, _ := json.Marshal(value)
+		if err := json.Unmarshal(raw, &reply); err != nil {
+			t.Fatalf("decode dispatch reply: %v", err)
+		}
+		return reply
+	}
+	nextPrompt := func() promptRecord {
+		select {
+		case record := <-prompts:
+			return record
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for agent prompt")
+			return promptRecord{}
+		}
+	}
+	endTurn := func(record promptRecord) {
+		if err := agent.Publish(ctx, "viewer.agent-hermes:_:turn-ended", map[string]any{"session_id": record.sessionID, "turn_id": record.turnID, "stop_reason": "end_turn"}); err != nil {
+			t.Fatalf("end turn %s: %v", record.turnID, err)
+		}
+	}
+
+	// 1. First dispatch starts immediately.
+	reply := dispatch(map[string]any{"chat_id": "chat-q", "message": "first", "role_ids": []string{"role-q"}})
+	if len(reply.Started) != 1 || len(reply.Queued) != 0 {
+		t.Fatalf("first dispatch should start immediately: %+v", reply)
+	}
+	first := nextPrompt()
+	if !strings.Contains(first.text, "first") {
+		t.Fatalf("first prompt text %q should contain the message", first.text)
+	}
+
+	// 2. Second dispatch to the busy role is queued, not started.
+	reply = dispatch(map[string]any{"chat_id": "chat-q", "message": "second", "role_ids": []string{"role-q"}})
+	if len(reply.Started) != 0 || len(reply.Queued) != 1 || reply.Queued[0] != "role-q" {
+		t.Fatalf("second dispatch should be queued: %+v", reply)
+	}
+	select {
+	case record := <-prompts:
+		t.Fatalf("queued message started while the first turn was still running: %+v", record)
+	case <-time.After(400 * time.Millisecond):
+	}
+
+	// 3. Parallel dispatch bypasses the busy lock on a throwaway session.
+	reply = dispatch(map[string]any{"chat_id": "chat-q", "message": "third", "role_ids": []string{"role-q"}, "parallel_dispatch": true})
+	if len(reply.Started) != 1 || len(reply.Queued) != 0 {
+		t.Fatalf("parallel dispatch should start immediately: %+v", reply)
+	}
+	parallel := nextPrompt()
+	if !strings.Contains(parallel.text, "third") {
+		t.Fatalf("parallel prompt text %q should contain the message", parallel.text)
+	}
+	if parallel.sessionID == first.sessionID {
+		t.Fatalf("parallel dispatch must use a fresh session, got %s", parallel.sessionID)
+	}
+	stored, err := p.store.roleSession("chat-q", "role-q")
+	if err != nil || stored == nil || stored.ProviderSessionID != first.sessionID {
+		t.Fatalf("parallel dispatch must not overwrite the stored session: stored=%#v err=%v", stored, err)
+	}
+
+	// 4. Ending the first turn releases the queued message onto the canonical
+	// session.
+	endTurn(first)
+	queued := nextPrompt()
+	if !strings.Contains(queued.text, "second") {
+		t.Fatalf("queued prompt text %q should contain the queued message", queued.text)
+	}
+	if queued.sessionID != first.sessionID {
+		t.Fatalf("queued turn should reuse the canonical session %s, got %s", first.sessionID, queued.sessionID)
+	}
+	endTurn(queued)
+	endTurn(parallel)
+
+	// 5. Everything drains: no busy keys, no queues, only the canonical
+	// runtime remains (the parallel throwaway entry is cleaned up).
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		p.mu.Lock()
+		busyCount, queueCount, runtimeCount := len(p.busy), len(p.queues), len(p.runtimes)
+		p.mu.Unlock()
+		if busyCount == 0 && queueCount == 0 && runtimeCount == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state did not drain: busy=%d queues=%d runtimes=%d", busyCount, queueCount, runtimeCount)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

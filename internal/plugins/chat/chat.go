@@ -65,6 +65,7 @@ type Plugin struct {
 	mu            sync.Mutex
 	runtimes      map[string]*runtime
 	busy          map[string]bool
+	queues        map[string][]queuedMessage
 	agents        map[string]string
 	catalogs      map[string]agentdriver.Catalog
 	openText      map[string]*Message                 // turnID → currently open assistant text message (deltas append until sealed)
@@ -77,7 +78,7 @@ type Plugin struct {
 
 var (
 	errBadRequest = errors.New("chat_id and message are required")
-	errTurnActive = errors.New("RoutingTargetBusy: chat role already has a turn in progress")
+	errQueueFull  = errors.New("QueueFull: chat role has too many queued messages")
 )
 
 func New(dataDir string, options ...Option) (*Plugin, error) {
@@ -88,7 +89,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -157,8 +158,8 @@ func (p *Plugin) reply(frame busclient.Frame, value any, err error) {
 	if errors.Is(err, errBadRequest) {
 		code = "bad_request"
 	}
-	if errors.Is(err, errTurnActive) {
-		code = "routing_target_busy"
+	if errors.Is(err, errQueueFull) {
+		code = "queue_full"
 	}
 	_ = pluginrpc.RespondError(p.client, frame, code, err.Error())
 }

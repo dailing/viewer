@@ -23,9 +23,28 @@ type dispatchRequest struct {
 	// for this message instead of reusing the stored one (one-shot, set by
 	// the composer's new-session toggle).
 	ForceNewSession bool `json:"force_new_session"`
+	// ParallelDispatch sends immediately without waiting for in-flight
+	// turns: every selected role runs concurrently on a fresh, throwaway
+	// agent session (the composer's send-now toggle). Implies a fresh
+	// session; the canonical per-chat+role session is left untouched.
+	ParallelDispatch bool `json:"parallel_dispatch"`
 }
 
 func runtimeKey(chatID, roleID string) string { return chatID + "\x00" + roleID }
+
+// maxQueuedPerRole bounds the per-chat+role pending-message queue.
+const maxQueuedPerRole = 32
+
+// queuedMessage is a dispatch waiting for a busy chat+role: it starts as its
+// own turn once the in-flight relay releases the role's busy key.
+type queuedMessage struct {
+	chatID   string
+	role     SuperRole
+	message  string
+	before   int64
+	forceNew bool
+	enqueued int64
+}
 
 func (p *Plugin) handleDispatch(frame busclient.Frame) {
 	value, err := frameObject(frame)
@@ -62,43 +81,68 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	keys := make([]string, 0, len(selected))
-	p.mu.Lock()
-	for _, role := range selected {
-		key := runtimeKey(chat.ID, role.ID)
-		if p.busy[key] {
-			err = errTurnActive
-			break
+	parallel := request.ParallelDispatch
+	if !parallel {
+		// Queue-capacity pre-check: an over-full queue fails the dispatch
+		// before the user message lands in the timeline.
+		p.mu.Lock()
+		for _, role := range selected {
+			key := runtimeKey(chat.ID, role.ID)
+			if p.busy[key] && len(p.queues[key]) >= maxQueuedPerRole {
+				err = errQueueFull
+				break
+			}
 		}
-		keys = append(keys, key)
-	}
-	if err == nil {
-		for _, key := range keys {
-			p.busy[key] = true
+		p.mu.Unlock()
+		if err != nil {
+			p.reply(frame, nil, err)
+			return
 		}
-	}
-	p.mu.Unlock()
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
 	}
 	dispatchID := newID()
 	user := &Message{ID: newID(), ChatID: chat.ID, TurnID: dispatchID, Role: "user", Text: request.Message, SenderFrom: "user", CreatedAt: nowMillis()}
 	if err = p.store.addMessage(user); err != nil {
-		p.releaseBusy(keys)
 		p.reply(frame, nil, err)
 		return
 	}
+	// Busy roles queue the message (it starts when the in-flight turn ends);
+	// free roles start immediately. Parallel dispatch skips the busy lock and
+	// runs every role right away on a throwaway session.
+	startedKeys := []string{}
+	startedRoles := []SuperRole{}
+	queuedRoleIDs := []string{}
+	p.mu.Lock()
+	for _, role := range selected {
+		key := runtimeKey(chat.ID, role.ID)
+		if !parallel && p.busy[key] {
+			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, role: role, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis()})
+			queuedRoleIDs = append(queuedRoleIDs, role.ID)
+			continue
+		}
+		if !parallel {
+			p.busy[key] = true
+			startedKeys = append(startedKeys, key)
+		}
+		startedRoles = append(startedRoles, role)
+	}
+	p.mu.Unlock()
 	p.publishMessage(user)
+	reply := map[string]any{"role_ids": roleIDs(selected), "started_role_ids": roleIDs(startedRoles), "queued_role_ids": queuedRoleIDs, "rationale": rationale, "dispatch_id": dispatchID}
+	if len(startedRoles) == 0 {
+		p.reply(frame, reply, nil)
+		return
+	}
 	p.wg.Add(1)
 	startGate := make(chan struct{})
 	go func() {
 		<-startGate
 		defer p.wg.Done()
-		defer p.releaseBusy(keys)
-		p.runRelay(*chat, workspace, selected, request.Message, user.CreatedAt, request.ForceNewSession)
+		if !parallel {
+			defer p.releaseBusy(startedKeys)
+		}
+		p.runRelay(*chat, workspace, startedRoles, request.Message, user.CreatedAt, request.ForceNewSession, parallel)
 	}()
-	p.reply(frame, map[string]any{"role_ids": roleIDs(selected), "rationale": rationale, "dispatch_id": dispatchID}, nil)
+	p.reply(frame, reply, nil)
 	close(startGate)
 }
 
@@ -193,11 +237,67 @@ func (p *Plugin) releaseBusy(keys []string) {
 		delete(p.busy, key)
 	}
 	p.mu.Unlock()
+	// A freed role may have queued messages waiting; start the next one.
+	for _, key := range keys {
+		p.startQueued(key)
+	}
 }
 
-func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, message string, before int64, forceNew bool) {
+// startQueued pops the next queued message for a freed chat+role key, marks
+// the key busy again, and relays it as its own single-role turn. Entries
+// whose chat disappeared (or whose workspace can no longer load) are dropped
+// and the cascade continues with the following entry.
+func (p *Plugin) startQueued(key string) {
+	p.mu.Lock()
+	if p.busy[key] {
+		p.mu.Unlock()
+		return
+	}
+	queue := p.queues[key]
+	if len(queue) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	entry := queue[0]
+	if len(queue) == 1 {
+		delete(p.queues, key)
+	} else {
+		p.queues[key] = queue[1:]
+	}
+	p.busy[key] = true
+	p.mu.Unlock()
+	chat, err := p.store.chat(entry.chatID)
+	if err == nil && chat == nil {
+		err = errors.New("chat not found")
+	}
+	if err == nil {
+		var workspace Workspace
+		workspace, err = p.workspace(p.ctx)
+		if err == nil {
+			slog.Info("chat queued message starting", "chat_id", entry.chatID, "role_id", entry.role.ID, "role_name", entry.role.Name, "queued_ms", nowMillis()-entry.enqueued)
+			p.wg.Add(1)
+			go func() {
+				defer p.wg.Done()
+				defer p.releaseBusy([]string{key})
+				p.runRelay(*chat, workspace, []SuperRole{entry.role}, entry.message, entry.before, entry.forceNew, false)
+			}()
+			return
+		}
+	}
+	slog.Warn("chat queued message dropped", "chat_id", entry.chatID, "role_id", entry.role.ID, "error", err)
+	p.releaseBusy([]string{key})
+}
+
+func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, message string, before int64, forceNew bool, parallel bool) {
 	for _, role := range roles {
 		turnID := newID()
+		key := runtimeKey(chat.ID, role.ID)
+		if parallel {
+			// Concurrent send-now turn: unique throwaway runtime key so the
+			// canonical chat+role runtime (and its stored session) stays
+			// untouched; the entry is removed when the turn ends.
+			key += "\x00" + turnID
+		}
 		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, StartedAt: nowMillis()}
 		if err := p.store.beginTurn(turn); err != nil {
 			slog.Error("chat turn persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
@@ -220,7 +320,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 				var current *runtime
 				var fresh bool
 				attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
-				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, forceNew || retryFresh)
+				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, key, forceNew || retryFresh || parallel, parallel)
 				if err != nil {
 					attempt["outcome"], attempt["error"] = "start_error", err.Error()
 					attempts = append(attempts, attempt)
@@ -262,7 +362,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 					current.activeTurn, current.cancelRequested = "", false
 				}
 				if err != nil {
-					delete(p.runtimes, runtimeKey(chat.ID, role.ID))
+					delete(p.runtimes, key)
 				}
 				p.mu.Unlock()
 				if cancelled {
@@ -316,6 +416,13 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		if reason != "cancelled" {
 			p.wg.Add(1)
 			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, summaryProvider)
+		}
+		if parallel {
+			// Send-now turns use a throwaway runtime; drop it once the turn
+			// has fully ended so the map only holds reusable sessions.
+			p.mu.Lock()
+			delete(p.runtimes, key)
+			p.mu.Unlock()
 		}
 		if err != nil || reason == "error" || reason == "cancelled" {
 			break

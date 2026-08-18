@@ -12,7 +12,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:selectedRoleIds": [value: string[]];
-  send: [value: string, forceNewSession: boolean];
+  send: [value: string, forceNewSession: boolean, parallel: boolean];
 }>();
 
 // The draft text lives inside the composer (not the pane), so keystrokes only
@@ -24,6 +24,11 @@ const draft = ref("");
 // force_new_session=true (each selected role starts a fresh agent session
 // instead of resuming the stored one) and the toggle resets itself.
 const forceNewSession = ref(false);
+
+// One-shot send-now (parallel) toggle: when armed, the next send carries
+// parallel_dispatch=true — the message starts immediately on a throwaway
+// session instead of queueing behind an in-flight turn.
+const sendNow = ref(false);
 
 const voice = useVoiceStore();
 const voiceError = computed(() => {
@@ -78,8 +83,9 @@ function clearText(): void {
 function handleSend(): void {
   const text = draft.value;
   if (text.trim() === "") return;
-  emit("send", text, forceNewSession.value);
+  emit("send", text, forceNewSession.value, sendNow.value);
   forceNewSession.value = false;
+  sendNow.value = false;
   draft.value = "";
   void nextTick(() => textarea.value?.focus());
 }
@@ -200,6 +206,17 @@ function handlePickerFocusOut(event: FocusEvent): void {
           @click="forceNewSession = !forceNewSession"
         >
           <i class="bi" :class="forceNewSession ? 'bi-plus-square-fill' : 'bi-plus-square'" />
+        </button>
+        <button
+          class="btn btn-sm btn-outline-secondary action-button"
+          :class="{ active: sendNow }"
+          type="button"
+          :title="sendNow ? '立即发送已激活：下一条消息不排队，开新会话与当前回复并行执行' : '立即发送：下一条消息开新会话并行执行，不排队等待（一次性）'"
+          :aria-pressed="sendNow"
+          aria-label="Send now in parallel on a fresh session"
+          @click="sendNow = !sendNow"
+        >
+          <i class="bi" :class="sendNow ? 'bi-lightning-fill' : 'bi-lightning'" />
         </button>
         <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="handleSend">
           <i class="bi bi-send" />

@@ -429,8 +429,12 @@ func candidateProfile(target agentdriver.Target) string {
 	return string(encoded)
 }
 
-func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole, candidate resolvedCandidate, turnID string, forceNew bool) (*runtime, bool, error) {
-	key := runtimeKey(chat.ID, role.ID)
+// ensureBusRuntime starts (or reuses) the agent session for a turn. `key` is
+// the runtimes map key chosen by the caller: the canonical chat+role key for
+// regular turns, a unique per-turn key for parallel send-now turns.
+// Ephemeral (parallel) runtimes never resume or overwrite the stored role
+// session — the canonical session belongs to the serial path.
+func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole, candidate resolvedCandidate, turnID, key string, forceNew bool, ephemeral bool) (*runtime, bool, error) {
 	effectiveCWD := chat.Root
 	if role.CWD != "" {
 		if filepath.IsAbs(role.CWD) {
@@ -460,13 +464,15 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole
 		return existing, false, nil
 	}
 	p.mu.Unlock()
-	state, err := p.store.roleSession(chat.ID, role.ID)
-	if err != nil {
-		return nil, false, err
-	}
 	requested := ""
-	if !forceNew && role.SessionPolicy != "new_each_run" && state != nil && state.Provider == providerKey && state.ProviderProfile == profile && state.CWD == absolute {
-		requested = state.ProviderSessionID
+	if !ephemeral {
+		state, err := p.store.roleSession(chat.ID, role.ID)
+		if err != nil {
+			return nil, false, err
+		}
+		if !forceNew && role.SessionPolicy != "new_each_run" && state != nil && state.Provider == providerKey && state.ProviderProfile == profile && state.CWD == absolute {
+			requested = state.ProviderSessionID
+		}
 	}
 	value, err := p.client.Request(ctx, candidate.pluginID+":_:start", map[string]any{"cwd": absolute, "target": candidate.target, "session_id": requested, "turn_id": turnID}, 30*time.Second)
 	if err != nil {
@@ -480,8 +486,10 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole
 		return nil, false, errors.New("agent start returned no session_id")
 	}
 	current := &runtime{sessionID: started.SessionID, profile: profile, cwd: absolute, roleID: role.ID, roleName: role.Name, pluginID: candidate.pluginID, providerKey: providerKey, target: candidate.target, ended: make(chan turnEnd, 1)}
-	if err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: providerKey, ProviderProfile: profile, ProviderSessionID: started.SessionID, CWD: absolute, UpdatedAt: nowMillis()}); err != nil {
-		return nil, false, err
+	if !ephemeral {
+		if err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: providerKey, ProviderProfile: profile, ProviderSessionID: started.SessionID, CWD: absolute, UpdatedAt: nowMillis()}); err != nil {
+			return nil, false, err
+		}
 	}
 	p.mu.Lock()
 	p.runtimes[key] = current

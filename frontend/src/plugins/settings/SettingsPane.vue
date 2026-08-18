@@ -4,7 +4,8 @@
  * the Dock gear). All toggles are browser-local (localStorage) and take
  * effect immediately; the backend section drives the gateway admin API.
  * Sections: 布局 (open mode), 聊天 (virtual space), Dock (hover expand
- * delay), 消息样式 (markdown theme overrides), 后端 (restart / build).
+ * delay), 主题 (app theme management, `stores/theme.ts`), 消息样式
+ * (markdown theme overrides), 后端 (restart / build).
  */
 import { inject, onMounted, ref } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
@@ -13,6 +14,8 @@ import { useDockSettingsStore } from "../../stores/dockSettings";
 import { useLayoutStore } from "../../stores/layout";
 import { useMarkdownStyleStore } from "../../stores/markdownStyle";
 import type { MarkdownStyleOverrides } from "../../stores/markdownStyle";
+import { useThemeStore } from "../../stores/theme";
+import type { ThemeVars } from "../../stores/theme";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("SettingsPane requires PluginPaneHost");
@@ -22,10 +25,55 @@ const layout = useLayoutStore();
 const chatSettings = useChatSettingsStore();
 const dockSettings = useDockSettingsStore();
 const markdownStyle = useMarkdownStyleStore();
+const theme = useThemeStore();
 
 onMounted(() => {
   ctx.setChrome({ title: "设置" });
 });
+
+/* ---- 主题 (app themes) ---- */
+
+const THEME_FIELDS: Array<{ key: keyof ThemeVars; label: string }> = [
+  { key: "canvas", label: "画布底色" },
+  { key: "surface", label: "面板底色" },
+  { key: "surfaceRaised", label: "浮起面底色" },
+  { key: "surfaceMuted", label: "柔和面底色" },
+  { key: "surfaceHover", label: "悬停底色" },
+  { key: "surfaceSelected", label: "选中底色" },
+  { key: "text", label: "正文文字" },
+  { key: "textMuted", label: "次要文字" },
+  { key: "textSubtle", label: "弱化文字" },
+  { key: "textInverse", label: "反色文字" },
+  { key: "border", label: "边框" },
+  { key: "borderStrong", label: "强调边框" },
+  { key: "accent", label: "主题色" },
+  { key: "accentHover", label: "主题色（悬停）" },
+  { key: "accentSoft", label: "主题色（浅底）" },
+  { key: "focus", label: "焦点色" },
+  { key: "success", label: "成功色" },
+  { key: "warning", label: "警告色" },
+  { key: "danger", label: "危险色" },
+  { key: "info", label: "信息色" },
+  { key: "overlay", label: "遮罩层" },
+];
+
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+/** <input type="color"> only accepts #rrggbb; fall back for rgb()/named values. */
+function colorInputValue(value: string): string {
+  return HEX_COLOR_RE.test(value) ? value : "#888888";
+}
+
+function addTheme(): void {
+  const name = window.prompt("新主题名称（以当前主题为模板复制）：", "自定义主题");
+  if (name === null) return;
+  theme.createTheme(name);
+}
+
+function removeTheme(id: string, name: string): void {
+  if (!window.confirm(`删除主题「${name}」？此操作不可撤销。`)) return;
+  theme.deleteTheme(id);
+}
 
 /* ---- 消息样式 (markdown theme overrides) ---- */
 
@@ -237,6 +285,89 @@ async function buildAndRestart(): Promise<void> {
 
     <div class="settings-group">
       <div class="settings-group-title">
+        <span><i class="bi bi-palette2"></i> 主题</span>
+        <span class="settings-choice">
+          <button
+            v-if="theme.active.builtin"
+            type="button"
+            class="btn btn-sm btn-outline-secondary"
+            title="恢复该内置主题的默认名称与配色"
+            @click="theme.resetTheme(theme.activeId)"
+          >恢复默认</button>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-secondary"
+            title="以当前主题为模板新建一个自定义主题"
+            @click="addTheme"
+          ><i class="bi bi-plus-lg"></i> 新建主题</button>
+        </span>
+      </div>
+      <div class="theme-list">
+        <div v-for="t in theme.themes" :key="t.id" class="theme-row" :class="{ active: t.id === theme.activeId }">
+          <button
+            type="button"
+            class="theme-row-main"
+            :title="t.id === theme.activeId ? '当前启用的主题' : '启用该主题'"
+            @click="theme.setActive(t.id)"
+          >
+            <i class="bi" :class="t.id === theme.activeId ? 'bi-check-circle-fill' : 'bi-circle'"></i>
+            <span class="theme-swatch" :style="{ background: t.vars.accent }"></span>
+            <span class="theme-name">{{ t.name }}</span>
+            <span class="theme-scheme">{{ t.scheme === "dark" ? "深色" : "浅色" }}</span>
+          </button>
+          <button
+            v-if="!t.builtin"
+            type="button"
+            class="theme-row-btn"
+            title="删除该主题"
+            @click="removeTheme(t.id, t.name)"
+          ><i class="bi bi-trash"></i></button>
+        </div>
+      </div>
+      <div class="settings-hint">编辑作用于当前启用的主题；内置主题可修改、可恢复默认，不可删除。</div>
+      <label class="settings-field">
+        <span>名称</span>
+        <input type="text" :value="theme.active.name" @change="theme.renameTheme(theme.activeId, ($event.target as HTMLInputElement).value)">
+      </label>
+      <label class="settings-field">
+        <span>基底（滚动条 / 表单 / Markdown 配色）</span>
+        <span class="settings-choice">
+          <button
+            type="button"
+            class="settings-choice-btn"
+            :class="{ active: theme.active.scheme === 'light' }"
+            title="浅色基底：Markdown 采用浅色配色"
+            @click="theme.setScheme(theme.activeId, 'light')"
+          ><i class="bi bi-sun"></i> 浅色</button>
+          <button
+            type="button"
+            class="settings-choice-btn"
+            :class="{ active: theme.active.scheme === 'dark' }"
+            title="深色基底：Markdown 采用深色配色"
+            @click="theme.setScheme(theme.activeId, 'dark')"
+          ><i class="bi bi-moon"></i> 深色</button>
+        </span>
+      </label>
+      <label v-for="field in THEME_FIELDS" :key="field.key" class="settings-field">
+        <span>{{ field.label }}</span>
+        <span class="theme-color-inputs">
+          <input
+            type="color"
+            :value="colorInputValue(theme.active.vars[field.key])"
+            @input="theme.setVar(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
+          >
+          <input
+            type="text"
+            class="theme-hex"
+            :value="theme.active.vars[field.key]"
+            @change="theme.setVar(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
+          >
+        </span>
+      </label>
+    </div>
+
+    <div class="settings-group">
+      <div class="settings-group-title">
         <span><i class="bi bi-palette"></i> 消息样式</span>
         <button type="button" class="btn btn-sm btn-outline-secondary" @click="markdownStyle.reset()">恢复默认</button>
       </div>
@@ -347,6 +478,104 @@ async function buildAndRestart(): Promise<void> {
 
 .settings-field input[type="number"] {
   width: 84px;
+}
+
+.settings-field input[type="text"] {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-size: var(--font-size-ui);
+  padding: 2px 6px;
+  width: 170px;
+}
+
+.theme-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.theme-row {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.theme-row-main {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  display: flex;
+  flex: 1;
+  font-size: var(--font-size-ui);
+  gap: 7px;
+  min-width: 0;
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.theme-row-main:hover {
+  background: var(--color-surface-hover);
+}
+
+.theme-row.active .theme-row-main {
+  background: var(--color-surface-selected);
+}
+
+.theme-row.active .bi-check-circle-fill {
+  color: var(--color-accent);
+}
+
+.theme-row-main .bi-circle {
+  color: var(--color-text-subtle);
+}
+
+.theme-swatch {
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+  flex: none;
+  height: 10px;
+  width: 10px;
+}
+
+.theme-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-scheme {
+  color: var(--color-text-subtle);
+  flex: none;
+  font-size: 11px;
+}
+
+.theme-row-btn {
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-subtle);
+  flex: none;
+  padding: 3px 5px;
+}
+
+.theme-row-btn:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-danger);
+}
+
+.theme-color-inputs {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.theme-hex {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  width: 130px;
 }
 
 .settings-field input[type="color"] {

@@ -10,11 +10,13 @@ import App from "./App.vue";
 import { connectBus } from "./shell/bus";
 import { loadPlugins } from "./shell/loader";
 import { useMarkdownStyleStore } from "./stores/markdownStyle";
+import { useThemeStore } from "./stores/theme";
 
 const app = createApp(App);
 app.use(createPinia());
 loadPlugins();
 app.mount("#app");
+useThemeStore().init();
 useMarkdownStyleStore().init();
 
 // Bus connects after mount: panes render immediately and bind "connecting"

@@ -58,14 +58,36 @@ const messageEndRef = ref<HTMLElement | null>(null);
 // to the top pulls an older page and restores the scroll position.
 const PAGE_SIZE = 50;
 const OLDER_SCROLL_THRESHOLD = 96;
+const NEWER_SCROLL_THRESHOLD = 96;
+// Render window (2026-08-19): the DOM holds only a bounded slice of history.
+// Attached to the live edge the window is the newest WINDOW_MAX_MESSAGES
+// messages and streaming evicts the oldest pages; scrolling far up detaches
+// from the live edge (live frames stop merging) and both edges stay capped —
+// scrolling back down re-fetches newer pages until the edge reattaches.
+// Adjustable: raise for more resident DOM, lower for less CPU.
+const WINDOW_MAX_MESSAGES = 300;
+// Scroll-up distance (in viewports) at which the pane detaches from the live
+// edge. Only genuine upward scrolling detaches — content growth under a
+// stationary viewport never does.
+const LIVE_DETACH_VIEWPORTS = 1.5;
+// Streaming batch: inbound message/block frames are coalesced into one
+// reactive update per interval instead of one per frame (a hot stream
+// publishes many frames per second; each used to rebuild the whole timeline).
+const STREAM_FLUSH_MS = 100;
 const loadingInitial = ref(true);
 const loadingOlder = ref(false);
+const loadingNewer = ref(false);
 const hasOlder = ref(false);
 const loadedLo = ref(0); // oldest loaded message created_at (ms); 0 = unbounded
 const olderCursor = ref<{ ts: number; id: string } | null>(null);
+// Detached-window state: hasNewer = the live edge is beyond the loaded
+// window; loadedHi = cursor of the newest loaded message (loadNewer start).
+const hasNewer = ref(false);
+const loadedHi = ref<MessageCursor | null>(null);
 let everLoaded = false;
 let userScrolled = false; // manual scroll wins over the cache-hit auto-scroll
 let lastProgrammaticScrollAt = 0; // suppresses the scroll-event echo of scrollThreadTop
+let lastObservedScrollTop = 0; // direction tracking for live-edge detach
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
 interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[]; pending?: boolean; sending?: boolean; routed?: string; failed?: string }
@@ -198,6 +220,11 @@ onBeforeUnmount(() => {
     clearTimeout(mermaidRenderTimer);
     mermaidRenderTimer = null;
   }
+  if (streamFlushTimer !== null) {
+    clearTimeout(streamFlushTimer);
+    streamFlushTimer = null;
+  }
+  flushStream(); // persist the last pending batch into the session cache
   for (const timer of confirmTimers.values()) clearTimeout(timer);
   confirmTimers.clear();
   mermaidRenderDeadline = 0;
@@ -371,12 +398,146 @@ function setChrome(): void {
   ctx.setChrome({ title: chat.value?.name ?? "Chat" });
 }
 
+// ---------------------------------------------------------------------------
+// Render window: bounded resident DOM (see constants above). The loaded
+// slice [loadedLo .. loadedHi] is contiguous; evicted pages stay on the
+// server and are transparently re-fetched by the existing scroll triggers.
+// ---------------------------------------------------------------------------
+
+/** True when a live frame sits beyond the detached window's upper edge —
+ *  such frames are skipped while detached (loadNewer/reattach fills them). */
+function beyondWindowEdge(ts: number, id: string): boolean {
+  const hi = loadedHi.value;
+  if (!hasNewer.value || hi === null) return false;
+  return ts > hi.ts || (ts === hi.ts && id > hi.id);
+}
+
+/** Drop the oldest page from the window and compensate the scroll position
+ *  by the removed height so the viewport content does not move. */
+function evictTopPage(): void {
+  const thread = threadRef.value;
+  const beforeHeight = thread?.scrollHeight ?? 0;
+  const beforeTop = thread?.scrollTop ?? 0;
+  messages.value.splice(0, Math.min(PAGE_SIZE, messages.value.length));
+  const oldest = messages.value[0];
+  loadedLo.value = oldest?.created_at ?? 0;
+  olderCursor.value = oldest ? { ts: oldest.created_at, id: oldest.id } : null;
+  hasOlder.value = true; // evicted pages are re-fetchable from the server
+  if (oldest) blocks.value = blocks.value.filter((block) => block.occurred_at >= oldest.created_at);
+  if (thread && beforeHeight > 0) {
+    void nextTick(() => {
+      const removed = beforeHeight - thread.scrollHeight;
+      if (removed !== 0) scrollThreadTop(Math.max(0, beforeTop - removed));
+    });
+  }
+}
+
+/** Drop the newest page from the window (user is reading far above). The
+ *  removed content is below the viewport, so no scroll compensation is
+ *  needed; the bottom trigger re-fetches it on the way down. */
+function evictBottomPage(): void {
+  messages.value.splice(Math.max(0, messages.value.length - PAGE_SIZE));
+  const newest = messages.value[messages.value.length - 1];
+  loadedHi.value = newest ? { ts: newest.created_at, id: newest.id } : null;
+  hasNewer.value = true;
+  if (newest) blocks.value = blocks.value.filter((block) => block.occurred_at <= newest.created_at);
+}
+
+/** Keep the resident window at or below WINDOW_MAX_MESSAGES, evicting the
+ *  `prefer`red edge first. The edge follows browse intent: streaming and
+ *  downward catch-up shed the top, upward history reading sheds the bottom.
+ *  Attached to the live edge the top is always the victim (the live tail is
+ *  sacred). */
+function enforceWindow(prefer: "top" | "bottom"): void {
+  if (loadingOlder.value || loadingNewer.value) return; // mid-flight page merge
+  while (messages.value.length > WINDOW_MAX_MESSAGES) {
+    if (!hasNewer.value || prefer === "top") evictTopPage(); else evictBottomPage();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming batch: inbound frames are queued and merged once per
+// STREAM_FLUSH_MS instead of once per frame, so a hot stream costs a bounded
+// number of timeline rebuilds per second (and each rebuild is bounded by the
+// render window above). All per-frame side effects run inside the flush.
+// ---------------------------------------------------------------------------
+const pendingMessageUpserts = new Map<string, ChatMessage>();
+const pendingBlockUpserts = new Map<string, ChatBlock>();
+let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleStreamFlush(): void {
+  if (streamFlushTimer !== null) return;
+  streamFlushTimer = setTimeout(() => {
+    streamFlushTimer = null;
+    flushStream();
+  }, STREAM_FLUSH_MS);
+}
+
+/** Merge one live message into the window (called only from flushStream). */
+function mergeMessage(value: ChatMessage): void {
+  if (value.role === "assistant" && value.id !== streamingMessageId) {
+    if (streamingMessageId !== "") renderMermaidAtBoundary();
+    streamingMessageId = value.id;
+  }
+  const index = messages.value.findIndex((item) => item.id === value.id);
+  if (index >= 0) messages.value.splice(index, 1, value); else messages.value.push(value);
+  if (value.role === "user") {
+    // The real user message supersedes its optimistic send box: transfer
+    // the routed label onto the real box, then drop the placeholder.
+    let sendIndex = pendingSends.value.findIndex((item) => item.text === value.text.trim());
+    if (sendIndex < 0) sendIndex = pendingSends.value.findIndex((item) => !item.sending && !item.failed);
+    if (sendIndex >= 0) {
+      const routed = pendingSends.value[sendIndex].routed;
+      if (routed) routedLabels.set(value.id, routed);
+      pendingSends.value.splice(sendIndex, 1);
+    }
+  }
+  resolvePendingTurn(value.sender?.role_id);
+  if (scrollOnNextUserMessage && value.role === "user") {
+    scrollOnNextUserMessage = false;
+    void nextTick(() => scrollThreadToMessageEnd());
+  }
+}
+
+/** Merge one live block into the window (called only from flushStream). */
+function mergeBlock(value: ChatBlock): void {
+  // A non-text block seals the current assistant text message.
+  if (streamingMessageId !== "") {
+    streamingMessageId = "";
+    renderMermaidAtBoundary();
+  }
+  // Merged streaming blocks (thinking/agent_text) republish with the same
+  // id as their text grows — upsert by id, never append-if-absent.
+  const index = blocks.value.findIndex((item) => item.id === value.id);
+  if (index >= 0) blocks.value.splice(index, 1, value); else blocks.value.push(value);
+  resolvePendingTurn(value.role_id);
+}
+
+function flushStream(): void {
+  if (streamFlushTimer !== null) {
+    clearTimeout(streamFlushTimer);
+    streamFlushTimer = null;
+  }
+  if (pendingMessageUpserts.size === 0 && pendingBlockUpserts.size === 0) return;
+  const messageUpserts = [...pendingMessageUpserts.values()];
+  const blockUpserts = [...pendingBlockUpserts.values()];
+  pendingMessageUpserts.clear();
+  pendingBlockUpserts.clear();
+  for (const value of messageUpserts) mergeMessage(value);
+  for (const value of blockUpserts) mergeBlock(value);
+  writeBack();
+  enforceWindow("top");
+}
+
 /** Assign scrollTop and remember the timestamp so the resulting scroll event
  *  is not mistaken for manual user scrolling. */
 function scrollThreadTop(top: number): void {
   lastProgrammaticScrollAt = Date.now();
   const thread = threadRef.value;
-  if (thread) thread.scrollTop = top;
+  if (thread) {
+    thread.scrollTop = top;
+    lastObservedScrollTop = top;
+  }
 }
 
 /** Scroll so the message-end anchor sits at the viewport's lower edge, with
@@ -426,15 +587,26 @@ function seedRunningTurns(list: ChatList): void {
   runningTurns.value = next;
 }
 
-async function load(): Promise<void> {
+async function load(fresh = false): Promise<void> {
   loadingInitial.value = true;
   streamingMessageId = "";
+  hasNewer.value = false; // a (re)load always lands on the live edge
+  loadedHi.value = null;
+  // Replacing the message list shrinks the DOM and the browser clamps
+  // scrollTop, echoing a scroll event that would otherwise look like a
+  // manual far-up scroll and instantly re-detach the fresh window.
+  lastProgrammaticScrollAt = Date.now();
+  lastObservedScrollTop = 0;
   try {
     // Session cache hit (v0.32): hydrate instantly, then merge only the
-    // delta; the pane renders before any network round-trip.
-    const cached = loadEntry(ctx.instanceId);
+    // delta; the pane renders before any network round-trip. A `fresh` load
+    // (jump-to-latest, detached refresh) skips the cache: the detached window
+    // can sit arbitrarily far from the live edge, beyond what the bounded
+    // delta refresh would close.
+    const cached = fresh ? undefined : loadEntry(ctx.instanceId);
     if (cached) {
       hydrate(cached);
+      enforceWindow("top"); // trim over-cap cache before the first paint
       loadingInitial.value = false;
       everLoaded = true;
       await nextTick();
@@ -478,9 +650,10 @@ async function load(): Promise<void> {
     workspace.value = workspaceData;
     setChrome();
     writeBack();
-    // First open lands on the message-end anchor (old-viewer parity); later
-    // reloads keep the user's scroll position.
-    if (!everLoaded) {
+    // First open lands on the message-end anchor (old-viewer parity); a
+    // fresh jump-to-latest reload does the same; other reloads keep the
+    // user's scroll position.
+    if (!everLoaded || fresh) {
       everLoaded = true;
       await nextTick();
       scrollThreadToMessageEnd();
@@ -547,13 +720,19 @@ async function refreshDelta(): Promise<boolean> {
   workspace.value = workspaceData;
   setChrome();
   writeBack();
+  enforceWindow("top");
   return true;
 }
 
 /** Merge-refresh entry point for activation / chat-list mutations: evict the
- *  cache and clear local state when the chat has vanished. */
+ *  cache and clear local state when the chat has vanished. A detached window
+ *  reattaches through a full reload (activation implies the user is here). */
 async function refresh(): Promise<void> {
   if (loadingInitial.value) return; // initial load() already fetches everything
+  if (hasNewer.value) {
+    await load(true); // detached: the delta cap may not reach the live edge
+    return;
+  }
   if (!(await refreshDelta())) {
     messages.value = [];
     blocks.value = [];
@@ -601,14 +780,77 @@ async function loadOlder(): Promise<void> {
   } finally {
     loadingOlder.value = false;
   }
+  enforceWindow("bottom"); // deep reading sheds pages off the bottom edge
+}
+
+/** Load one newer page after the detached window's upper edge (reverse of
+ *  loadOlder). When the backend reports nothing even newer, the window has
+ *  caught up with the live edge: reattach (live frames merge again) and
+ *  close the fetch/publish race with a delta refresh. */
+async function loadNewer(): Promise<void> {
+  if (loadingInitial.value || loadingNewer.value || !hasNewer.value) return;
+  loadingNewer.value = true;
+  try {
+    const newest = messages.value[messages.value.length - 1];
+    const cursor = loadedHi.value ?? (newest ? { ts: newest.created_at, id: newest.id } : null);
+    const list = await (ctx.bus.request("chat:_:chats:list", {
+      chat_id: ctx.instanceId, include_messages: true,
+      ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}), limit: PAGE_SIZE,
+    }) as Promise<ChatList>);
+    seedRunningTurns(list);
+    const page = (list.messages ?? []).filter((item) => !messages.value.some((known) => known.id === item.id));
+    if (page.length > 0) {
+      const spanLo = cursor?.ts ?? loadedLo.value;
+      const gapBlocks = await fetchBlocks(spanLo);
+      messages.value = [...messages.value, ...page].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
+      const blockById = new Map(blocks.value.map((item) => [item.id, item] as const));
+      for (const block of gapBlocks) blockById.set(block.id, block);
+      blocks.value = [...blockById.values()].sort((a, b) => a.occurred_at - b.occurred_at || a.id.localeCompare(b.id));
+    }
+    hasNewer.value = list.has_more ?? false;
+    const top = messages.value[messages.value.length - 1];
+    loadedHi.value = top ? { ts: top.created_at, id: top.id } : null;
+    writeBack();
+    if (!hasNewer.value) {
+      // Reattached: fold in anything published during the catch-up fetch,
+      // then land on the message end.
+      await refreshDelta();
+      scrollThreadToMessageEnd();
+    }
+  } catch (cause) {
+    error.value = errorText(cause);
+  } finally {
+    loadingNewer.value = false;
+  }
+  enforceWindow("top");
+}
+
+/** Jump back to the live edge (bottom bar / send while detached): a fresh
+ *  reload resets the window to the newest page (the cache-hydrate + bounded
+ *  delta path cannot close an arbitrarily deep detach gap). */
+function jumpToLatest(): void {
+  void load(true).catch((cause) => { error.value = errorText(cause); });
 }
 
 function handleThreadScroll(): void {
+  if (loadingInitial.value) return; // structural churn of a (re)load
   if (Date.now() - lastProgrammaticScrollAt < 400) return; // programmatic echo
   userScrolled = true;
   const thread = threadRef.value;
-  if (!thread || thread.scrollTop > OLDER_SCROLL_THRESHOLD) return;
-  void loadOlder();
+  if (!thread) return;
+  const scrolledUp = thread.scrollTop < lastObservedScrollTop - 4;
+  lastObservedScrollTop = thread.scrollTop;
+  if (thread.scrollTop <= OLDER_SCROLL_THRESHOLD) void loadOlder();
+  const scrollBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+  // Detach only on genuine upward scrolling far from the edge — content
+  // growth under a stationary viewport (streaming) never detaches.
+  if (!hasNewer.value && scrolledUp && scrollBottom > LIVE_DETACH_VIEWPORTS * thread.clientHeight) {
+    hasNewer.value = true;
+    const newest = messages.value[messages.value.length - 1];
+    loadedHi.value = newest ? { ts: newest.created_at, id: newest.id } : null;
+    return;
+  }
+  if (hasNewer.value && scrollBottom <= NEWER_SCROLL_THRESHOLD) void loadNewer();
 }
 
 function patchPendingSend(key: string, patch: Partial<PendingSend>): void {
@@ -638,6 +880,7 @@ async function send(text: string, forceNewSession = false, parallel = false): Pr
   const message = text.trim();
   if (message === "") return;
   error.value = "";
+  if (hasNewer.value) jumpToLatest(); // a send always targets the live edge
   // Optimistic user box with a sending marker; dispatch latency (routing,
   // agent spawn) no longer leaves the thread looking idle.
   const key = `send:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
@@ -719,43 +962,18 @@ onMounted(() => {
   const refreshNow = (): void => { void refresh().catch(() => undefined); };
   ctx.bus.subscribe(`chat:${ctx.instanceId}:message`, (frame) => {
     const value = frame.value as ChatMessage;
-    if (value.role === "assistant" && value.id !== streamingMessageId) {
-      if (streamingMessageId !== "") renderMermaidAtBoundary();
-      streamingMessageId = value.id;
-    }
-    const index = messages.value.findIndex((item) => item.id === value.id);
-    if (index >= 0) messages.value.splice(index, 1, value); else messages.value.push(value);
-    if (value.role === "user") {
-      // The real user message supersedes its optimistic send box: transfer
-      // the routed label onto the real box, then drop the placeholder.
-      let sendIndex = pendingSends.value.findIndex((item) => item.text === value.text.trim());
-      if (sendIndex < 0) sendIndex = pendingSends.value.findIndex((item) => !item.sending && !item.failed);
-      if (sendIndex >= 0) {
-        const routed = pendingSends.value[sendIndex].routed;
-        if (routed) routedLabels.set(value.id, routed);
-        pendingSends.value.splice(sendIndex, 1);
-      }
-    }
-    writeBack();
-    resolvePendingTurn(value.sender?.role_id);
-    if (scrollOnNextUserMessage && value.role === "user") {
-      scrollOnNextUserMessage = false;
-      void nextTick(() => scrollThreadToMessageEnd());
-    }
+    // Detached window: frames beyond the upper edge wait for loadNewer.
+    if (beyondWindowEdge(value.created_at, value.id)) return;
+    pendingMessageUpserts.set(value.id, value);
+    // The user's own send echo flushes immediately (snappy composer);
+    // assistant streams ride the batch timer.
+    if (value.role === "user") flushStream(); else scheduleStreamFlush();
   });
   ctx.bus.subscribe(`chat:${ctx.instanceId}:block`, (frame) => {
     const value = frame.value as ChatBlock;
-    // A non-text block seals the current assistant text message.
-    if (streamingMessageId !== "") {
-      streamingMessageId = "";
-      renderMermaidAtBoundary();
-    }
-    // Merged streaming blocks (thinking/agent_text) republish with the same
-    // id as their text grows — upsert by id, never append-if-absent.
-    const index = blocks.value.findIndex((item) => item.id === value.id);
-    if (index >= 0) blocks.value.splice(index, 1, value); else blocks.value.push(value);
-    writeBack();
-    resolvePendingTurn(value.role_id);
+    if (beyondWindowEdge(value.occurred_at, value.id)) return;
+    pendingBlockUpserts.set(value.id, value);
+    scheduleStreamFlush();
   });
   // Turn lifecycle feed: started/completed per turn, filtered to this chat.
   // A queued message starts its turn only when the in-flight turn ends, so
@@ -880,6 +1098,12 @@ onMounted(() => {
       <div v-if="timeline.length && chatSettings.virtualSpace" class="chat-thread-virtual-space" aria-hidden="true" />
       <div v-if="!timeline.length" class="chat-empty">Write one message and dispatch it into this chat.</div>
     </div>
+    <div v-if="hasNewer" class="chat-newer-bar">
+      <button type="button" class="chat-newer-jump" @click="jumpToLatest">
+        <span v-if="loadingNewer" class="spinner-border spinner-border-sm" aria-hidden="true" />
+        <i v-else class="bi bi-arrow-down" aria-hidden="true" /> 新消息 — 跳到最新
+      </button>
+    </div>
     <div class="composer-shell">
       <div v-if="error" class="small text-danger mb-1">{{ error }}</div>
       <ComposerBox
@@ -904,6 +1128,35 @@ onMounted(() => {
  * containment does not change its box or scroll metrics. */
 .chat-thread {
   contain: strict;
+}
+
+/* Detached-window bar: shown between thread and composer while the user
+   reads history above the live edge; click jumps back to the newest page. */
+.chat-newer-bar {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0;
+}
+
+.chat-newer-jump {
+  align-items: center;
+  background: none;
+  border: 0;
+  color: var(--bs-primary);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-size-ui);
+  gap: 4px;
+  padding: 0 6px;
+}
+
+.chat-newer-jump:hover {
+  text-decoration: underline;
+}
+
+.chat-newer-jump .spinner-border {
+  height: 10px;
+  width: 10px;
 }
 
 .chat-box {

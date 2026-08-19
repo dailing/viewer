@@ -377,6 +377,13 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 		payload = append(payload, chat.payload())
 	}
 	result := map[string]any{"chats": payload, "active_chat_id": p.activeChatID, "running_chat_ids": p.runningChatIDs()}
+	// Per-turn running snapshot for the pane: bound to a chat_id filter so
+	// the Dock-wide list payload stays lean.
+	if request != nil {
+		if chatID, _ := request["chat_id"].(string); chatID != "" {
+			result["running_turns"] = p.runningTurns(chatID)
+		}
+	}
 	if request != nil && request["include_messages"] == true {
 		chatID, _ := request["chat_id"].(string)
 		var messages []Message

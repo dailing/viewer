@@ -547,20 +547,26 @@ func (p *Plugin) handleStop(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
 	roleID, _ := value["role_id"].(string)
+	turnID, _ := value["turn_id"].(string)
 	if err == nil && chatID == "" {
 		err = errBadRequest
 	}
 	stopped := false
 	if err == nil {
-		stopped, err = p.stopTurn(chatID, roleID)
+		stopped, err = p.stopTurn(chatID, roleID, turnID)
 	}
 	p.reply(frame, map[string]any{"stopped": stopped}, err)
 }
-func (p *Plugin) stopTurn(chatID, roleID string) (bool, error) {
+
+// stopTurn cancels in-flight turns of a chat. roleID narrows to one role;
+// turnID narrows further to one specific turn — required now that parallel
+// send-now turns of the same role can run side by side and the pane stops
+// them individually.
+func (p *Plugin) stopTurn(chatID, roleID, turnID string) (bool, error) {
 	p.mu.Lock()
 	targets := []*runtime{}
 	for key, current := range p.runtimes {
-		if strings.HasPrefix(key, chatID+"\x00") && current.activeTurn != "" && (roleID == "" || current.roleID == roleID) {
+		if strings.HasPrefix(key, chatID+"\x00") && current.activeTurn != "" && (roleID == "" || current.roleID == roleID) && (turnID == "" || current.activeTurn == turnID) {
 			current.cancelRequested = true
 			targets = append(targets, current)
 		}
@@ -568,6 +574,9 @@ func (p *Plugin) stopTurn(chatID, roleID string) (bool, error) {
 	p.mu.Unlock()
 	var result error
 	for _, current := range targets {
+		if p.client == nil {
+			break // unit-test plugin without a bus: the cancel flag alone ends the relay turn
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		var err error
 		_, err = p.client.Request(ctx, current.pluginID+":_:cancel", map[string]any{"session_id": current.sessionID}, 5*time.Second)

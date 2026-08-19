@@ -545,6 +545,42 @@ func TestRunningChatIDs(t *testing.T) {
 	}
 }
 
+func TestRunningTurnsAndTurnTargetedStop(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	if turns := p.runningTurns("chat-a"); len(turns) != 0 {
+		t.Fatalf("expected no running turns, got %v", turns)
+	}
+	// Canonical runtime plus a parallel send-now runtime (key carries the
+	// turn id) for the same role: both must surface individually; the other
+	// chat and idle runtimes must not leak in.
+	p.runtimes[runtimeKey("chat-a", "role-1")] = &runtime{sessionID: "s1", activeTurn: "turn-1", roleID: "role-1", roleName: "Role"}
+	p.runtimes[runtimeKey("chat-a", "role-1")+"\x00turn-2"] = &runtime{sessionID: "s2", activeTurn: "turn-2", roleID: "role-1", roleName: "Role"}
+	p.runtimes[runtimeKey("chat-b", "role-1")] = &runtime{sessionID: "s3", activeTurn: "turn-3", roleID: "role-1"}
+	p.runtimes[runtimeKey("chat-a", "role-2")] = &runtime{sessionID: "s4"}
+	turns := p.runningTurns("chat-a")
+	if len(turns) != 2 || turns[0]["turn_id"] != "turn-1" || turns[1]["turn_id"] != "turn-2" || turns[0]["role_id"] != "role-1" {
+		t.Fatalf("turns=%v", turns)
+	}
+	// A turn-targeted stop cancels exactly that turn; the parallel sibling
+	// keeps running untouched.
+	if stopped, err := p.stopTurn("chat-a", "", "turn-2"); !stopped || err != nil {
+		t.Fatalf("stopped=%v err=%v", stopped, err)
+	}
+	if !p.runtimes[runtimeKey("chat-a", "role-1")+"\x00turn-2"].cancelRequested {
+		t.Fatal("turn-2 should be cancel-requested")
+	}
+	if p.runtimes[runtimeKey("chat-a", "role-1")].cancelRequested {
+		t.Fatal("turn-1 must not be touched by a turn-2 stop")
+	}
+	if stopped, err := p.stopTurn("chat-a", "", "turn-9"); stopped || err != nil {
+		t.Fatalf("unknown turn: stopped=%v err=%v", stopped, err)
+	}
+}
+
 func TestHandleUpdatePersistsRawBeforeVisibleTextFilter(t *testing.T) {
 	p, err := New(t.TempDir())
 	if err != nil {

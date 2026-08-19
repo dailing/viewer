@@ -30,7 +30,13 @@ const roles = ref<Role[]>([]);
 const workspace = ref<Workspace | null>(null);
 const chat = ref<Chat | null>(null);
 const selected = ref<string[]>([]);
-const activeRoles = ref(new Set<string>());
+// In-flight turns of this chat, keyed by turn id. Seeded from the
+// chats:list running_turns snapshot (survives pane reloads/remounts) and
+// updated live by the chat:_:turn started/completed feed. Per-turn binding
+// keeps parallel send-now turns of the same role individually marked — and
+// individually stoppable.
+const runningTurns = ref(new Map<string, { roleId: string }>());
+const runningRoleIds = computed(() => new Set([...runningTurns.value.values()].map((turn) => turn.roleId)));
 // Optimistic per-role placeholder boxes: created the moment dispatch returns
 // so a response box appears immediately, and resolved when the turn's first
 // live message/block arrives (the real turn box takes over) or the turn ends.
@@ -192,6 +198,8 @@ onBeforeUnmount(() => {
     clearTimeout(mermaidRenderTimer);
     mermaidRenderTimer = null;
   }
+  for (const timer of confirmTimers.values()) clearTimeout(timer);
+  confirmTimers.clear();
   mermaidRenderDeadline = 0;
   streamingMessageId = "";
 });
@@ -202,20 +210,14 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Latest timeline box per role: the running indicator lives only on that
- *  one box, so historical turns of an active role no longer all spin. */
-const latestBoxKeyByRole = computed<Map<string, string>>(() => {
-  const latest = new Map<string, { key: string; ts: number }>();
-  for (const box of timeline.value) {
-    if (box.kind !== "role" || box.roleId === "") continue;
-    const current = latest.get(box.roleId);
-    if (!current || box.ts >= current.ts) latest.set(box.roleId, { key: box.key, ts: box.ts });
-  }
-  return new Map([...latest].map(([role, value]) => [role, value.key]));
-});
-
+/** Running state binds to the turn, not the role: each in-flight turn's
+ *  box shows the indicator (parallel send-now turns of one role included),
+ *  historical boxes never do. Optimistic placeholder boxes (no turn id yet)
+ *  count as active while their role has a dispatched/running turn. */
 function turnActive(box: TimelineBox): boolean {
-  return box.roleId !== "" && activeRoles.value.has(box.roleId) && latestBoxKeyByRole.value.get(box.roleId) === box.key;
+  if (box.roleId === "") return false;
+  if (box.turnId !== "") return runningTurns.value.has(box.turnId);
+  return box.pending === true && (pendingTurns.value.has(box.roleId) || runningRoleIds.value.has(box.roleId));
 }
 
 /** Drop a role's optimistic placeholder once its turn produces visible
@@ -415,6 +417,15 @@ async function fetchBlocks(after: number, before = 0): Promise<ChatBlock[]> {
   return [...byId.values()];
 }
 
+/** Adopt the backend's per-turn running snapshot (chats:list running_turns)
+ *  so chips are correct after a pane reload/remount mid-turn; the live
+ *  chat:_:turn feed takes over from there. */
+function seedRunningTurns(list: ChatList): void {
+  const next = new Map<string, { roleId: string }>();
+  for (const turn of list.running_turns ?? []) next.set(turn.turn_id, { roleId: turn.role_id });
+  runningTurns.value = next;
+}
+
 async function load(): Promise<void> {
   loadingInitial.value = true;
   streamingMessageId = "";
@@ -447,6 +458,7 @@ async function load(): Promise<void> {
       chat_id: ctx.instanceId, include_messages: true, limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
+    seedRunningTurns(list);
     const page = list.messages ?? [];
     messages.value = page;
     hasOlder.value = list.has_more ?? false;
@@ -501,6 +513,7 @@ async function refreshDelta(): Promise<boolean> {
     if (pageCount === 0) {
       chats = list.chats;
       firstHasMore = list.has_more ?? false;
+      seedRunningTurns(list);
     }
     const page = list.messages ?? [];
     fetched.push(...page);
@@ -642,9 +655,9 @@ async function send(text: string, forceNewSession = false, parallel = false): Pr
     const started = result.started_role_ids ?? result.role_ids;
     const queued = result.queued_role_ids ?? [];
     patchPendingSend(key, { sending: false, routed: routedLabelFor(started, queued) });
-    activeRoles.value = new Set([...activeRoles.value, ...started]);
     // Show one optimistic response box per dispatched role immediately; each
-    // resolves when that turn's first live event arrives.
+    // resolves when that turn's first live event arrives. The bus's
+    // chat:_:turn started frame marks the turn running shortly after.
     const now = Date.now();
     const pending = new Map(pendingTurns.value);
     for (const roleId of started) {
@@ -658,19 +671,48 @@ async function send(text: string, forceNewSession = false, parallel = false): Pr
   }
 }
 
-async function stop(roleId?: string): Promise<void> {
+async function stop(roleId?: string, turnId?: string): Promise<void> {
   try {
     const payload: Record<string, unknown> = { chat_id: ctx.instanceId };
     if (roleId) payload.role_id = roleId;
+    if (turnId) payload.turn_id = turnId;
     await ctx.bus.request("chat:_:stop", payload);
   } catch (cause) {
     error.value = errorText(cause);
   }
 }
 
-function confirmStop(roleId: string, roleName: string): void {
-  if (!confirm(`确认停止 ${roleName} 的当前回复？`)) return;
-  void stop(roleId);
+// Two-click stop (old Python-viewer parity): the running chip in a turn
+// box's header arms a 10s confirm window on first click (chip switches to
+// "Stop?"); a second click inside the window stops that turn, otherwise the
+// chip reverts to running. Keyed by turn id (pending boxes by box key) so
+// parallel turns confirm independently.
+const STOP_CONFIRM_MS = 10_000;
+const confirmingStops = ref(new Set<string>());
+const confirmTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function stopKey(box: TimelineBox): string {
+  return box.turnId !== "" ? box.turnId : box.key;
+}
+
+function clearConfirm(key: string): void {
+  const timer = confirmTimers.get(key);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    confirmTimers.delete(key);
+  }
+  if (confirmingStops.value.delete(key)) confirmingStops.value = new Set(confirmingStops.value);
+}
+
+function clickTurnStatus(box: TimelineBox): void {
+  const key = stopKey(box);
+  if (!confirmingStops.value.has(key)) {
+    confirmingStops.value = new Set([...confirmingStops.value, key]);
+    confirmTimers.set(key, setTimeout(() => clearConfirm(key), STOP_CONFIRM_MS));
+    return;
+  }
+  clearConfirm(key);
+  void stop(box.roleId, box.turnId || undefined);
 }
 
 onMounted(() => {
@@ -715,21 +757,22 @@ onMounted(() => {
     writeBack();
     resolvePendingTurn(value.role_id);
   });
-  // A queued message starts its turn only when the in-flight turn ends; the
-  // global turn feed marks the role active at that point so the running
-  // indicator and stop button appear for the dequeued turn as well.
+  // Turn lifecycle feed: started/completed per turn, filtered to this chat.
+  // A queued message starts its turn only when the in-flight turn ends, so
+  // this feed (not the dispatch reply) is the authority on what is running;
+  // it also drives the running chips of parallel turns of the same role.
   ctx.bus.subscribe("chat:_:turn", (frame) => {
-    const value = frame.value as { chat_id: string; role_id: string; phase: string };
-    if (value.chat_id !== ctx.instanceId || value.phase !== "started") return;
-    if (!activeRoles.value.has(value.role_id)) {
-      activeRoles.value = new Set([...activeRoles.value, value.role_id]);
+    const value = frame.value as { chat_id: string; turn_id: string; role_id: string; phase: string };
+    if (value.chat_id !== ctx.instanceId || !value.turn_id) return;
+    if (value.phase === "started") {
+      if (!runningTurns.value.has(value.turn_id)) {
+        runningTurns.value = new Map([...runningTurns.value, [value.turn_id, { roleId: value.role_id }]]);
+      }
+      return;
     }
-  });
-  ctx.bus.subscribe(`chat:${ctx.instanceId}:turn-completed`, (frame) => {
-    const value = frame.value as { role_id: string };
-    const next = new Set(activeRoles.value);
-    next.delete(value.role_id);
-    activeRoles.value = next;
+    if (value.phase !== "completed") return;
+    if (runningTurns.value.delete(value.turn_id)) runningTurns.value = new Map(runningTurns.value);
+    clearConfirm(value.turn_id);
     resolvePendingTurn(value.role_id);
     if (streamingMessageId !== "") {
       streamingMessageId = "";
@@ -779,18 +822,21 @@ onMounted(() => {
               </button>
             </template>
             <span v-else-if="box.kind === 'user' && box.routed" class="chat-meta-detail">→ {{ box.routed }}</span>
-            <span v-if="turnActive(box)" class="chat-turn-status">
-              <span class="spinner-border spinner-border-sm" aria-hidden="true" /> running
-            </span>
             <button
               v-if="turnActive(box)"
-              class="btn btn-sm btn-link chat-stop-turn"
+              class="chat-turn-status chat-turn-chip"
+              :class="{ confirming: confirmingStops.has(stopKey(box)) }"
               type="button"
-              title="停止当前回复"
-              :aria-label="`停止 ${box.label} 的当前回复`"
-              @click="confirmStop(box.roleId, box.label)"
+              :title="confirmingStops.has(stopKey(box)) ? `10 秒内再次点击确认停止 ${box.label} 的当前回复` : '点击停止当前回复'"
+              :aria-label="confirmingStops.has(stopKey(box)) ? `确认停止 ${box.label} 的当前回复` : `停止 ${box.label} 的当前回复`"
+              @click="clickTurnStatus(box)"
             >
-              <i class="bi bi-stop-fill" />
+              <template v-if="confirmingStops.has(stopKey(box))">
+                <i class="bi bi-question-circle" aria-hidden="true" /> Stop?
+              </template>
+              <template v-else>
+                <span class="spinner-border spinner-border-sm" aria-hidden="true" /> running
+              </template>
             </button>
             <span v-if="box.kind === 'role' && roleTargetLabel(box.roleId)" class="chat-meta-detail">{{ roleTargetLabel(box.roleId) }}</span>
             <span v-if="box.kind === 'role' && usageLabel(box)" class="chat-meta-detail" :title="usageTitle(box)">{{ usageLabel(box) }}</span>
@@ -906,6 +952,24 @@ onMounted(() => {
 .chat-turn-status .spinner-border {
   height: 10px;
   width: 10px;
+}
+
+/* Clickable running chip (two-click stop): looks like the plain status
+   text, turns danger-colored while the 10s confirm window is armed. */
+.chat-turn-chip {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  padding: 0;
+}
+
+.chat-turn-chip:hover {
+  color: var(--bs-primary-text-emphasis, var(--bs-primary));
+}
+
+.chat-turn-chip.confirming,
+.chat-turn-chip.confirming:hover {
+  color: var(--bs-danger);
 }
 
 .chat-send-failed {

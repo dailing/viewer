@@ -315,6 +315,27 @@ func (p *Plugin) runningChatIDs() []string {
 	return result
 }
 
+// runningTurns returns one entry per in-flight turn of a chat, carrying the
+// owning role. chats:list exposes it when a chat_id filter is present so the
+// pane can bind each turn box's running state — and target a stop at one
+// specific turn — even after a reload, and even while parallel send-now
+// turns of the same role run side by side.
+func (p *Plugin) runningTurns(chatID string) []map[string]any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seen := map[string]bool{}
+	result := []map[string]any{}
+	for key, current := range p.runtimes {
+		if current.activeTurn == "" || !strings.HasPrefix(key, chatID+"\x00") || seen[current.activeTurn] {
+			continue
+		}
+		seen[current.activeTurn] = true
+		result = append(result, map[string]any{"turn_id": current.activeTurn, "role_id": current.roleID, "role_name": current.roleName})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i]["turn_id"].(string) < result[j]["turn_id"].(string) })
+	return result
+}
+
 func chatIDForTurn(p *Plugin, turnID string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

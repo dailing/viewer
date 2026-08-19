@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Viewer</title>
+    <!-- Stage-B plugin loading (framework 8.6): bare specifiers in external
+         plugin bundles resolve to the shell's shared vendor entries. Must
+         appear before any module script. -->
+    <script type="importmap">
+      {
+        "imports": {
+          "vue": "/assets/externals-vue.js",
+          "pinia": "/assets/externals-pinia.js"
+        }
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

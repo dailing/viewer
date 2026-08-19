@@ -2,6 +2,6 @@
 
 from .client import BusClient, RpcError
 from .matching import match
-from .plugin import Ctx, Plugin, slot
+from .plugin import Ctx, Plugin, push_assets, slot
 
-__all__ = ["BusClient", "Ctx", "Plugin", "RpcError", "match", "slot"]
+__all__ = ["BusClient", "Ctx", "Plugin", "RpcError", "match", "push_assets", "slot"]

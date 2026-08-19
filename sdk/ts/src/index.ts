@@ -6,6 +6,7 @@ export {
   RpcError,
   RpcTimeoutError,
 } from "./client.js";
+export { definePlugin } from "./plugin.js";
 export type {
   BusClientOptions,
   BusErrorEntry,
@@ -16,3 +17,14 @@ export type {
   PluginManifest,
   StateHandler,
 } from "./client.js";
+export type {
+  DockInstance,
+  DockProvider,
+  PaneChrome,
+  PaneChromeAction,
+  PaneChromeControl,
+  PluginComponent,
+  PluginCtx,
+  PluginModule,
+  PluginPaneCtx,
+} from "./plugin.js";

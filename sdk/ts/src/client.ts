@@ -66,6 +66,11 @@ export interface PluginManifest {
   version: string;
   slots: Record<string, unknown>;
   emits: Record<string, unknown>;
+  /** Display standard (framework section 14.1): shown in the plugin manager
+   *  and used by the shell for placeholders; icon is a bootstrap-icons class. */
+  name?: string;
+  icon?: string;
+  description?: string;
   [extra: string]: unknown;
 }
 

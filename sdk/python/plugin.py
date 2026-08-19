@@ -4,16 +4,87 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import logging
 import os
 import signal
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from .client import BusClient
 
 logger = logging.getLogger(__name__)
+
+# Frame budgets mirror sdk/go/busclient/assets.go: stay under the kernel's
+# 1 MiB frame cap including envelope overhead.
+_ONE_SHOT_BUDGET = 700 * 1024  # total base64 bytes
+_CHUNK_BUDGET = 480 * 1024  # decoded bytes per file op
+
+
+async def push_assets(
+    client: BusClient,
+    directory: str | os.PathLike[str],
+    manifest: dict[str, Any] | None = None,
+    *,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Push a built frontend bundle to the gateway's asset store.
+
+    Framework section 14.3: call after the plugin is registered (``start()``
+    returns); the shell loads the bundle from the ``plugins:_:assets``
+    mailbox without a page refresh, and a re-push hot-reloads open panes.
+    ``directory`` must contain the bundle entry ``frontend.js``. Wire mode is
+    chosen automatically (one-shot vs begin/file/commit chunked sequence).
+    Returns the committed asset entry ({id, url, entry, hash, ...}).
+    """
+    root = Path(directory)
+    if not (root / "frontend.js").is_file():
+        raise FileNotFoundError(f"bundle entry frontend.js missing in {root}")
+    files: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts) or rel.name == "entry.json":
+            continue
+        files[rel.as_posix()] = path.read_bytes()
+
+    total_b64 = sum(len(base64.b64encode(data)) for data in files.values())
+    if total_b64 <= _ONE_SHOT_BUDGET:
+        return await client.request(
+            "gateway:_:assets:push",
+            {
+                "files": [
+                    {"path": path, "data_b64": base64.b64encode(data).decode()}
+                    for path, data in files.items()
+                ],
+                "manifest": manifest,
+            },
+            timeout=timeout,
+        )
+
+    begin = await client.request(
+        "gateway:_:assets:push", {"op": "begin", "manifest": manifest}, timeout=timeout
+    )
+    upload_id = begin.get("upload_id")
+    if not upload_id:
+        raise RuntimeError(f"assets begin returned no upload_id: {begin!r}")
+    for path, data in files.items():
+        for offset in range(0, len(data), _CHUNK_BUDGET):
+            op: dict[str, Any] = {
+                "op": "file",
+                "upload_id": upload_id,
+                "path": path,
+                "data_b64": base64.b64encode(data[offset : offset + _CHUNK_BUDGET]).decode(),
+            }
+            if offset > 0:
+                op["append"] = True
+            await client.request("gateway:_:assets:push", op, timeout=timeout)
+    return await client.request(
+        "gateway:_:assets:push", {"op": "commit", "upload_id": upload_id}, timeout=timeout
+    )
 
 
 def slot(pattern: str) -> Callable[[Callable[..., Awaitable[None]]], Callable[..., Awaitable[None]]]:
@@ -132,6 +203,18 @@ class Plugin:
 
     async def on_stop(self) -> None:
         """Called before the connection is closed."""
+
+    async def push_assets(
+        self, directory: str | os.PathLike[str], manifest: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Push this plugin's built frontend bundle to the gateway.
+
+        Convenience wrapper around the module-level ``push_assets`` using
+        this plugin's connected client; call from ``on_start`` or later.
+        """
+        if self.client is None:
+            raise RuntimeError("push_assets requires a started plugin (client is None)")
+        return await push_assets(self.client, directory, manifest)
 
     # -------------------------------------------------------------- lifecycle
 

@@ -181,6 +181,7 @@ func newGateway(config RuntimeConfig) (Plugin, error) {
 	serverConfig := gateway.DefaultConfig()
 	serverConfig.KernelWS, serverConfig.Host, serverConfig.Port = config.KernelWS, config.GatewayHost, config.GatewayPort
 	serverConfig.StaticFS = config.StaticFS
+	serverConfig.AssetsDir = dataPath(config, "plugin-assets")
 	server := gateway.New(serverConfig)
 	return lifecycleAdapter{
 		start: func(context.Context) error { return server.Start() },

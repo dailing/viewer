@@ -30,11 +30,18 @@ type Origin struct {
 }
 
 type Manifest struct {
-	ID      string          `json:"id"`
-	Version string          `json:"version"`
-	Slots   map[string]any  `json:"slots"`
-	Emits   map[string]any  `json:"emits"`
-	Raw     json.RawMessage `json:"-"`
+	ID      string         `json:"id"`
+	Version string         `json:"version"`
+	Slots   map[string]any `json:"slots"`
+	Emits   map[string]any `json:"emits"`
+	// Display standard (framework section 14.1): shown in the plugin
+	// manager and used by the shell for placeholders; Icon is a
+	// bootstrap-icons class. All optional; unknown fields survive
+	// round trips through Raw.
+	Name        string          `json:"name,omitempty"`
+	Icon        string          `json:"icon,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Raw         json.RawMessage `json:"-"`
 }
 
 func (m Manifest) MarshalJSON() ([]byte, error) {

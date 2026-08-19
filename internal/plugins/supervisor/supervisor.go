@@ -26,8 +26,8 @@ const (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "supervisor", Version: "0.1.0",
-	Slots: map[string]any{"restart": map[string]any{}, "states": map[string]any{}},
+	ID: "supervisor", Version: "0.2.0",
+	Slots: map[string]any{"restart": map[string]any{}, "states": map[string]any{}, "list": map[string]any{}, "upsert": map[string]any{}, "delete": map[string]any{}, "start": map[string]any{}, "stop": map[string]any{}},
 	Emits: map[string]any{"states": map[string]any{}, "lifecycle": map[string]any{}},
 }
 
@@ -46,7 +46,7 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		LogDir: filepath.Join(home, ".view", "logs"), BackoffBase: time.Second,
-		BackoffCap: 30 * time.Second, BreakerMaxCrash: 5,
+		BackoffCap: 30 * time.Second, BreakerMaxCrash: 3,
 		BreakerWindow: 60 * time.Second, TerminationGrace: 2 * time.Second,
 	}
 }
@@ -55,19 +55,28 @@ type registry struct {
 	Plugins []registryEntry `json:"plugins"`
 }
 
+// registryEntry is one managed external plugin. Command overrides the
+// default launch (<path>/backend/run); "--kernel-ws <addr>" is always
+// appended (fixed launch ABI, framework section 14.3). Autostart defaults to
+// false: external plugins start manually from the manager pane.
 type registryEntry struct {
-	ID      string `json:"id"`
-	Path    string `json:"path"`
-	Enabled *bool  `json:"enabled"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name,omitempty"`
+	Path      string   `json:"path"`
+	Command   []string `json:"command,omitempty"`
+	Enabled   *bool    `json:"enabled"`
+	Autostart *bool    `json:"autostart,omitempty"`
 }
 
 type managedPlugin struct {
 	opMu          sync.Mutex
 	id, path      string
+	entry         registryEntry
 	cmd           *exec.Cmd
 	state         string
 	exitCode      *int
 	crashes       []time.Time
+	startedAt     time.Time
 	generation    uint64
 	done          chan struct{}
 	restartCancel context.CancelFunc
@@ -129,13 +138,15 @@ func New(config Config) (*Plugin, error) {
 		if entry.ID == "" || entry.Path == "" {
 			return nil, errors.New("enabled registry entries require id and path")
 		}
-		run := filepath.Join(entry.Path, "backend", "run")
-		info, statErr := os.Stat(run)
-		if statErr != nil || info.IsDir() {
-			slog.Error("plugin has no backend/run", "plugin", entry.ID, "path", run)
-			continue
+		if len(entry.Command) == 0 {
+			run := filepath.Join(entry.Path, "backend", "run")
+			info, statErr := os.Stat(run)
+			if statErr != nil || info.IsDir() {
+				slog.Error("plugin has no backend/run", "plugin", entry.ID, "path", run)
+				continue
+			}
 		}
-		managed[entry.ID] = &managedPlugin{id: entry.ID, path: entry.Path, state: StateStopped}
+		managed[entry.ID] = &managedPlugin{id: entry.ID, path: entry.Path, entry: entry, state: StateStopped}
 	}
 	return &Plugin{config: config, managed: managed}, nil
 }
@@ -167,6 +178,15 @@ func (p *Plugin) StartWithManaged(ctx context.Context, managed bool) error {
 	if _, err := p.client.Subscribe("supervisor:_:restart", p.restartRPC); err != nil {
 		return err
 	}
+	for pattern, handler := range map[string]func(busclient.Frame){
+		"supervisor:_:list": p.listRPC, "supervisor:_:upsert": p.upsertRPC,
+		"supervisor:_:delete": p.deleteRPC, "supervisor:_:start": p.startRPC,
+		"supervisor:_:stop": p.stopRPC,
+	} {
+		if _, err := p.client.Subscribe(pattern, handler); err != nil {
+			return err
+		}
+	}
 	if err := p.client.Connect(ctx); err != nil {
 		return fmt.Errorf("connect supervisor: %w", err)
 	}
@@ -174,7 +194,9 @@ func (p *Plugin) StartWithManaged(ctx context.Context, managed bool) error {
 	p.mu.Lock()
 	plugins := make([]*managedPlugin, 0, len(p.managed))
 	for _, item := range p.managed {
-		plugins = append(plugins, item)
+		if item.entry.Autostart != nil && *item.entry.Autostart {
+			plugins = append(plugins, item)
+		}
 	}
 	p.mu.Unlock()
 	for _, item := range plugins {
@@ -210,7 +232,20 @@ func (p *Plugin) spawnLocked(item *managedPlugin) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", logPath, err)
 	}
-	cmd := exec.Command(filepath.Join(item.path, "backend", "run"), "--kernel-ws", p.config.KernelWS)
+	// Launch ABI: entry command or the default backend/run; the kernel
+	// address is always appended as the fixed --kernel-ws argument. Relative
+	// executables resolve against the plugin directory, not our cwd.
+	argv := item.entry.Command
+	if len(argv) == 0 {
+		argv = []string{filepath.Join(item.path, "backend", "run")}
+	}
+	executable := argv[0]
+	if !filepath.IsAbs(executable) {
+		executable = filepath.Join(item.path, executable)
+	}
+	args := append(append([]string{}, argv[1:]...), "--kernel-ws", p.config.KernelWS)
+	cmd := exec.Command(executable, args...)
+	cmd.Dir = item.path
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.Env = append(os.Environ(), "VIEWER_MANAGED=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -229,6 +264,7 @@ func (p *Plugin) spawnLocked(item *managedPlugin) error {
 	}
 	item.cmd, item.done = cmd, make(chan struct{})
 	item.state, item.exitCode = StateStarting, nil
+	item.startedAt = time.Now()
 	done := item.done
 	p.mu.Unlock()
 	slog.Info("spawned plugin", "plugin", item.id, "pid", cmd.Process.Pid)
@@ -249,14 +285,14 @@ func (p *Plugin) waitProcess(item *managedPlugin, cmd *exec.Cmd, generation uint
 	}
 	item.exitCode = &exitCode
 	now := time.Now()
-	item.crashes = append(item.crashes, now)
-	cutoff := now.Add(-p.config.BreakerWindow)
-	first := 0
-	for first < len(item.crashes) && item.crashes[first].Before(cutoff) {
-		first++
+	// Retry counter: consecutive crashes only — a run that stayed up past
+	// BreakerWindow resets it. Retries stop after BreakerMaxCrash (default
+	// 3) consecutive failures and the plugin is marked broken.
+	if !item.startedAt.IsZero() && now.Sub(item.startedAt) >= p.config.BreakerWindow {
+		item.crashes = nil
 	}
-	item.crashes = append([]time.Time(nil), item.crashes[first:]...)
-	broken := len(item.crashes) >= p.config.BreakerMaxCrash
+	item.crashes = append(item.crashes, now)
+	broken := len(item.crashes) > p.config.BreakerMaxCrash
 	if broken {
 		item.state = StateBroken
 	} else {
@@ -278,14 +314,8 @@ func (p *Plugin) recordSpawnFailure(item *managedPlugin, err error) {
 	p.mu.Lock()
 	item.exitCode = nil
 	item.crashes = append(item.crashes, now)
-	cutoff := now.Add(-p.config.BreakerWindow)
-	first := 0
-	for first < len(item.crashes) && item.crashes[first].Before(cutoff) {
-		first++
-	}
-	item.crashes = append([]time.Time(nil), item.crashes[first:]...)
 	item.state = StateCrashed
-	if len(item.crashes) >= p.config.BreakerMaxCrash {
+	if len(item.crashes) > p.config.BreakerMaxCrash {
 		item.state = StateBroken
 	}
 	broken, attempt := item.state == StateBroken, len(item.crashes)

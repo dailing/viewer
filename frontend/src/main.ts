@@ -8,13 +8,14 @@ import "./styles.css";
 
 import App from "./App.vue";
 import { connectBus } from "./shell/bus";
-import { loadPlugins } from "./shell/loader";
+import { loadExternalPlugins, loadPlugins } from "./shell/loader";
 import { useMarkdownStyleStore } from "./stores/markdownStyle";
 import { useThemeStore } from "./stores/theme";
 
 const app = createApp(App);
 app.use(createPinia());
 loadPlugins();
+loadExternalPlugins();
 app.mount("#app");
 useThemeStore().init();
 useMarkdownStyleStore().init();

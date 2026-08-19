@@ -26,6 +26,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"viewer/sdk/go/busclient"
 	"viewer/sdk/go/protocol"
 )
 
@@ -44,6 +45,10 @@ type Config struct {
 	Port         int
 	StaticFS     fs.FS
 	PingInterval time.Duration
+	// AssetsDir enables the plugin frontend asset pipeline (framework
+	// section 14.3): content-addressed bundle store + /plugins/ serving +
+	// the gateway:_:assets:* bus RPCs. Empty disables it.
+	AssetsDir string
 }
 
 func DefaultConfig() Config {
@@ -60,6 +65,12 @@ type Server struct {
 
 	mu      sync.Mutex
 	sockets map[*websocket.Conn]struct{}
+
+	// Asset pipeline (assets.go): own bus client + store state.
+	client      *busclient.Client
+	assetsState *assetsState
+	assetsCtx   context.Context
+	assetsStop  context.CancelFunc
 }
 
 func New(config Config) *Server {
@@ -105,12 +116,20 @@ func (s *Server) Start() error {
 		s.serveErr <- err
 	}()
 	slog.Info("gateway listening", "address", "http://"+s.Addr(), "kernel_ws", s.config.KernelWS)
+	s.assetsCtx, s.assetsStop = context.WithCancel(context.Background())
+	if err := s.startAssets(s.assetsCtx); err != nil {
+		slog.Error("gateway asset pipeline failed to start", "error", err)
+	}
 	return nil
 }
 
 func (s *Server) Wait() error { return <-s.serveErr }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.assetsStop != nil {
+		s.assetsStop()
+	}
+	s.stopAssets()
 	s.mu.Lock()
 	sockets := make([]*websocket.Conn, 0, len(s.sockets))
 	for socket := range s.sockets {
@@ -130,6 +149,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/ws":
 		s.serveBrowser(w, r)
+	case strings.HasPrefix(r.URL.Path, "/plugins/"):
+		s.servePluginAsset(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/restart":
 		s.handleRestart(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/build-restart":

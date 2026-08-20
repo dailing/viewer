@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,8 +33,9 @@ const (
 var Manifest = busclient.Manifest{
 	ID: "voice", Version: "0.1.0",
 	Slots: map[string]any{
-		"voice:_:start":  map[string]any{"summary": "start a voice-service relay; RPC -> {rec_id}"},
-		"voice:_:cancel": map[string]any{"summary": "cancel a recording relay"},
+		"voice:_:start":    map[string]any{"summary": "start a voice-service relay; RPC -> {rec_id}"},
+		"voice:_:cancel":   map[string]any{"summary": "cancel a recording relay"},
+		"voice:_:sessions": map[string]any{"summary": "list in-flight relay ids; RPC -> {sessions}"},
 	},
 	Emits: map[string]any{
 		"voice:*:event": map[string]any{"summary": "normalized voice-service state"},
@@ -114,7 +116,7 @@ func (p *Plugin) Start(ctx context.Context) error {
 func (p *Plugin) StartWithManaged(ctx context.Context, managed bool) error {
 	p.client = busclient.New(p.config.KernelWS, Manifest, busclient.WithManaged(managed))
 	for pattern, handler := range map[string]func(busclient.Frame){
-		"voice:_:start": p.handleStart, "voice:_:cancel": p.handleCancel,
+		"voice:_:start": p.handleStart, "voice:_:cancel": p.handleCancel, "voice:_:sessions": p.handleSessions,
 	} {
 		if _, err := p.client.Subscribe(pattern, handler); err != nil {
 			_ = p.client.Close()
@@ -251,6 +253,22 @@ func (p *Plugin) handleCancel(frame busclient.Frame) {
 		current.close()
 	}
 	p.respond(frame, map[string]any{"rec_id": recID})
+}
+
+// handleSessions reports the ids of in-flight voice relays; the gateway's
+// scheduled-restart watchdog polls it as part of the idle check.
+func (p *Plugin) handleSessions(frame busclient.Frame) {
+	if pluginrpc.Cancelled(frame) {
+		return
+	}
+	p.mu.RLock()
+	ids := make([]string, 0, len(p.sessions))
+	for id := range p.sessions {
+		ids = append(ids, id)
+	}
+	p.mu.RUnlock()
+	sort.Strings(ids)
+	p.respond(frame, map[string]any{"sessions": ids})
 }
 
 func (p *Plugin) readServiceConfig(ctx context.Context) (serviceConfig, error) {

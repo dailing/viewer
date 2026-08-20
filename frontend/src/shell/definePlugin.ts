@@ -34,15 +34,19 @@ export interface DockProvider {
   title: string;
   /**
    * Singleton providers (bus-inspector) have no backend-tracked instances;
-   * the Dock pins their entry by default and lets users persistently unpin it.
+   * their entry is always listed in the Dock. A singleton provider may still
+   * carry `instances` (files): the Dock lists them below its root entry.
    */
   singleton?: boolean;
+  /**
+   * Singleton root entry acts as a launcher: clicking it calls `create()`
+   * instead of opening `type:main` (files — the root entry never opens).
+   */
+  clickCreates?: boolean;
   /** Reactive list of running instances, maintained by the provider. */
   instances: DockInstance[];
   /** "+" menu action (create a new instance); absent = not user-creatable. */
   create?: () => Promise<void> | void;
-  /** Dock hover action to remove a running instance (e.g. kill a terminal). */
-  remove?: (id: string) => Promise<void> | void;
 }
 
 export interface PluginModule {

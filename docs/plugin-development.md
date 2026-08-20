@@ -252,11 +252,13 @@ ctx 提供（pane 级 scope = `<paneType>:<instanceId>`，插件级 instanceId �
 | `ctx.setChrome({title, status, statusClass, actions, controls})` | 往 shell 标题栏注册内容（按钮/下拉/chips），插件不自绘标题栏 |
 | `ctx.onDispose(fn)` | 注册清理回调（pane 关闭 / 插件卸载时调用） |
 
-多实例插件（如 terminal）：`instances` 是**响应式数组**（`ref`/`reactive`），你的 activate 里维护它（订阅后端 mailbox 增量更新）；`create()` 是 Dock "+" 动作，`remove(id)` 是 hover 删除动作。DockInstance 的 `state`（`"running" | "unread" | "error" | "dead"`）驱动状态点颜色。
+多实例插件（如 terminal）：`instances` 是**响应式数组**（`ref`/`reactive`），你的 activate 里维护它（订阅后端 mailbox 增量更新）；`create()` 是 Dock "+" 动作。DockInstance 的 `state`（`"running" | "unread" | "error" | "dead"`）驱动状态点颜色。Dock 条目上没有动作按钮——实例的终止/删除走 pane chrome action（`ctx.setChrome`，如 terminal 的终止按钮）或 pin + 关闭剪枝语义（如 files）。
 
 ### 3.4 样式约定
 
-- 用 shell 的 CSS 变量：`var(--color-bg)`、`--color-text`、`--color-accent`、`--font-size-ui` 等（见 `frontend/src/styles.css`/主题系统），自动适配用户主题。
+- 用 shell 的 CSS 变量：`var(--color-surface)`、`var(--color-text)`、`var(--color-accent)`、`--font-size-ui` 等（见 `frontend/src/styles.css`/主题系统），自动适配用户主题（含亮暗切换）。**不要在自己的根元素上重新声明 `--color-*` 变量**——那会覆盖活动主题。
+- 通用元素直接用 shell 的样式 class（`.v-bg-surface` / `.v-fg-muted` / `.v-title` / `.v-panel` 等，完整清单见 plugin-framework §8.10）；状态色/徽标底色用 `color-mix(in srgb, var(--color-*) N%, transparent)` 派生，样式表里不写字面 hex 颜色。
+- 自建顶栏（tab bar 等）用 `var(--color-titlebar)` / `var(--color-titlebar-text)`，与 pane 抬头一致。
 - 组件用 SFC `scoped` 样式；构建时 `cssCodeSplit: false`，产物 `frontend.css` 由 shell 自动注入/移除。
 - 不要引入全局 reset 或污染全局选择器。
 

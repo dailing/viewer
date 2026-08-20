@@ -15,7 +15,6 @@ import { dockProviders } from "./registries";
 const layout = useLayoutStore();
 const dockSettings = useDockSettingsStore();
 const menuOpen = ref(false);
-const pinRevision = ref(0);
 const expanded = ref(false);
 const navEl = ref<HTMLElement | null>(null);
 // Pinned: the Dock stays expanded and its width takes real layout space
@@ -105,15 +104,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeydown);
 });
 
-function pinStorageKey(type: string): string {
-  return `viewer.dock.singletonPinned.v1.${type}`;
-}
-
-function isSingletonPinned(type: string): boolean {
-  void pinRevision.value;
-  return localStorage.getItem(pinStorageKey(type)) !== "false";
-}
-
 interface DockEntry {
   key: string;
   uid: string;
@@ -123,7 +113,6 @@ interface DockEntry {
   state?: string;
   provider: DockProvider;
   instance?: DockInstance;
-  pinned?: boolean;
 }
 
 function chatDisplayLabel(label: string): string {
@@ -152,19 +141,16 @@ const entries = computed<DockEntry[]>(() => {
   for (const provider of dockProviders) {
     if (provider.singleton === true) {
       const uid = `${provider.type}:main`;
-      const pinned = isSingletonPinned(provider.type);
-      if (pinned || layout.isUidOpen(uid)) {
-        result.push({
-          key: uid,
-          uid,
-          icon: provider.icon,
-          label: provider.title,
-          displayLabel: provider.title,
-          provider,
-          pinned,
-        });
-      }
-      continue;
+      result.push({
+        key: uid,
+        uid,
+        icon: provider.icon,
+        label: provider.title,
+        displayLabel: provider.title,
+        provider,
+      });
+      // Singleton providers may still list instances (files root launcher).
+      if (provider.instances.length === 0) continue;
     }
     for (const instance of provider.instances) {
       const uid = `${provider.type}:${instance.id}`;
@@ -191,33 +177,34 @@ const activeUid = computed(() => {
 const creatable = computed(() => dockProviders);
 
 function openEntry(entry: DockEntry): void {
+  if (entry.instance === undefined && entry.provider.clickCreates === true) {
+    void entry.provider.create?.();
+    return;
+  }
   layout.openInstance(entry.provider.type, entry.instance?.id ?? "main");
 }
 
 async function createFrom(provider: DockProvider): Promise<void> {
   menuOpen.value = false;
-  if (provider.singleton === true) {
+  if (provider.singleton === true && provider.clickCreates !== true) {
     layout.openInstance(provider.type, "main");
     return;
   }
   await provider.create?.();
 }
 
-async function removeEntry(entry: DockEntry): Promise<void> {
-  if (entry.instance === undefined) return;
-  await entry.provider.remove?.(entry.instance.id);
-}
-
-function togglePin(entry: DockEntry): void {
-  const pinned = entry.pinned !== false;
-  localStorage.setItem(pinStorageKey(entry.provider.type), pinned ? "false" : "true");
-  pinRevision.value += 1;
-}
-
 function openSettings(): void {
   menuOpen.value = false;
   layout.openInstance("settings", "main");
 }
+
+// Frontend build stamp (vite define), shown in the Dock foot when expanded:
+// "YYYY-MM-DD HH:mm" in local time.
+const buildTime = (() => {
+  const date = new Date(__BUILD_TIME__);
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+})();
 </script>
 
 <template>
@@ -269,8 +256,6 @@ function openSettings(): void {
             <span v-if="isExpanded" class="dock-label">{{ entry.displayLabel }}</span>
           </button>
           <span v-if="entry.state !== undefined" class="dock-dot" :class="dockDotClass(entry.state)"></span>
-          <button v-if="entry.provider.remove !== undefined && entry.instance !== undefined" type="button" class="dock-remove" title="终止" @click="removeEntry(entry)"><i class="bi bi-x"></i></button>
-          <button v-if="entry.provider.singleton === true" type="button" class="dock-pin" :title="entry.pinned === false ? '固定到 Dock' : '从 Dock 取消固定'" @click="togglePin(entry)"><i class="bi" :class="entry.pinned === false ? 'bi-pin-angle' : 'bi-pin-angle-fill'"></i></button>
         </div>
         <div v-if="entries.length === 0" class="dock-empty" title="没有正在运行的 instance"><i class="bi bi-dash-lg"></i></div>
       </div>
@@ -285,6 +270,7 @@ function openSettings(): void {
           @click="toggleDockPin"
         ><i class="bi" :class="pinned ? 'bi-pin-angle-fill' : 'bi-pin-angle'"></i></button>
         <button type="button" class="dock-btn" title="设置" aria-label="设置" @click="openSettings"><i class="bi bi-gear"></i></button>
+        <span v-if="isExpanded" class="dock-build" :title="`前端构建时间：${buildTime}`">{{ buildTime }}</span>
       </div>
       <div
         v-if="isExpanded"
@@ -477,42 +463,6 @@ function openSettings(): void {
   right: auto;
 }
 
-.dock-remove,
-.dock-pin {
-  align-items: center;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
-  border-radius: 50%;
-  color: var(--color-danger);
-  display: none;
-  font-size: 9px;
-  height: 14px;
-  justify-content: center;
-  left: -2px;
-  padding: 0;
-  position: absolute;
-  top: -2px;
-  width: 14px;
-}
-
-.dock-pin {
-  color: var(--color-text-muted);
-}
-
-.dock-item:hover .dock-remove,
-.dock-item:hover .dock-pin {
-  display: inline-flex;
-}
-
-.dock.expanded .dock-remove,
-.dock.expanded .dock-pin {
-  flex: 0 0 16px;
-  left: auto;
-  margin-right: 4px;
-  position: static;
-  top: auto;
-}
-
 .dock-empty {
   color: var(--color-text-subtle);
   margin-top: 4px;
@@ -570,6 +520,16 @@ function openSettings(): void {
   flex: 0 0 auto;
   padding-top: 4px;
   position: relative;
+}
+
+.dock-build {
+  color: var(--color-text-subtle);
+  display: block;
+  font-size: 10px;
+  overflow: hidden;
+  padding: 2px 8px 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dock-menu-item:disabled {

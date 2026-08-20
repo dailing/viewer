@@ -80,14 +80,17 @@ function clearText(): void {
 // raw `draft` ref from both send paths and never reset it, so the message
 // stayed in the box and a second click re-sent it (chat 9475ce5db012 has 3
 // identical user rows from that). Empty/whitespace input is a no-op.
-function handleSend(): void {
+// Refocus only for keyboard sends (Ctrl+Enter): after a button click,
+// focusing the textarea pops the virtual keyboard back up on mobile and
+// covers the timeline the user wants to watch.
+function handleSend(refocus = true): void {
   const text = draft.value;
   if (text.trim() === "") return;
   emit("send", text, forceNewSession.value, sendNow.value);
   forceNewSession.value = false;
   sendNow.value = false;
   draft.value = "";
-  void nextTick(() => textarea.value?.focus());
+  if (refocus) void nextTick(() => textarea.value?.focus());
 }
 
 function clearRoles(): void {
@@ -140,7 +143,7 @@ function handlePickerFocusOut(event: FocusEvent): void {
       rows="2"
       placeholder="Message"
       @input="resizeTextarea"
-      @keydown.ctrl.enter.prevent="handleSend"
+      @keydown.ctrl.enter.prevent="handleSend()"
     />
     <div v-if="voiceError !== ''" class="voice-error">
       <i class="bi bi-exclamation-triangle" />
@@ -218,7 +221,7 @@ function handlePickerFocusOut(event: FocusEvent): void {
         >
           <i class="bi" :class="sendNow ? 'bi-lightning-fill' : 'bi-lightning'" />
         </button>
-        <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="handleSend">
+        <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="handleSend(false)">
           <i class="bi bi-send" />
         </button>
       </div>

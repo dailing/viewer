@@ -16,6 +16,7 @@ import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
 import "@xterm/xterm/css/xterm.css";
 
 import type { PluginCtx } from "../../shell/ctx";
+import { useLayoutStore } from "../../stores/layout";
 
 interface OutputEntry {
   seq: number;
@@ -36,6 +37,33 @@ if (injectedCtx === undefined) throw new Error("TerminalPane must be mounted ins
 const ctx: PluginCtx = injectedCtx;
 
 const termId = ctx.instanceId;
+const layout = useLayoutStore();
+
+/**
+ * Terminate lives in the pane chrome (framework section 8.5): unlike files
+ * instances, a terminal's scrollback may be worth revisiting, so the plain
+ * title-bar close only detaches the pane — the PTY keeps running and the
+ * Dock entry stays. This danger action is the single terminate path: kill
+ * the PTY (its Dock entry drops out via the status mailbox) and close the
+ * hosting pane.
+ */
+ctx.setChrome({
+  actions: [
+    {
+      id: "kill",
+      title: "终止终端进程并关闭面板",
+      icon: "bi-x-octagon",
+      variant: "danger",
+      run: async () => {
+        await ctx.bus.request(`terminal:${termId}:kill`).catch(() => {});
+        const pane = layout.panes.find(
+          (entry) => entry.content?.paneType === "terminal" && entry.content.instanceId === termId,
+        );
+        if (pane !== undefined) layout.closePane(pane.id);
+      },
+    },
+  ],
+});
 const containerRef = ref<HTMLElement | null>(null);
 const status = ref<TerminalStatus | null>(null);
 const loadError = ref<string | null>(null);

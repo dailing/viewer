@@ -1,6 +1,8 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.40**（2026-08-19）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.42**（2026-08-20）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.42 变更：**Dock 去按钮化 + 计划重启 + 构建时间戳**——①Dock 条目的 hover pin/终止按钮全部移除，实例级动作统一收进 pane chrome（§8.7/§8.8）：singleton 条目改为无条件常驻（localStorage `viewer.dock.singletonPinned.v1.*` 机制废弃），`DockProvider.remove` 契约删除；terminal 的终止 = pane chrome danger action（杀 PTY + 关 pane），plain close 只摘 pane、PTY 与 Dock 条目保留（scrollback 可回看）；files 沿用 pin+关闭剪枝语义。②gateway 新增 `POST /api/admin/schedule-restart`（C4）：一次性武装延迟重启，watchdog 每 5s 经总线 RPC 查空闲（`chat:_:chats:list` 的 `running_chat_ids` 为空 + `voice:_:sessions` 无活动 relay），空闲即走 v0.34 优雅重启路径；armed 标志纯内存，不设取消。voice 新增 RPC `voice:_:sessions` 返回在途 relay id 列表。③前端构建时间戳：vite `define` 注入 `__BUILD_TIME__`（每次 build 重算），Dock 底部展开时显示本地时间 "YYYY-MM-DD HH:mm"。
+> v0.41 变更：**插件主题集成（§8.10）**——主题变量表新增 `--color-titlebar` / `--color-titlebar-text`（pane 抬头纯色可配，settings 主题编辑器同步加项）；shell 新增插件通用样式 class 族（`.v-bg-*` / `.v-fg-*` / `.v-title` / `.v-panel`），插件用 class 即跟随活动主题（含亮暗切换）；消息样式覆盖新增行内代码文字色与代码块文字色两项。
 > v0.40 变更：**chat 渲染窗口 + 流式批刷（A.7）**——①ChatPane 常驻 DOM 封顶为渲染窗口（`WINDOW_MAX_MESSAGES`=300 条消息，常量可调）：超出按页（50 条）驱逐，方向跟随浏览意图——流式/向下追赶驱逐顶部（按 DOM 高度差补偿 scrollTop，视口内容不动），向上深读历史驱逐底部；被驱逐页留在服务端，由既有 `before`/`after` 复合游标透明重拉，blocks 随窗口同跨度裁剪。②**detach/reattach 语义**：手动上滑距 live 边超 1.5 屏即 detach——越过窗口上沿的 live 帧跳过合并，底部显示「跳到最新」横条；滚回底部触发区按 `after` 游标逐页追赶（`loadNewer`），`has_more` 收敛即 reattach 并以增量刷新闭合抓取竞态；「跳到最新」与 detached 态下发消息均走**全新最新页加载**（v0.32 增量刷新最多追 3 页，闭合不了任意深度的 detach 缺口）；（重）加载期 DOM 收缩引发的 scrollTop 钳制回波被识别抑制，不会落地瞬间误 detach；内容增长（原地看流式输出）不触发 detach（按滚动方向判定）。③**流式批刷**：message/block 总线帧先并入按 id 键控的暂存 Map，100ms 一批落入响应式状态（同 id 多次更新一批只落一次；用户本人发送回显仍即时刷新），timeline 重建/缓存回写/markdown 重渲染频次随之封顶；mermaid 维持 500ms 节流，扫描范围被窗口天然限定。
 > v0.39 变更：**§8.4 阶段 B 落地 + 插件管理面定稿**——①前端资产管道实现：RPC `gateway:_:assets:push` 支持 one-shot 与三段式 chunked（`begin`/`file`/`commit`，超帧文件以 `append:true` 分片续传），资产 id 绑定调用方 origin（插件只能发布自己的 bundle）；内容寻址库存 `<data>/plugin-assets/<id>/<hash>/`（保留最近 3 代、`entry.json` sidecar、启动时从磁盘重建），gateway 同源 serve `/plugins/<id>/assets/<hash>/<file>`（immutable 缓存）；全量映射发 `plugins:_:assets` mailbox；`gateway:_:assets:remove {id}` 删除资产。②shell 动态加载：`index.html` 静态 import map 把 `vue`/`pinia` 钉到稳定 vendor entry（`src/externals/*.ts`，与 app bundle 同一次 Rollup 构建、共享 chunk = 同一单例）；loader 订阅 assets mailbox 对账：新 id `import(url)`、hash 变即热重载（先 deactivate 再 import 新 URL，无页面刷新）、条目消失即逻辑卸载（注销组件/Dock provider，已开 pane 回落 unknown-type placeholder）；import 失败按 hash 冷却 30s。shell 额外识别伴随样式表：assets 文件列表含 `frontend.css` 时 import 前自动注入 `<link>`、卸载时移除（插件构建用 Vite library mode + `cssCodeSplit:false`）。③**插件管理 = supervisor 扩展 + 默认核心前端插件 `plugin-manager`**（singleton pane，§8.9 版式）：RPC `supervisor:_:list/upsert/delete/start/stop`；registry entry 增加 `command`（自定义启动命令行，相对路径相对插件目录解析；`--kernel-ws` 恒追加）、`name`、`autostart`（**默认 false，手动启动**）；失败策略定为**连续崩溃重试 3 次后转 `broken` 待手动启动**，稳定运行超过 60s 重置计数（旧 60s 窗口内 5 次熔断语义废弃）；delete 顺带 `assets:remove` 完成前端热卸载。④manifest 展示标准：hello manifest 可选 `name`/`icon`（bootstrap-icons class）/`description`，经 `plugins:_:list` 原文透传（Raw passthrough，无协议变更），供管理面板与 shell placeholder 使用。⑤SDK：`sdk/go` `busclient.PushAssets`、`sdk/python` `push_assets`（+ `Plugin.push_assets`）、`sdk/ts` `plugin.ts`（`definePlugin` + ctx/Dock/PaneChrome 类型，与 shell 结构化兼容）；inbox-RPC 回应助手（`Object`/`Cancelled`/`Respond`/`RespondError`）下沉到 `sdk/go/busclient`（`internal/plugins/pluginrpc` 变为同名委托），外部 Go 插件不再依赖 internal 包。开发者手册见 `docs/plugin-development.md`。
 > v0.38 变更：**RPC no_route fail-fast + 丢帧可追查（§5.3）**——broker 对零订阅者的请求帧（payload 带 `_reply_to` + `_corr`）立即合成 `no_route` 错误响应回 `_reply_to`，调用方秒级失败（此前干等 30s 客户端超时，重启竞态下 blocks:list 等 RPC 必然中招）；普通事件零订阅者仍静默丢弃。慢消费者队列丢弃带 `_corr` 的帧逐条 WARN（带 corr）。inbox 约定本身不变，broker 仍无 RPC 路由子系统。
@@ -286,7 +288,8 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 ### 8.7 Dock 与 pane 打开语义（v0.24 定稿）
 
 - **`openInstance` 打开语义**：目标 instance 已开 → 聚焦所在 pane；当前 active pane 为空 → 用之；存在其他空 pane → 用第一个空 pane；都没有 → 对 active pane 自动 split（默认垂直即左右分，新 pane 在右侧）并放入。**任何已占用 pane 的内容不被静默替换。**
-- **Dock singleton 条目 = pin 制**：singleton provider（bus-inspector、chat-manager 等）默认 **pinned**——图标常驻 dock，点击 = 打开或聚焦；用户可 unpin（hover 上的 pin 切换），unpin 后回到"开着才显示"。pin 状态属 view state（F6），当前实现持久化在浏览器 localStorage，按 provider type 键控。
+- **Dock singleton 条目常驻**：singleton provider（bus-inspector、chat-manager 等）的条目无条件常驻 dock，点击 = 打开或聚焦。（v0.24 引入的 pin/unpin 切换在 v0.42 随 dock hover 按钮一并移除。）
+- **Dock 条目无动作按钮（v0.42）**：dock 条目上不放任何按钮；实例的终止/删除动作归 pane chrome（§8.8）——terminal 的终止是 chrome danger action（杀 PTY + 关 pane，plain close 只摘 pane、实例保留可回看 scrollback），files 是 pin + 关闭剪枝。`DockProvider` 契约不再有 `remove` 钩子。
 - **Dock 分区契约不变**：一个前端插件贡献一个 DockProvider（一个 dock 分区 + instances 列表）；一个插件可注册任意数量 pane 组件类型。需要第二个 dock 分区时拆第二个前端插件（如 chat / chat-manager），shell 契约零改动。
 
 ### 8.8 Pane chrome 注册（v0.25 定稿）
@@ -303,6 +306,18 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 - **动作归右栏**：list 条目上不放任何按钮；删除、pin 等破坏性或有副作用的动作一律在右栏 configuration 区（与保存并列）。
 - **dock 底部 = 设置入口**：总线连接状态指示从 dock 移除，原位为设置按钮（齿轮）；设置项含"悬停展开延迟（ms）"，持久化于 localStorage（view state，F6）。
 - **路由编辑器**：policy 的 candidates 每候选一行；agent/provider/model 渲染为"浅色小 label + 可点击文本"（不使用 select 下拉箭头样式），点击文本弹出选项菜单；相邻候选间的分割线轻微高亮、中央置小"+"按钮 = 在该位置插入新候选（列表末尾同样有一条"+"分割线用于追加）；候选排序用**拖拽**（drag & drop），不设上下移按钮；候选行不再内嵌 parameters JSON 框——右栏最底部用一个等宽框展示当前 policy 的完整 JSON 预览（只读，随可视化编辑实时更新）。
+
+### 8.10 插件主题集成（v0.41 定稿）
+
+- **主题变量单源**：shell 的全部 `--color-*` 变量定义在 `styles.css`（`:root` 默认 + `[data-theme="dark"]` 深色回退），活动主题以 inline custom property 覆盖在 `.app-shell` 上。插件渲染在 `.app-shell` 子树内，直接 `var(--color-*)` 即跟随活动主题与亮暗切换。
+- **禁止重声明**：插件**不得**在自己的根元素上重新定义 `--color-*` 变量（会把活动主题覆盖回硬编码值，亮暗切换失效）；只允许引用。插件自有色板（如重要性分级色）应派生自主题变量（`color-mix`）或定义为插件私有变量名。
+- **通用样式 class**（`styles.css`，scoped 在 `.app-shell` 下）：插件把 class 放到元素上即获得与 shell 一致的配色——
+  - 底色：`.v-bg-canvas` / `.v-bg-surface` / `.v-bg-muted` / `.v-bg-raised`（同时设定匹配的前景色）
+  - 文字：`.v-fg` / `.v-fg-muted` / `.v-fg-subtle` / `.v-fg-accent` / `.v-fg-success` / `.v-fg-warning` / `.v-fg-danger`
+  - 标题：`.v-title`（正文色 + 粗体）
+  - 容器：`.v-panel`（surface 底 + 1px 边框 + 圆角）
+- **抬头变量**：pane 抬头配色独立于 surface 系（`--color-titlebar` / `--color-titlebar-text`），主题编辑器可纯色配置；插件自建顶栏（如 tab bar）应用 `var(--color-titlebar)` 与 shell 抬头一致。
+- **硬编码颜色禁令**：插件样式表不出现字面 hex/rgb 颜色（状态色、徽标底色等一律 `color-mix(in srgb, var(--color-*) N%, transparent)` 派生），保证亮暗两套主题下都成立。
 
 ## 9. 进程模型与监督
 
@@ -343,7 +358,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 | C1 | config-store | `config:_:get/set` 等 RPC channel；`plugins.<id>.*` namespace |
 | C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件 |
 | C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5） |
-| C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37） |
+| C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37）+ `POST /api/admin/schedule-restart`（武装后等空闲自重启，v0.42） |
 | C5 | automation-engine | 后期（§7.5） |
 
 ### 10.3 前端 display 层（插件前端模块 `activate(ctx)`）
@@ -523,6 +538,7 @@ my-plugin/
 - **v0.28**（2026-08-14）：**viewer.voice 契约定稿**（A.8）——音频经总线传输（base64 chunk publish）、文字经总线事件回传（ready/partial/final…）；后端插件只做外部 voice-service 的 WS relay（C1 注入 service_ws/model/language；内嵌 ASR 后端不移植）；前端 voice 插件无 pane（store + 按钮），chat composer 直接 import 引用；录音安全上限 10 分钟。
 - **v0.29**（2026-08-14）：**voice 前端降级**（A.8）——后端 voice 插件缺席时（`plugins:_:list` 探测），composer 麦克风按钮置灰禁用，chat 其余功能不受影响；总线重连后重新探测。
 - **v0.40**（2026-08-19）：**chat 渲染窗口 + 流式批刷**（A.7）——常驻 DOM 封顶 300 条消息（常量可调），超窗按页驱逐：流式/向下追赶驱逐顶部（scrollTop 高度差补偿），向上深读驱逐底部，驱逐页经既有 before/after 游标透明重拉；手动上滑超 1.5 屏 detach（越窗 live 帧跳过合并 + 「跳到最新」横条），滚到底部逐页追赶至 reattach，跳最新/detached 发消息走全新最新页加载（增量刷新 3 页上限闭合不了深度 detach 缺口）；message/block 帧 100ms 批刷（id 键控 Map 合并，发送回显即时），timeline/回写/markdown 频次封顶，mermaid 维持 500ms 节流。
+- **v0.42**（2026-08-20）：**Dock 去按钮化 + 计划重启 + 构建时间戳**——①dock 条目 hover pin/终止按钮移除，实例动作归 pane chrome（§8.7/§8.8）：singleton 条目无条件常驻（`viewer.dock.singletonPinned.v1.*` 废弃），`DockProvider.remove` 删除；terminal 终止 = chrome danger action（杀 PTY + 关 pane，plain close 只摘 pane、实例保留可回看 scrollback），files 沿用 pin+关闭剪枝。②C4 新增 `POST /api/admin/schedule-restart`：一次性武装延迟重启，watchdog 5s 轮询空闲（chat 无 running turn + voice 无活动 relay）即走 v0.34 优雅重启；voice 新增 `voice:_:sessions` RPC；armed 标志纯内存，不设取消。③vite `define` 注入 `__BUILD_TIME__`，dock 底部展开时显示本地 "YYYY-MM-DD HH:mm"。
 - **v0.38**（2026-08-17）：**RPC no_route fail-fast + 丢帧可追查**（§5.3）——请求帧零订阅者时 broker 合成 `no_route` 错误响应立即回 `_reply_to`（此前调用方干等 30s 客户端超时；重启竞态兜底，非路由子系统，普通事件仍静默丢弃）；慢消费者丢弃带 `_corr` 帧逐条 WARN。
 - **v0.34**（2026-08-15）：**gateway admin restart 定稿**（§10 C4）——http-gateway 暴露 `POST /api/admin/restart`：单二进制优雅自重启（spawn 同参数新进程 + `--wait-pid <self>` 等旧 pid 消失再 bind + Setsid + 日志转 `/tmp/viewerd.log`，500ms 后 SIGTERM 自关走排空路径）；spawn 失败返回 500 且旧进程继续运行；`--wait-pid` 上限 30s。dev 单二进制获得与 deploy/supervisor 等价的开发重启路径。
 - **v0.35**（2026-08-16）：**agent catalog 协议发现 + 缓存刷新**——hermes/opencode catalog 从 config.yaml 扫描/硬编码改为 ACP 协议枚举（hermes `session/new.models` = SessionModelState `provider:model`，opencode `session/new.configOptions` 的 select 型 `model` 项 = `provider/model`），codex 沿用 app-server `model/list`；统一 `agentdriver.CatalogCache`（启动静态 fallback + 后台即时/30 分钟周期刷新 + 失败保留旧值 + 发现成功重发 retained mailbox）；新增 `<agent-plugin>:_:catalog-refresh` RPC；opencode `start` 经 `session/set_config_option` 落地模型强制（agent 校验失败即 start 失败）；C1 catalog override 语义不变。
@@ -573,7 +589,7 @@ my-plugin/
 - **C1 config-store**：`config.py` + `models.py`（AppConfig schema）；路由 `GET/PUT /api/config`、`GET/POST /api/config/llm-provider-states(/clear)` → RPC `config:_:get/set` 等。前端 `ConfigPanel.vue` 拆为设置壳 + per-plugin section 贡献点（F2）。
 - **C2 instance-store**：新建（§7.2 bindings、instance state 落点）；同时接管 `viewer.layout.v1` 的服务端持久化（若需要跨设备）——view state 仍走 F6 localStorage。
 - **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
-- **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。
+- **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。admin API：`POST /api/admin/restart`（v0.34 优雅自重启）、`POST /api/admin/build-restart`（v0.37 构建成功后自重启）、`POST /api/admin/schedule-restart`（v0.42 武装后等空闲自重启：watchdog 5s 轮询 `chat:_:chats:list` 无 running + `voice:_:sessions` 无活动才触发，armed 标志纯内存）。
 
 ### A.4 viewer.terminal（Phase 2，链路首验）
 
@@ -619,6 +635,7 @@ my-plugin/
   - publish `voice:{rec}:chunk` `{data}`：base64 音频块（MediaRecorder 250ms 一片，约 5–15KB）；插件解码转发为 WS 二进制帧。总线帧为 JSON，音频即 base64 payload（内核无帧长上限，`SetReadLimit(-1)`）。
   - publish `voice:{rec}:stop`：插件转发 stop，继续 relay 直到 final，随后关闭会话。
   - RPC `voice:_:cancel` `{rec_id}`：中止并清理（关 WS、丢弃结果）。
+  - RPC `voice:_:sessions` → `{sessions: [rec_id…]}`：在途 relay 列表（v0.42，gateway 计划重启的空闲判定轮询它）。
   - emit `voice:{rec}:event` `{type: ready|processing|partial|committed|final|error, text?, message?}`：voice-service 消息的直通归一（语义对齐生产版 `_normalize_voice_service_message`）。
 - **会话生命周期**：final / error / cancel 结束；单条录音设安全上限（默认 10 分钟，超时发 error 并清理）——协议安全帽，非 idle reap。
 - **并发**：多 rec 并行；ASR 串行化由 voice-service 自身保证（其全局转写锁）。

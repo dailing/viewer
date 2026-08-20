@@ -22,6 +22,8 @@ export interface ThemeVars {
   surfaceMuted: string;
   surfaceHover: string;
   surfaceSelected: string;
+  titlebar: string;
+  titlebarText: string;
   text: string;
   textMuted: string;
   textSubtle: string;
@@ -55,6 +57,8 @@ export const THEME_VAR_NAMES: Record<keyof ThemeVars, string> = {
   surfaceMuted: "--color-surface-muted",
   surfaceHover: "--color-surface-hover",
   surfaceSelected: "--color-surface-selected",
+  titlebar: "--color-titlebar",
+  titlebarText: "--color-titlebar-text",
   text: "--color-text",
   textMuted: "--color-text-muted",
   textSubtle: "--color-text-subtle",
@@ -79,6 +83,8 @@ const LIGHT_VARS: ThemeVars = {
   surfaceMuted: "#f5f5f5",
   surfaceHover: "#eeeeee",
   surfaceSelected: "#e9edf2",
+  titlebar: "#e7eaef",
+  titlebarText: "#5f666d",
   text: "#34383d",
   textMuted: "#747980",
   textSubtle: "#969ba1",
@@ -103,6 +109,8 @@ const DARK_VARS: ThemeVars = {
   surfaceMuted: "#171f2a",
   surfaceHover: "#1d2937",
   surfaceSelected: "#102a43",
+  titlebar: "#171f2a",
+  titlebarText: "#9aa7b6",
   text: "#e6edf3",
   textMuted: "#9aa7b6",
   textSubtle: "#748094",

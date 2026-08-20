@@ -40,6 +40,8 @@ const THEME_FIELDS: Array<{ key: keyof ThemeVars; label: string }> = [
   { key: "surfaceMuted", label: "柔和面底色" },
   { key: "surfaceHover", label: "悬停底色" },
   { key: "surfaceSelected", label: "选中底色" },
+  { key: "titlebar", label: "抬头底色" },
+  { key: "titlebarText", label: "抬头文字" },
   { key: "text", label: "正文文字" },
   { key: "textMuted", label: "次要文字" },
   { key: "textSubtle", label: "弱化文字" },
@@ -79,7 +81,8 @@ function removeTheme(id: string, name: string): void {
 
 const STYLE_DEFAULTS: Required<MarkdownStyleOverrides> = {
   bodyFontSize: 15, bodyLineHeight: 1.65, bodyColor: "#404449", strongColor: "#1f4e79",
-  linkColor: "#58749a", codeFontSize: 13, codeBackground: "#f5f5f5", syntaxBackground: "#f5f5f5",
+  linkColor: "#58749a", codeFontSize: 13, codeColor: "#4a4e53", codeBackground: "#f5f5f5",
+  syntaxText: "#4a4e53", syntaxBackground: "#f5f5f5",
   borderColor: "#e3e4e6",
 };
 const NUMBER_FIELDS = new Set<keyof MarkdownStyleOverrides>(["bodyFontSize", "bodyLineHeight", "codeFontSize"]);
@@ -106,8 +109,10 @@ function setOverride(field: keyof MarkdownStyleOverrides, raw: string): void {
 
 const restarting = ref(false);
 const building = ref(false);
+const scheduled = ref(false);
 
 const RESTART_POLL_MS = 800;
+const SCHEDULED_POLL_MS = 3000;
 const RESTART_TIMEOUT_MS = 60_000;
 // Build (vite + go build) takes minutes; the gateway stays up until the
 // build finishes, so we must first observe it going DOWN before polling for
@@ -224,6 +229,51 @@ async function buildAndRestart(): Promise<void> {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, BUILD_POLL_MS));
+  }
+}
+
+/**
+ * Scheduled restart: POST /api/admin/schedule-restart arms a one-shot
+ * deferred restart in the gateway; its watchdog fires the graceful restart
+ * path once the system is idle (no chat turn in flight, no voice relay
+ * active). The gateway stays up while waiting, so phase 1 has no deadline —
+ * waiting hours for a long agent turn is the whole point. Once it goes down
+ * (restart fired), poll until the replacement answers, then reload.
+ */
+async function scheduleRestart(): Promise<void> {
+  if (scheduled.value || restarting.value || building.value) return;
+  const confirmed = window.confirm(
+    "计划重启（viewerd）？\n当所有 agent 任务跑完、且没有录音进行中时自动重启；等待期间服务不中断，重启完成后页面自动刷新。"
+  );
+  if (!confirmed) return;
+  const resp = await fetch("/api/admin/schedule-restart", { method: "POST" }).catch(() => null);
+  if (resp === null || !resp.ok) {
+    const body = resp === null ? "" : await resp.text().catch(() => "");
+    window.alert(resp === null ? "计划重启请求未能送达，请检查服务状态。" : `计划重启失败：HTTP ${resp.status} ${body}`);
+    return;
+  }
+  scheduled.value = true;
+  // Phase 1: wait for the gateway to go down (idle reached, restart fired).
+  for (;;) {
+    try {
+      await fetch("/", { cache: "no-store" });
+    } catch {
+      break; // server down — restart in progress
+    }
+    await new Promise((resolve) => setTimeout(resolve, SCHEDULED_POLL_MS));
+  }
+  // Phase 2: wait for the replacement to come up, then reload.
+  for (;;) {
+    try {
+      const probe = await fetch("/", { cache: "no-store" });
+      if (probe.ok) {
+        location.reload();
+        return;
+      }
+    } catch {
+      // replacement still binding
+    }
+    await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_MS));
   }
 }
 </script>
@@ -396,8 +446,16 @@ async function buildAndRestart(): Promise<void> {
         <input type="number" min="9" max="20" step="1" :value="overrideValue('codeFontSize')" @change="setOverride('codeFontSize', ($event.target as HTMLInputElement).value)">
       </label>
       <label class="settings-field">
+        <span>行内代码文字</span>
+        <input type="color" :value="overrideValue('codeColor')" @input="setOverride('codeColor', ($event.target as HTMLInputElement).value)">
+      </label>
+      <label class="settings-field">
         <span>行内代码底色</span>
         <input type="color" :value="overrideValue('codeBackground')" @input="setOverride('codeBackground', ($event.target as HTMLInputElement).value)">
+      </label>
+      <label class="settings-field">
+        <span>代码块文字</span>
+        <input type="color" :value="overrideValue('syntaxText')" @input="setOverride('syntaxText', ($event.target as HTMLInputElement).value)">
       </label>
       <label class="settings-field">
         <span>代码块底色</span>
@@ -428,6 +486,13 @@ async function buildAndRestart(): Promise<void> {
             title="构建并重启：后台运行 web/build-release.sh，构建成功后自动重启并刷新页面；构建失败则保持现状"
             @click="buildAndRestart"
           ><i class="bi" :class="building ? 'bi-hourglass-split' : 'bi-hammer'"></i> {{ building ? "构建中…" : "构建并重启" }}</button>
+          <button
+            type="button"
+            class="settings-choice-btn"
+            :disabled="scheduled || restarting || building"
+            title="计划重启：等所有 agent 任务跑完、没有录音进行中时自动重启；等待期间服务不中断"
+            @click="scheduleRestart"
+          ><i class="bi" :class="scheduled ? 'bi-hourglass-split' : 'bi-clock-history'"></i> {{ scheduled ? "已计划（等空闲）…" : "空闲时重启" }}</button>
         </span>
       </div>
     </div>

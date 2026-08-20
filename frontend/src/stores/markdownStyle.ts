@@ -15,7 +15,9 @@ export interface MarkdownStyleOverrides {
   strongColor?: string;
   linkColor?: string;
   codeFontSize?: number;
+  codeColor?: string;
   codeBackground?: string;
+  syntaxText?: string;
   syntaxBackground?: string;
   borderColor?: string;
 }
@@ -28,7 +30,9 @@ const FIELD_VARS: Record<keyof MarkdownStyleOverrides, string[]> = {
   strongColor: ["--markdown-strong-color"],
   linkColor: ["--markdown-link-color"],
   codeFontSize: ["--markdown-code-font-size"],
+  codeColor: ["--markdown-code-color"],
   codeBackground: ["--markdown-code-background"],
+  syntaxText: ["--syntax-text"],
   syntaxBackground: ["--syntax-background"],
   borderColor: ["--markdown-border-color"],
 };

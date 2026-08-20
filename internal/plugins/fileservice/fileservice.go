@@ -310,6 +310,14 @@ func requestPath(frame busclient.Frame) (string, bool) {
 }
 
 func resolveRequestPath(raw string) (string, bool) {
+	if raw == "" {
+		// The browser root is the user's home directory, not the process cwd.
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		return home, true
+	}
 	expanded, err := expandUser(raw)
 	if err != nil {
 		return "", false

@@ -148,7 +148,8 @@ async def run(args: argparse.Namespace) -> None:
                 client, "file:_:list", {"path": str(text_path)}, "not_directory"
             )
             current = await client.request("file:_:list", {"path": ""})
-            assert current["path"] == str(Path.cwd().resolve())
+            assert current["path"] == str(home.resolve())
+            assert [entry["name"] for entry in current["entries"]] == ["home.txt"]
             home_listing = await client.request("file:_:list", {"path": "~"})
             assert home_listing["path"] == str(home.resolve())
             assert [entry["name"] for entry in home_listing["entries"]] == ["home.txt"]

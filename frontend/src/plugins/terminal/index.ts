@@ -66,9 +66,6 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     create: async () => {
       await ctx.bus.request("terminal:_:create", {});
     },
-    remove: async (id) => {
-      await ctx.bus.request(`terminal:${id}:kill`);
-    },
   };
 }
 

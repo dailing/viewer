@@ -71,6 +71,9 @@ type Server struct {
 	assetsState *assetsState
 	assetsCtx   context.Context
 	assetsStop  context.CancelFunc
+
+	// Scheduled restart (schedrestart.go): one-shot deferred-restart flag.
+	sched schedRestartState
 }
 
 func New(config Config) *Server {
@@ -120,6 +123,7 @@ func (s *Server) Start() error {
 	if err := s.startAssets(s.assetsCtx); err != nil {
 		slog.Error("gateway asset pipeline failed to start", "error", err)
 	}
+	go s.watchScheduledRestart(s.assetsCtx)
 	return nil
 }
 
@@ -153,6 +157,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.servePluginAsset(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/restart":
 		s.handleRestart(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/schedule-restart":
+		s.handleScheduleRestart(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/build-restart":
 		s.handleBuildRestart(w, r)
 	default:

@@ -179,9 +179,9 @@ function updateControl(control: PaneChromeControl, event: Event): void {
 
 .pane-titlebar {
   align-items: center;
-  background: var(--color-surface-muted);
+  background: var(--color-titlebar);
   border-bottom: 1px solid var(--color-border);
-  color: var(--color-text-muted);
+  color: var(--color-titlebar-text);
   display: flex;
   flex: 0 0 var(--pane-titlebar-height);
   font-size: var(--font-size-ui-small);

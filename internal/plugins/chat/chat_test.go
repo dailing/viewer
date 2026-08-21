@@ -82,13 +82,16 @@ func TestRouterHTTPCompletion(t *testing.T) {
 		if got := request.Header.Get("Authorization"); got != "Bearer secret" {
 			t.Errorf("authorization=%q", got)
 		}
+		if request.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path=%q, want /v1/chat/completions (endpoint must be normalized)", request.URL.Path)
+		}
 		_ = json.NewDecoder(request.Body).Decode(&captured)
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"choices":[{"message":{"content":"{\"role_ids\":[\"r2\"],\"rationale\":\"best\"}"}}]}`))
 	}))
 	defer server.Close()
 	roles := []SuperRole{{ID: "r1", Name: "One", Description: "alpha", Provider: "hermes"}, {ID: "r2", Name: "Two", Description: "beta", Provider: "hermes"}}
-	ids, rationale, err := routeWithLLM(context.Background(), server.Client(), LLMConfig{Endpoint: server.URL, APIKey: "secret", Model: "router"}, "choose", roles, "history")
+	ids, rationale, err := routeWithLLM(context.Background(), server.Client(), LLMConfig{Endpoint: server.URL + "/v1", APIKey: "secret", Model: "router"}, "choose", roles, "history")
 	if err != nil || len(ids) != 1 || ids[0] != "r2" || rationale != "best" {
 		t.Fatalf("ids=%v rationale=%q err=%v", ids, rationale, err)
 	}

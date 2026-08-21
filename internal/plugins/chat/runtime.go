@@ -213,6 +213,7 @@ func (p *Plugin) selectRoles(request dispatchRequest, raw map[string]any, chat C
 	}
 	ids, rationale, err := routeWithLLM(p.ctx, p.httpClient, config, request.Message, eligible, history)
 	if err != nil {
+		slog.Warn("chat dispatch routing failed", "chat_id", chat.ID, "error", err)
 		return nil, "", err
 	}
 	selected := []SuperRole{}

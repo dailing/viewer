@@ -80,6 +80,10 @@ type LLMConfig struct {
 	Endpoint string `json:"endpoint"`
 	APIKey   string `json:"key"`
 	Model    string `json:"model"`
+	// TimeoutSeconds bounds one dispatch-router call; <=0 means the default
+	// (60s). Local servers with few parallel slots queue under load, so the
+	// budget must cover queueing, not just generation.
+	TimeoutSeconds int `json:"timeout_seconds"`
 }
 
 type SummaryConfig struct {

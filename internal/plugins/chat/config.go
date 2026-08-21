@@ -160,6 +160,9 @@ func (p *Plugin) llmConfig(ctx context.Context) (LLMConfig, error) {
 			return result, err
 		}
 	}
+	if result.TimeoutSeconds == 0 {
+		_ = p.configGet(ctx, "llm.timeout_seconds", &result.TimeoutSeconds)
+	}
 	return result, nil
 }
 

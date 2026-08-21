@@ -34,6 +34,24 @@ export interface SplitNode {
 
 export type LayoutNode = PaneNode | SplitNode;
 
+/** A pane lifted out of the split tree, rendered in the floating overlay layer. */
+export interface FloatingPane {
+  id: string;
+  content: PaneContent;
+  /** Position/size in px relative to the workspace area. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Stacking order; highest z is frontmost. */
+  z: number;
+  /** Bumped by refreshFloating: remounts the hosted component via :key. */
+  epoch: number;
+}
+
+export const FLOAT_MIN_W = 240;
+export const FLOAT_MIN_H = 160;
+
 export function contentUid(content: PaneContent): string {
   return `${content.paneType}:${content.instanceId}`;
 }
@@ -88,6 +106,8 @@ export const useLayoutStore = defineStore("layout", {
     activePaneId: "p1",
     nextId: 2,
     openMode: readOpenMode() as OpenMode,
+    floating: [] as FloatingPane[],
+    nextZ: 1,
   }),
   getters: {
     panes(state): PaneNode[] {
@@ -105,6 +125,7 @@ export const useLayoutStore = defineStore("layout", {
       return id;
     },
     isUidOpen(uid: string): boolean {
+      if (this.floating.some((pane) => contentUid(pane.content) === uid)) return true;
       return this.panes.some((pane) => pane.content !== null && contentUid(pane.content) === uid);
     },
     /**
@@ -114,6 +135,11 @@ export const useLayoutStore = defineStore("layout", {
      */
     openInstance(paneType: string, instanceId: string): void {
       const uid = `${paneType}:${instanceId}`;
+      const floated = this.floating.find((pane) => contentUid(pane.content) === uid);
+      if (floated !== undefined) {
+        this.raiseFloating(floated.id);
+        return;
+      }
       const existing = this.panes.find(
         (pane) => pane.content !== null && contentUid(pane.content) === uid,
       );
@@ -186,6 +212,55 @@ export const useLayoutStore = defineStore("layout", {
       if (node !== null && node.type === "split") {
         node.ratio = Math.min(RATIO_MAX, Math.max(RATIO_MIN, ratio));
       }
+    },
+    /** Lift a tree pane's content into the floating layer; the freed pane closes. */
+    floatPane(paneId: string): void {
+      const node = findNode(this.root, paneId);
+      if (node === null || node.type !== "pane" || node.content === null) return;
+      const content = node.content;
+      this.closePane(paneId);
+      const offset = 24 + (this.floating.length % 5) * 32;
+      this.floating.push({
+        id: this.newId(),
+        content,
+        x: offset,
+        y: offset,
+        w: 520,
+        h: 380,
+        z: this.nextZ++,
+        epoch: 0,
+      });
+    },
+    /** Return a floating pane's content to the split tree via openInstance. */
+    dockFloating(id: string): void {
+      const index = this.floating.findIndex((pane) => pane.id === id);
+      if (index < 0) return;
+      const [pane] = this.floating.splice(index, 1);
+      this.openInstance(pane.content.paneType, pane.content.instanceId);
+    },
+    closeFloating(id: string): void {
+      const index = this.floating.findIndex((pane) => pane.id === id);
+      if (index >= 0) this.floating.splice(index, 1);
+    },
+    raiseFloating(id: string): void {
+      const pane = this.floating.find((entry) => entry.id === id);
+      if (pane !== undefined && pane.z !== this.nextZ - 1) pane.z = this.nextZ++;
+    },
+    moveFloating(id: string, x: number, y: number): void {
+      const pane = this.floating.find((entry) => entry.id === id);
+      if (pane === undefined) return;
+      pane.x = Math.round(x);
+      pane.y = Math.round(y);
+    },
+    resizeFloating(id: string, w: number, h: number): void {
+      const pane = this.floating.find((entry) => entry.id === id);
+      if (pane === undefined) return;
+      pane.w = Math.max(FLOAT_MIN_W, Math.round(w));
+      pane.h = Math.max(FLOAT_MIN_H, Math.round(h));
+    },
+    refreshFloating(id: string): void {
+      const pane = this.floating.find((entry) => entry.id === id);
+      if (pane !== undefined) pane.epoch += 1;
     },
   },
 });

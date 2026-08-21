@@ -98,10 +98,15 @@ function handleKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape") closePopovers();
 }
 
-onMounted(() => window.addEventListener("keydown", handleKeydown));
+onMounted(() => {
+  window.addEventListener("keydown", handleKeydown);
+  void pollSchedRestart();
+  schedRestartTimer = setInterval(pollSchedRestart, 15000);
+});
 onBeforeUnmount(() => {
   clearExpandTimer();
   window.removeEventListener("keydown", handleKeydown);
+  if (schedRestartTimer !== null) clearInterval(schedRestartTimer);
 });
 
 interface DockEntry {
@@ -198,6 +203,42 @@ function openSettings(): void {
   layout.openInstance("settings", "main");
 }
 
+/**
+ * Scheduled-restart indicator (framework v0.44): a deferred build+restart
+ * can be armed from Settings or by an agent over the gateway HTTP API
+ * (POST /api/admin/schedule-restart). Poll the status endpoint lightly so a
+ * pending restart is visible without opening Settings; clicking the
+ * indicator opens Settings where it can be cancelled.
+ */
+type SchedRestartStatus = "none" | "building" | "armed" | "failed";
+const schedRestart = ref<SchedRestartStatus>("none");
+let schedRestartTimer: ReturnType<typeof setInterval> | null = null;
+
+async function pollSchedRestart(): Promise<void> {
+  try {
+    const resp = await fetch("/api/admin/schedule-restart", { cache: "no-store" });
+    if (!resp.ok) return;
+    const body = (await resp.json()) as { status?: string };
+    schedRestart.value =
+      body.status === "building" || body.status === "armed" || body.status === "failed" ? body.status : "none";
+  } catch {
+    // Gateway down (the scheduled restart may have just fired) — keep last state.
+  }
+}
+
+const schedRestartTitle = computed<string>(() => {
+  switch (schedRestart.value) {
+    case "building":
+      return "已计划重启：后台构建中（点击打开设置，可取消）";
+    case "armed":
+      return "已计划重启：等系统空闲后自动重启（点击打开设置，可取消）";
+    case "failed":
+      return "计划重启构建失败：保持现状（点击打开设置）";
+    default:
+      return "";
+  }
+});
+
 // Frontend build stamp (vite define), shown in the Dock foot when expanded:
 // "YYYY-MM-DD HH:mm" in local time.
 const buildTime = (() => {
@@ -262,6 +303,15 @@ const buildTime = (() => {
 
       <div class="dock-foot">
         <button
+          v-if="schedRestart !== 'none'"
+          type="button"
+          class="dock-btn dock-sched"
+          :class="`dock-sched-${schedRestart}`"
+          :title="schedRestartTitle"
+          :aria-label="schedRestartTitle"
+          @click="openSettings"
+        ><i class="bi" :class="schedRestart === 'failed' ? 'bi-exclamation-triangle' : 'bi-clock-history'"></i></button>
+        <button
           type="button"
           class="dock-btn"
           :class="{ 'dock-pin-active': pinned }"
@@ -293,14 +343,11 @@ const buildTime = (() => {
 }
 
 /* Pinned: the expanded width takes real layout space, compressing the
-   panes to the right instead of overlaying them; no floating shadow. */
+   panes to the right instead of overlaying them. Flat style: no floating
+   shadow in either mode. */
 .dock.pinned {
   flex-basis: var(--dock-expanded-width);
   width: var(--dock-expanded-width);
-}
-
-.dock.pinned .dock-inner {
-  box-shadow: none;
 }
 
 /* No width animation while dragging the resizer. */
@@ -346,7 +393,6 @@ const buildTime = (() => {
 }
 
 .dock.expanded .dock-inner {
-  box-shadow: 4px 0 12px rgb(0 0 0 / 0.12);
   z-index: 40;
   width: var(--dock-expanded-width);
 }
@@ -372,6 +418,17 @@ const buildTime = (() => {
 .dock-btn:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);
+}
+
+/* Scheduled-restart indicator (framework v0.44): warning tint while a
+   deferred restart is pending, danger tint after a failed build. */
+.dock-sched-building,
+.dock-sched-armed {
+  color: var(--color-warning);
+}
+
+.dock-sched-failed {
+  color: var(--color-danger);
 }
 
 .dock-plus {

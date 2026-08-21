@@ -159,6 +159,10 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleRestart(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/schedule-restart":
 		s.handleScheduleRestart(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/schedule-restart":
+		s.handleScheduleRestartStatus(w, r)
+	case r.Method == http.MethodDelete && r.URL.Path == "/api/admin/schedule-restart":
+		s.handleScheduleRestartCancel(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/build-restart":
 		s.handleBuildRestart(w, r)
 	default:
@@ -186,57 +190,70 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 
 // buildMu serializes build-restart runs: a second click while a build is
 // still running gets a 409 instead of two competing builds.
-var buildMu sync.Mutex
-var buildRunning bool
+var (
+	buildMu      sync.Mutex
+	buildRunning bool
+)
 
-// handleBuildRestart runs web/build-release.sh and, only on a successful
-// build, takes the same graceful restart path as handleRestart so the fresh
-// binary gets loaded. The build runs in the background (it takes minutes:
-// vite + go build); the endpoint answers 202 immediately and the frontend
-// polls until the gateway goes away and comes back. A failed build only logs
-// — the running binary is left untouched.
-func (s *Server) handleBuildRestart(w http.ResponseWriter, r *http.Request) {
+func acquireBuild() bool {
 	buildMu.Lock()
+	defer buildMu.Unlock()
 	if buildRunning {
-		buildMu.Unlock()
+		return false
+	}
+	buildRunning = true
+	return true
+}
+
+func releaseBuild() {
+	buildMu.Lock()
+	buildRunning = false
+	buildMu.Unlock()
+}
+
+// runReleaseBuild runs web/build-release.sh (vite + go build, takes
+// minutes); the old server keeps serving during the build. Output appends
+// to /tmp/viewerd-build.log. Variable so tests can inject a fake.
+var runReleaseBuild = func() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	// The deployed binary lives at <repo>/dist/viewerd; the release script
+	// is at <repo>/web/build-release.sh.
+	repoRoot := filepath.Dir(filepath.Dir(exe))
+	script := filepath.Join(repoRoot, "web", "build-release.sh")
+	slog.Info("build-release: building", "script", script)
+	cmd := exec.Command("bash", script)
+	cmd.Dir = repoRoot
+	// The release script needs Go, which lives outside the systemd unit's
+	// default PATH (~/.local/go/bin).
+	home, _ := os.UserHomeDir()
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Join(home, ".local", "go", "bin")+":"+os.Getenv("PATH"))
+	logFile, logErr := os.OpenFile("/tmp/viewerd-build.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if logErr == nil {
+		defer logFile.Close()
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
+	return cmd.Run()
+}
+
+// handleBuildRestart runs the release build and, only on success, takes the
+// same graceful restart path as handleRestart so the fresh binary gets
+// loaded. The endpoint answers 202 immediately and the frontend polls until
+// the gateway goes away and comes back. A failed build only logs — the
+// running binary is left untouched.
+func (s *Server) handleBuildRestart(w http.ResponseWriter, _ *http.Request) {
+	if !acquireBuild() {
 		http.Error(w, "a build is already running", http.StatusConflict)
 		return
 	}
-	buildRunning = true
-	buildMu.Unlock()
-	exe, err := os.Executable()
-	if err != nil {
-		buildMu.Lock()
-		buildRunning = false
-		buildMu.Unlock()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	// The deployed binary lives at <repo>/dist/viewerd; the release script is
-	// at <repo>/web/build-release.sh.
-	repoRoot := filepath.Dir(filepath.Dir(exe))
-	script := filepath.Join(repoRoot, "web", "build-release.sh")
 	go func() {
-		defer func() {
-			buildMu.Lock()
-			buildRunning = false
-			buildMu.Unlock()
-		}()
-		slog.Info("build-restart: building", "script", script)
-		cmd := exec.Command("bash", script)
-		cmd.Dir = repoRoot
-		// The release script needs Go, which lives outside the systemd unit's
-		// default PATH (~/.local/go/bin).
-		home, _ := os.UserHomeDir()
-		cmd.Env = append(os.Environ(), "PATH="+filepath.Join(home, ".local", "go", "bin")+":"+os.Getenv("PATH"))
-		logFile, logErr := os.OpenFile("/tmp/viewerd-build.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if logErr == nil {
-			defer logFile.Close()
-			cmd.Stdout = logFile
-			cmd.Stderr = logFile
-		}
-		if runErr := cmd.Run(); runErr != nil {
-			slog.Error("build-restart: build failed, keeping the running binary", "error", runErr, "log", "/tmp/viewerd-build.log")
+		err := runReleaseBuild()
+		releaseBuild()
+		if err != nil {
+			slog.Error("build-restart: build failed, keeping the running binary", "error", err, "log", "/tmp/viewerd-build.log")
 			return
 		}
 		slog.Info("build-restart: build succeeded, restarting")

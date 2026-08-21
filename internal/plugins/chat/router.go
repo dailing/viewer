@@ -1,11 +1,9 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -48,39 +46,18 @@ func routeWithLLM(ctx context.Context, client *http.Client, config LLMConfig, me
 	if strings.TrimSpace(config.Endpoint) == "" || strings.TrimSpace(config.Model) == "" {
 		return nil, "", fmt.Errorf("LLM router is not configured: set plugins.viewer-chat.llm.endpoint and model")
 	}
-	body := map[string]any{"model": config.Model, "response_format": map[string]string{"type": "json_object"}, "messages": []map[string]string{{"role": "system", "content": "Follow the routing prompt exactly. Return only a JSON object with role_ids and rationale."}, {"role": "user", "content": renderDispatchPrompt(message, roles, history)}}}
-	data, _ := json.Marshal(body)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, config.Endpoint, bytes.NewReader(data))
-	if err != nil {
-		return nil, "", err
+	timeout := config.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = 60
 	}
-	request.Header.Set("Content-Type", "application/json")
-	if config.APIKey != "" {
-		request.Header.Set("Authorization", "Bearer "+config.APIKey)
-	}
-	response, err := client.Do(request)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+	messages := []map[string]string{{"role": "system", "content": "Follow the routing prompt exactly. Return only a JSON object with role_ids and rationale."}, {"role": "user", "content": renderDispatchPrompt(message, roles, history)}}
+	result, err := chatCompletion(ctx, client, config, messages, true)
 	if err != nil {
 		return nil, "", fmt.Errorf("dispatch model failed: %w", err)
 	}
-	defer response.Body.Close()
-	limited, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		return nil, "", err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, "", fmt.Errorf("dispatch model returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(limited)))
-	}
-	var envelope struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if json.Unmarshal(limited, &envelope) != nil || len(envelope.Choices) == 0 {
-		return nil, "", fmt.Errorf("dispatch model returned a malformed completion")
-	}
-	return parseRoute(envelope.Choices[0].Message.Content, roles)
+	return parseRoute(result.Content, roles)
 }
 
 func parseRoute(content string, roles []SuperRole) ([]string, string, error) {
@@ -124,4 +101,8 @@ func parseRoute(content string, roles []SuperRole) ([]string, string, error) {
 	return nil, "", fmt.Errorf("no eligible roles")
 }
 
-func defaultHTTPClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
+// No client-level Timeout: every caller bounds its own context (router:
+// llm.timeout_seconds; summary: turn_summary.timeout_seconds; hindsight:
+// hindsight.timeout_seconds). A shared cap used to silently truncate the
+// summary's configured 60s budget to 30s under local-server queueing.
+func defaultHTTPClient() *http.Client { return &http.Client{} }

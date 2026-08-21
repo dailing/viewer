@@ -5,9 +5,11 @@
  * effect immediately; the backend section drives the gateway admin API.
  * Sections: 布局 (open mode), 聊天 (virtual space), Dock (hover expand
  * delay), 主题 (app theme management, `stores/theme.ts`), 消息样式
- * (markdown theme overrides), 后端 (restart / build).
+ * (markdown theme overrides), 后端 (restart / build-restart / scheduled
+ * restart toggle with live status). The chat
+ * dispatch/summary LLM lives in 聊天管理 → 模型 (chat-manager LLMPanel).
  */
-import { inject, onMounted, ref } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { useDockSettingsStore } from "../../stores/dockSettings";
@@ -29,6 +31,11 @@ const theme = useThemeStore();
 
 onMounted(() => {
   ctx.setChrome({ title: "设置" });
+  void refreshSchedStatus();
+  schedPollTimer = setInterval(refreshSchedStatus, 5000);
+});
+onBeforeUnmount(() => {
+  if (schedPollTimer !== null) clearInterval(schedPollTimer);
 });
 
 /* ---- 主题 (app themes) ---- */
@@ -109,7 +116,42 @@ function setOverride(field: keyof MarkdownStyleOverrides, raw: string): void {
 
 const restarting = ref(false);
 const building = ref(false);
-const scheduled = ref(false);
+
+/**
+ * Scheduled-restart state mirrors the gateway's in-memory state machine
+ * (framework v0.44): none | building | armed | failed. Fetched on mount and
+ * polled so the toggle also reflects schedules armed by agents over the
+ * HTTP API (POST /api/admin/schedule-restart), not just this pane.
+ */
+type SchedStatus = "none" | "building" | "armed" | "failed";
+const schedStatus = ref<SchedStatus>("none");
+// True while this pane is running the wait-for-restart polling loops below.
+const schedWaiting = ref(false);
+
+const SCHED_STATUS_TEXT: Record<SchedStatus, string> = {
+  none: "未计划",
+  building: "已计划 · 后台构建中",
+  armed: "已计划 · 等系统空闲后自动重启",
+  failed: "构建失败 · 保持现状（可重试或取消）",
+};
+const schedStatusText = computed(() => SCHED_STATUS_TEXT[schedStatus.value]);
+
+async function refreshSchedStatus(): Promise<void> {
+  try {
+    const probe = await fetch("/api/admin/schedule-restart", { cache: "no-store" });
+    if (!probe.ok) return;
+    const body = (await probe.json()) as { status?: string };
+    if (body.status === "building" || body.status === "armed" || body.status === "failed") {
+      schedStatus.value = body.status;
+    } else {
+      schedStatus.value = "none";
+    }
+  } catch {
+    // Gateway momentarily unreachable (a restart firing) — keep last state.
+  }
+}
+
+let schedPollTimer: ReturnType<typeof setInterval> | null = null;
 
 const RESTART_POLL_MS = 800;
 const SCHEDULED_POLL_MS = 3000;
@@ -233,17 +275,22 @@ async function buildAndRestart(): Promise<void> {
 }
 
 /**
- * Scheduled restart: POST /api/admin/schedule-restart arms a one-shot
- * deferred restart in the gateway; its watchdog fires the graceful restart
- * path once the system is idle (no chat turn in flight, no voice relay
- * active). The gateway stays up while waiting, so phase 1 has no deadline —
- * waiting hours for a long agent turn is the whole point. Once it goes down
- * (restart fired), poll until the replacement answers, then reload.
+ * Scheduled build+restart: POST /api/admin/schedule-restart starts the
+ * release build in the background (the gateway stays up); on success it
+ * arms a one-shot deferred restart whose watchdog fires the graceful
+ * restart path once the system is idle (no chat turn in flight, no voice
+ * relay active). The gateway stays up while waiting, so phase 1 has no
+ * deadline — waiting hours for a long agent turn is the whole point. A
+ * failed build never arms: the GET status endpoint reports "failed" so we
+ * stop waiting instead of polling forever; a "none" report means the
+ * schedule was cancelled (here or by an agent over the HTTP API) and we
+ * likewise stop waiting. Once the gateway goes down (restart fired), poll
+ * until the replacement answers, then reload.
  */
 async function scheduleRestart(): Promise<void> {
-  if (scheduled.value || restarting.value || building.value) return;
+  if (schedWaiting.value || restarting.value || building.value) return;
   const confirmed = window.confirm(
-    "计划重启（viewerd）？\n当所有 agent 任务跑完、且没有录音进行中时自动重启；等待期间服务不中断，重启完成后页面自动刷新。"
+    "空闲时构建并重启（viewerd）？\n先在后台跑构建（约 1-2 分钟，期间服务不中断）；构建成功后，等所有 agent 任务跑完、且没有录音进行中时自动重启；构建失败则保持现状不动。重启完成后页面自动刷新。可随时再次点击该按钮取消。"
   );
   if (!confirmed) return;
   const resp = await fetch("/api/admin/schedule-restart", { method: "POST" }).catch(() => null);
@@ -252,13 +299,39 @@ async function scheduleRestart(): Promise<void> {
     window.alert(resp === null ? "计划重启请求未能送达，请检查服务状态。" : `计划重启失败：HTTP ${resp.status} ${body}`);
     return;
   }
-  scheduled.value = true;
-  // Phase 1: wait for the gateway to go down (idle reached, restart fired).
+  schedStatus.value = "building";
+  schedWaiting.value = true;
+  // Phase 1: wait for the gateway to go down (build done, idle reached,
+  // restart fired). A failed build or a cancel surfaces via the status
+  // endpoint.
   for (;;) {
     try {
       await fetch("/", { cache: "no-store" });
     } catch {
       break; // server down — restart in progress
+    }
+    try {
+      const probe = await fetch("/api/admin/schedule-restart", { cache: "no-store" });
+      if (probe.ok) {
+        const body = (await probe.json()) as { status?: string };
+        if (body.status === "failed") {
+          schedStatus.value = "failed";
+          schedWaiting.value = false;
+          window.alert("构建失败：保持现状不动（详情见 /tmp/viewerd-build.log）。");
+          return;
+        }
+        if (body.status === "none") {
+          // Cancelled (this pane or an agent over the HTTP API).
+          schedStatus.value = "none";
+          schedWaiting.value = false;
+          return;
+        }
+        if (body.status === "building" || body.status === "armed") {
+          schedStatus.value = body.status;
+        }
+      }
+    } catch {
+      // status probe unreachable — the main probe above decides the outcome
     }
     await new Promise((resolve) => setTimeout(resolve, SCHEDULED_POLL_MS));
   }
@@ -275,6 +348,32 @@ async function scheduleRestart(): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_MS));
   }
+}
+
+/**
+ * Cancel a pending scheduled restart: DELETE /api/admin/schedule-restart
+ * disarms the watchdog. A build already in flight finishes but can no
+ * longer arm (the gateway's building→armed transition is a CAS), so
+ * cancelling mid-build is safe.
+ */
+async function cancelScheduledRestart(): Promise<void> {
+  const confirmed = window.confirm("取消已计划的重启？\n正在后台跑的构建会跑完，但不会触发重启。");
+  if (!confirmed) return;
+  const resp = await fetch("/api/admin/schedule-restart", { method: "DELETE" }).catch(() => null);
+  if (resp === null || !resp.ok) {
+    window.alert(resp === null ? "取消请求未能送达，请检查服务状态。" : `取消失败：HTTP ${resp.status}`);
+    return;
+  }
+  schedStatus.value = "none";
+}
+
+/** The 空闲时重启 button is a toggle: arm when idle, cancel when scheduled. */
+function toggleScheduledRestart(): void {
+  if (schedStatus.value === "building" || schedStatus.value === "armed") {
+    void cancelScheduledRestart();
+    return;
+  }
+  void scheduleRestart();
 }
 </script>
 
@@ -489,11 +588,17 @@ async function scheduleRestart(): Promise<void> {
           <button
             type="button"
             class="settings-choice-btn"
-            :disabled="scheduled || restarting || building"
-            title="计划重启：等所有 agent 任务跑完、没有录音进行中时自动重启；等待期间服务不中断"
-            @click="scheduleRestart"
-          ><i class="bi" :class="scheduled ? 'bi-hourglass-split' : 'bi-clock-history'"></i> {{ scheduled ? "已计划（等空闲）…" : "空闲时重启" }}</button>
+            :class="{ active: schedStatus === 'building' || schedStatus === 'armed' }"
+            :disabled="restarting || building"
+            :title="schedStatus === 'building' || schedStatus === 'armed'
+              ? '已计划重启，点击取消（进行中的构建会跑完但不触发重启）'
+              : '空闲时构建并重启：后台构建（约 1-2 分钟，期间服务不中断）成功后，等所有 agent 任务跑完、没有录音时自动重启；构建失败则保持现状'"
+            @click="toggleScheduledRestart"
+          ><i class="bi" :class="schedStatus === 'building' || schedStatus === 'armed' ? 'bi-clock-history' : 'bi-clock'"></i> {{ schedStatus === "building" || schedStatus === "armed" ? "取消计划重启" : "空闲时重启" }}</button>
         </span>
+      </div>
+      <div class="settings-hint">
+        计划重启状态：{{ schedStatusText }}。agent 可通过 HTTP API 控制：POST /api/admin/schedule-restart 计划、GET 查询、DELETE 取消。
       </div>
     </div>
   </section>
@@ -545,7 +650,8 @@ async function scheduleRestart(): Promise<void> {
   width: 84px;
 }
 
-.settings-field input[type="text"] {
+.settings-field input[type="text"],
+.settings-field input[type="password"] {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   color: var(--color-text);

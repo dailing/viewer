@@ -4,6 +4,7 @@
  * on the right. No top NavBar — the Dock's plug owns connection state.
  */
 import Dock from "./shell/Dock.vue";
+import FloatingLayer from "./shell/FloatingLayer.vue";
 import SplitNode from "./shell/SplitNode.vue";
 import { useLayoutStore } from "./stores/layout";
 
@@ -15,6 +16,7 @@ const layout = useLayoutStore();
     <Dock />
     <main class="workspace">
       <SplitNode :node="layout.root" />
+      <FloatingLayer />
     </main>
   </div>
 </template>
@@ -27,5 +29,6 @@ const layout = useLayoutStore();
   min-width: 0;
   overscroll-behavior: none;
   overflow: hidden;
+  position: relative;
 }
 </style>

@@ -1,51 +1,44 @@
 <script setup lang="ts">
 /**
- * Pane container: a title bar (instance identity + refresh/split/close
- * actions) hosting one instance's component. Clicking anywhere focuses the
- * pane — new Dock opens land in the focused pane.
+ * One floating pane: absolutely positioned above the split tree, draggable by
+ * its title bar and resizable from the bottom-right corner. Mirrors
+ * PaneContainer's title logic so chrome (title/status/custom actions) behaves
+ * the same in both worlds.
  */
-import { computed } from "vue";
+import { computed, ref } from "vue";
 
-import { contentUid, type PaneNode } from "../stores/layout";
+import { contentUid, FLOAT_MIN_H, FLOAT_MIN_W, type FloatingPane } from "../stores/layout";
 import { useLayoutStore } from "../stores/layout";
 import { usePaneChromeStore } from "../stores/paneChrome";
 import type { PaneChromeAction, PaneChromeControl } from "../stores/paneChrome";
 import PluginPaneHost from "./PluginPaneHost.vue";
 import { dockProviders } from "./registries";
 
-const props = defineProps<{ pane: PaneNode }>();
+const props = defineProps<{ pane: FloatingPane }>();
 const layout = useLayoutStore();
 const paneChrome = usePaneChromeStore();
 
+const root = ref<HTMLElement | null>(null);
+
 const provider = computed(() =>
-  props.pane.content === null
-    ? undefined
-    : dockProviders.find((entry) => entry.type === props.pane.content?.paneType),
+  dockProviders.find((entry) => entry.type === props.pane.content.paneType),
 );
-
 const dockInstance = computed(() =>
-  props.pane.content === null
-    ? undefined
-    : provider.value?.instances.find((entry) => entry.id === props.pane.content?.instanceId),
+  provider.value?.instances.find((entry) => entry.id === props.pane.content.instanceId),
 );
-
 const automaticTitle = computed(() => {
-  if (props.pane.content === null) return "";
   const base = provider.value?.title ?? props.pane.content.paneType;
   return props.pane.content.instanceId === "main"
     ? base
     : `${base} #${props.pane.content.instanceId}`;
 });
-
 const icon = computed(() => dockInstance.value?.icon ?? provider.value?.icon ?? "bi-puzzle");
 const tooltip = computed(() => dockInstance.value?.label ?? title.value);
-const isActive = computed(() => layout.activePaneId === props.pane.id);
-const uid = computed(() => (props.pane.content === null ? "" : contentUid(props.pane.content)));
+const uid = computed(() => contentUid(props.pane.content));
 const chrome = computed(() => paneChrome.forUid(uid.value));
 const title = computed(() => chrome.value?.title ?? automaticTitle.value);
 
 function runAction(action: PaneChromeAction): void {
-  layout.setActivePane(props.pane.id);
   void action.run();
 }
 
@@ -53,26 +46,87 @@ function updateControl(control: PaneChromeControl, event: Event): void {
   if (control.kind !== "select") return;
   const target = event.target as HTMLSelectElement | null;
   if (target === null) return;
-  layout.setActivePane(props.pane.id);
   void control.onChange(target.value);
+}
+
+/** Workspace bounds, for clamping drag/resize so the pane stays reachable. */
+function workspaceRect(): DOMRect | null {
+  return root.value?.closest(".workspace")?.getBoundingClientRect() ?? null;
+}
+
+function startDrag(event: PointerEvent): void {
+  if ((event.target as HTMLElement).closest("button, select, input, a") !== null) return;
+  const bounds = workspaceRect();
+  if (bounds === null) return;
+  event.preventDefault();
+  const pointerId = event.pointerId;
+  (event.currentTarget as HTMLElement).setPointerCapture(pointerId);
+  const startX = event.clientX - props.pane.x;
+  const startY = event.clientY - props.pane.y;
+
+  const move = (moveEvent: PointerEvent) => {
+    const maxX = bounds.width - 48;
+    const maxY = bounds.height - 32;
+    const x = Math.min(maxX, Math.max(-props.pane.w + 64, moveEvent.clientX - startX));
+    const y = Math.min(maxY, Math.max(0, moveEvent.clientY - startY));
+    layout.moveFloating(props.pane.id, x, y);
+  };
+  const stop = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", stop);
+    window.removeEventListener("pointercancel", stop);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
+}
+
+function startResize(event: PointerEvent): void {
+  const bounds = workspaceRect();
+  if (bounds === null) return;
+  event.preventDefault();
+  const pointerId = event.pointerId;
+  (event.currentTarget as HTMLElement).setPointerCapture(pointerId);
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const startW = props.pane.w;
+  const startH = props.pane.h;
+
+  const move = (moveEvent: PointerEvent) => {
+    const w = Math.min(bounds.width - props.pane.x, startW + moveEvent.clientX - startX);
+    const h = Math.min(bounds.height - props.pane.y, startH + moveEvent.clientY - startY);
+    layout.resizeFloating(props.pane.id, Math.max(FLOAT_MIN_W, w), Math.max(FLOAT_MIN_H, h));
+  };
+  const stop = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", stop);
+    window.removeEventListener("pointercancel", stop);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
 }
 </script>
 
 <template>
   <div
-    class="pane-container"
-    :class="{ active: isActive }"
-    @pointerdown="layout.setActivePane(pane.id)"
+    ref="root"
+    class="floating-pane"
+    :style="{
+      left: `${pane.x}px`,
+      top: `${pane.y}px`,
+      width: `${pane.w}px`,
+      height: `${pane.h}px`,
+      zIndex: pane.z,
+    }"
+    @pointerdown="layout.raiseFloating(pane.id)"
   >
-    <header class="pane-titlebar">
-      <template v-if="pane.content !== null">
-        <i class="bi pane-icon" :class="icon" :title="tooltip"></i>
-        <span class="pane-title" :title="tooltip">{{ title }}</span>
-        <span v-if="chrome?.status" class="pane-status" :class="chrome.statusClass">
-          {{ chrome.status }}
-        </span>
-      </template>
-      <span v-else class="pane-title pane-title-empty">空面板</span>
+    <header class="pane-titlebar" @pointerdown="startDrag">
+      <i class="bi pane-icon" :class="icon" :title="tooltip"></i>
+      <span class="pane-title" :title="tooltip">{{ title }}</span>
+      <span v-if="chrome?.status" class="pane-status" :class="chrome.statusClass">
+        {{ chrome.status }}
+      </span>
       <span class="pane-actions">
         <button
           v-for="action in chrome?.actions ?? []"
@@ -105,85 +159,57 @@ function updateControl(control: PaneChromeControl, event: Event): void {
               {{ option }}
             </option>
           </select>
-          <span v-else class="pane-control-chips" :title="control.title">
-            <span
-              v-for="(item, index) in control.items"
-              :key="`${index}:${item}`"
-              class="pane-control-chip"
-            >
-              {{ item }}
-            </span>
-          </span>
         </template>
         <button
-          v-if="pane.content !== null"
           type="button"
           class="pane-btn"
           title="刷新"
-          @click.stop="layout.refreshPane(pane.id)"
+          @click.stop="layout.refreshFloating(pane.id)"
         >
           <i class="bi bi-arrow-clockwise"></i>
         </button>
         <button
           type="button"
           class="pane-btn"
-          title="向右分隔"
-          @click.stop="layout.splitPane(pane.id, 'vertical')"
+          title="放回布局"
+          @click.stop="layout.dockFloating(pane.id)"
         >
-          <i class="bi bi-layout-split"></i>
-        </button>
-        <button
-          type="button"
-          class="pane-btn"
-          title="向下分隔"
-          @click.stop="layout.splitPane(pane.id, 'horizontal')"
-        >
-          <i class="bi bi-layout-split rotate-90"></i>
-        </button>
-        <button
-          v-if="pane.content !== null"
-          type="button"
-          class="pane-btn"
-          title="浮动面板"
-          @click.stop="layout.floatPane(pane.id)"
-        >
-          <i class="bi bi-window-stack"></i>
+          <i class="bi bi-window-dock"></i>
         </button>
         <button
           type="button"
           class="pane-btn"
           title="关闭面板"
-          @click.stop="layout.closePane(pane.id)"
+          @click.stop="layout.closeFloating(pane.id)"
         >
           <i class="bi bi-x-lg"></i>
         </button>
       </span>
     </header>
-    <div class="pane-body">
+    <div class="floating-body">
       <PluginPaneHost
-        v-if="pane.content !== null"
         :key="`${uid}:${pane.epoch}`"
         :pane-type="pane.content.paneType"
         :instance-id="pane.content.instanceId"
       />
-      <div v-else class="pane-placeholder">
-        <i class="bi bi-plus-square-dotted"></i>
-        <div>从左侧 Dock 打开一个 instance，或点 + 新建</div>
-      </div>
     </div>
+    <div class="floating-resize" title="拖动调整大小" @pointerdown.stop="startResize"></div>
   </div>
 </template>
 
 <style scoped>
-.pane-container {
+.floating-pane {
   background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 35%);
   display: flex;
   flex-direction: column;
-  height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  width: 100%;
+  pointer-events: auto;
+  position: absolute;
 }
 
 .pane-titlebar {
@@ -191,17 +217,19 @@ function updateControl(control: PaneChromeControl, event: Event): void {
   background: var(--color-titlebar);
   border-bottom: 1px solid var(--color-border);
   color: var(--color-titlebar-text);
+  cursor: grab;
   display: flex;
   flex: 0 0 var(--pane-titlebar-height);
   font-size: var(--font-size-ui-small);
   gap: 6px;
   min-height: 0;
   padding: 0 4px 0 8px;
+  touch-action: none;
+  user-select: none;
 }
 
-.pane-container.active .pane-titlebar {
-  box-shadow: inset 0 -2px 0 var(--color-accent);
-  color: var(--color-text);
+.pane-titlebar:active {
+  cursor: grabbing;
 }
 
 .pane-icon {
@@ -212,10 +240,6 @@ function updateControl(control: PaneChromeControl, event: Event): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.pane-title-empty {
-  color: var(--color-text-subtle);
 }
 
 .pane-status {
@@ -287,47 +311,31 @@ function updateControl(control: PaneChromeControl, event: Event): void {
   min-width: 54px;
 }
 
-.pane-control-chips {
-  align-items: center;
-  display: flex;
-  gap: 2px;
-  max-width: 180px;
-  overflow: hidden;
-}
-
-.pane-control-chip {
-  background: var(--color-surface);
-  color: var(--color-text-muted);
-  font-size: 10px;
-  overflow: hidden;
-  padding: 2px 5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rotate-90 {
-  transform: rotate(90deg);
-}
-
-.pane-body {
+.floating-body {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
 }
 
-.pane-placeholder {
-  align-items: center;
-  color: var(--color-text-subtle);
-  display: flex;
-  flex-direction: column;
-  font-size: var(--font-size-ui-small);
-  gap: 6px;
-  height: 100%;
-  justify-content: center;
+.floating-resize {
+  bottom: 0;
+  cursor: nwse-resize;
+  height: 14px;
+  position: absolute;
+  right: 0;
+  touch-action: none;
+  width: 14px;
 }
 
-.pane-placeholder > i {
-  font-size: 20px;
+.floating-resize::after {
+  border-bottom: 2px solid var(--color-text-subtle);
+  border-right: 2px solid var(--color-text-subtle);
+  bottom: 3px;
+  content: "";
+  height: 7px;
+  position: absolute;
+  right: 3px;
+  width: 7px;
 }
 </style>

@@ -25,7 +25,7 @@ import (
 
 const (
 	DefaultServiceWS = "ws://127.0.0.1:8765/v1/voice/ws"
-	MaxDuration      = 10 * time.Minute
+	MaxDuration      = 20 * time.Minute
 	configNamespace  = "viewer-voice"
 	ioTimeout        = 5 * time.Second
 )

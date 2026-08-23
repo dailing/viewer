@@ -1,8 +1,7 @@
-// Package llm implements the global LLM forwarding plugin: a single
-// OpenAI-compatible chat-completions endpoint behind `llm:_:complete` so
-// plugins never know which model/endpoint serves them. The active config
-// lives in config-store under `plugins.llm.active` and is re-read on every
-// call, so edits in the LLM pane take effect immediately.
+// Package llm implements the global LLM forwarding plugin. Viewer plugins use
+// `llm:_:complete`; local external tools may use its optional loopback
+// OpenAI-compatible HTTP facade. Both re-read the same active config so one
+// model switch applies everywhere.
 package llm
 
 import (
@@ -12,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"viewer/internal/plugins/pluginrpc"
@@ -21,9 +22,11 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "llm", Version: "0.1.0",
+	ID: "llm", Version: "0.2.0",
 	Slots: map[string]any{
-		"llm:_:complete": map[string]any{"summary": "OpenAI-compatible chat completion; RPC {messages, json_mode?, timeout_seconds?, extra_body?} -> {content, model}; extra_body is merged verbatim into the request body (endpoint-specific)"},
+		"llm:_:complete":       map[string]any{"summary": "OpenAI-compatible chat completion; RPC {messages, json_mode?, timeout_seconds?, extra_body?} -> {content, model}; extra_body is merged verbatim into the request body (endpoint-specific)"},
+		"llm:_:http:configure": map[string]any{"summary": "Configure the loopback OpenAI-compatible HTTP facade {enabled, port}"},
+		"llm:_:http:status":    map[string]any{"summary": "Report the loopback HTTP facade state"},
 	},
 	Emits: map[string]any{},
 }
@@ -58,6 +61,10 @@ type CompletionResult struct {
 type Plugin struct {
 	client     *busclient.Client
 	httpClient *http.Client
+	serverMu   sync.Mutex
+	server     *http.Server
+	httpConfig HTTPConfig
+	httpError  string
 }
 
 func New() *Plugin {
@@ -71,16 +78,40 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	if _, err := p.client.Subscribe("llm:_:complete", p.handleComplete); err != nil {
 		return fmt.Errorf("subscribe llm:_:complete: %w", err)
 	}
+	if _, err := p.client.Subscribe("llm:_:http:configure", p.handleHTTPConfigure); err != nil {
+		return fmt.Errorf("subscribe llm:_:http:configure: %w", err)
+	}
+	if _, err := p.client.Subscribe("llm:_:http:status", p.handleHTTPStatus); err != nil {
+		return fmt.Errorf("subscribe llm:_:http:status: %w", err)
+	}
+	if _, err := p.client.Subscribe("config:plugins.llm:config", p.handleConfigChange); err != nil {
+		return fmt.Errorf("subscribe llm config mailbox: %w", err)
+	}
 	if err := p.client.Connect(ctx); err != nil {
 		return fmt.Errorf("connect llm plugin: %w", err)
 	}
 	if err := p.migrateLegacyConfig(ctx); err != nil {
 		return fmt.Errorf("migrate legacy llm config: %w", err)
 	}
+	httpConfig, err := p.loadHTTPConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("read llm HTTP config: %w", err)
+	}
+	if err := p.applyHTTPConfig(httpConfig); err != nil {
+		// A stale/occupied configured port must not prevent Viewer from starting.
+		slog.Error("llm HTTP facade failed to start", "error", err)
+	}
 	return nil
 }
 
-func (p *Plugin) Close(context.Context) error {
+func (p *Plugin) Close(ctx context.Context) error {
+	p.serverMu.Lock()
+	server := p.server
+	p.server = nil
+	p.serverMu.Unlock()
+	if server != nil {
+		_ = server.Shutdown(ctx)
+	}
 	if p.client != nil {
 		return p.client.Close()
 	}

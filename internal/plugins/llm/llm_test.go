@@ -3,10 +3,18 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"viewer/internal/kernel"
+	"viewer/internal/plugins/configstore"
+	"viewer/sdk/go/busclient"
 )
 
 func TestCompleteBaseURLAndJSONMode(t *testing.T) {
@@ -125,5 +133,107 @@ func TestMigrateLegacyNoLegacyKeys(t *testing.T) {
 	}
 	if len(stored) != 0 {
 		t.Fatalf("nothing should be written without legacy keys: %v", stored)
+	}
+}
+
+func TestHTTPFacadeUsesActiveModelAndCanBeDisabled(t *testing.T) {
+	var upstreamModel atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		upstreamModel.Store(body["model"])
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"model":"central-model","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	kernelConfig := kernel.DefaultConfig()
+	kernelConfig.Host, kernelConfig.Port = "127.0.0.1", 0
+	kernelServer := kernel.New(kernelConfig)
+	if err := kernelServer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer kernelServer.Shutdown(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	kernelWS := fmt.Sprintf("ws://127.0.0.1:%d/ws", kernelServer.Port())
+
+	store, err := configstore.New(t.TempDir() + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Start(ctx, kernelWS, false); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	caller := busclient.New(kernelWS, busclient.Manifest{ID: "llm-http-test", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+	_, err = caller.Request(ctx, "config:_:set", map[string]any{
+		"plugin": configNamespace, "key": "active",
+		"value": Config{Endpoint: upstream.URL, Model: "central-model"},
+	}, rpcBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plugin := New()
+	if err := plugin.Start(ctx, kernelWS, false); err != nil {
+		t.Fatal(err)
+	}
+	defer plugin.Close(context.Background())
+
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+	statusValue, err := caller.Request(ctx, "llm:_:http:configure", map[string]any{"enabled": true, "port": port}, rpcBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusValue.(map[string]any)
+	if status["running"] != true {
+		t.Fatalf("status = %#v", status)
+	}
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	response, err := http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"caller-model","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("completion status = %d", response.StatusCode)
+	}
+	if got := upstreamModel.Load(); got != "central-model" {
+		t.Fatalf("upstream model = %v, want central-model", got)
+	}
+
+	modelsResponse, err := http.Get(baseURL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer modelsResponse.Body.Close()
+	var models map[string]any
+	if err := json.NewDecoder(modelsResponse.Body).Decode(&models); err != nil {
+		t.Fatal(err)
+	}
+	data := models["data"].([]any)
+	if data[0].(map[string]any)["id"] != "central-model" {
+		t.Fatalf("models = %#v", models)
+	}
+
+	if _, err := caller.Request(ctx, "llm:_:http:configure", map[string]any{"enabled": false, "port": port}, rpcBudget); err != nil {
+		t.Fatal(err)
+	}
+	if plugin.currentHTTPStatus().Running {
+		t.Fatal("HTTP facade still running after disable")
 	}
 }

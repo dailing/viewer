@@ -9,6 +9,7 @@
  * - `profiles`: array of saved configs {id, name, endpoint, key, model,
  *   timeout_seconds} — purely a frontend-managed library.
  * - `active`: the ACTIVE config {endpoint, key, model, timeout_seconds}.
+ * - `http`: loopback facade config {enabled, port}.
  *
  * The endpoint may be the base `/v1` URL or the full `/v1/chat/completions`
  * URL (the llm plugin appends it); any OpenAI-compatible endpoint works.
@@ -16,7 +17,7 @@
  * with few parallel slots queue under load, so it must cover queueing, not
  * just generation.
  */
-import { computed, inject, onMounted, reactive, ref } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
 import MasterDetail from "../chat-manager/MasterDetail.vue";
@@ -39,6 +40,15 @@ interface LlmActive {
   key?: string;
   model?: string;
   timeout_seconds?: number;
+}
+
+interface LlmHttpStatus {
+  enabled: boolean;
+  running: boolean;
+  host: string;
+  port: number;
+  base_url?: string;
+  last_error?: string;
 }
 
 /** Seeded only when `profiles` has never been stored; deleting all profiles
@@ -67,6 +77,13 @@ const form = reactive({ name: "", endpoint: "", model: "", key: "", timeout: "" 
 const saving = ref(false);
 const status = ref("");
 const statusError = ref(false);
+const httpEnabled = ref(false);
+const httpPort = ref("18731");
+const httpSaving = ref(false);
+const httpStatus = ref<LlmHttpStatus | null>(null);
+const httpMessage = ref("");
+const httpMessageError = ref(false);
+let httpStatusTimer: number | undefined;
 
 function setStatus(text: string, isError = false): void {
   status.value = text;
@@ -118,9 +135,10 @@ function select(id: string): void {
 
 async function load(): Promise<void> {
   try {
-    const [llm, stored] = await Promise.all([
+    const [llm, stored, httpConfig] = await Promise.all([
       ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "active" }) as Promise<LlmActive | null>,
       ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "profiles" }) as Promise<LlmProfile[] | null>,
+      ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "http" }) as Promise<{ enabled?: boolean; port?: number } | null>,
     ]);
     active.value = llm ?? {};
     if (stored === null) {
@@ -129,10 +147,48 @@ async function load(): Promise<void> {
     } else {
       profiles.value = stored;
     }
+    httpEnabled.value = httpConfig?.enabled ?? false;
+    httpPort.value = String(httpConfig?.port ?? 18731);
+    await refreshHttpStatus();
     // Preselect the active profile when there is one, else the first.
     select(activeProfileId.value || profiles.value[0]?.id || "");
   } catch (error) {
     setStatus(`读取失败：${String(error)}`, true);
+  }
+}
+
+async function refreshHttpStatus(): Promise<void> {
+  try {
+    httpStatus.value = await ctx.bus.request("llm:_:http:status", {}) as LlmHttpStatus;
+  } catch (error) {
+    httpMessage.value = `读取 HTTP 状态失败：${String(error)}`;
+    httpMessageError.value = true;
+  }
+}
+
+async function saveHttpConfig(): Promise<void> {
+  if (httpSaving.value) return;
+  const port = Number(httpPort.value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    httpMessage.value = "端口必须是 1–65535 之间的整数。";
+    httpMessageError.value = true;
+    return;
+  }
+  httpSaving.value = true;
+  httpMessage.value = "";
+  httpMessageError.value = false;
+  try {
+    httpStatus.value = await ctx.bus.request("llm:_:http:configure", {
+      enabled: httpEnabled.value,
+      port,
+    }) as LlmHttpStatus;
+    httpMessage.value = httpStatus.value.running ? "HTTP 服务已生效" : "HTTP 服务已关闭";
+  } catch (error) {
+    httpMessage.value = `保存失败：${String(error)}`;
+    httpMessageError.value = true;
+    await refreshHttpStatus();
+  } finally {
+    httpSaving.value = false;
   }
 }
 
@@ -230,10 +286,42 @@ async function removeProfile(): Promise<void> {
   }
 }
 
-onMounted(() => void load());
+onMounted(() => {
+  void load();
+  httpStatusTimer = window.setInterval(() => void refreshHttpStatus(), 5000);
+});
+onBeforeUnmount(() => {
+  if (httpStatusTimer !== undefined) window.clearInterval(httpStatusTimer);
+});
 </script>
 
 <template>
+  <div class="http-facade border-bottom pb-3 mb-3">
+    <div class="fw-semibold mb-2">统一 HTTP 接口</div>
+    <div class="d-flex flex-wrap align-items-end gap-2">
+      <label class="form-check form-switch mb-1">
+        <input v-model="httpEnabled" class="form-check-input" type="checkbox">
+        <span class="form-check-label small">启用本机 HTTP 服务</span>
+      </label>
+      <label class="form-label small mb-0">端口
+        <input v-model="httpPort" type="number" min="1" max="65535" step="1" class="form-control form-control-sm mt-1 http-port">
+      </label>
+      <button type="button" class="btn btn-sm btn-primary" :disabled="httpSaving" @click="saveHttpConfig">
+        {{ httpSaving ? "应用中…" : "应用" }}
+      </button>
+      <span class="small" :class="httpMessageError ? 'text-danger' : 'text-secondary'">{{ httpMessage }}</span>
+    </div>
+    <div class="small mt-2" :class="httpStatus?.last_error ? 'text-danger' : 'text-secondary'">
+      <template v-if="httpStatus?.running">
+        运行中：<code>{{ httpStatus.base_url }}</code>（POST /chat/completions，GET /models）
+      </template>
+      <template v-else>当前未监听。</template>
+      <template v-if="httpStatus?.last_error"> {{ httpStatus.last_error }}</template>
+    </div>
+    <div class="small text-secondary mt-1">
+      仅监听 127.0.0.1。调用方请求中的 model 会被当前启用模型覆盖，因此在这里切换一次，Viewer、Hindsight、infod、gaokao 会一起切换。
+    </div>
+  </div>
   <MasterDetail :items="items" :selected-id="selectedId" create-label="＋ 新建模型配置" @select="select" @create="createProfile">
     <template #detail>
       <div v-if="selectedId !== ''" class="llm-detail">
@@ -288,5 +376,11 @@ onMounted(() => void load());
 <style scoped>
 .llm-detail {
   max-width: 34rem;
+}
+.http-facade {
+  max-width: 52rem;
+}
+.http-port {
+  width: 8rem;
 }
 </style>

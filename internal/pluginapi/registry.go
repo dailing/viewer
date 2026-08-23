@@ -14,9 +14,11 @@ import (
 	"viewer/internal/plugins/gateway"
 	"viewer/internal/plugins/inspector"
 	"viewer/internal/plugins/instancestore"
+	"viewer/internal/plugins/llm"
 	"viewer/internal/plugins/supervisor"
 	"viewer/internal/plugins/terminal"
 	"viewer/internal/plugins/voice"
+	"viewer/internal/plugins/voicecontrol"
 )
 
 // Registry is the complete resident core set. Inspector starts first so it can
@@ -24,16 +26,26 @@ import (
 var Registry = []Entry{
 	{ID: inspector.Manifest.ID, Factory: newInspector},
 	{ID: configstore.Manifest.ID, Factory: newConfigStore},
+	{ID: llm.Manifest.ID, Factory: newLLM},
 	{ID: agenthermes.Manifest.ID, Factory: newAgentHermes},
 	{ID: agentcodex.Manifest.ID, Factory: newAgentCodex},
 	{ID: agentopencode.Manifest.ID, Factory: newAgentOpenCode},
 	{ID: instancestore.Manifest.ID, Factory: newInstanceStore},
 	{ID: fileservice.Manifest.ID, Factory: newFileService},
 	{ID: chat.Manifest.ID, Factory: newChat},
+	{ID: voicecontrol.Manifest.ID, Factory: newVoiceControl},
 	{ID: voice.Manifest.ID, Factory: newVoice},
 	{ID: terminal.Manifest.ID, Factory: newTerminal},
 	{ID: supervisor.Manifest.ID, Factory: newSupervisor},
 	{ID: "gateway", Factory: newGateway},
+}
+
+func newVoiceControl(config RuntimeConfig) (Plugin, error) {
+	plugin := voicecontrol.New()
+	return lifecycleAdapter{
+		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
+		wait:  waitContext, close: plugin.Close,
+	}, nil
 }
 
 func newVoice(config RuntimeConfig) (Plugin, error) {
@@ -116,6 +128,14 @@ func newConfigStore(config RuntimeConfig) (Plugin, error) {
 	return lifecycleAdapter{
 		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
 		wait:  waitContext, close: func(context.Context) error { return plugin.Close() },
+	}, nil
+}
+
+func newLLM(config RuntimeConfig) (Plugin, error) {
+	plugin := llm.New()
+	return lifecycleAdapter{
+		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
+		wait:  waitContext, close: plugin.Close,
 	}, nil
 }
 

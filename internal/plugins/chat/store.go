@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -414,6 +415,21 @@ func (s *store) chatMessageBlocks(chatID string, after, before int64) ([]Message
 	var values []MessageBlock
 	err := query.Order("occurred_at, id").Find(&values).Error
 	return values, err
+}
+
+// latestAssistantMessage returns the chat's newest assistant message (the
+// voice read-latest command reads it aloud), or nil when none exists.
+func (s *store) latestAssistantMessage(chatID string) (*Message, error) {
+	var message Message
+	result := s.db.Where("chat_id = ? AND role = ?", chatID, "assistant").
+		Order("created_at DESC, id DESC").Limit(1).First(&message)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &message, nil
 }
 
 // historyPage returns one page of a chat's messages for newest-first

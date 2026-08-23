@@ -21,7 +21,7 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "chat", Version: "0.3.0",
+	ID: "chat", Version: "0.4.0",
 	Slots: map[string]any{
 		"chat:_:workspace:get": map[string]any{}, "chat:_:workspace:patch": map[string]any{},
 		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},
@@ -29,9 +29,11 @@ var Manifest = busclient.Manifest{
 		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
 		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
 		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
+		"chat:_:voice:invoke": map[string]any{},
 	},
 	Emits: map[string]any{
 		"chat:*:message": map[string]any{}, "chat:*:block": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
+		"voice-catalog:_:chat": map[string]any{},
 	},
 }
 
@@ -60,6 +62,7 @@ type Plugin struct {
 	store         *store
 	client        *busclient.Client
 	httpClient    *http.Client
+	llmFn         llmCompleter
 	ctx           context.Context
 	cancel        context.CancelFunc
 	mu            sync.Mutex
@@ -112,6 +115,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
 		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
 		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
+		"chat:_:voice:invoke": p.handleVoiceInvoke,
 	}
 	for pattern, handler := range handlers {
 		asyncHandler := handler
@@ -125,6 +129,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	if err := p.client.Connect(ctx); err != nil {
 		return err
 	}
+	p.llmFn = p.llmCompleteViaBus
 	if err := p.migrateLegacyDomainConfig(ctx); err != nil {
 		return err
 	}
@@ -146,6 +151,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 			return err
 		}
 	}
+	p.publishVoiceCatalog()
 	return nil
 }
 
@@ -490,6 +496,9 @@ func (p *Plugin) handleChatsCreate(frame busclient.Frame) {
 	if err == nil {
 		err = p.store.saveChat(&chat)
 	}
+	if err == nil {
+		p.publishVoiceCatalog()
+	}
 	p.reply(frame, chat.payload(), err)
 }
 func (p *Plugin) handleChatsPatch(frame busclient.Frame) {
@@ -516,6 +525,9 @@ func (p *Plugin) handleChatsPatch(frame busclient.Frame) {
 	}
 	if err == nil {
 		err = p.store.saveChat(chat)
+	}
+	if err == nil {
+		p.publishVoiceCatalog()
 	}
 	p.reply(frame, chat.payload(), err)
 }
@@ -566,6 +578,9 @@ func (p *Plugin) handleChatsDelete(frame busclient.Frame) {
 		if err == nil {
 			err = p.client.Set(context.Background(), "chat:_:active", "")
 		}
+	}
+	if err == nil {
+		p.publishVoiceCatalog()
 	}
 	p.reply(frame, map[string]any{"deleted": err == nil, "id": id}, err)
 }

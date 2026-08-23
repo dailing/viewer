@@ -11,27 +11,24 @@ import (
 )
 
 func TestSummarizeTranscriptPromptAndParsing(t *testing.T) {
-	var request map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
-		if err := json.NewDecoder(incoming.Body).Decode(&request); err != nil {
-			t.Error(err)
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"model":"summary-model","choices":[{"message":{"content":"## 任务\n测试\n## 关键动作与改动\n- x\n## 结果\n好\n## 未决事项\n无"}}]}`))
-	}))
-	defer server.Close()
-	result, err := summarizeTranscript(context.Background(), server.Client(), LLMConfig{Endpoint: server.URL, Model: "configured"}, "### User query\n做事\n\n### Assistant\n完成")
+	// The HTTP layer is the llm plugin's job (tested there); here the
+	// completer is faked and the prompt shape is asserted.
+	var messages []map[string]string
+	complete := func(_ context.Context, incoming []map[string]string, _ bool, _ int) (completionResult, error) {
+		messages = incoming
+		return completionResult{Content: "## 任务\n测试\n## 关键动作与改动\n- x\n## 结果\n好\n## 未决事项\n无", Model: "summary-model"}, nil
+	}
+	result, err := summarizeTranscript(context.Background(), complete, "### User query\n做事\n\n### Assistant\n完成", 60)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Model != "summary-model" || !strings.Contains(result.Content, "## 未决事项") {
 		t.Fatalf("unexpected result %#v", result)
 	}
-	messages, _ := request["messages"].([]any)
 	if len(messages) != 2 {
-		t.Fatalf("messages=%#v", request["messages"])
+		t.Fatalf("messages=%#v", messages)
 	}
-	user := messages[1].(map[string]any)["content"].(string)
+	user := messages[1]["content"]
 	for _, required := range []string{"exactly these four sections", "### User query", "### Assistant"} {
 		if !strings.Contains(user, required) {
 			t.Errorf("prompt missing %q", required)

@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import type { PluginCtx } from "../../shell/ctx";
 import VoiceInputButton from "../voice/VoiceInputButton.vue";
 import { useVoiceStore } from "../voice/voiceStore";
 import type { Role } from "./types";
+import { VoiceDictationController } from "./voiceDictation";
 
 const props = defineProps<{
   selectedRoleIds: string[];
@@ -74,6 +76,19 @@ function clearText(): void {
   draft.value = "";
   void nextTick(() => textarea.value?.focus());
 }
+
+// Voice dictation (framework: voice actions): the pane-local half of the
+// global voice-control loop; hands off via the voice-fx mailbox.
+// contextId is "chat:{chatId}".
+const injectedCtx = inject<PluginCtx>("pluginCtx");
+if (injectedCtx === undefined) throw new Error("ComposerBox requires PluginPaneHost");
+const voiceDictation = new VoiceDictationController(injectedCtx, props.contextId.slice("chat:".length), {
+  contextId: props.contextId,
+  getDraft: () => draft.value,
+  send: () => handleSend(false),
+  clearDraft: clearText,
+});
+onBeforeUnmount(() => voiceDictation.dispose());
 
 // Send takes a snapshot of the draft, clears the box, and refocuses it.
 // Clearing after send prevents duplicate sends: the previous code emitted the

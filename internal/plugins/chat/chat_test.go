@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -76,22 +74,19 @@ func TestCapRecentContextPreservesSuffixWithinByteBudget(t *testing.T) {
 	}
 }
 
-func TestRouterHTTPCompletion(t *testing.T) {
-	var captured map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if got := request.Header.Get("Authorization"); got != "Bearer secret" {
-			t.Errorf("authorization=%q", got)
+func TestRouterCompletion(t *testing.T) {
+	// The HTTP layer (endpoint normalization, auth header, JSON mode) is the
+	// llm plugin's job and is tested there; here the completer is faked.
+	var captured []map[string]string
+	complete := func(_ context.Context, messages []map[string]string, jsonMode bool, _ int) (completionResult, error) {
+		captured = messages
+		if !jsonMode {
+			t.Errorf("router should request json mode")
 		}
-		if request.URL.Path != "/v1/chat/completions" {
-			t.Errorf("path=%q, want /v1/chat/completions (endpoint must be normalized)", request.URL.Path)
-		}
-		_ = json.NewDecoder(request.Body).Decode(&captured)
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"choices":[{"message":{"content":"{\"role_ids\":[\"r2\"],\"rationale\":\"best\"}"}}]}`))
-	}))
-	defer server.Close()
+		return completionResult{Content: `{"role_ids":["r2"],"rationale":"best"}`, Model: "fake"}, nil
+	}
 	roles := []SuperRole{{ID: "r1", Name: "One", Description: "alpha", Provider: "hermes"}, {ID: "r2", Name: "Two", Description: "beta", Provider: "hermes"}}
-	ids, rationale, err := routeWithLLM(context.Background(), server.Client(), LLMConfig{Endpoint: server.URL + "/v1", APIKey: "secret", Model: "router"}, "choose", roles, "history")
+	ids, rationale, err := routeWithLLM(context.Background(), complete, "choose", roles, "history")
 	if err != nil || len(ids) != 1 || ids[0] != "r2" || rationale != "best" {
 		t.Fatalf("ids=%v rationale=%q err=%v", ids, rationale, err)
 	}

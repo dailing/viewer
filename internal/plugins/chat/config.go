@@ -146,26 +146,6 @@ func roleByID(roles []SuperRole, id string) (SuperRole, bool) {
 	return SuperRole{}, false
 }
 
-func (p *Plugin) llmConfig(ctx context.Context) (LLMConfig, error) {
-	var result LLMConfig
-	if err := p.configGet(ctx, "llm", &result); err != nil {
-		return result, err
-	}
-	// Accept both the aggregate object and the literal llm.* namespace keys.
-	for key, target := range map[string]*string{"llm.endpoint": &result.Endpoint, "llm.key": &result.APIKey, "llm.model": &result.Model} {
-		if *target != "" {
-			continue
-		}
-		if err := p.configGet(ctx, key, target); err != nil {
-			return result, err
-		}
-	}
-	if result.TimeoutSeconds == 0 {
-		_ = p.configGet(ctx, "llm.timeout_seconds", &result.TimeoutSeconds)
-	}
-	return result, nil
-}
-
 func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
 	result := SummaryConfig{
 		Enabled: true, ToolCharBudget: 4000, TimeoutSeconds: 60,

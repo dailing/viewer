@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -135,16 +134,9 @@ func (p *Plugin) generateTurnSummary(turnID, provider string) {
 		return
 	}
 	base := &TurnSummary{TurnID: turnID, ChatID: turn.ChatID, RoleID: turn.RoleID, RoleName: turn.RoleName, Provider: provider, Status: "failed", SourceMessageCount: count, SourceCharCount: chars, OccurredAt: derefMillis(turn.EndedAt, nowMillis()), CreatedAt: nowMillis()}
-	llm, err := p.llmConfig(p.ctx)
-	if err != nil {
-		base.Error = err.Error()
-		_ = p.store.saveTurnSummary(base)
-		log.Printf("viewer-chat turn summary failed turn_id=%s: %v", turnID, err)
-		return
-	}
 	ctx, cancel := context.WithTimeout(p.ctx, time.Duration(config.TimeoutSeconds)*time.Second)
 	started := time.Now()
-	result, err := summarizeTranscript(ctx, p.httpClient, llm, transcript)
+	result, err := summarizeTranscript(ctx, p.llmFn, transcript, config.TimeoutSeconds)
 	cancel()
 	base.LatencyMS = int(time.Since(started).Milliseconds())
 	if err != nil {
@@ -153,12 +145,12 @@ func (p *Plugin) generateTurnSummary(turnID, provider string) {
 		log.Printf("viewer-chat turn summary failed turn_id=%s: %v", turnID, err)
 		return
 	}
-	base.Status, base.Summary, base.Model, base.ProfileID = "completed", result.Content, result.Model, llm.Model
+	base.Status, base.Summary, base.Model, base.ProfileID = "completed", result.Content, result.Model, result.Model
 	_ = p.store.saveTurnSummary(base)
 }
 
-func summarizeTranscript(ctx context.Context, client *http.Client, llm LLMConfig, transcript string) (completionResult, error) {
-	return chatCompletion(ctx, client, llm, []map[string]string{{"role": "system", "content": turnSummarySystemPrompt}, {"role": "user", "content": fmt.Sprintf(turnSummaryUserTemplate, transcript)}}, false)
+func summarizeTranscript(ctx context.Context, complete llmCompleter, transcript string, timeoutSeconds int) (completionResult, error) {
+	return complete(ctx, []map[string]string{{"role": "system", "content": turnSummarySystemPrompt}, {"role": "user", "content": fmt.Sprintf(turnSummaryUserTemplate, transcript)}}, false, timeoutSeconds)
 }
 
 func derefMillis(value *int64, fallback int64) int64 {

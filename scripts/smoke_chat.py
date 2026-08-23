@@ -32,7 +32,7 @@ async def run() -> None:
         data_dir, log_path = Path(temp) / "data", Path(temp) / "viewerd.log"
         environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true", "VIEWER_CODEX_APP_SERVER_COMMAND": str(codex_mock), "VIEWER_CODEX_APP_SERVER_YOLO": "true", "VIEWER_OPENCODE_COMMAND": str(opencode_mock), "VIEWER_OPENCODE_ARGS": "acp"}
         with log_path.open("wb") as log:
-            process = subprocess.Popen([str(viewerd), "--plugins=config-store,viewer.agent-hermes,viewer.agent-codex,viewer.agent-opencode,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(viewerd), "--plugins=config-store,llm,viewer.agent-hermes,viewer.agent-codex,viewer.agent-opencode,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
         client = BusClient(f"ws://127.0.0.1:{port}/ws", CALLER, request_timeout=25.0)
         messages: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []; catalogs: list[Any] = []; codex_catalogs: list[Any] = []; opencode_catalogs: list[Any] = []; agent_events: list[dict[str, Any]] = []; codex_events: list[dict[str, Any]] = []; opencode_events: list[dict[str, Any]] = []
         try:

@@ -169,6 +169,12 @@ function activeRecordingJobForContext(contextId: string): VoiceRuntimeJob | null
   );
 }
 
+/** Live mic stream of a context's in-flight recording, for client-side
+ *  silence detection (voice command mode). Null when not recording. */
+export function voiceStreamForContext(contextId: string): MediaStream | null {
+  return activeRecordingJobForContext(contextId)?.stream ?? null;
+}
+
 function composeVoiceText(composition: VoiceComposition): string {
   return composition.segments.reduce(
     (text, segment) => appendTranscription(text, segment.text),
@@ -276,7 +282,7 @@ export const useVoiceStore = defineStore("next-voice", {
       this.languageModelRefine = enabled;
       voiceCtx?.storage.set("languageModelRefine", enabled);
     },
-    async start(id: string, baseText: string): Promise<void> {
+    async start(id: string, baseText: string, options?: { refine?: boolean }): Promise<void> {
       const ctx = requireCtx();
       console.info("[voice] start clicked", { contextId: id, backendAvailable: this.backendAvailable });
       if (this.activeRecordingContextId !== "") {
@@ -353,7 +359,7 @@ export const useVoiceStore = defineStore("next-voice", {
         });
         const result = (await ctx.bus.request("voice:_:start", {
           mime_type: selectedMimeType,
-          llm_refine: this.languageModelRefine,
+          llm_refine: options?.refine ?? this.languageModelRefine,
         })) as { rec_id: string };
         job.recId = result.rec_id;
         console.info("[voice] start RPC ok", { recId: job.recId, mimeType: selectedMimeType });

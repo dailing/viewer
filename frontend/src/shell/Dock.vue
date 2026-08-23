@@ -10,7 +10,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useDockSettingsStore, clampDockWidth } from "../stores/dockSettings";
 import { useLayoutStore } from "../stores/layout";
 import type { DockInstance, DockProvider } from "./definePlugin";
-import { dockProviders } from "./registries";
+import { dockActions, dockProviders } from "./registries";
 
 const layout = useLayoutStore();
 const dockSettings = useDockSettingsStore();
@@ -312,6 +312,17 @@ const buildTime = (() => {
           @click="openSettings"
         ><i class="bi" :class="schedRestart === 'failed' ? 'bi-exclamation-triangle' : 'bi-clock-history'"></i></button>
         <button
+          v-for="action in dockActions"
+          :key="action.id"
+          type="button"
+          class="dock-btn"
+          :class="{ 'dock-action-active': action.active?.() === true }"
+          :title="action.title()"
+          :aria-label="action.title()"
+          :aria-pressed="action.active?.() === true"
+          @click="action.onClick()"
+        ><i class="bi" :class="action.icon()"></i></button>
+        <button
           type="button"
           class="dock-btn"
           :class="{ 'dock-pin-active': pinned }"
@@ -383,9 +394,9 @@ const buildTime = (() => {
   left: 0;
   overflow: visible;
   /* Left inset pins the icon column to its collapsed-center position, so
-     icons never move while the width transition runs (35px = 34px button
+     icons never move while the width transition runs (29px = 28px button
      + 1px border-right, border-box). */
-  padding: 6px 0 6px calc((var(--dock-width) - 35px) / 2);
+  padding: 4px 0 4px calc((var(--dock-width) - 29px) / 2);
   position: absolute;
   top: 0;
   transition: width 160ms ease;
@@ -408,11 +419,11 @@ const buildTime = (() => {
   border-radius: var(--radius-md);
   color: var(--color-text-muted);
   display: inline-flex;
-  font-size: 16px;
-  height: 34px;
+  font-size: 14px;
+  height: 28px;
   justify-content: center;
   padding: 0;
-  width: 34px;
+  width: 28px;
 }
 
 .dock-btn:hover {
@@ -438,8 +449,8 @@ const buildTime = (() => {
 .dock-sep {
   background: var(--color-border);
   flex: 0 0 1px;
-  margin: 6px 0 6px 5px;
-  width: 24px;
+  margin: 4px 0 4px 4px;
+  width: 20px;
 }
 
 .dock-items {
@@ -447,7 +458,7 @@ const buildTime = (() => {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -459,7 +470,7 @@ const buildTime = (() => {
   display: flex;
   min-width: 0;
   position: relative;
-  width: 34px;
+  width: 28px;
 }
 
 .dock.expanded .dock-item {
@@ -516,17 +527,22 @@ const buildTime = (() => {
 }
 
 .dock.expanded .dock-dot {
-  left: 27px;
+  left: 24px;
   right: auto;
 }
 
 .dock-empty {
   color: var(--color-text-subtle);
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .dock-pin-active {
   color: var(--color-accent);
+}
+
+/* Global dock actions (e.g. voice control): accent tint while active. */
+.dock-action-active {
+  color: var(--color-danger);
 }
 
 .dock-menu-overlay {
@@ -575,7 +591,7 @@ const buildTime = (() => {
 
 .dock-foot {
   flex: 0 0 auto;
-  padding-top: 4px;
+  padding-top: 2px;
   position: relative;
 }
 

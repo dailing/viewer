@@ -1,0 +1,129 @@
+package llm
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+)
+
+func TestCompleteBaseURLAndJSONMode(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if request.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path = %q, want /v1/chat/completions", request.URL.Path)
+		}
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if body["response_format"] == nil {
+			t.Errorf("json_mode should set response_format, body = %v", body)
+		}
+		if request.Header.Get("Authorization") != "Bearer k" {
+			t.Errorf("missing bearer key")
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		encoded, _ := json.Marshal(map[string]any{
+			"model":   "fake",
+			"choices": []map[string]any{{"message": map[string]string{"content": "  done  "}}},
+		})
+		_, _ = writer.Write(encoded)
+	}))
+	defer server.Close()
+	result, err := complete(context.Background(), server.Client(), Config{Endpoint: server.URL + "/v1", APIKey: "k", Model: "m"}, []map[string]string{{"role": "user", "content": "hi"}}, true, nil)
+	if err != nil || result.Content != "done" || result.Model != "fake" {
+		t.Fatalf("result = %#v err = %v", result, err)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+
+func TestCompleteHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+		_, _ = writer.Write([]byte("upstream down"))
+	}))
+	defer server.Close()
+	_, err := complete(context.Background(), server.Client(), Config{Endpoint: server.URL, Model: "m"}, []map[string]string{{"role": "user", "content": "hi"}}, false, nil)
+	if err == nil {
+		t.Fatal("expected HTTP error")
+	}
+}
+
+func TestCompleteExtraBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		kwargs, ok := body["chat_template_kwargs"].(map[string]any)
+		if !ok || kwargs["enable_thinking"] != false {
+			t.Errorf("extra_body not merged, body = %v", body)
+		}
+		if body["model"] != "m" {
+			t.Errorf("extra_body must not drop the model field, body = %v", body)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		encoded, _ := json.Marshal(map[string]any{
+			"model":   "fake",
+			"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}},
+		})
+		_, _ = writer.Write(encoded)
+	}))
+	defer server.Close()
+	extra := map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}}
+	result, err := complete(context.Background(), server.Client(), Config{Endpoint: server.URL, Model: "m"}, []map[string]string{{"role": "user", "content": "hi"}}, false, extra)
+	if err != nil || result.Content != "ok" {
+		t.Fatalf("result = %#v err = %v", result, err)
+	}
+}
+
+func TestMigrateLegacy(t *testing.T) {
+	stored := map[string]json.RawMessage{}
+	get := func(namespace, key string) (json.RawMessage, bool, error) {
+		value, ok := stored[namespace+"/"+key]
+		return value, ok, nil
+	}
+	set := func(namespace, key string, value json.RawMessage) error {
+		stored[namespace+"/"+key] = value
+		return nil
+	}
+	stored[legacyNamespace+"/llm"] = json.RawMessage(`{"endpoint":"http://x/v1","model":"m"}`)
+	stored[legacyNamespace+"/llm_profiles"] = json.RawMessage(`[{"id":"p1"}]`)
+	if err := migrateLegacy(get, set); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stored[configNamespace+"/active"]; !ok {
+		t.Fatalf("active not migrated: %v", stored)
+	}
+	if _, ok := stored[configNamespace+"/profiles"]; !ok {
+		t.Fatalf("profiles not migrated: %v", stored)
+	}
+	// Second run must not overwrite user edits in the new namespace.
+	stored[configNamespace+"/active"] = json.RawMessage(`{"endpoint":"http://y/v1","model":"edited"}`)
+	if err := migrateLegacy(get, set); err != nil {
+		t.Fatal(err)
+	}
+	if string(stored[configNamespace+"/active"]) != `{"endpoint":"http://y/v1","model":"edited"}` {
+		t.Fatalf("migration overwrote existing config: %s", stored[configNamespace+"/active"])
+	}
+}
+
+func TestMigrateLegacyNoLegacyKeys(t *testing.T) {
+	stored := map[string]json.RawMessage{}
+	get := func(namespace, key string) (json.RawMessage, bool, error) {
+		value, ok := stored[namespace+"/"+key]
+		return value, ok, nil
+	}
+	set := func(namespace, key string, value json.RawMessage) error {
+		stored[namespace+"/"+key] = value
+		return nil
+	}
+	if err := migrateLegacy(get, set); err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("nothing should be written without legacy keys: %v", stored)
+	}
+}

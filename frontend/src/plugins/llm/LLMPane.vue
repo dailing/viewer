@@ -1,28 +1,28 @@
 <script setup lang="ts">
 /**
- * 模型 tab (framework §8.9 master-detail, same as Roles/路由/聊天): the left
- * column lists saved model configs, the right column edits the selected one.
+ * 语言模型 pane: the global llm plugin's settings (framework: global LLM
+ * layer). Every plugin's LLM usage (chat dispatch/summary, voice control,
+ * …) goes through `llm:_:complete`, which re-reads the active config on
+ * every call — 启用/保存 take effect immediately, no restart.
  *
- * Storage (config-store, plugin `plugins.viewer-chat`):
- * - `llm_profiles`: array of saved configs {id, name, endpoint, key, model,
+ * Storage (config-store, plugin `plugins.llm`):
+ * - `profiles`: array of saved configs {id, name, endpoint, key, model,
  *   timeout_seconds} — purely a frontend-managed library.
- * - `llm`: the ACTIVE config {endpoint, key, model, timeout_seconds}. The
- *   chat plugin re-reads it on every dispatch/summary call, so 启用/保存
- *   take effect immediately — no restart.
+ * - `active`: the ACTIVE config {endpoint, key, model, timeout_seconds}.
  *
  * The endpoint may be the base `/v1` URL or the full `/v1/chat/completions`
- * URL (llm.go appends it); any OpenAI-compatible endpoint works.
- * timeout_seconds bounds one dispatch-router call (default 60): local
- * servers with few parallel slots queue under load, so it must cover
- * queueing, not just generation.
+ * URL (the llm plugin appends it); any OpenAI-compatible endpoint works.
+ * timeout_seconds bounds one completion call (default 60): local servers
+ * with few parallel slots queue under load, so it must cover queueing, not
+ * just generation.
  */
 import { computed, inject, onMounted, reactive, ref } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import MasterDetail from "./MasterDetail.vue";
+import MasterDetail from "../chat-manager/MasterDetail.vue";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
-if (injectedCtx === undefined) throw new Error("LLMPanel requires PluginPaneHost");
+if (injectedCtx === undefined) throw new Error("LLMPane requires PluginPaneHost");
 const ctx: PluginCtx = injectedCtx;
 
 interface LlmProfile {
@@ -41,8 +41,8 @@ interface LlmActive {
   timeout_seconds?: number;
 }
 
-/** Seeded only when `llm_profiles` has never been stored; deleting all
- *  profiles is respected (an empty array is not re-seeded). */
+/** Seeded only when `profiles` has never been stored; deleting all profiles
+ *  is respected (an empty array is not re-seeded). */
 const DEFAULT_PROFILES: LlmProfile[] = [
   {
     id: "llama-server",
@@ -98,8 +98,8 @@ const items = computed(() =>
 
 async function persistProfiles(): Promise<void> {
   await ctx.bus.request("config:_:set", {
-    plugin: "plugins.viewer-chat",
-    key: "llm_profiles",
+    plugin: "plugins.llm",
+    key: "profiles",
     value: profiles.value,
   });
 }
@@ -119,8 +119,8 @@ function select(id: string): void {
 async function load(): Promise<void> {
   try {
     const [llm, stored] = await Promise.all([
-      ctx.bus.request("config:_:get", { plugin: "plugins.viewer-chat", key: "llm" }) as Promise<LlmActive | null>,
-      ctx.bus.request("config:_:get", { plugin: "plugins.viewer-chat", key: "llm_profiles" }) as Promise<LlmProfile[] | null>,
+      ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "active" }) as Promise<LlmActive | null>,
+      ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "profiles" }) as Promise<LlmProfile[] | null>,
     ]);
     active.value = llm ?? {};
     if (stored === null) {
@@ -175,7 +175,7 @@ async function saveProfile(): Promise<void> {
   try {
     await persistProfiles();
     // Editing the config that is currently in use must take effect
-    // immediately — the backend re-reads `llm` per call.
+    // immediately — the llm plugin re-reads `active` per call.
     if (profile.id === activeProfileId.value) await activate(profile);
     select(profile.id);
     setStatus("已保存");
@@ -193,7 +193,7 @@ async function activate(profile: LlmProfile): Promise<void> {
     model: profile.model.trim(),
     timeout_seconds: profile.timeout_seconds,
   };
-  await ctx.bus.request("config:_:set", { plugin: "plugins.viewer-chat", key: "llm", value });
+  await ctx.bus.request("config:_:set", { plugin: "plugins.llm", key: "active", value });
   active.value = value;
 }
 
@@ -208,7 +208,7 @@ async function activateSelected(): Promise<void> {
   setStatus("");
   try {
     await activate(profile);
-    setStatus("已启用，dispatch 与摘要下次调用即生效");
+    setStatus("已启用，所有插件下次调用即生效");
   } catch (error) {
     setStatus(`启用失败：${String(error)}`, true);
   } finally {
@@ -264,7 +264,7 @@ onMounted(() => void load());
             type="button"
             class="btn btn-sm btn-outline-secondary"
             :disabled="saving || selectedId === activeProfileId"
-            title="将该配置设为 dispatch/摘要当前使用的模型（plugins.viewer-chat.llm），立即生效"
+            title="将该配置设为全局当前使用的模型（plugins.llm.active），立即生效"
             @click="activateSelected"
           >设为当前</button>
           <button
@@ -277,7 +277,7 @@ onMounted(() => void load());
           <span class="small" :class="statusError ? 'text-danger' : 'text-secondary'">{{ status }}</span>
         </div>
         <div class="small text-secondary mt-2">
-          左侧 ● 为当前使用中的配置。模型配置保存在后端 config-store（plugins.viewer-chat.llm_profiles / llm），启用后立即生效，无需重启。自定义接口需兼容 OpenAI /chat/completions。
+          左侧 ● 为当前使用中的配置。这是全局语言模型转发层：所有插件（dispatch、摘要、语音控制）都经由 llm 插件调用它。配置保存在后端 config-store（plugins.llm.profiles / active），启用后立即生效，无需重启。自定义接口需兼容 OpenAI /chat/completions。
         </div>
       </div>
       <div v-else class="small text-secondary">暂无配置，点击左下角「＋ 新建模型配置」。</div>

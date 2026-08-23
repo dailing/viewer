@@ -16,31 +16,40 @@
 import { createCtx, type PluginCtx } from "./ctx";
 import { bus } from "./bus";
 import type { PluginModule } from "./definePlugin";
-import { registerComponent, registerDockProvider, unregisterComponent, unregisterDockProvider } from "./registries";
+import { registerComponent, registerDockActions, registerDockProvider, unregisterComponent, unregisterDockActions, unregisterDockProvider } from "./registries";
 
 /** Plugin ids the static stage-A build already registered. */
 const staticIds = new Set<string>();
 
 /** Live external plugins: id → loaded module handle. */
-const externalPlugins = new Map<string, { hash: string; module: PluginModule; ctx: PluginCtx; dockType?: string; styleEl?: HTMLLinkElement }>();
+const externalPlugins = new Map<string, { hash: string; module: PluginModule; ctx: PluginCtx; dockType?: string; actionIds?: string[]; styleEl?: HTMLLinkElement }>();
 
 /** Failed import attempts: id → {hash, at}; retried after a cooldown. */
 const failedImports = new Map<string, { hash: string; at: number }>();
 const IMPORT_RETRY_MS = 30_000;
 
 /** Register one plugin module's contributions (shared by both stages). */
-function registerModule(plugin: PluginModule, ctx: PluginCtx): string | undefined {
-  let dockType: string | undefined;
+function registerModule(plugin: PluginModule, ctx: PluginCtx): { dockType?: string; actionIds?: string[] } {
+  const result: { dockType?: string; actionIds?: string[] } = {};
   for (const [type, component] of Object.entries(plugin.components ?? {})) {
     registerComponent(type, component);
   }
   if (plugin.createDockProvider !== undefined) {
     try {
       const provider = plugin.createDockProvider(ctx);
-      dockType = provider.type;
+      result.dockType = provider.type;
       registerDockProvider(provider);
     } catch (error) {
       console.error(`plugin ${plugin.id} createDockProvider failed`, error);
+    }
+  }
+  if (plugin.createDockActions !== undefined) {
+    try {
+      const actions = plugin.createDockActions(ctx);
+      result.actionIds = actions.map((action) => action.id);
+      registerDockActions(actions);
+    } catch (error) {
+      console.error(`plugin ${plugin.id} createDockActions failed`, error);
     }
   }
   if (plugin.activate !== undefined) {
@@ -48,10 +57,10 @@ function registerModule(plugin: PluginModule, ctx: PluginCtx): string | undefine
       console.error(`plugin ${plugin.id} activate failed`, error);
     });
   }
-  return dockType;
+  return result;
 }
 
-function unregisterModule(handle: { module: PluginModule; ctx: PluginCtx; dockType?: string; styleEl?: HTMLLinkElement }): void {
+function unregisterModule(handle: { module: PluginModule; ctx: PluginCtx; dockType?: string; actionIds?: string[]; styleEl?: HTMLLinkElement }): void {
   try {
     handle.module.deactivate?.();
   } catch (error) {
@@ -62,6 +71,7 @@ function unregisterModule(handle: { module: PluginModule; ctx: PluginCtx; dockTy
     unregisterComponent(type);
   }
   if (handle.dockType !== undefined) unregisterDockProvider(handle.dockType);
+  if (handle.actionIds !== undefined) unregisterDockActions(handle.actionIds);
   handle.styleEl?.remove();
 }
 
@@ -148,8 +158,8 @@ async function importExternal(id: string, entry: AssetsMailboxEntry): Promise<vo
       throw new Error(`bundle ${url} has no definePlugin default export with id "${id}"`);
     }
     const ctx = createCtx(id);
-    const dockType = registerModule(plugin, ctx);
-    externalPlugins.set(id, { hash: entry.hash, module: plugin, ctx, dockType, styleEl });
+    const { dockType, actionIds } = registerModule(plugin, ctx);
+    externalPlugins.set(id, { hash: entry.hash, module: plugin, ctx, dockType, actionIds, styleEl });
     failedImports.delete(id);
     console.info(`external plugin ${id} loaded`, url);
   } catch (error) {

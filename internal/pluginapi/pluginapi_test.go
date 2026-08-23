@@ -13,7 +13,7 @@ func TestRegistryOrderAndCompleteness(t *testing.T) {
 	for _, entry := range Registry {
 		ids = append(ids, entry.ID)
 	}
-	want := []string{"bus-inspector", "config-store", "viewer.agent-hermes", "viewer.agent-codex", "viewer.agent-opencode", "instance-store", "file-service", "chat", "voice", "terminal", "supervisor", "gateway"}
+	want := []string{"bus-inspector", "config-store", "llm", "viewer.agent-hermes", "viewer.agent-codex", "viewer.agent-opencode", "instance-store", "file-service", "chat", "voice-control", "voice", "terminal", "supervisor", "gateway"}
 	if !reflect.DeepEqual(ids, want) {
 		t.Fatalf("registry ids = %v, want %v", ids, want)
 	}

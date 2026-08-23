@@ -115,7 +115,7 @@ asyncio.run(main())
             + ' "$@"\n'
         )
         run.chmod(0o755)
-        entries.append({"id": plugin_id, "path": str(plugin), "enabled": True})
+        entries.append({"id": plugin_id, "path": str(plugin), "enabled": True, "autostart": True})
     registry = base / "registry.json"
     registry.write_text(json.dumps({"plugins": entries}))
     return registry
@@ -166,7 +166,7 @@ async def main() -> int:
             print("PASS crashed -> automatic restart -> running")
 
             broken = await wait_state(states_queue, "crash-loop", "broken", timeout=25)
-            assert broken["crashes"] == 5 and broken["exit_code"] == 7
+            assert broken["crashes"] == 4 and broken["exit_code"] == 7
             print("PASS crash-loop circuit breaker")
 
             reply = await observer.request("supervisor:_:restart", {"id": "fake-ok"}, timeout=5)

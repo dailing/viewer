@@ -49,12 +49,28 @@ export interface DockProvider {
   create?: () => Promise<void> | void;
 }
 
+/**
+ * A plugin's contribution to the Dock foot: a global action button next to
+ * pin/settings (framework section 8.5). Getters are called during render, so
+ * ref-backed state stays reactive.
+ */
+export interface DockAction {
+  id: string;
+  icon: () => string;
+  title: () => string;
+  /** Optional highlighted state (e.g. listening). */
+  active?: () => boolean;
+  onClick: () => void;
+}
+
 export interface PluginModule {
   id: string;
   /** instance.type → component (lazy via defineAsyncComponent). */
   components?: Record<string, Component>;
   /** Build the Dock contribution; called once at bootstrap with plugin ctx. */
   createDockProvider?: (ctx: PluginCtx) => DockProvider;
+  /** Build global Dock-foot action buttons; called once at bootstrap. */
+  createDockActions?: (ctx: PluginCtx) => DockAction[];
   /** Called once at bootstrap with the plugin-scope ctx. */
   activate?: (ctx: PluginCtx) => void | Promise<void>;
   deactivate?: () => void;

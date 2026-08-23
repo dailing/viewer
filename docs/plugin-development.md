@@ -222,12 +222,20 @@ export default definePlugin({
     singleton: true,          // 单实例面板；多实例见 §3.3
     instances: [],
   }),
+  // 可选：Dock 底部（pin/设置旁）的全局动作按钮，如 voice-control 的耳机开关。
+  // icon/title/active 是 getter，渲染期调用，ref 状态保持响应式。
+  createDockActions: (ctx) => [{
+    id: "my-plugin-action",
+    icon: () => "bi-lightning",
+    title: () => "Do something",
+    onClick: () => { /* ... */ },
+  }],
   activate: (ctx) => { /* 插件级初始化：订阅 mailbox、注册全局行为 */ },
   deactivate: () => { /* 热卸载/热重载前调用；ctx 的订阅会被自动清理 */ },
 });
 ```
 
-shell 对你的模块是**结构化（鸭子类型）校验**：字段名对上即可。
+shell 对你的模块是**结构化（鸭子类型）校验**：字段名对上即可。加载顺序：components → createDockProvider → createDockActions → activate（所以后三者若共享状态要懒初始化，见 voice-control 的 `ensure()`）。
 
 ### 3.3 组件与 ctx
 

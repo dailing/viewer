@@ -3,10 +3,10 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 )
 
 const (
@@ -42,19 +42,13 @@ func renderDispatchPrompt(message string, roles []SuperRole, history string) str
 	return strings.ReplaceAll(result, "{{message}}", message)
 }
 
-func routeWithLLM(ctx context.Context, client *http.Client, config LLMConfig, message string, roles []SuperRole, history string) ([]string, string, error) {
-	if strings.TrimSpace(config.Endpoint) == "" || strings.TrimSpace(config.Model) == "" {
-		return nil, "", fmt.Errorf("LLM router is not configured: set plugins.viewer-chat.llm.endpoint and model")
-	}
-	timeout := config.TimeoutSeconds
-	if timeout <= 0 {
-		timeout = 60
-	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
+func routeWithLLM(ctx context.Context, complete llmCompleter, message string, roles []SuperRole, history string) ([]string, string, error) {
 	messages := []map[string]string{{"role": "system", "content": "Follow the routing prompt exactly. Return only a JSON object with role_ids and rationale."}, {"role": "user", "content": renderDispatchPrompt(message, roles, history)}}
-	result, err := chatCompletion(ctx, client, config, messages, true)
+	result, err := complete(ctx, messages, true, 0)
 	if err != nil {
+		if llmNotConfigured(err) {
+			return nil, "", errors.New("LLM router is not configured: set endpoint and model in the LLM pane")
+		}
 		return nil, "", fmt.Errorf("dispatch model failed: %w", err)
 	}
 	return parseRoute(result.Content, roles)

@@ -2,17 +2,15 @@
 import { ref } from "vue";
 
 import ChatsPanel from "./ChatsPanel.vue";
-import LLMPanel from "./LLMPanel.vue";
 import RolesPanel from "./RolesPanel.vue";
 import RoutesPanel from "./RoutesPanel.vue";
 
-type Tab = "chats" | "roles" | "routes" | "llm";
+type Tab = "chats" | "roles" | "routes";
 const activeTab = ref<Tab>("chats");
 const tabs: Array<{ id: Tab; label: string; icon: string }> = [
   { id: "chats", label: "聊天", icon: "bi-chat-left-text" },
   { id: "roles", label: "Roles", icon: "bi-people" },
   { id: "routes", label: "路由", icon: "bi-signpost-split" },
-  { id: "llm", label: "模型", icon: "bi-cpu" },
 ];
 </script>
 
@@ -26,8 +24,7 @@ const tabs: Array<{ id: Tab; label: string; icon: string }> = [
     <div class="flex-grow-1 min-h-0">
       <ChatsPanel v-if="activeTab === 'chats'" />
       <RolesPanel v-else-if="activeTab === 'roles'" />
-      <RoutesPanel v-else-if="activeTab === 'routes'" />
-      <LLMPanel v-else />
+      <RoutesPanel v-else />
     </div>
   </section>
 </template>

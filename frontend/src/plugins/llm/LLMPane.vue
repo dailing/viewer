@@ -9,7 +9,7 @@
  * - `profiles`: array of saved configs {id, name, endpoint, key, model,
  *   timeout_seconds} — purely a frontend-managed library.
  * - `active`: the ACTIVE config {endpoint, key, model, timeout_seconds}.
- * - `http`: loopback facade config {enabled, port}.
+ * - `http`: facade config {enabled, port, expose}.
  *
  * The endpoint may be the base `/v1` URL or the full `/v1/chat/completions`
  * URL (the llm plugin appends it); any OpenAI-compatible endpoint works.
@@ -48,6 +48,7 @@ interface LlmHttpStatus {
   host: string;
   port: number;
   base_url?: string;
+  expose: boolean;
   last_error?: string;
 }
 
@@ -78,6 +79,7 @@ const saving = ref(false);
 const status = ref("");
 const statusError = ref(false);
 const httpEnabled = ref(false);
+const httpExpose = ref(false);
 const httpPort = ref("18731");
 const httpSaving = ref(false);
 const httpStatus = ref<LlmHttpStatus | null>(null);
@@ -138,7 +140,7 @@ async function load(): Promise<void> {
     const [llm, stored, httpConfig] = await Promise.all([
       ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "active" }) as Promise<LlmActive | null>,
       ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "profiles" }) as Promise<LlmProfile[] | null>,
-      ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "http" }) as Promise<{ enabled?: boolean; port?: number } | null>,
+      ctx.bus.request("config:_:get", { plugin: "plugins.llm", key: "http" }) as Promise<{ enabled?: boolean; port?: number; expose?: boolean } | null>,
     ]);
     active.value = llm ?? {};
     if (stored === null) {
@@ -148,6 +150,7 @@ async function load(): Promise<void> {
       profiles.value = stored;
     }
     httpEnabled.value = httpConfig?.enabled ?? false;
+    httpExpose.value = httpConfig?.expose ?? false;
     httpPort.value = String(httpConfig?.port ?? 18731);
     await refreshHttpStatus();
     // Preselect the active profile when there is one, else the first.
@@ -181,6 +184,7 @@ async function saveHttpConfig(): Promise<void> {
     httpStatus.value = await ctx.bus.request("llm:_:http:configure", {
       enabled: httpEnabled.value,
       port,
+      expose: httpExpose.value,
     }) as LlmHttpStatus;
     httpMessage.value = httpStatus.value.running ? "HTTP 服务已生效" : "HTTP 服务已关闭";
   } catch (error) {
@@ -306,6 +310,10 @@ onBeforeUnmount(() => {
       <label class="form-label small mb-0">端口
         <input v-model="httpPort" type="number" min="1" max="65535" step="1" class="form-control form-control-sm mt-1 http-port">
       </label>
+      <label class="form-check mb-1">
+        <input v-model="httpExpose" class="form-check-input" type="checkbox">
+        <span class="form-check-label small">允许局域网和容器访问</span>
+      </label>
       <button type="button" class="btn btn-sm btn-primary" :disabled="httpSaving" @click="saveHttpConfig">
         {{ httpSaving ? "应用中…" : "应用" }}
       </button>
@@ -319,7 +327,7 @@ onBeforeUnmount(() => {
       <template v-if="httpStatus?.last_error"> {{ httpStatus.last_error }}</template>
     </div>
     <div class="small text-secondary mt-1">
-      仅监听 127.0.0.1。调用方请求中的 model 会被当前启用模型覆盖，因此在这里切换一次，Viewer、Hindsight、infod、gaokao 会一起切换。
+      默认仅监听 127.0.0.1；允许外部访问后绑定 0.0.0.0，Docker 内使用 <code>http://host.docker.internal:{{ httpStatus?.port ?? httpPort }}/v1</code>。调用方请求中的 model 会被当前启用模型覆盖，因此在这里切换一次，Viewer、Hindsight、infod、gaokao 和语音服务会一起切换。每次 HTTP 调用的原始参数、实际转发参数和响应都写入 Viewer 日志（API Key 除外）。
     </div>
   </div>
   <MasterDetail :items="items" :selected-id="selectedId" create-label="＋ 新建模型配置" @select="select" @create="createProfile">

@@ -22,10 +22,10 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "llm", Version: "0.2.0",
+	ID: "llm", Version: "0.3.0",
 	Slots: map[string]any{
 		"llm:_:complete":       map[string]any{"summary": "OpenAI-compatible chat completion; RPC {messages, json_mode?, timeout_seconds?, extra_body?} -> {content, model}; extra_body is merged verbatim into the request body (endpoint-specific)"},
-		"llm:_:http:configure": map[string]any{"summary": "Configure the loopback OpenAI-compatible HTTP facade {enabled, port}"},
+		"llm:_:http:configure": map[string]any{"summary": "Configure the OpenAI-compatible HTTP facade {enabled, port, expose}"},
 		"llm:_:http:status":    map[string]any{"summary": "Report the loopback HTTP facade state"},
 	},
 	Emits: map[string]any{},

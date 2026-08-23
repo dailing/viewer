@@ -1,9 +1,11 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -137,6 +139,10 @@ func TestMigrateLegacyNoLegacyKeys(t *testing.T) {
 }
 
 func TestHTTPFacadeUsesActiveModelAndCanBeDisabled(t *testing.T) {
+	var logOutput bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logOutput, nil)))
+	defer slog.SetDefault(previousLogger)
 	var upstreamModel atomic.Value
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var body map[string]any
@@ -194,13 +200,16 @@ func TestHTTPFacadeUsesActiveModelAndCanBeDisabled(t *testing.T) {
 	}
 	port := probe.Addr().(*net.TCPAddr).Port
 	_ = probe.Close()
-	statusValue, err := caller.Request(ctx, "llm:_:http:configure", map[string]any{"enabled": true, "port": port}, rpcBudget)
+	statusValue, err := caller.Request(ctx, "llm:_:http:configure", map[string]any{"enabled": true, "port": port, "expose": true}, rpcBudget)
 	if err != nil {
 		t.Fatal(err)
 	}
 	status := statusValue.(map[string]any)
 	if status["running"] != true {
 		t.Fatalf("status = %#v", status)
+	}
+	if status["host"] != allInterfacesHost || status["expose"] != true {
+		t.Fatalf("exposed status = %#v", status)
 	}
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -214,6 +223,12 @@ func TestHTTPFacadeUsesActiveModelAndCanBeDisabled(t *testing.T) {
 	}
 	if got := upstreamModel.Load(); got != "central-model" {
 		t.Fatalf("upstream model = %v, want central-model", got)
+	}
+	logged := logOutput.String()
+	for _, expected := range []string{"llm HTTP completion", "request_body", "caller-model", "upstream_body", "central-model", "response_body", "choices", "request_id"} {
+		if !strings.Contains(logged, expected) {
+			t.Fatalf("HTTP trace log missing %q: %s", expected, logged)
+		}
 	}
 
 	modelsResponse, err := http.Get(baseURL + "/v1/models")

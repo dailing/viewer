@@ -1,7 +1,9 @@
 package llm
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,17 +19,19 @@ import (
 )
 
 const (
-	defaultHTTPPort = 18731
-	maxRequestBytes = 1 << 20
-	loopbackHost    = "127.0.0.1"
+	defaultHTTPPort    = 18731
+	maxRequestBytes    = 1 << 20
+	maxResponseLogSize = 4 << 20
+	loopbackHost       = "127.0.0.1"
+	allInterfacesHost  = "0.0.0.0"
 )
 
-// HTTPConfig controls the local OpenAI-compatible facade. It deliberately
-// binds loopback only: this endpoint needs no second API key and is intended
-// for local tools sharing Viewer's centrally selected model.
+// HTTPConfig controls the OpenAI-compatible facade. Expose=false is
+// loopback-only; expose=true also permits LAN and host.docker.internal clients.
 type HTTPConfig struct {
 	Enabled bool `json:"enabled"`
 	Port    int  `json:"port"`
+	Expose  bool `json:"expose"`
 }
 
 type httpStatus struct {
@@ -36,7 +40,15 @@ type httpStatus struct {
 	Host      string `json:"host"`
 	Port      int    `json:"port"`
 	BaseURL   string `json:"base_url,omitempty"`
+	Expose    bool   `json:"expose"`
 	LastError string `json:"last_error,omitempty"`
+}
+
+func (config HTTPConfig) host() string {
+	if config.Expose {
+		return allInterfacesHost
+	}
+	return loopbackHost
 }
 
 func normalizeHTTPConfig(config HTTPConfig) (HTTPConfig, error) {
@@ -126,10 +138,11 @@ func (p *Plugin) currentHTTPStatus() httpStatus {
 	defer p.serverMu.Unlock()
 	status := httpStatus{
 		Enabled: p.httpConfig.Enabled, Running: p.server != nil,
-		Host: loopbackHost, Port: p.httpConfig.Port, LastError: p.httpError,
+		Host: p.httpConfig.host(), Port: p.httpConfig.Port, Expose: p.httpConfig.Expose, LastError: p.httpError,
 	}
 	if status.Running {
-		status.BaseURL = "http://" + net.JoinHostPort(status.Host, strconv.Itoa(status.Port)) + "/v1"
+		// 0.0.0.0 is a bind address, not a useful client destination.
+		status.BaseURL = "http://" + net.JoinHostPort(loopbackHost, strconv.Itoa(status.Port)) + "/v1"
 	}
 	return status
 }
@@ -159,7 +172,7 @@ func (p *Plugin) applyHTTPConfig(raw HTTPConfig) error {
 	var replacement *http.Server
 	var listener net.Listener
 	if config.Enabled {
-		address := net.JoinHostPort(loopbackHost, strconv.Itoa(config.Port))
+		address := net.JoinHostPort(config.host(), strconv.Itoa(config.Port))
 		listener, err = net.Listen("tcp", address)
 		if err != nil {
 			wrapped := fmt.Errorf("listen %s: %w", address, err)
@@ -223,35 +236,73 @@ func (p *Plugin) serveModels(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.Request) {
+	requestID := newRequestID()
+	loggedWriter := newLoggingResponseWriter(writer)
+	writer = loggedWriter
+	writer.Header().Set("X-Viewer-LLM-Request-ID", requestID)
+	startedAt := time.Now()
+	var requestBody, upstreamBody, upstreamEndpoint, requestError string
+	var upstreamStatus int
+	defer func() {
+		slog.Info("llm HTTP completion",
+			"request_id", requestID,
+			"remote_addr", request.RemoteAddr,
+			"user_agent", request.UserAgent(),
+			"request_body", requestBody,
+			"upstream_endpoint", upstreamEndpoint,
+			"upstream_body", upstreamBody,
+			"upstream_status", upstreamStatus,
+			"response_status", loggedWriter.statusCode(),
+			"response_body", loggedWriter.body.String(),
+			"response_truncated", loggedWriter.body.truncated,
+			"error", requestError,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		)
+	}()
+
 	request.Body = http.MaxBytesReader(writer, request.Body, maxRequestBytes)
+	rawBody, err := io.ReadAll(request.Body)
+	requestBody = string(rawBody)
+	if err != nil {
+		requestError = err.Error()
+		writeOpenAIError(writer, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
 	var body map[string]any
-	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(rawBody, &body); err != nil {
+		requestError = err.Error()
 		writeOpenAIError(writer, http.StatusBadRequest, "invalid JSON request: "+err.Error())
 		return
 	}
 	if _, ok := body["messages"].([]any); !ok {
+		requestError = "messages must be an array"
 		writeOpenAIError(writer, http.StatusBadRequest, "messages must be an array")
 		return
 	}
 	config, err := p.activeConfig(request.Context())
 	if err != nil {
+		requestError = err.Error()
 		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if strings.TrimSpace(config.Endpoint) == "" || strings.TrimSpace(config.Model) == "" {
+		requestError = "LLM is not configured"
 		writeOpenAIError(writer, http.StatusServiceUnavailable, "LLM is not configured")
 		return
 	}
 	body["model"] = config.Model
 	encoded, err := json.Marshal(body)
 	if err != nil {
+		requestError = err.Error()
 		writeOpenAIError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
+	upstreamBody = string(encoded)
 	endpoint := strings.TrimRight(config.Endpoint, "/")
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
 		endpoint += "/chat/completions"
 	}
+	upstreamEndpoint = endpoint
 	timeout := config.TimeoutSeconds
 	if timeout <= 0 {
 		timeout = defaultTimeout
@@ -260,6 +311,7 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 	defer cancel()
 	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(encoded)))
 	if err != nil {
+		requestError = err.Error()
 		writeOpenAIError(writer, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -270,17 +322,87 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 	}
 	response, err := p.httpClient.Do(upstream)
 	if err != nil {
+		requestError = err.Error()
 		writeOpenAIError(writer, http.StatusBadGateway, err.Error())
 		return
 	}
 	defer response.Body.Close()
+	upstreamStatus = response.StatusCode
 	for _, header := range []string{"Content-Type", "Cache-Control"} {
 		if value := response.Header.Get(header); value != "" {
 			writer.Header().Set(header, value)
 		}
 	}
 	writer.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(writer, response.Body)
+	if _, err := io.Copy(writer, response.Body); err != nil {
+		requestError = err.Error()
+	}
+}
+
+type limitedLogBuffer struct {
+	bytes.Buffer
+	truncated bool
+}
+
+func (buffer *limitedLogBuffer) Write(value []byte) (int, error) {
+	originalLength := len(value)
+	remaining := maxResponseLogSize - buffer.Len()
+	if remaining <= 0 {
+		buffer.truncated = buffer.truncated || originalLength > 0
+		return originalLength, nil
+	}
+	if len(value) > remaining {
+		value = value[:remaining]
+		buffer.truncated = true
+	}
+	_, _ = buffer.Buffer.Write(value)
+	return originalLength, nil
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	body   limitedLogBuffer
+	status int
+}
+
+func newLoggingResponseWriter(writer http.ResponseWriter) *loggingResponseWriter {
+	return &loggingResponseWriter{ResponseWriter: writer}
+}
+
+func (writer *loggingResponseWriter) WriteHeader(status int) {
+	if writer.status == 0 {
+		writer.status = status
+	}
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *loggingResponseWriter) Write(value []byte) (int, error) {
+	if writer.status == 0 {
+		writer.status = http.StatusOK
+	}
+	_, _ = writer.body.Write(value)
+	return writer.ResponseWriter.Write(value)
+}
+
+func (writer *loggingResponseWriter) Flush() {
+	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (writer *loggingResponseWriter) statusCode() int {
+	if writer.status == 0 {
+		return http.StatusOK
+	}
+	return writer.status
+}
+
+func newRequestID() string {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err == nil {
+		return fmt.Sprintf("%x", value[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {

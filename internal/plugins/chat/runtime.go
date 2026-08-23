@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"viewer/internal/agentdriver"
 	"viewer/sdk/go/busclient"
 )
 
@@ -44,6 +45,9 @@ type queuedMessage struct {
 	before   int64
 	forceNew bool
 	enqueued int64
+	// dispatchID of the dispatch that queued this message, so the turn that
+	// eventually runs it links back to the user message's turn_id.
+	dispatchID string
 }
 
 func (p *Plugin) handleDispatch(frame busclient.Frame) {
@@ -115,7 +119,7 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 	for _, role := range selected {
 		key := runtimeKey(chat.ID, role.ID)
 		if !parallel && p.busy[key] {
-			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, role: role, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis()})
+			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, role: role, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis(), dispatchID: dispatchID})
 			queuedRoleIDs = append(queuedRoleIDs, role.ID)
 			continue
 		}
@@ -140,7 +144,7 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		if !parallel {
 			defer p.releaseBusy(startedKeys)
 		}
-		p.runRelay(*chat, workspace, startedRoles, request.Message, user.CreatedAt, request.ForceNewSession, parallel)
+		p.runRelay(*chat, workspace, startedRoles, request.Message, user.CreatedAt, request.ForceNewSession, parallel, dispatchID)
 	}()
 	p.reply(frame, reply, nil)
 	close(startGate)
@@ -276,7 +280,7 @@ func (p *Plugin) startQueued(key string) {
 			go func() {
 				defer p.wg.Done()
 				defer p.releaseBusy([]string{key})
-				p.runRelay(*chat, workspace, []SuperRole{entry.role}, entry.message, entry.before, entry.forceNew, false)
+				p.runRelay(*chat, workspace, []SuperRole{entry.role}, entry.message, entry.before, entry.forceNew, false, entry.dispatchID)
 			}()
 			return
 		}
@@ -285,7 +289,7 @@ func (p *Plugin) startQueued(key string) {
 	p.releaseBusy([]string{key})
 }
 
-func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, message string, before int64, forceNew bool, parallel bool) {
+func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, message string, before int64, forceNew bool, parallel bool, dispatchID string) {
 	for _, role := range roles {
 		turnID := newID()
 		key := runtimeKey(chat.ID, role.ID)
@@ -295,7 +299,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			// untouched; the entry is removed when the turn ends.
 			key += "\x00" + turnID
 		}
-		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, StartedAt: nowMillis()}
+		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, StartedAt: nowMillis()}
 		if err := p.store.beginTurn(turn); err != nil {
 			slog.Error("chat turn persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
 			continue
@@ -307,8 +311,16 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		reason, summaryProvider := "error", ""
 		endErr := ""
 		attempts := []map[string]any{}
+		// resolvedTarget records the candidate that actually runs the turn:
+		// the planned first candidate at resolve time, replaced on failover.
+		// Persisted on the turn row and published on the turn feed so the
+		// pane's routing labels come from the execution record.
+		resolved := agentdriver.Target{}
 		if err != nil {
 			slog.Warn("chat routing candidate resolution failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
+		} else if len(candidates) > 0 {
+			resolved = candidates[0].target
+			p.recordTurnTarget(chat.ID, turnID, role, resolved, dispatchID)
 		}
 	candidateLoop:
 		for _, candidate := range candidates {
@@ -325,6 +337,10 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 					continue candidateLoop
 				}
 				summaryProvider = candidate.target.Agent
+				if candidate.target.Agent != resolved.Agent || candidate.target.Provider != resolved.Provider || candidate.target.Model != resolved.Model {
+					resolved = candidate.target
+					p.recordTurnTarget(chat.ID, turnID, role, resolved, dispatchID)
+				}
 				prompt := message
 				contextBytes, promptMode := 0, "existing_session"
 				if fresh {
@@ -409,7 +425,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		}
 		slog.Info("chat turn completed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "role_name", role.Name, "stop_reason", reason, "latency_ms", nowMillis()-turn.StartedAt, "attempts", attempts)
 		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "attempts": attempts, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
-		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "completed", "stop_reason": reason})
+		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "completed", "stop_reason": reason, "dispatch_id": dispatchID, "agent": resolved.Agent, "provider": resolved.Provider, "model": resolved.Model})
 		if reason != "cancelled" {
 			p.wg.Add(1)
 			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, summaryProvider)
@@ -429,6 +445,17 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 
 func shouldRetryFreshHermesSession(agent string, fresh bool, reason string, hadEvents, alreadyRetried bool) bool {
 	return agent == "hermes" && !fresh && reason == "refusal" && !hadEvents && !alreadyRetried
+}
+
+// recordTurnTarget persists the turn's routing target and announces it on
+// the turn lifecycle feed (phase "target"), so panes label the turn with
+// the candidate that actually runs it — the planned candidate right after
+// resolution, the failover replacement when a later candidate takes over.
+func (p *Plugin) recordTurnTarget(chatID, turnID string, role SuperRole, target agentdriver.Target, dispatchID string) {
+	if err := p.store.setTurnTarget(turnID, target.Agent, target.Provider, target.Model); err != nil {
+		slog.Warn("chat turn target persistence failed", "chat_id", chatID, "turn_id", turnID, "role_id", role.ID, "error", err)
+	}
+	p.publish("chat:_:turn", map[string]any{"chat_id": chatID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "target", "dispatch_id": dispatchID, "agent": target.Agent, "provider": target.Provider, "model": target.Model})
 }
 
 // emitTurnFailure records a failed/aborted turn as a visible "error" message

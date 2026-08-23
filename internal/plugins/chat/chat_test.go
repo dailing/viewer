@@ -379,6 +379,7 @@ func TestQueuedAndParallelDispatch(t *testing.T) {
 	type dispatchReply struct {
 		Started []string `json:"started_role_ids"`
 		Queued  []string `json:"queued_role_ids"`
+		ID      string   `json:"dispatch_id"`
 	}
 	dispatch := func(payload map[string]any) dispatchReply {
 		value, err := caller.Request(ctx, "chat:_:dispatch", payload, 10*time.Second)
@@ -412,6 +413,7 @@ func TestQueuedAndParallelDispatch(t *testing.T) {
 	if len(reply.Started) != 1 || len(reply.Queued) != 0 {
 		t.Fatalf("first dispatch should start immediately: %+v", reply)
 	}
+	firstDispatchID := reply.ID
 	first := nextPrompt()
 	if !strings.Contains(first.text, "first") {
 		t.Fatalf("first prompt text %q should contain the message", first.text)
@@ -422,6 +424,7 @@ func TestQueuedAndParallelDispatch(t *testing.T) {
 	if len(reply.Started) != 0 || len(reply.Queued) != 1 || reply.Queued[0] != "role-q" {
 		t.Fatalf("second dispatch should be queued: %+v", reply)
 	}
+	queuedDispatchID := reply.ID
 	select {
 	case record := <-prompts:
 		t.Fatalf("queued message started while the first turn was still running: %+v", record)
@@ -472,6 +475,52 @@ func TestQueuedAndParallelDispatch(t *testing.T) {
 			t.Fatalf("state did not drain: busy=%d queues=%d runtimes=%d", busyCount, queueCount, runtimeCount)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 6. Every turn persisted its execution target (agent/provider/model)
+	// and links back to its dispatch — the queued turn proves the dispatch
+	// id threads through the busy queue.
+	assertTarget := func(turnID, dispatchID string) {
+		t.Helper()
+		turn, err := p.store.turn(turnID)
+		if err != nil || turn == nil {
+			t.Fatalf("turn %s missing: %v", turnID, err)
+		}
+		if turn.Agent != "hermes" || turn.Provider != "default" || turn.Model != "m" {
+			t.Fatalf("turn %s target = %q/%q/%q, want hermes/default/m", turnID, turn.Agent, turn.Provider, turn.Model)
+		}
+		if turn.DispatchID != dispatchID {
+			t.Fatalf("turn %s dispatch = %q, want %q", turnID, turn.DispatchID, dispatchID)
+		}
+	}
+	assertTarget(first.turnID, firstDispatchID)
+	assertTarget(queued.turnID, queuedDispatchID)
+	assertTarget(parallel.turnID, reply.ID)
+
+	// 7. chats:list exposes the per-turn targets for the pane's labels.
+	value, err := caller.Request(ctx, "chat:_:chats:list", map[string]any{"chat_id": "chat-q"}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("chats:list: %v", err)
+	}
+	var list struct {
+		TurnTargets map[string]struct {
+			DispatchID string `json:"dispatch_id"`
+			RoleName   string `json:"role_name"`
+			Agent      string `json:"agent"`
+			Provider   string `json:"provider"`
+			Model      string `json:"model"`
+		} `json:"turn_targets"`
+	}
+	raw, _ := json.Marshal(value)
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatalf("decode chats:list reply: %v", err)
+	}
+	target, ok := list.TurnTargets[first.turnID]
+	if !ok {
+		t.Fatalf("chats:list turn_targets missing turn %s: %v", first.turnID, list.TurnTargets)
+	}
+	if target.Agent != "hermes" || target.Provider != "default" || target.Model != "m" || target.DispatchID != firstDispatchID || target.RoleName != "Q" {
+		t.Fatalf("turn_targets[%s] = %+v, want hermes/default/m dispatch %s role Q", first.turnID, target, firstDispatchID)
 	}
 }
 

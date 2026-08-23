@@ -14,7 +14,7 @@
  * plus per-chat caps. Trimming drops the oldest half and resets the older
  * pagination boundary so scrolling to the top transparently re-fetches.
  */
-import type { Chat, ChatBlock, ChatMessage, Role, Workspace } from "./types";
+import type { Chat, ChatBlock, ChatMessage, Role, TurnTargetEntry, Workspace } from "./types";
 
 export interface MessageCursor {
   ts: number;
@@ -35,6 +35,8 @@ export interface ChatCacheEntry {
   loadedLo: number;
   /** Max occurred_at among loaded blocks (delta fetch boundary). */
   blockHigh: number;
+  /** Per-turn routing labels (turn id → execution target) for the loaded span. */
+  turnTargets: Record<string, TurnTargetEntry>;
 }
 
 const MAX_CHATS = 24;

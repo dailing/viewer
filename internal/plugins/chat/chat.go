@@ -388,6 +388,15 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 	if request != nil {
 		if chatID, _ := request["chat_id"].(string); chatID != "" {
 			result["running_turns"] = p.runningTurns(chatID)
+			// Per-turn routing targets (the execution record behind the
+			// pane's agent/provider/model labels): the whole chat's targeted
+			// turns, so cached windows and delta refreshes both reseed fully.
+			targets, targetsErr := p.store.chatTurnTargets(chatID)
+			if targetsErr != nil {
+				p.reply(frame, nil, targetsErr)
+				return
+			}
+			result["turn_targets"] = turnTargetsPayload(targets)
 		}
 	}
 	if request != nil && request["include_messages"] == true {
@@ -425,6 +434,25 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 // escaping plus a fixed per-block envelope.
 const blocksReplyBudget = 700 * 1024
 
+// turnTargetsPayload renders targeted turns as turn_id → execution target
+// for the pane's routing labels. dispatch_id links a turn back to its
+// triggering user message (whose turn_id is the dispatch id), letting the
+// user box's "→" label rebuild from the same records.
+func turnTargetsPayload(turns []Turn) map[string]any {
+	values := make(map[string]any, len(turns))
+	for _, turn := range turns {
+		values[turn.ID] = map[string]any{
+			"dispatch_id": turn.DispatchID,
+			"role_id":     turn.RoleID,
+			"role_name":   turn.RoleName,
+			"agent":       turn.Agent,
+			"provider":    turn.Provider,
+			"model":       turn.Model,
+		}
+	}
+	return values
+}
+
 func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 	request, _ := pluginrpc.Object(frame)
 	chatID, _ := request["chat_id"].(string)
@@ -448,6 +476,13 @@ func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 	}
 	values, truncated, nextAfter := budgetBlockPayloads(blocks, turnRoles)
 	result := map[string]any{"blocks": values}
+	targeted := make([]Turn, 0, len(turns))
+	for _, turn := range turns {
+		if turn.Agent != "" {
+			targeted = append(targeted, turn)
+		}
+	}
+	result["turn_targets"] = turnTargetsPayload(targeted)
 	if truncated {
 		// Resume with after=next_after; boundary blocks sharing the same
 		// occurred_at are re-sent and deduplicated by id on the client.

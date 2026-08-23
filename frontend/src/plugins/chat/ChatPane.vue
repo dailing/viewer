@@ -4,7 +4,8 @@
  * user message boxes and per-role turn boxes. Inside a role turn box,
  * markdown text segments (from `messages`) and tool-activity rows (from
  * non-`agent_text` `message_blocks`) interleave strictly by time. Box header
- * carries the info strip: role icon + name, running status, time. Markdown
+ * carries the info strip: role icon + name, running status, routing target
+ * (from the turn's persisted execution record — blank when none), time. Markdown
  * goes through renderMarkdown (markdown-it + KaTeX + hljs line numbers +
  * mermaid); styling follows the --markdown-* theme variables (markdownStyle
  * store, customizable via the settings pane).
@@ -16,7 +17,7 @@ import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
-import type { Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, Role, Workspace } from "./types";
+import type { Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, Role, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -46,9 +47,12 @@ const pendingTurns = ref(new Map<string, { key: string; roleId: string; label: s
 // returns, and replaced by the real user message once the bus delivers it.
 interface PendingSend { key: string; text: string; ts: number; sending: boolean; routed: string; failed: string }
 const pendingSends = ref<PendingSend[]>([]);
-// Routed label transferred onto the real user message (by id) when it lands,
-// so the arrow survives the optimistic box being replaced.
-const routedLabels = new Map<string, string>();
+// Per-turn routing targets from the backend execution record (turns table):
+// chats:list / blocks:list replies seed the whole chat's targeted turns and
+// the chat:_:turn feed (phases "target"/"completed") updates entries live.
+// Both routing labels (user box "→", role box header) render from this map;
+// turns without a record — history predating persistence — show no label.
+const turnTargets = ref(new Map<string, TurnTargetEntry>());
 const error = ref("");
 const threadRef = ref<HTMLElement | null>(null);
 const messageEndRef = ref<HTMLElement | null>(null);
@@ -108,9 +112,11 @@ const timeline = computed<TimelineBox[]>(() => {
   for (const message of messages.value) {
     if (message.role === "user") {
       boxes.push({
-        key: `u:${message.id}`, kind: "user", label: "You", roleId: "", turnId: "", ts: message.created_at,
+        // User messages carry the dispatch id as turn_id; the dispatch's
+        // turn records (keyed by that id) supply the "→" routing label.
+        key: `u:${message.id}`, kind: "user", label: "You", roleId: "", turnId: message.turn_id, ts: message.created_at,
         segments: [{ id: message.id, kind: "text", ts: message.created_at, text: message.text }],
-        routed: routedLabels.get(message.id) ?? "",
+        routed: dispatchLabels.value.get(message.turn_id) ?? "",
       });
       continue;
     }
@@ -258,7 +264,9 @@ function resolvePendingTurn(roleId: string | undefined): void {
 
 /** Role's configured execution target: agent / provider / model (first enabled candidate).
  *  Honors chat-level routing override before falling back to the role's own
- *  policy and then the workspace default. */
+ *  policy and then the workspace default. Used ONLY for the optimistic
+ *  dispatch label on the just-sent box — persisted turn targets take over
+ *  once the real message and turn records land. */
 function roleTargetLabel(roleId: string): string {
   const ws = workspace.value;
   if (!ws || !roleId) return "";
@@ -269,6 +277,51 @@ function roleTargetLabel(roleId: string): string {
   const candidate = policy?.candidates.find((item) => item.enabled);
   if (!candidate) return "";
   return [candidate.agent_id, candidate.provider_id, candidate.model_id].filter(Boolean).join(" / ");
+}
+
+/** Normalize a backend turn target into the pane's entry shape; null when
+ *  the turn has no usable target (blank label → nothing rendered). */
+function turnTargetEntry(raw: TurnTarget | undefined): TurnTargetEntry | null {
+  if (!raw) return null;
+  const label = [raw.agent, raw.provider, raw.model].filter(Boolean).join(" / ");
+  if (!label) return null;
+  return { dispatchId: raw.dispatch_id ?? "", roleId: raw.role_id ?? "", roleName: raw.role_name ?? "", label };
+}
+
+/** Merge one turn-target update; keeps an existing dispatchId when the
+ *  incoming source (a live frame) doesn't carry it. */
+function upsertTurnTarget(turnId: string, entry: TurnTargetEntry): void {
+  const existing = turnTargets.value.get(turnId);
+  const merged = entry.dispatchId ? entry : { ...entry, dispatchId: existing?.dispatchId ?? "" };
+  if (existing && existing.label === merged.label && existing.dispatchId === merged.dispatchId && existing.roleId === merged.roleId && existing.roleName === merged.roleName) return;
+  turnTargets.value = new Map([...turnTargets.value, [turnId, merged]]);
+}
+
+/** Seed turn targets from a chats:list / blocks:list reply (turn_id → target). */
+function seedTurnTargets(map: Record<string, TurnTarget> | undefined): void {
+  if (!map) return;
+  for (const [turnId, raw] of Object.entries(map)) {
+    const entry = turnTargetEntry(raw);
+    if (entry) upsertTurnTarget(turnId, entry);
+  }
+}
+
+/** dispatch_id → "RoleName → agent / provider / model · …" for user boxes,
+ *  derived from the dispatch's turn records (one pass per target change). */
+const dispatchLabels = computed<Map<string, string>>(() => {
+  const byDispatch = new Map<string, string[]>();
+  for (const entry of turnTargets.value.values()) {
+    if (!entry.dispatchId) continue;
+    const part = `${entry.roleName || "Agent"} → ${entry.label}`;
+    byDispatch.set(entry.dispatchId, [...(byDispatch.get(entry.dispatchId) ?? []), part]);
+  }
+  return new Map([...byDispatch].map(([id, parts]) => [id, parts.join("  ·  ")]));
+});
+
+/** Role box header label: the turn's recorded execution target, blank for
+ *  turns without a record. */
+function turnTargetLabel(box: TimelineBox): string {
+  return box.turnId ? turnTargets.value.get(box.turnId)?.label ?? "" : "";
 }
 
 interface CtxUsage { used: number; size: number }
@@ -377,6 +430,7 @@ function writeBack(): void {
     olderCursor: olderCursor.value ? { ...olderCursor.value } : null,
     loadedLo: loadedLo.value,
     blockHigh,
+    turnTargets: Object.fromEntries(turnTargets.value),
   };
   saveEntry(ctx.instanceId, entry);
 }
@@ -391,6 +445,7 @@ function hydrate(entry: ChatCacheEntry): void {
   hasOlder.value = entry.hasOlder;
   olderCursor.value = entry.olderCursor ? { ...entry.olderCursor } : null;
   loadedLo.value = entry.loadedLo;
+  turnTargets.value = new Map(Object.entries(entry.turnTargets ?? {}));
   setChrome();
 }
 
@@ -482,15 +537,11 @@ function mergeMessage(value: ChatMessage): void {
   const index = messages.value.findIndex((item) => item.id === value.id);
   if (index >= 0) messages.value.splice(index, 1, value); else messages.value.push(value);
   if (value.role === "user") {
-    // The real user message supersedes its optimistic send box: transfer
-    // the routed label onto the real box, then drop the placeholder.
+    // The real user message supersedes its optimistic send box; the "→"
+    // routing label re-derives from the dispatch's turn records.
     let sendIndex = pendingSends.value.findIndex((item) => item.text === value.text.trim());
     if (sendIndex < 0) sendIndex = pendingSends.value.findIndex((item) => !item.sending && !item.failed);
-    if (sendIndex >= 0) {
-      const routed = pendingSends.value[sendIndex].routed;
-      if (routed) routedLabels.set(value.id, routed);
-      pendingSends.value.splice(sendIndex, 1);
-    }
+    if (sendIndex >= 0) pendingSends.value.splice(sendIndex, 1);
   }
   resolvePendingTurn(value.sender?.role_id);
   if (scrollOnNextUserMessage && value.role === "user") {
@@ -571,6 +622,7 @@ async function fetchBlocks(after: number, before = 0): Promise<ChatBlock[]> {
     const list = await (ctx.bus.request("chat:_:blocks:list", {
       chat_id: ctx.instanceId, after: cursor, ...(before > 0 ? { before } : {}),
     }) as Promise<ChatBlockList>);
+    seedTurnTargets(list.turn_targets);
     for (const block of list.blocks ?? []) byId.set(block.id, block);
     if (!(list.truncated ?? false) || !list.next_after) break;
     cursor = list.next_after;
@@ -631,6 +683,7 @@ async function load(fresh = false): Promise<void> {
     }) as Promise<ChatList>);
     chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
     seedRunningTurns(list);
+    seedTurnTargets(list.turn_targets);
     const page = list.messages ?? [];
     messages.value = page;
     hasOlder.value = list.has_more ?? false;
@@ -688,6 +741,7 @@ async function refreshDelta(): Promise<boolean> {
       firstHasMore = list.has_more ?? false;
       seedRunningTurns(list);
     }
+    seedTurnTargets(list.turn_targets);
     const page = list.messages ?? [];
     fetched.push(...page);
     // A no-cursor top page reports "older exist" as has_more — nothing newer
@@ -761,6 +815,7 @@ async function loadOlder(): Promise<void> {
       hasOlder.value = false;
       return;
     }
+    seedTurnTargets(list.turn_targets);
     const newLo = page[0].created_at;
     const spanBlocks = await fetchBlocks(newLo, loadedLo.value);
     const known = new Set(messages.value.map((item) => item.id));
@@ -798,6 +853,7 @@ async function loadNewer(): Promise<void> {
       ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}), limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     seedRunningTurns(list);
+    seedTurnTargets(list.turn_targets);
     const page = (list.messages ?? []).filter((item) => !messages.value.some((known) => known.id === item.id));
     if (page.length > 0) {
       const spanLo = cursor?.ts ?? loadedLo.value;
@@ -980,8 +1036,14 @@ onMounted(() => {
   // this feed (not the dispatch reply) is the authority on what is running;
   // it also drives the running chips of parallel turns of the same role.
   ctx.bus.subscribe("chat:_:turn", (frame) => {
-    const value = frame.value as { chat_id: string; turn_id: string; role_id: string; phase: string };
+    const value = frame.value as { chat_id: string; turn_id: string; role_id: string; role_name?: string; phase: string; dispatch_id?: string; agent?: string; provider?: string; model?: string };
     if (value.chat_id !== ctx.instanceId || !value.turn_id) return;
+    // "target" phase (and completed frames) carry the turn's execution
+    // target straight from the backend record — the routing labels' source.
+    if (value.phase === "target" || value.phase === "completed") {
+      const entry = turnTargetEntry({ dispatch_id: value.dispatch_id, role_id: value.role_id, role_name: value.role_name, agent: value.agent, provider: value.provider, model: value.model });
+      if (entry) upsertTurnTarget(value.turn_id, entry);
+    }
     if (value.phase === "started") {
       if (!runningTurns.value.has(value.turn_id)) {
         runningTurns.value = new Map([...runningTurns.value, [value.turn_id, { roleId: value.role_id }]]);
@@ -1056,7 +1118,7 @@ onMounted(() => {
                 <span class="spinner-border spinner-border-sm" aria-hidden="true" /> running
               </template>
             </button>
-            <span v-if="box.kind === 'role' && roleTargetLabel(box.roleId)" class="chat-meta-detail">{{ roleTargetLabel(box.roleId) }}</span>
+            <span v-if="box.kind === 'role' && turnTargetLabel(box)" class="chat-meta-detail">{{ turnTargetLabel(box) }}</span>
             <span v-if="box.kind === 'role' && usageLabel(box)" class="chat-meta-detail" :title="usageTitle(box)">{{ usageLabel(box) }}</span>
             <span class="chat-time">{{ formatTime(box.ts) }}</span>
           </div>

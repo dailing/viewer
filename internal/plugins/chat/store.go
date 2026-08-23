@@ -106,10 +106,21 @@ func (m Message) payload() map[string]any {
 }
 
 type Turn struct {
-	ID         string `gorm:"primaryKey"`
-	ChatID     string `gorm:"index;not null"`
-	RoleID     string `gorm:"index"`
-	RoleName   string
+	ID       string `gorm:"primaryKey"`
+	ChatID   string `gorm:"index;not null"`
+	RoleID   string `gorm:"index"`
+	RoleName string
+	// DispatchID links the turn back to the dispatch whose user message
+	// triggered it (user messages carry the dispatch id as their turn_id),
+	// so the user box's routing label can be rebuilt from turn records.
+	DispatchID string `gorm:"index"`
+	// Agent/Provider/Model record the routing candidate that actually
+	// executed the turn (planned candidate at resolve time, updated on
+	// failover). Empty on turns that predate this column or never resolved
+	// a candidate — the frontend renders no routing label for those.
+	Agent      string
+	Provider   string
+	Model      string
 	StartedAt  int64
 	EndedAt    *int64
 	StopReason *string
@@ -368,6 +379,21 @@ func (s *store) message(id string) (*Message, error) {
 func (s *store) completeTurn(id, reason string) error {
 	ended := nowMillis()
 	return s.db.Model(&Turn{}).Where("id = ?", id).Updates(map[string]any{"ended_at": ended, "stop_reason": reason}).Error
+}
+
+// setTurnTarget records the routing candidate executing the turn (planned
+// candidate first, replaced on failover so the row ends on the candidate
+// that actually ran).
+func (s *store) setTurnTarget(id, agent, provider, model string) error {
+	return s.db.Model(&Turn{}).Where("id = ?", id).Updates(map[string]any{"agent": agent, "provider": provider, "model": model}).Error
+}
+
+// chatTurnTargets returns the chat's turns that have an execution target
+// recorded — the source of the frontend's per-turn routing labels.
+func (s *store) chatTurnTargets(chatID string) ([]Turn, error) {
+	var values []Turn
+	err := s.db.Where("chat_id = ? AND agent <> ''", chatID).Find(&values).Error
+	return values, err
 }
 
 func (s *store) turn(id string) (*Turn, error) {

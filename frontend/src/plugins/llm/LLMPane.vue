@@ -33,6 +33,7 @@ interface LlmProfile {
   key: string;
   model: string;
   timeout_seconds?: number;
+  extra_body?: Record<string, unknown>;
 }
 
 interface LlmActive {
@@ -40,6 +41,7 @@ interface LlmActive {
   key?: string;
   model?: string;
   timeout_seconds?: number;
+  extra_body?: Record<string, unknown>;
 }
 
 interface LlmHttpStatus {
@@ -74,7 +76,7 @@ const DEFAULT_PROFILES: LlmProfile[] = [
 const profiles = ref<LlmProfile[]>([]);
 const active = ref<LlmActive>({});
 const selectedId = ref("");
-const form = reactive({ name: "", endpoint: "", model: "", key: "", timeout: "" });
+const form = reactive({ name: "", endpoint: "", model: "", key: "", timeout: "", extraBody: "" });
 const saving = ref(false);
 const status = ref("");
 const statusError = ref(false);
@@ -132,6 +134,7 @@ function select(id: string): void {
   form.model = profile.model;
   form.key = profile.key;
   form.timeout = profile.timeout_seconds === undefined ? "" : String(profile.timeout_seconds);
+  form.extraBody = profile.extra_body === undefined ? "" : JSON.stringify(profile.extra_body);
   setStatus("");
 }
 
@@ -218,6 +221,17 @@ function formTimeoutSeconds(): number | undefined {
   return form.timeout.trim() !== "" && Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
 }
 
+/** Parse the default-request-fields JSON; undefined when blank, throws on invalid input. */
+function formExtraBody(): Record<string, unknown> | undefined {
+  const text = form.extraBody.trim();
+  if (text === "") return undefined;
+  const parsed: unknown = JSON.parse(text);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("默认请求参数必须是 JSON 对象");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 async function saveProfile(): Promise<void> {
   if (saving.value) return;
   const profile = profiles.value.find((item) => item.id === selectedId.value);
@@ -229,9 +243,16 @@ async function saveProfile(): Promise<void> {
     setStatus("接口地址和模型不能为空。", true);
     return;
   }
+  let extraBody: Record<string, unknown> | undefined;
+  try {
+    extraBody = formExtraBody();
+  } catch (error) {
+    setStatus(`默认请求参数无效：${String(error)}`, true);
+    return;
+  }
   saving.value = true;
   setStatus("");
-  Object.assign(profile, { name, endpoint, model, key: form.key.trim(), timeout_seconds: formTimeoutSeconds() });
+  Object.assign(profile, { name, endpoint, model, key: form.key.trim(), timeout_seconds: formTimeoutSeconds(), extra_body: extraBody });
   try {
     await persistProfiles();
     // Editing the config that is currently in use must take effect
@@ -252,6 +273,7 @@ async function activate(profile: LlmProfile): Promise<void> {
     key: profile.key.trim(),
     model: profile.model.trim(),
     timeout_seconds: profile.timeout_seconds,
+    extra_body: profile.extra_body,
   };
   await ctx.bus.request("config:_:set", { plugin: "plugins.llm", key: "active", value });
   active.value = value;
@@ -348,6 +370,18 @@ onBeforeUnmount(() => {
         <label class="form-label small w-100">超时（秒，可空）
           <input v-model="form.timeout" type="number" min="1" step="1" class="form-control form-control-sm mt-1" placeholder="默认 60；本地小并发服务建议 ≥60">
         </label>
+        <label class="form-label small w-100">默认请求参数（JSON 对象，可空）
+          <textarea
+            v-model="form.extraBody"
+            rows="2"
+            class="form-control form-control-sm mt-1 font-monospace"
+            placeholder='{"reasoning_effort":"medium"}'
+            spellcheck="false"
+          ></textarea>
+        </label>
+        <div class="small text-secondary">
+          每次调用都会并入这些字段（如 thinking 档位）；调用方自带的同名字段优先。端点不认识的字段可能被拒为 400。
+        </div>
         <div class="d-flex align-items-center gap-2 mt-1">
           <button
             type="button"

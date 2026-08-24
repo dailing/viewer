@@ -89,6 +89,37 @@ func TestCompleteExtraBody(t *testing.T) {
 	}
 }
 
+func TestCompleteConfigExtraBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		// Config default applied; the per-call extra_body wins per key.
+		if body["reasoning_effort"] != "low" {
+			t.Errorf("caller extra_body must override the config default per key, body = %v", body)
+		}
+		if body["seed"] != float64(7) {
+			t.Errorf("config-only default missing, body = %v", body)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		encoded, _ := json.Marshal(map[string]any{
+			"model":   "fake",
+			"choices": []map[string]any{{"message": map[string]string{"content": "ok"}}},
+		})
+		_, _ = writer.Write(encoded)
+	}))
+	defer server.Close()
+	config := Config{
+		Endpoint:  server.URL,
+		Model:     "m",
+		ExtraBody: map[string]any{"reasoning_effort": "medium", "seed": 7},
+	}
+	extra := map[string]any{"reasoning_effort": "low"}
+	result, err := complete(context.Background(), server.Client(), config, []map[string]string{{"role": "user", "content": "hi"}}, false, extra)
+	if err != nil || result.Content != "ok" {
+		t.Fatalf("result = %#v err = %v", result, err)
+	}
+}
+
 func TestMigrateLegacy(t *testing.T) {
 	stored := map[string]json.RawMessage{}
 	get := func(namespace, key string) (json.RawMessage, bool, error) {

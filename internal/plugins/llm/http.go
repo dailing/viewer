@@ -290,6 +290,11 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 		writeOpenAIError(writer, http.StatusServiceUnavailable, "LLM is not configured")
 		return
 	}
+	for key, value := range config.ExtraBody {
+		if _, exists := body[key]; !exists {
+			body[key] = value
+		}
+	}
 	body["model"] = config.Model
 	encoded, err := json.Marshal(body)
 	if err != nil {

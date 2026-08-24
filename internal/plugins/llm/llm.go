@@ -24,7 +24,7 @@ import (
 var Manifest = busclient.Manifest{
 	ID: "llm", Version: "0.3.0",
 	Slots: map[string]any{
-		"llm:_:complete":       map[string]any{"summary": "OpenAI-compatible chat completion; RPC {messages, json_mode?, timeout_seconds?, extra_body?} -> {content, model}; extra_body is merged verbatim into the request body (endpoint-specific)"},
+		"llm:_:complete":       map[string]any{"summary": "OpenAI-compatible chat completion; RPC {messages, json_mode?, timeout_seconds?, extra_body?} -> {content, model}; extra_body is merged verbatim into the request body over the active config's default extra_body (callers win per key; endpoint-specific)"},
 		"llm:_:http:configure": map[string]any{"summary": "Configure the OpenAI-compatible HTTP facade {enabled, port, expose}"},
 		"llm:_:http:status":    map[string]any{"summary": "Report the loopback HTTP facade state"},
 	},
@@ -50,6 +50,12 @@ type Config struct {
 	// Local servers with few parallel slots queue under load, so the budget
 	// must cover queueing, not just generation.
 	TimeoutSeconds int `json:"timeout_seconds"`
+	// ExtraBody holds per-model default request fields (e.g.
+	// {"reasoning_effort":"medium"}), merged into every outbound request
+	// body; per-call fields (RPC extra_body / HTTP request body) win per
+	// key. Endpoint-specific; strict servers may reject unknown fields with
+	// HTTP 400.
+	ExtraBody map[string]any `json:"extra_body,omitempty"`
 }
 
 // CompletionResult is the RPC reply payload.
@@ -240,6 +246,9 @@ func complete(ctx context.Context, client *http.Client, config Config, messages 
 	body := map[string]any{"model": config.Model, "messages": messages}
 	if jsonMode {
 		body["response_format"] = map[string]string{"type": "json_object"}
+	}
+	for key, value := range config.ExtraBody {
+		body[key] = value
 	}
 	for key, value := range extraBody {
 		body[key] = value

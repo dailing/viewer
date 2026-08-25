@@ -18,6 +18,22 @@ func TestBackoff(t *testing.T) {
 	}
 }
 
+func TestStaleAssetIDs(t *testing.T) {
+	assets := map[string]bool{"managed": true, "disabled": true, "standalone": true, "orphan": true}
+	registered := map[string]bool{"managed": true, "disabled": true}
+	online := map[string]bool{"standalone": true}
+	stale := staleAssetIDs(assets, registered, online)
+	if len(stale) != 1 || stale[0] != "orphan" {
+		t.Fatalf("stale assets = %v, want [orphan]", stale)
+	}
+	if got := staleAssetIDs(map[string]bool{"managed": true}, registered, online); len(got) != 0 {
+		t.Fatalf("stale assets = %v, want none for registered plugin", got)
+	}
+	if got := staleAssetIDs(nil, registered, online); len(got) != 0 {
+		t.Fatalf("stale assets = %v, want none for empty mailbox", got)
+	}
+}
+
 func TestNewLoadsOnlyEnabledRunnablePlugins(t *testing.T) {
 	temp := t.TempDir()
 	enabled := filepath.Join(temp, "enabled")

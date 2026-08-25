@@ -89,6 +89,7 @@ func (p *Plugin) upsertRPC(frame busclient.Frame) {
 		item = &managedPlugin{id: entry.ID, path: entry.Path, state: StateStopped}
 		p.managed[entry.ID] = item
 	}
+	p.registered[entry.ID] = true
 	item.entry = entry
 	item.path = entry.Path
 	p.mu.Unlock()
@@ -118,6 +119,7 @@ func (p *Plugin) deleteRPC(frame busclient.Frame) {
 	p.stopOne(item, true)
 	p.mu.Lock()
 	delete(p.managed, id)
+	delete(p.registered, id)
 	p.mu.Unlock()
 	if err := p.saveRegistry(); err != nil {
 		p.respondError(value, "persist_failed", err.Error())

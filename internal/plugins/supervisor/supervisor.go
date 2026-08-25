@@ -96,6 +96,17 @@ type Plugin struct {
 	mu       sync.Mutex
 	managed  map[string]*managedPlugin
 	stopping bool
+
+	// registered holds every registry.json id (including disabled entries)
+	// so the orphan-assets sweep never collects a merely disabled plugin.
+	registered map[string]bool
+	// online/assetIDs are the latest plugins:_:list and plugins:_:assets
+	// mailbox snapshots, kept for the one-shot orphan-assets sweep.
+	online   map[string]bool
+	assetIDs map[string]bool
+	// gcCancel stops the orphan-assets sweep; the sweep cannot use the Start
+	// ctx because the assembly cancels it as soon as Start returns.
+	gcCancel context.CancelFunc
 }
 
 func New(config Config) (*Plugin, error) {
@@ -131,7 +142,11 @@ func New(config Config) (*Plugin, error) {
 		return nil, fmt.Errorf("decode registry: %w", err)
 	}
 	managed := make(map[string]*managedPlugin)
+	registered := make(map[string]bool, len(decoded.Plugins))
 	for _, entry := range decoded.Plugins {
+		if entry.ID != "" {
+			registered[entry.ID] = true
+		}
 		if entry.Enabled != nil && !*entry.Enabled {
 			continue
 		}
@@ -148,7 +163,7 @@ func New(config Config) (*Plugin, error) {
 		}
 		managed[entry.ID] = &managedPlugin{id: entry.ID, path: entry.Path, entry: entry, state: StateStopped}
 	}
-	return &Plugin{config: config, managed: managed}, nil
+	return &Plugin{config: config, managed: managed, registered: registered}, nil
 }
 
 func (p *Plugin) Run(ctx context.Context) error {
@@ -189,6 +204,10 @@ func (p *Plugin) StartWithManaged(ctx context.Context, managed bool) error {
 	}
 	if err := p.client.Connect(ctx); err != nil {
 		return fmt.Errorf("connect supervisor: %w", err)
+	}
+	if err := p.startAssetsGC(); err != nil {
+		// Non-fatal: orphaned assets are a hygiene issue, not a startup blocker.
+		slog.Warn("orphan-assets sweep unavailable", "error", err)
 	}
 
 	p.mu.Lock()
@@ -387,6 +406,7 @@ func (p *Plugin) trackRegistry(frame busclient.Frame) {
 	}
 	changed := false
 	p.mu.Lock()
+	p.online = online
 	for id, item := range p.managed {
 		if item.state == StateStarting && online[id] {
 			item.state, item.crashes = StateRunning, nil
@@ -396,6 +416,81 @@ func (p *Plugin) trackRegistry(frame busclient.Frame) {
 	p.mu.Unlock()
 	if changed {
 		p.publishStates()
+	}
+}
+
+// assetsGCSettle delays the one-shot orphan-assets sweep so in-process,
+// managed, and already-running standalone plugins have time to reconnect
+// and re-push before their entries are judged.
+const assetsGCSettle = 30 * time.Second
+
+// startAssetsGC keeps a snapshot of the plugins:_:assets mailbox and, once
+// after the settle window, removes entries whose plugin is neither in
+// registry.json nor connected. This is the backstop for delete paths that
+// bypassed the manager RPC (which removes assets itself): without it the
+// gateway republishes leftover bundles from disk on every boot and the
+// shell would keep offering entry points for dead plugins.
+func (p *Plugin) startAssetsGC() error {
+	sub, err := p.client.Subscribe("plugins:_:assets", p.trackAssets)
+	if err != nil {
+		return err
+	}
+	// The Start ctx is cancelled by the assembly when Start returns, so the
+	// sweep runs on its own context tied to shutdown instead.
+	gcCtx, cancel := context.WithCancel(context.Background())
+	p.mu.Lock()
+	p.gcCancel = cancel
+	p.mu.Unlock()
+	go func() {
+		timer := time.NewTimer(assetsGCSettle)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-gcCtx.Done():
+			return
+		}
+		p.gcOrphanAssets(gcCtx)
+		_ = sub.Unsubscribe(context.Background())
+	}()
+	return nil
+}
+
+func (p *Plugin) trackAssets(frame busclient.Frame) {
+	entries, _ := frame.Value.(map[string]any)
+	ids := make(map[string]bool, len(entries))
+	for id := range entries {
+		ids[id] = true
+	}
+	p.mu.Lock()
+	p.assetIDs = ids
+	p.mu.Unlock()
+}
+
+// staleAssetIDs lists asset-entry ids that are neither registered nor online.
+func staleAssetIDs(assets, registered, online map[string]bool) []string {
+	stale := make([]string, 0, len(assets))
+	for id := range assets {
+		if registered[id] || online[id] {
+			continue
+		}
+		stale = append(stale, id)
+	}
+	return stale
+}
+
+func (p *Plugin) gcOrphanAssets(ctx context.Context) {
+	p.mu.Lock()
+	stale := staleAssetIDs(p.assetIDs, p.registered, p.online)
+	p.mu.Unlock()
+	for _, id := range stale {
+		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := p.client.Request(reqCtx, "gateway:_:assets:remove", map[string]any{"id": id}, 5*time.Second)
+		cancel()
+		if err != nil {
+			slog.Warn("orphan assets remove failed", "plugin", id, "error", err)
+			continue
+		}
+		slog.Info("removed orphaned plugin assets", "plugin", id)
 	}
 }
 
@@ -483,6 +578,10 @@ func (p *Plugin) shutdown() {
 		return
 	}
 	p.stopping = true
+	if p.gcCancel != nil {
+		p.gcCancel()
+		p.gcCancel = nil
+	}
 	items := make([]*managedPlugin, 0, len(p.managed))
 	for _, item := range p.managed {
 		if item.restartCancel != nil {

@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.54**（2026-08-24）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.55**（2026-08-25）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.55 变更：**外部插件入口以在线注册表为准 + 无主资产启动清扫**——①shell loader 的加载/卸载对账从只看 `plugins:_:assets` 改为取 **assets ∩ `plugins:_:list` 交集**：资产在而后端不在线的插件不再有 Dock 入口与可打开 pane（v0.39 起资产库持久化于磁盘、gateway 启动重建邮箱，与插件存活无关——删除插件时若绕过 `supervisor:_:delete`（其内部会顺带 `assets:remove`），残留资产会让死插件的图标一直可点、打开后 RPC 必失败）；断线即走既有逻辑卸载路径，重连自动恢复入口。②supervisor 启动 30s 稳定窗后做一次**无主资产清扫**：`plugins:_:assets` 中既不在 registry.json（含 disabled 条目）也不在线的 id，逐一经 `gateway:_:assets:remove` 回收（磁盘与邮箱同清）；standalone 插件下次启动由 SDK 重推资产自动恢复。
 > v0.54 变更：**LLM 每模型默认请求参数**——`plugins.llm.active` 与 `profiles` 新增可选 `extra_body`（JSON 对象）：作为该模型的默认请求字段并入每次出站调用（WS `llm:_:complete` 与 HTTP facade 共用），调用方逐 key 覆盖（RPC `extra_body` / HTTP 请求体同名字段优先），如 `{"reasoning_effort":"medium"}` 设默认 thinking 档位；设置 pane 新增「默认请求参数」JSON 编辑。实测 llama-server 下 `chat_template_kwargs.enable_thinking=false` 与 `reasoning_effort` 并存时前者生效，voice 低延迟路径不受影响。
 > v0.53 变更：**LLM HTTP 可观测性 + 容器接入**——HTTP 配置增 `expose`：false 仅 `127.0.0.1`，true 绑定 `0.0.0.0` 供 LAN / `host.docker.internal` 使用。每个 `/v1/chat/completions` 返回 `X-Viewer-LLM-Request-ID`，并向 `viewerd.log` 写一条结构化 `llm HTTP completion`：调用方原始 body、覆盖 active model 后的实际上游 endpoint/body、上游/客户端状态、返回 body、错误、来源与耗时；API Key 永不记录，响应日志上限 4 MiB并显式标 `response_truncated`。Hindsight、infod、gaokao-bank、voice-service 的默认/运行配置统一改指端口 18731。
 > v0.52 变更：**LLM 本机统一 HTTP 接口**——`llm` 插件新增可热开关/换端口的 loopback HTTP facade（配置 `plugins.llm.http {enabled,port}`，设置 pane 直接配置并显示运行/错误状态）：`POST /v1/chat/completions` 透明转发 OpenAI 兼容请求/响应（含 streaming），强制用 `plugins.llm.active.model` 覆盖调用方 model；`GET /v1/models` 返回当前模型，`GET /health` 探活。监听固定 `127.0.0.1`、无额外鉴权，供同机 Hindsight/infod/gaokao 等统一指向；切换 active 后 Viewer 总线调用和所有 HTTP 调用同步生效。RPC `llm:_:http:configure/status` 负责原子换监听与状态观测，端口占用不阻断 Viewer 启动。
@@ -292,6 +293,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 1. **import map 不随注册变化**：共享依赖（vue/pinia/SDK）bootstrap 时一次注入；插件 bundle 只 import 共享依赖 + 相对资产。
 2. **热更新靠 URL hash**：`import()` 对同 URL 返回缓存模块；reload = `deactivate` 旧模块 → 以新 hash URL 重新 `import()` → `activate`。重新 build 后 URL 变化，天然 cache-bust。
 3. **逻辑卸载，物理不卸载**：ES module 无法从浏览器真正移除；`deactivate` 注销订阅与 registry 条目、instance 组件 unmount 或转 placeholder，旧代码留内存无害，页面刷新自清。
+3b. **入口 = 资产 ∩ 在线**（v0.55）：loader 同时订阅 `plugins:_:assets` 与 `plugins:_:list`，仅对两 mailbox 交集中的 id 提供 Dock 入口/加载 bundle；资产在而插件断线 = 无入口（资产持久化不代表存活，§14.3），插件重连后入口自动恢复。
 4. **未知 type 的 pane**：插件未加载时 `PluginPaneHost` 显示 placeholder 并排队，插件注册后自动补挂。
 5. **时序**：前端模块加载不等待后端 hello 完成；组件照常挂载，RPC 失败由 ctx 统一重试/"connecting"态；插件状态本身是 mailbox 数据，UI 直接绑定。
 
@@ -480,7 +482,7 @@ my-plugin/
 
 - 内核 config 维护插件注册表：条目指向 `~/.view/plugins/<id>/`（安装态）或**任意外部路径**（开发态，直接指向工作目录）。
 - **启动 ABI（固定 cmdline 契约，语言无关）**：插件后端入口 = 可执行文件 `backend/run`（Python entry / shell 脚本 / 编译二进制皆可）；supervisor 插件用固定参数拉起：`backend/run --kernel-ws ws://127.0.0.1:<port>`，参数集仅此一项、全框架统一，后续按需追加遇到再加。插件 spawn 自己子进程时传什么参数（如 chat 插件给 per-chat 子进程传 `--instance-id`）是**插件内部 ABI**，框架不约定（§9）。supervisor 插件与被拉起的插件进程之间只约定这一组参数 + §5 协议。
-- **前端资产管道（WS push + 内容寻址）**：所有插件（本地 supervised / standalone attach / 远程）hello 后经总线 RPC `gateway:_:assets:push` 主动 push 自己的 bundle 字节（§6.2 例外）；**gateway 不读任何插件目录**。gateway 存进内容寻址资产库 `~/.view/plugin-assets/<id>/<content-hash>/`，并维护 **`plugins:_:assets` mailbox**（id → url/hash）；shell 拿到的 URL 是 `/plugins/<id>/assets/<hash>/frontend.js`（与内核的 `plugins:_:list` 状态合并使用）。URL hash = 内容 hash，热更新 cache-bust 自动成立。SDK 在 hello 后自动 push，dev watch 模式下 dist 变化自动重推。
+- **前端资产管道（WS push + 内容寻址）**：所有插件（本地 supervised / standalone attach / 远程）hello 后经总线 RPC `gateway:_:assets:push` 主动 push 自己的 bundle 字节（§6.2 例外）；**gateway 不读任何插件目录**。gateway 存进内容寻址资产库 `~/.view/plugin-assets/<id>/<content-hash>/`，并维护 **`plugins:_:assets` mailbox**（id → url/hash）；shell 拿到的 URL 是 `/plugins/<id>/assets/<hash>/frontend.js`（与内核的 `plugins:_:list` 求交集后才成为入口，§8.6 规则 3b）。URL hash = 内容 hash，热更新 cache-bust 自动成立。SDK 在 hello 后自动 push，dev watch 模式下 dist 变化自动重推。
 - 安装/卸载/启用/禁用/重载：经总线 RPC（如 `plugins:_:install/reload`）。
 - In-repo core plugins 走 §8.4 阶段 A，不经此机制。
 
@@ -545,6 +547,7 @@ my-plugin/
 - **v0.49**（2026-08-22）：**语音对话化 + catalog 频道名修复**——catalog mailbox 改三段频道名 `voice-catalog:_:<plugin>`（v0.48 两段名被 kernel `invalid_channel` 拒绝、目录恒空）；`voice-control:_:command` 升级为连续语音对话（LLM 输出 `{"say","entry_id"}`：直答或派发条目，prompt = 系统规则 + 目录 + 摘要 + 最近轮次）；per-session 对话历史 + running summary 压缩（字符预算 3000、恒留最新 4 条、硬顶 40 条，enable 切换重置）；`llm:_:complete` 新增 `extra_body` 透传（voice 调用带 `enable_thinking=false`）。
 - **v0.48**（2026-08-21）：**语音控制全局化 + LLM 转发层**——新增 core plugins `llm`（C6：纯转发 RPC `llm:_:complete` + `plugins.llm` 配置 + 设置 pane + 一次性迁移）与 `voice-control`（C7）；§8.11 重写为 shell 全局连续 loop（Dock-foot 通用 `createDockActions` 扩展点、`voice-catalog:*` retained mailbox 发现、`entry.channel` invoke 契约、`voice-fx` retained mailbox 口述交接、`chat:_:turn` 主动播报）；chat 侧命令相移除、口述/确认回路保留下沉；composer 耳机按钮删除；v0.47 pane 级命令控制器废弃。
 - **v0.1**（2026-08-12）：初版。三层结构、Event+Mailbox 双原语、"逻辑隔离默认"进程模型。
+- **v0.55**（2026-08-25）：外部插件入口可见性改为 `plugins:_:assets` ∩ `plugins:_:list` 交集（§8.6 规则 3b），死插件残留资产不再复活 Dock 入口；supervisor 新增启动无主资产清扫（30s 稳定窗后回收既未注册也不在线的资产条目，§14.3）。
 - **v0.2**（2026-08-12）：微内核化；RPC 升为一等原语；传输统一（单 WS）；by-reference 数据面；渲染只在浏览器、view 为前端模块+后端 runtime。
 - **v0.3**（2026-08-12）：插件 I/O 固定契约（slots/emits，bindings 只存 slot→source 映射，删除 action）；内核纯化（config/instance-store/file/gateway 降为 core plugins，内核仅 broker+supervisor）；传输层定为 WebSocket 单一栈；自动化引擎定位为 core plugin。
 - **v0.4**（2026-08-12）：前端插件机制定稿——浏览器内四层、instance 挂载生命周期（PluginPaneHost + 懒加载组件 + instance ctx + 自动清理）、两阶段加载（A: build-time `import.meta.glob` + code-split 懒加载；B: 运行时 ESM + import map 共享依赖单例）；否决 Module Federation 与 iframe 插件容器。

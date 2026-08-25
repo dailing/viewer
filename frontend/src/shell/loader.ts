@@ -6,11 +6,15 @@
  * keeps index modules tiny (component SFCs load via defineAsyncComponent).
  *
  * Stage B (external): the gateway's `plugins:_:assets` mailbox maps plugin
- * id → content-addressed bundle URL. `loadExternalPlugins` subscribes to it
- * and reconciles: new ids get `import(url)`ed, changed hashes reload
- * (deactivate old → import new), removed ids deactivate and unregister
- * (logical unload — framework 8.6 rule 3: module bytes stay in memory,
- * panes fall back to the unknown-type placeholder until reload).
+ * id → content-addressed bundle URL, and the kernel's `plugins:_:list`
+ * mailbox carries the live connection registry. `loadExternalPlugins`
+ * subscribes to both and reconciles: an entry point exists only for ids in
+ * the intersection (bundle available AND backend connected) — assets alone
+ * must never resurrect the dock icon of a dead plugin. New ids get
+ * `import(url)`ed, changed hashes reload (deactivate old → import new),
+ * removed/disconnected ids deactivate and unregister (logical unload —
+ * framework 8.6 rule 3: module bytes stay in memory, panes fall back to the
+ * unknown-type placeholder until reload).
  */
 
 import { createCtx, type PluginCtx } from "./ctx";
@@ -99,20 +103,51 @@ interface AssetsMailboxEntry {
   manifest?: { name?: string; icon?: string; description?: string };
 }
 
-/** Subscribe the assets mailbox and reconcile external plugin loads. Called
- *  once at bootstrap; mailbox redelivery on reconnect re-reconciles, which
- *  is a no-op for already-loaded hashes. */
-export function loadExternalPlugins(): void {
-  bus.subscribe("plugins:_:assets", (frame) => {
-    const value = frame.value as Record<string, AssetsMailboxEntry> | null;
-    void reconcileExternal(value ?? {});
+/** Registry mailbox entry shape (kernel broker RegistryEntry). */
+interface RegistryMailboxEntry {
+  id?: string;
+  manifest?: { id?: string };
+}
+
+/** Latest mailbox snapshots; reconcileExternal derives the live set from
+ *  their intersection. */
+let latestAssets: Record<string, AssetsMailboxEntry> = {};
+let connectedIds = new Set<string>();
+
+/** Reconciles are serialized: assets and list frames can arrive together
+ *  and import() is async, so naive overlap could register one plugin twice. */
+let reconcileChain: Promise<void> = Promise.resolve();
+
+function scheduleReconcile(): void {
+  reconcileChain = reconcileChain.then(reconcileExternal).catch((error: unknown) => {
+    console.error("external plugin reconcile failed", error);
   });
 }
 
-async function reconcileExternal(assets: Record<string, AssetsMailboxEntry>): Promise<void> {
-  // Unload: ids whose assets disappeared (manager delete / assets:remove).
+/** Subscribe the assets and registry mailboxes and reconcile external plugin
+ *  loads. Called once at bootstrap; mailbox redelivery on reconnect
+ *  re-reconciles, which is a no-op for already-loaded hashes. */
+export function loadExternalPlugins(): void {
+  bus.subscribe("plugins:_:assets", (frame) => {
+    latestAssets = (frame.value as Record<string, AssetsMailboxEntry> | null) ?? {};
+    scheduleReconcile();
+  });
+  bus.subscribe("plugins:_:list", (frame) => {
+    const entries = Array.isArray(frame.value) ? (frame.value as RegistryMailboxEntry[]) : [];
+    connectedIds = new Set(
+      entries
+        .map((entry) => entry?.id ?? entry?.manifest?.id)
+        .filter((id): id is string => typeof id === "string" && id !== ""),
+    );
+    scheduleReconcile();
+  });
+}
+
+async function reconcileExternal(): Promise<void> {
+  // Unload: ids whose assets disappeared (manager delete / assets:remove)
+  // or whose backend disconnected (no entry point without a live backend).
   for (const id of [...externalPlugins.keys()]) {
-    if (!(id in assets)) {
+    if (!(id in latestAssets) || !connectedIds.has(id)) {
       const handle = externalPlugins.get(id);
       externalPlugins.delete(id);
       if (handle !== undefined) {
@@ -121,8 +156,9 @@ async function reconcileExternal(assets: Record<string, AssetsMailboxEntry>): Pr
       }
     }
   }
-  for (const [id, entry] of Object.entries(assets)) {
+  for (const [id, entry] of Object.entries(latestAssets)) {
     if (staticIds.has(id)) continue; // in-repo build wins; never double-register
+    if (!connectedIds.has(id)) continue; // offline: assets are not an entry point
     const loaded = externalPlugins.get(id);
     if (loaded !== undefined && loaded.hash === entry.hash) continue;
     const failed = failedImports.get(id);

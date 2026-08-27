@@ -13,12 +13,13 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
+import { registerInputSessionRuntime, useInputSessionsStore, type InputSession } from "../../stores/inputSessions";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
 import ToolActivity from "./ToolActivity.vue";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
-import { isToolActivity, presentToolBlock } from "./toolPresentation";
+import { presentToolBlock } from "./toolPresentation";
 import type { Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, Role, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
@@ -32,7 +33,16 @@ const blocks = ref<ChatBlock[]>([]);
 const roles = ref<Role[]>([]);
 const workspace = ref<Workspace | null>(null);
 const chat = ref<Chat | null>(null);
-const selected = ref<string[]>([]);
+const inputSessionId = `chat:${ctx.instanceId}`;
+const inputs = useInputSessionsStore();
+inputs.ensure({ id: inputSessionId, pluginId: "chat", paneType: "chat", instanceId: ctx.instanceId, label: "Chat input" });
+const selected = computed({
+  get: () => inputs.session(inputSessionId)?.selectedRoleIds ?? [],
+  set: (value: string[]) => inputs.patch(inputSessionId, { selectedRoleIds: value }),
+});
+const composerExpanded = ref(false);
+const composerRef = ref<{ focus: () => void } | null>(null);
+const composerVisible = computed(() => Boolean(inputs.session(inputSessionId)?.pinned) || composerExpanded.value);
 // In-flight turns of this chat, keyed by turn id. Seeded from the
 // chats:list running_turns snapshot (survives pane reloads/remounts) and
 // updated live by the chat:_:turn started/completed feed. Per-turn binding
@@ -366,8 +376,9 @@ function parseBlockPayload(block?: ChatBlock): Record<string, unknown> | null {
   return null;
 }
 
-/** First-level activity compaction. Only uninterrupted tool activity is
- * grouped; assistant text, reasoning, and errors deliberately break a run.
+/** First-level activity compaction. Every activity row shown as a small
+ * gray collapsible line (tool calls, file changes, commands, thinking,
+ * tool results, errors) counts toward a run; only body text breaks it.
  * Runs of one or two remain directly visible, while 3+ become one stable
  * details row whose key stays anchored to the first call as live calls arrive. */
 function groupedSegments(segments: Segment[]): DisplaySegment[] {
@@ -379,7 +390,9 @@ function groupedSegments(segments: Segment[]): DisplaySegment[] {
     run = [];
   };
   for (const segment of segments) {
-    if (segment.kind === "activity" && isToolActivity(segment.block)) run.push(segment);
+    // Segments were already filtered by activityDisplayable upstream, so any
+    // activity kind reaching here belongs in the collapse accounting.
+    if (segment.kind === "activity") run.push(segment);
     else { flush(); result.push(segment); }
   }
   flush();
@@ -438,6 +451,7 @@ function hydrate(entry: ChatCacheEntry): void {
 
 function setChrome(): void {
   ctx.setChrome({ title: chat.value?.name ?? "Chat" });
+  inputs.patch(inputSessionId, { label: `${chat.value?.name ?? "Chat"} input` });
 }
 
 // ---------------------------------------------------------------------------
@@ -919,9 +933,9 @@ function routedLabelFor(startedIds: string[], queuedIds: string[]): string {
   return [...startedIds.map((id) => label(id, false)), ...queuedIds.map((id) => label(id, true))].join("  ·  ");
 }
 
-async function send(text: string, forceNewSession = false, parallel = false): Promise<void> {
+async function send(text: string, forceNewSession = false, parallel = false, roleIds = selected.value): Promise<boolean> {
   const message = text.trim();
-  if (message === "") return;
+  if (message === "") return false;
   error.value = "";
   if (hasNewer.value) jumpToLatest(); // a send always targets the live edge
   // Optimistic user box with a sending marker; dispatch latency (routing,
@@ -931,7 +945,7 @@ async function send(text: string, forceNewSession = false, parallel = false): Pr
   void nextTick(() => scrollThreadToMessageEnd());
   try {
     const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message };
-    if (selected.value.length > 0) payload.role_ids = selected.value;
+    if (roleIds.length > 0) payload.role_ids = roleIds;
     if (forceNewSession) payload.force_new_session = true;
     if (parallel) payload.parallel_dispatch = true;
     const result = await ctx.bus.request("chat:_:dispatch", payload) as { role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[] };
@@ -952,10 +966,31 @@ async function send(text: string, forceNewSession = false, parallel = false): Pr
     }
     pendingTurns.value = pending;
     scrollOnNextUserMessage = true; // scroll the just-sent query into view when it lands
+    return true;
   } catch (cause) {
     patchPendingSend(key, { sending: false, failed: errorText(cause) });
+    return false;
   }
 }
+
+function handleComposerFocusOut(event: FocusEvent): void {
+  if (inputs.session(inputSessionId)?.pinned) return;
+  const shell = event.currentTarget;
+  const next = event.relatedTarget;
+  if (shell instanceof HTMLElement && next instanceof Node && shell.contains(next)) return;
+  window.setTimeout(() => {
+    if (!inputs.session(inputSessionId)?.pinned) composerExpanded.value = false;
+  }, 0);
+}
+
+function openComposer(): void {
+  inputs.activate(inputSessionId);
+  composerExpanded.value = true;
+  void nextTick(() => composerRef.value?.focus());
+}
+
+const unregisterInputRuntime = registerInputSessionRuntime(inputSessionId, (session: InputSession) =>
+  send(session.text, session.forceNewSession, session.parallel, session.selectedRoleIds));
 
 async function stop(roleId?: string, turnId?: string): Promise<void> {
   try {
@@ -1051,6 +1086,7 @@ onMounted(() => {
   });
   window.addEventListener("viewer:chats-changed", refreshNow);
   ctx.onDispose(() => {
+    unregisterInputRuntime();
     window.removeEventListener("viewer:chats-changed", refreshNow);
     writeBack();
   });
@@ -1151,15 +1187,26 @@ onMounted(() => {
         <i v-else class="bi bi-arrow-down" aria-hidden="true" /> 新消息 — 跳到最新
       </button>
     </div>
-    <div class="composer-shell">
+    <div v-if="composerVisible" class="composer-shell" @focusout="handleComposerFocusOut">
       <div v-if="error" class="small text-danger mb-1">{{ error }}</div>
       <ComposerBox
+        ref="composerRef"
         v-model:selected-role-ids="selected"
         :roles="members"
         :context-id="'chat:' + ctx.instanceId"
-        @send="send"
       />
     </div>
+    <button
+      v-else
+      type="button"
+      class="composer-overlay-button"
+      :class="{ active: inputs.activeId === inputSessionId }"
+      :title="inputs.session(inputSessionId)?.text ? '打开已保存的输入' : '打开输入框'"
+      @click="openComposer"
+    >
+      <i class="bi" :class="inputs.session(inputSessionId)?.text ? 'bi-pencil-square' : 'bi-chat-square-text'" />
+      <span v-if="inputs.session(inputSessionId)?.text" class="composer-overlay-dot" />
+    </button>
   </section>
 </template>
 
@@ -1478,4 +1525,26 @@ onMounted(() => {
   width: 100%;
   z-index: 5;
 }
+
+.composer-overlay-button {
+  align-items: center;
+  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--color-surface-raised) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  border-radius: 999px;
+  bottom: 8px;
+  color: var(--color-text-muted);
+  display: inline-flex;
+  height: 38px;
+  justify-content: center;
+  opacity: .72;
+  position: absolute;
+  right: 8px;
+  width: 38px;
+  z-index: 8;
+}
+
+.composer-overlay-button:hover,
+.composer-overlay-button.active { color: var(--color-text); opacity: 1; }
+.composer-overlay-dot { background: var(--color-accent); border-radius: 50%; height: 6px; position: absolute; right: 4px; top: 4px; width: 6px; }
 </style>

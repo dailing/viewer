@@ -54,6 +54,30 @@ const jobsByRecording = new Map<string, VoiceRuntimeJob>();
 const compositions = new Map<string, VoiceComposition>();
 const earlyEvents = new Map<string, VoiceMessage[]>();
 const processedFrames = new WeakSet<object>();
+const VOICE_CONTEXTS_KEY = "viewer.voiceContexts.v1";
+
+function loadVoiceContexts(): Record<string, VoiceContextState> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(VOICE_CONTEXTS_KEY) ?? "{}") as Record<string, Partial<VoiceContextState>>;
+    return Object.fromEntries(Object.entries(parsed).map(([id, value]) => {
+      const text = typeof value.text === "string" ? value.text : "";
+      const interrupted = ["connecting", "recording", "processing"].includes(String(value.status));
+      return [id, {
+        status: interrupted ? (text.trim() ? "ready" : "idle") : value.status ?? "idle",
+        text,
+        error: interrupted ? "页面刷新中断了录音，已保留刷新前的转写内容" : value.error ?? "",
+        unread: value.unread === true,
+        updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : Date.now(),
+      } satisfies VoiceContextState];
+    }));
+  } catch {
+    return {};
+  }
+}
+
+function persistVoiceContexts(contexts: Record<string, VoiceContextState>): void {
+  localStorage.setItem(VOICE_CONTEXTS_KEY, JSON.stringify(contexts));
+}
 
 interface PluginRegistryEntry {
   manifest?: { id?: string };
@@ -234,7 +258,7 @@ function cleanupRuntime(job: VoiceRuntimeJob): void {
 
 export const useVoiceStore = defineStore("next-voice", {
   state: () => ({
-    contexts: {} as Record<string, VoiceContextState>,
+    contexts: loadVoiceContexts(),
     activeRecordingContextId: "",
     activeRecordingJobId: "",
     languageModelRefine: true,
@@ -262,6 +286,7 @@ export const useVoiceStore = defineStore("next-voice", {
         ...patch,
         updatedAt: Date.now(),
       };
+      persistVoiceContexts(this.contexts);
     },
     syncText(id: string, text: string): void {
       const current = this.ensure(id, text);
@@ -420,6 +445,36 @@ export const useVoiceStore = defineStore("next-voice", {
       const jobs = [...runtimeJobs.values()].filter((job) => job.contextId === id);
       await Promise.allSettled(jobs.map((job) => cancelRuntime(job)));
       if (this.contexts[id]?.status !== "error") this.setContext(id, { status: "idle" });
+    },
+    async finishForSend(id: string): Promise<string> {
+      // getUserMedia and the start RPC are asynchronous. If send is clicked
+      // during that window, wait for recording to become stoppable instead
+      // of dispatching the pre-refine partial draft.
+      if (this.context(id).status === "connecting") {
+        await this.waitForStatus(id, (status) => status !== "connecting", 30_000);
+      }
+      if (this.context(id).status === "recording") await this.stop(id);
+      if (["connecting", "recording", "processing"].includes(this.context(id).status)) {
+        await this.waitForStatus(id, (status) => !["connecting", "recording", "processing"].includes(status), 20 * 60_000);
+      }
+      const state = this.context(id);
+      if (state.status === "error") throw new Error(state.error || "Voice input failed.");
+      return state.text;
+    },
+    async waitForStatus(id: string, accept: (status: VoiceJobStatus) => boolean, timeoutMs: number): Promise<void> {
+      if (accept(this.context(id).status)) return;
+      await new Promise<void>((resolve, reject) => {
+        const started = Date.now();
+        const timer = window.setInterval(() => {
+          if (accept(this.context(id).status)) {
+            window.clearInterval(timer);
+            resolve();
+          } else if (Date.now() - started >= timeoutMs) {
+            window.clearInterval(timer);
+            reject(new Error("Timed out waiting for voice processing."));
+          }
+        }, 100);
+      });
     },
     handleEvent(job: VoiceRuntimeJob, message: VoiceMessage): void {
       if (runtimeJobs.get(job.id) !== job) return;

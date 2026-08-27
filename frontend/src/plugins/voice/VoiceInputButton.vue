@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 
 import { useVoiceStore } from "./voiceStore";
 
@@ -76,6 +76,7 @@ watch(
     model.value = text;
     applyingStoreText.value = false;
   },
+  { immediate: true },
 );
 
 watch(
@@ -86,12 +87,6 @@ watch(
   },
   { immediate: true },
 );
-
-onBeforeUnmount(() => {
-  if (["connecting", "recording", "processing"].includes(state.value.status)) {
-    void voice.cancel(props.contextId);
-  }
-});
 
 defineExpose({
   focus: () => voiceButton.value?.focus(),

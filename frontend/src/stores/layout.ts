@@ -267,12 +267,34 @@ export const useLayoutStore = defineStore("layout", {
         epoch: 0,
       });
     },
-    /** Return a floating pane's content to the split tree via openInstance. */
+    /**
+     * Return a floating pane's content to the split tree without displacing
+     * existing tiles: tiling modes append a fresh tile at the leaf end
+     * (filling the last tile instead when it is empty); free mode replaces
+     * the active pane, since its geometry is explicitly user-authored.
+     */
     dockFloating(id: string): void {
       const index = this.floating.findIndex((pane) => pane.id === id);
       if (index < 0) return;
       const [pane] = this.floating.splice(index, 1);
-      this.openInstance(pane.content.paneType, pane.content.instanceId);
+      const content = pane.content;
+      if (this.mode === "free") {
+        const target = this.activePane;
+        target.content = content;
+        this.activePaneId = target.id;
+        return;
+      }
+      const panes = this.panes;
+      const last = panes[panes.length - 1];
+      if (last !== undefined && last.content === null) {
+        last.content = content;
+        this.activePaneId = last.id;
+        return;
+      }
+      if (last !== undefined) {
+        this.splitPane(last.id, "vertical");
+        this.activePane.content = content; // splitPane focuses the fresh tile
+      }
     },
     closeFloating(id: string): void {
       const index = this.floating.findIndex((pane) => pane.id === id);

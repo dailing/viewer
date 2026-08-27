@@ -3,12 +3,31 @@ import { computed } from "vue";
 
 import { contentUid, type LayoutMode } from "../stores/layout";
 import { useLayoutStore } from "../stores/layout";
+import { useInputSessionsStore } from "../stores/inputSessions";
 import { usePaneChromeStore } from "../stores/paneChrome";
+import { sendInputSession } from "../plugins/voice/inputSessionVoice";
+import { useVoiceStore } from "../plugins/voice/voiceStore";
 import type { PaneChromeAction, PaneChromeControl } from "../stores/paneChrome";
 import { dockProviders } from "./registries";
 
 const layout = useLayoutStore();
 const paneChrome = usePaneChromeStore();
+const inputs = useInputSessionsStore();
+const voice = useVoiceStore();
+const activeInput = computed(() => inputs.activeSession);
+const activeVoice = computed(() => activeInput.value ? voice.context(activeInput.value.id) : null);
+const hasActiveInput = computed(() => Boolean(activeInput.value && (
+  activeInput.value.text.trim() ||
+  activeInput.value.phase !== "idle" ||
+  (activeVoice.value !== null && activeVoice.value.status !== "idle")
+)));
+const activeInputBusy = computed(() => Boolean(activeVoice.value && ["connecting", "recording", "processing"].includes(activeVoice.value.status)));
+const activeInputHasText = computed(() => Boolean(activeInput.value?.text.trim() || activeVoice.value?.text.trim()));
+const activeInputStatus = computed(() => {
+  if (!activeInput.value) return "";
+  if (activeVoice.value && activeVoice.value.status !== "idle") return activeVoice.value.status;
+  return activeInput.value.phase === "idle" ? "draft" : activeInput.value.phase;
+});
 const pane = computed(() => layout.activePane);
 const content = computed(() => pane.value.content);
 const provider = computed(() =>
@@ -49,6 +68,22 @@ function updateControl(control: PaneChromeControl, event: Event): void {
   const target = event.target as HTMLSelectElement | null;
   if (target !== null) void control.onChange(target.value);
 }
+
+async function stopActiveInput(): Promise<void> {
+  const session = activeInput.value;
+  if (!session) return;
+  try {
+    inputs.setText(session.id, await voice.finishForSend(session.id));
+  } catch (cause) {
+    inputs.patch(session.id, { phase: "error", error: cause instanceof Error ? cause.message : String(cause) });
+  }
+}
+
+function openActiveInput(): void {
+  const session = activeInput.value;
+  if (!session) return;
+  layout.openInstance(session.paneType, session.instanceId);
+}
 </script>
 
 <template>
@@ -86,6 +121,32 @@ function updateControl(control: PaneChromeControl, event: Event): void {
           <span v-for="(item, index) in control.items" :key="`${index}:${item}`">{{ item }}</span>
         </span>
       </template>
+      <span v-if="hasActiveInput" class="workspace-input-session" :title="activeInput?.label">
+        <button class="workspace-input-label" type="button" @click="openActiveInput">
+          <i class="bi bi-pencil-square" />
+          <span>{{ activeInput?.label }}</span>
+          <small>{{ activeInputStatus }}</small>
+        </button>
+        <button
+          v-if="activeInputBusy"
+          class="workspace-btn danger"
+          type="button"
+          title="停止录音并等待转写/refine 完成"
+          @click="stopActiveInput"
+        >
+          <i class="bi bi-stop-fill" />
+        </button>
+        <button
+          class="workspace-btn active"
+          type="button"
+          title="完成语音 refine 后发送到绑定目标"
+          :disabled="activeInput?.phase === 'sending' || (!activeInputHasText && !activeInputBusy)"
+          @click="activeInput && sendInputSession(activeInput.id)"
+        >
+          <span v-if="activeInput?.phase === 'sending'" class="spinner-border spinner-border-sm" />
+          <i v-else class="bi bi-send" />
+        </button>
+      </span>
       <span class="workspace-divider"></span>
       <select
         class="workspace-select mode-select"
@@ -160,10 +221,15 @@ function updateControl(control: PaneChromeControl, event: Event): void {
 .workspace-chips { display: flex; gap: 2px; max-width: 180px; overflow: hidden; }
 .workspace-chips span { background: var(--color-surface); color: var(--color-text-muted); font-size: 10px; overflow: hidden; padding: 2px 5px; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-divider { border-left: 1px solid var(--color-border); height: 16px; margin: 0 2px; }
+.workspace-input-session { align-items: center; border-left: 1px solid var(--color-border); display: inline-flex; gap: 1px; margin-left: 2px; padding-left: 4px; }
+.workspace-input-label { align-items: center; background: transparent; border: 0; color: var(--color-text-muted); display: inline-flex; font-size: 10px; gap: 4px; height: var(--nav-button-size); max-width: 150px; padding: 0 4px; }
+.workspace-input-label span { max-width: 86px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-input-label small { color: var(--color-text-subtle); font-size: 9px; }
+.workspace-input-label:hover { background: var(--color-surface-hover); color: var(--color-text); }
 .rotate-90 { transform: rotate(90deg); }
 
 @media (max-width: 720px) {
-  .workspace-title, .workspace-status, .workspace-divider { display: none; }
+  .workspace-title, .workspace-status, .workspace-divider, .workspace-input-label span { display: none; }
   .workspace-actions { overflow-x: auto; }
 }
 </style>

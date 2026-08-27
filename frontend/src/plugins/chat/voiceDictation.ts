@@ -96,7 +96,16 @@ export class VoiceDictationController {
   dispose(): void {
     this.disposed = true;
     for (const stop of this.stopWatches) stop();
-    void this.cancel();
+    this.releaseSilence();
+    stopSpeaking();
+    // The draft recording belongs to the global input session, not this
+    // controller component. Closing/unpinning the pane must leave it running;
+    // WorkspaceBar remains able to stop/refine/send it. A short-lived confirm
+    // recording has no useful target once this controller is gone, so only
+    // that private context is cancelled.
+    if (this.phase.value === "confirm") void this.voice.cancel(this.confirmContextId);
+    this.phase.value = "off";
+    this.fromLoop = false;
   }
 
   /** Start dictating into this pane's composer. */

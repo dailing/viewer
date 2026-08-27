@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
+import { useInputSessionsStore } from "../../stores/inputSessions";
+import { sendInputSession } from "../voice/inputSessionVoice";
 import VoiceInputButton from "../voice/VoiceInputButton.vue";
 import { useVoiceStore } from "../voice/voiceStore";
 import type { Role } from "./types";
@@ -14,23 +16,30 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:selectedRoleIds": [value: string[]];
-  send: [value: string, forceNewSession: boolean, parallel: boolean];
 }>();
 
-// The draft text lives inside the composer (not the pane), so keystrokes only
-// re-render this small component instead of the whole timeline. `send` carries
-// the final text up.
-const draft = ref("");
+const inputs = useInputSessionsStore();
+const session = computed(() => inputs.session(props.contextId)!);
+const draft = computed({
+  get: () => session.value.text,
+  set: (text: string) => inputs.setText(props.contextId, text),
+});
 
 // One-shot new-session toggle: when armed, the next send carries
 // force_new_session=true (each selected role starts a fresh agent session
 // instead of resuming the stored one) and the toggle resets itself.
-const forceNewSession = ref(false);
+const forceNewSession = computed({
+  get: () => session.value.forceNewSession,
+  set: (value: boolean) => inputs.patch(props.contextId, { forceNewSession: value }),
+});
 
 // One-shot send-now (parallel) toggle: when armed, the next send carries
 // parallel_dispatch=true — the message starts immediately on a throwaway
 // session instead of queueing behind an in-flight turn.
-const sendNow = ref(false);
+const sendNow = computed({
+  get: () => session.value.parallel,
+  set: (value: boolean) => inputs.patch(props.contextId, { parallel: value }),
+});
 
 const voice = useVoiceStore();
 const voiceError = computed(() => {
@@ -54,7 +63,10 @@ watch(
   () => resizeTextarea(),
 );
 
-onMounted(() => resizeTextarea());
+onMounted(() => {
+  inputs.activate(props.contextId);
+  resizeTextarea();
+});
 
 // Grow the textarea only after a pause, never mid-keystroke: resizing on every
 // input forces a full-document layout (~150-200ms with thousands of messages
@@ -85,7 +97,7 @@ if (injectedCtx === undefined) throw new Error("ComposerBox requires PluginPaneH
 const voiceDictation = new VoiceDictationController(injectedCtx, props.contextId.slice("chat:".length), {
   contextId: props.contextId,
   getDraft: () => draft.value,
-  send: () => handleSend(false),
+  send: () => { void handleSend(false); },
   clearDraft: clearText,
 });
 onBeforeUnmount(() => voiceDictation.dispose());
@@ -98,14 +110,10 @@ onBeforeUnmount(() => voiceDictation.dispose());
 // Refocus only for keyboard sends (Ctrl+Enter): after a button click,
 // focusing the textarea pops the virtual keyboard back up on mobile and
 // covers the timeline the user wants to watch.
-function handleSend(refocus = true): void {
-  const text = draft.value;
-  if (text.trim() === "") return;
-  emit("send", text, forceNewSession.value, sendNow.value);
-  forceNewSession.value = false;
-  sendNow.value = false;
-  draft.value = "";
-  if (refocus) void nextTick(() => textarea.value?.focus());
+async function handleSend(refocus = true): Promise<void> {
+  if (draft.value.trim() === "") return;
+  const sent = await sendInputSession(props.contextId);
+  if (sent && refocus) void nextTick(() => textarea.value?.focus());
 }
 
 function clearRoles(): void {
@@ -148,10 +156,12 @@ function handlePickerFocusOut(event: FocusEvent): void {
     details.open = false;
   }, 0);
 }
+
+defineExpose({ focus: () => textarea.value?.focus() });
 </script>
 
 <template>
-  <div class="composer-card">
+  <div class="composer-card" @focusin="inputs.activate(contextId)">
     <textarea
       ref="textarea"
       v-model="draft"
@@ -173,9 +183,13 @@ function handlePickerFocusOut(event: FocusEvent): void {
         <i class="bi bi-x" />
       </button>
     </div>
+    <div v-if="session.phase === 'error' && session.error" class="voice-error">
+      <i class="bi bi-exclamation-triangle" />
+      <span class="voice-error-text" :title="session.error">{{ session.error }}</span>
+    </div>
     <div class="composer-actions">
       <div class="composer-actions-main">
-        <VoiceInputButton v-model="draft" :context-id="contextId" />
+        <VoiceInputButton v-model="draft" :context-id="contextId" @start="inputs.activate(contextId)" />
         <details
           class="dispatch-picker"
           :class="{ active: selectedRoles.length > 0 }"
@@ -241,6 +255,16 @@ function handlePickerFocusOut(event: FocusEvent): void {
         </button>
       </div>
       <div class="composer-actions-trailing">
+        <button
+          class="btn btn-sm btn-outline-secondary action-button"
+          :class="{ active: session.pinned }"
+          type="button"
+          :title="session.pinned ? '取消固定：失焦后收进右下角' : '固定输入框在底部'"
+          :aria-pressed="session.pinned"
+          @click="inputs.setPinned(contextId, !session.pinned)"
+        >
+          <i class="bi" :class="session.pinned ? 'bi-pin-angle-fill' : 'bi-pin-angle'" />
+        </button>
         <button class="btn btn-sm btn-outline-secondary action-button" type="button" title="Clear text" aria-label="Clear text" :disabled="draft === ''" @click="clearText">
           <i class="bi bi-eraser" />
         </button>

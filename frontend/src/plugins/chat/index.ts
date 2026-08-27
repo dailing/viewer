@@ -3,6 +3,7 @@ import type { PluginCtx } from "../../shell/ctx";
 import type { DockInstance, DockProvider } from "../../shell/definePlugin";
 import { definePlugin } from "../../shell/definePlugin";
 import { useLayoutStore } from "../../stores/layout";
+import { registerInputSessionSender, type InputSession } from "../../stores/inputSessions";
 import { dockStateFor, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
 import type { ChatList } from "./types";
 
@@ -70,4 +71,17 @@ export default definePlugin({
     chat: defineAsyncComponent(() => import("./ChatPane.vue")),
   },
   createDockProvider,
+  activate(ctx) {
+    const unregister = registerInputSessionSender("chat", async (session: InputSession) => {
+      const message = session.text.trim();
+      if (!message) return false;
+      const payload: Record<string, unknown> = { chat_id: session.instanceId, message };
+      if (session.selectedRoleIds.length > 0) payload.role_ids = session.selectedRoleIds;
+      if (session.forceNewSession) payload.force_new_session = true;
+      if (session.parallel) payload.parallel_dispatch = true;
+      await ctx.bus.request("chat:_:dispatch", payload);
+      return true;
+    });
+    ctx.onDispose(unregister);
+  },
 });

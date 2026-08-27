@@ -34,6 +34,9 @@ export interface SplitNode {
 
 export type LayoutNode = PaneNode | SplitNode;
 
+/** How tree panes are arranged. Floating panes are outside every mode. */
+export type LayoutMode = "cascade" | "columns" | "rows" | "free";
+
 /** A pane lifted out of the split tree, rendered in the floating overlay layer. */
 export interface FloatingPane {
   id: string;
@@ -95,9 +98,15 @@ const RATIO_MAX = 0.85;
 export type OpenMode = "new" | "replace";
 
 const OPEN_MODE_STORAGE_KEY = "viewer.layout.openMode.v1";
+const LAYOUT_MODE_STORAGE_KEY = "viewer.layout.mode.v1";
 
 function readOpenMode(): OpenMode {
   return localStorage.getItem(OPEN_MODE_STORAGE_KEY) === "replace" ? "replace" : "new";
+}
+
+function readLayoutMode(): LayoutMode {
+  const value = localStorage.getItem(LAYOUT_MODE_STORAGE_KEY);
+  return value === "columns" || value === "rows" || value === "free" ? value : "cascade";
 }
 
 export const useLayoutStore = defineStore("layout", {
@@ -106,6 +115,7 @@ export const useLayoutStore = defineStore("layout", {
     activePaneId: "p1",
     nextId: 2,
     openMode: readOpenMode() as OpenMode,
+    mode: readLayoutMode() as LayoutMode,
     floating: [] as FloatingPane[],
     nextZ: 1,
   }),
@@ -153,7 +163,11 @@ export const useLayoutStore = defineStore("layout", {
         if (empty !== undefined) {
           target = empty;
         } else if (this.openMode !== "replace") {
-          this.splitPane(target.id, "vertical");
+          // Algorithmic layouts have one stable placement rule: new tiles
+          // enter at the leaf end. Free mode keeps the focused-pane split
+          // behavior because its geometry is explicitly user-authored.
+          const splitTarget = this.mode === "free" ? target : this.panes[this.panes.length - 1];
+          this.splitPane(splitTarget.id, "vertical");
           target = this.activePane;
         }
       }
@@ -163,6 +177,10 @@ export const useLayoutStore = defineStore("layout", {
     setOpenMode(mode: OpenMode): void {
       this.openMode = mode;
       localStorage.setItem(OPEN_MODE_STORAGE_KEY, mode);
+    },
+    setMode(mode: LayoutMode): void {
+      this.mode = mode;
+      localStorage.setItem(LAYOUT_MODE_STORAGE_KEY, mode);
     },
     setActivePane(paneId: string): void {
       this.activePaneId = paneId;
@@ -184,6 +202,24 @@ export const useLayoutStore = defineStore("layout", {
       if (slot === null) this.root = split;
       else slot.parent[slot.key] = split;
       this.activePaneId = fresh.id;
+    },
+    /** Add an unassigned tile at the leaf end; Dock opens can then reuse it. */
+    addPane(): void {
+      const panes = this.panes;
+      const target = panes[panes.length - 1];
+      if (target !== undefined) this.splitPane(target.id, "vertical");
+    },
+    /** Move the focused content one tile toward the root/start or leaf/end. */
+    movePane(paneId: string, delta: -1 | 1): void {
+      const panes = this.panes;
+      const from = panes.findIndex((pane) => pane.id === paneId);
+      const to = from + delta;
+      if (from < 0 || to < 0 || to >= panes.length) return;
+      const source = panes[from];
+      const destination = panes[to];
+      [source.content, destination.content] = [destination.content, source.content];
+      [source.epoch, destination.epoch] = [destination.epoch, source.epoch];
+      this.activePaneId = destination.id;
     },
     /** Close a pane; the sibling subtree collapses into the freed slot. */
     closePane(paneId: string): void {

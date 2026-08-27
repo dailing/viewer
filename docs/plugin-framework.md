@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.55**（2026-08-25）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.56**（2026-08-27）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v0.56 变更：**四模式平铺 + 全局 pane chrome**——split tree 继续作为 pane 集合与自由布局的结构源，shell 增加自适应主次（每层按当前区域长边对半切、首 pane 恒占根区域一半）、横向等宽、纵向等高、自由分割四种持久化布局。前三种由算法唯一决定 geometry，新 pane 统一追加到叶端、隐藏物理 split/resize 操作；自由模式保留 active pane 横/纵 split 与比例拖动。原每 pane 标题栏提升为 workspace 单一共享抬头，显示 active pane 的 title/status/插件 actions/controls 与公共动作；tile 本身只用 accent 边框标 active。新增向树根/叶端逐格移动（交换相邻 tile 内容，连续操作可达首/末）；浮动 pane 仍脱离全部 tiling mode、自带可拖标题栏，dock 时按当前模式放回。
 > v0.55 变更：**外部插件入口以在线注册表为准 + 无主资产启动清扫**——①shell loader 的加载/卸载对账从只看 `plugins:_:assets` 改为取 **assets ∩ `plugins:_:list` 交集**：资产在而后端不在线的插件不再有 Dock 入口与可打开 pane（v0.39 起资产库持久化于磁盘、gateway 启动重建邮箱，与插件存活无关——删除插件时若绕过 `supervisor:_:delete`（其内部会顺带 `assets:remove`），残留资产会让死插件的图标一直可点、打开后 RPC 必失败）；断线即走既有逻辑卸载路径，重连自动恢复入口。②supervisor 启动 30s 稳定窗后做一次**无主资产清扫**：`plugins:_:assets` 中既不在 registry.json（含 disabled 条目）也不在线的 id，逐一经 `gateway:_:assets:remove` 回收（磁盘与邮箱同清）；standalone 插件下次启动由 SDK 重推资产自动恢复。
 > v0.54 变更：**LLM 每模型默认请求参数**——`plugins.llm.active` 与 `profiles` 新增可选 `extra_body`（JSON 对象）：作为该模型的默认请求字段并入每次出站调用（WS `llm:_:complete` 与 HTTP facade 共用），调用方逐 key 覆盖（RPC `extra_body` / HTTP 请求体同名字段优先），如 `{"reasoning_effort":"medium"}` 设默认 thinking 档位；设置 pane 新增「默认请求参数」JSON 编辑。实测 llama-server 下 `chat_template_kwargs.enable_thinking=false` 与 `reasoning_effort` 并存时前者生效，voice 低延迟路径不受影响。
 > v0.53 变更：**LLM HTTP 可观测性 + 容器接入**——HTTP 配置增 `expose`：false 仅 `127.0.0.1`，true 绑定 `0.0.0.0` 供 LAN / `host.docker.internal` 使用。每个 `/v1/chat/completions` 返回 `X-Viewer-LLM-Request-ID`，并向 `viewerd.log` 写一条结构化 `llm HTTP completion`：调用方原始 body、覆盖 active model 后的实际上游 endpoint/body、上游/客户端状态、返回 body、错误、来源与耗时；API Key 永不记录，响应日志上限 4 MiB并显式标 `response_truncated`。Hindsight、infod、gaokao-bank、voice-service 的默认/运行配置统一改指端口 18731。
@@ -299,16 +300,18 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 
 静态与动态汇于一处：registries 只有一套，in-repo core plugins bootstrap 静态注册（build-time chunk），external plugins 走本节动态流程，插件作者无感知。
 
-### 8.7 Dock 与 pane 打开语义（v0.24 定稿）
+### 8.7 Dock 与 pane 打开语义（v0.56 修订）
 
-- **`openInstance` 打开语义**：目标 instance 已开 → 聚焦所在 pane；当前 active pane 为空 → 用之；存在其他空 pane → 用第一个空 pane；都没有 → 对 active pane 自动 split（默认垂直即左右分，新 pane 在右侧）并放入。**任何已占用 pane 的内容不被静默替换。**
+- **`openInstance` 打开语义**：目标 instance 已开 → 聚焦所在 pane；当前 active pane 为空 → 用之；存在其他空 pane → 用第一个空 pane；都没有 → 自适应主次/横向等宽/纵向等高模式追加一个叶端 pane，自由模式对 active pane 自动 split（默认垂直即左右分）并放入。`openMode=replace` 仍显式允许替换 active 内容；默认 new 模式下任何已占用 pane 的内容不被静默替换。
+- **四种 tiling mode**：`cascade` 每层根据该层实际矩形长边二等分（宽高相等时上下切），first pane 占根一半、其余在 second 区递归；`columns` 横向等宽；`rows` 纵向等高；`free` 直接渲染 binary split tree 并开放横/纵 split + ratio drag。模式选择存 `viewer.layout.mode.v1`。前三种只显示通用「新增 pane」，不允许手改由算法确定的 geometry。
+- **移动语义**：共享抬头的「向树根/向叶端」将 active pane 内容与 DFS tile 顺序的前/后相邻项交换，并把 active 跟随到新位置；连续操作即可置首/置末，四模式与模式切换保持同一顺序语义。
 - **Dock singleton 条目常驻**：singleton provider（bus-inspector、chat-manager 等）的条目无条件常驻 dock，点击 = 打开或聚焦。（v0.24 引入的 pin/unpin 切换在 v0.42 随 dock hover 按钮一并移除。）
 - **Dock 条目无动作按钮（v0.42）**：dock 条目上不放任何按钮；实例的终止/删除动作归 pane chrome（§8.8）——terminal 的终止是 chrome danger action（杀 PTY + 关 pane，plain close 只摘 pane、实例保留可回看 scrollback），files 是 pin + 关闭剪枝。`DockProvider` 契约不再有 `remove` 钩子。
 - **Dock 分区契约不变**：一个前端插件贡献一个 DockProvider（一个 dock 分区 + instances 列表）；一个插件可注册任意数量 pane 组件类型。需要第二个 dock 分区时拆第二个前端插件（如 chat / chat-manager），shell 契约零改动。
 
-### 8.8 Pane chrome 注册（v0.25 定稿）
+### 8.8 Pane chrome 注册（v0.56 修订）
 
-- **单一 title bar**：pane 标题栏只有 shell 渲染的一条（图标 + 标题 + 状态 + 插件 actions/controls + 标准布局按钮 refresh/split/close）。**插件禁止自渲染标题栏**；插件自定义标题/按钮一律走注册。
+- **workspace 单一 title bar**：所有 tiled panes 共用 shell 顶部一条抬头（active pane 的图标 + 标题 + 状态 + 插件 actions/controls + layout selector + move/refresh/add-or-split/float/close）；tile 内不再重复占用标题高度，以 accent border 标 active。浮动 pane 因需 drag handle 而保留自己的标题栏。**插件禁止自渲染标题栏**；插件自定义标题/按钮一律走注册，注册 API 不变。
 - **注册 API**：`ctx.setChrome({title?, status?, statusClass?, actions?, controls?})`，按 instance uid（`paneType:instanceId`）键控；ctx dispose 时自动清除。actions = `{id, title, icon?, label?, active?, variant?, run()}`；controls = `select`（options + onChange）或 `chips`（只读条目）——类型移植自老版 `stores/paneToolbar.ts`，语义不变。
 - **标题回退**：未注册时 shell 沿用自动标题（provider title + instance 标识）。
 - **dock 实例过滤**：instance 型 DockProvider 的 dock 列表 = **pinned ∪ 当前已开**（与 singleton unpin 后"开着才显示"同一条语义）；完整列表永远在管理界面（chat → chat-manager 聊天 tab）。
@@ -547,6 +550,7 @@ my-plugin/
 - **v0.49**（2026-08-22）：**语音对话化 + catalog 频道名修复**——catalog mailbox 改三段频道名 `voice-catalog:_:<plugin>`（v0.48 两段名被 kernel `invalid_channel` 拒绝、目录恒空）；`voice-control:_:command` 升级为连续语音对话（LLM 输出 `{"say","entry_id"}`：直答或派发条目，prompt = 系统规则 + 目录 + 摘要 + 最近轮次）；per-session 对话历史 + running summary 压缩（字符预算 3000、恒留最新 4 条、硬顶 40 条，enable 切换重置）；`llm:_:complete` 新增 `extra_body` 透传（voice 调用带 `enable_thinking=false`）。
 - **v0.48**（2026-08-21）：**语音控制全局化 + LLM 转发层**——新增 core plugins `llm`（C6：纯转发 RPC `llm:_:complete` + `plugins.llm` 配置 + 设置 pane + 一次性迁移）与 `voice-control`（C7）；§8.11 重写为 shell 全局连续 loop（Dock-foot 通用 `createDockActions` 扩展点、`voice-catalog:*` retained mailbox 发现、`entry.channel` invoke 契约、`voice-fx` retained mailbox 口述交接、`chat:_:turn` 主动播报）；chat 侧命令相移除、口述/确认回路保留下沉；composer 耳机按钮删除；v0.47 pane 级命令控制器废弃。
 - **v0.1**（2026-08-12）：初版。三层结构、Event+Mailbox 双原语、"逻辑隔离默认"进程模型。
+- **v0.56**（2026-08-27）：四模式平铺与 workspace 共享 pane chrome（§8.7/§8.8）：自适应主次长边递归二分、横向等宽、纵向等高、自由 split tree；算法布局统一叶端追加并隐藏物理 split/resize，自由布局保留手动分割；active tile 高亮，pane 内容可向树根/叶端逐格移动；浮动层继续脱离 tiling。
 - **v0.55**（2026-08-25）：外部插件入口可见性改为 `plugins:_:assets` ∩ `plugins:_:list` 交集（§8.6 规则 3b），死插件残留资产不再复活 Dock 入口；supervisor 新增启动无主资产清扫（30s 稳定窗后回收既未注册也不在线的资产条目，§14.3）。
 - **v0.2**（2026-08-12）：微内核化；RPC 升为一等原语；传输统一（单 WS）；by-reference 数据面；渲染只在浏览器、view 为前端模块+后端 runtime。
 - **v0.3**（2026-08-12）：插件 I/O 固定契约（slots/emits，bindings 只存 slot→source 映射，删除 action）；内核纯化（config/instance-store/file/gateway 降为 core plugins，内核仅 broker+supervisor）；传输层定为 WebSocket 单一栈；自动化引擎定位为 core plugin。

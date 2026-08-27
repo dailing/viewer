@@ -19,3 +19,21 @@ func TestParseBlock(t *testing.T) {
 		t.Fatalf("usage block=%#v", usage)
 	}
 }
+
+func TestToolContentIsNormalizedAsInputAndOutput(t *testing.T) {
+	content := func(text string) []any {
+		return []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": text}}}
+	}
+	call := ParseBlock("tool_call", map[string]any{
+		"title": "terminal: go test ./...", "kind": "execute", "toolCallId": "tc-1", "content": content("$ go test ./..."),
+	})
+	if call.Text != "terminal: go test ./..." || !strings.Contains(call.Payload, `"input":"$ go test ./..."`) || !strings.Contains(call.Payload, `"kind":"execute"`) {
+		t.Fatalf("call=%#v", call)
+	}
+	result := ParseBlock("tool_call_update", map[string]any{
+		"kind": "execute", "status": "completed", "toolCallId": "tc-1", "content": content("terminal result\n- output: ok\n- exit_code: 0"),
+	})
+	if result.Text != "" || !strings.Contains(result.Payload, `"output":"terminal result\n- output: ok\n- exit_code: 0"`) {
+		t.Fatalf("result=%#v", result)
+	}
+}

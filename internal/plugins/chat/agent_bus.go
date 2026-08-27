@@ -161,12 +161,15 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 		// the frontend renders one activity row, not one row per chunk. A
 		// different kind seals the segment; the next delta opens a new block.
 		streaming := block.Kind == agentdriver.KindAgentText || block.Kind == agentdriver.KindThinking
-		// Tool-call lifecycle updates (pending → in_progress → completed)
-		// share one tool_call_id; merge them into the block opened by the
-		// initial call so the timeline shows a single row per call.
-		toolCallID := ""
-		if block.Kind == agentdriver.KindToolCall {
-			toolCallID = payloadString(block.Payload, "tool_call_id")
+		// Tool-call lifecycle updates and Codex command output deltas carry a
+		// stable activity id. Merge each lifecycle into the block opened by the
+		// initial call so the timeline shows one row per call/command.
+		activityID := payloadString(block.Payload, "tool_call_id")
+		if activityID == "" {
+			activityID = payloadString(block.Payload, "activity_id")
+		}
+		if activityID != "" {
+			activityID = block.Kind + ":" + activityID
 		}
 		p.mu.Lock()
 		open := p.openBlock[turnID]
@@ -181,19 +184,19 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 			p.openBlock[turnID] = block
 		}
 		toolMerge := false
-		if toolCallID != "" {
+		if activityID != "" {
 			calls := p.openToolCalls[turnID]
 			if calls == nil {
 				calls = map[string]*MessageBlock{}
 				p.openToolCalls[turnID] = calls
 			}
-			if existing := calls[toolCallID]; existing != nil {
+			if existing := calls[activityID]; existing != nil {
 				existing.Text = mergeBlockText(existing.Text, block.Text)
 				existing.Payload = mergeBlockPayload(existing.Payload, block.Payload)
 				block = existing
 				toolMerge = true
 			} else {
-				calls[toolCallID] = block
+				calls[activityID] = block
 			}
 		}
 		p.mu.Unlock()
@@ -281,6 +284,17 @@ func mergeBlockPayload(existing, update string) string {
 			continue
 		case string:
 			if typed == "" {
+				continue
+			}
+		}
+		// Streaming command output is additive. The completed Codex item sends
+		// the authoritative aggregated output and marks it complete, replacing
+		// the already-appended deltas to avoid duplication.
+		if key == "output" {
+			incoming, incomingOK := value.(string)
+			complete, _ := overlay["output_complete"].(bool)
+			if previous, previousOK := base[key].(string); incomingOK && previousOK && !complete {
+				base[key] = previous + incoming
 				continue
 			}
 		}

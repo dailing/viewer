@@ -15,8 +15,10 @@ import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
+import ToolActivity from "./ToolActivity.vue";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
+import { isToolActivity, presentToolBlock } from "./toolPresentation";
 import type { Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, Role, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
@@ -94,17 +96,9 @@ let lastProgrammaticScrollAt = 0; // suppresses the scroll-event echo of scrollT
 let lastObservedScrollTop = 0; // direction tracking for live-edge detach
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
+interface ActivityGroup { id: string; kind: "activity-group"; ts: number; segments: Segment[] }
+type DisplaySegment = Segment | ActivityGroup;
 interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[]; pending?: boolean; sending?: boolean; routed?: string; failed?: string }
-
-const ACTIVITY_LABELS: Record<string, string> = {
-  thinking: "Reasoning",
-  tool_call: "Tool call",
-  tool_result: "Tool result",
-  file_change: "Edit",
-  command: "Command",
-  error: "Error",
-  other: "Activity",
-};
 
 const timeline = computed<TimelineBox[]>(() => {
   const turns = new Map<string, TimelineBox>();
@@ -363,21 +357,6 @@ function usageTitle(box: TimelineBox): string {
   return `${usage.used.toLocaleString()} of ${usage.size ? usage.size.toLocaleString() : "?"} context tokens`;
 }
 
-function activityIcon(block?: ChatBlock): string {
-  switch (block?.kind) {
-    case "thinking": return "bi-lightbulb";
-    case "file_change": return "bi-pencil-square";
-    case "command": return "bi-terminal";
-    case "tool_result": return "bi-check-circle";
-    case "error": return "bi-exclamation-triangle";
-    default: return "bi-tools";
-  }
-}
-
-function activityLabel(block?: ChatBlock): string {
-  return ACTIVITY_LABELS[block?.kind ?? ""] ?? "Activity";
-}
-
 function parseBlockPayload(block?: ChatBlock): Record<string, unknown> | null {
   if (!block?.payload) return null;
   try {
@@ -387,21 +366,29 @@ function parseBlockPayload(block?: ChatBlock): Record<string, unknown> | null {
   return null;
 }
 
-function activitySummary(block?: ChatBlock): string {
-  const text = (block?.text ?? "").replace(/\s+/g, " ").trim();
-  if (text) return text;
-  const payload = parseBlockPayload(block);
-  if (payload && typeof payload.name === "string" && payload.name) return payload.name;
-  return activityLabel(block);
+/** First-level activity compaction. Only uninterrupted tool activity is
+ * grouped; assistant text, reasoning, and errors deliberately break a run.
+ * Runs of one or two remain directly visible, while 3+ become one stable
+ * details row whose key stays anchored to the first call as live calls arrive. */
+function groupedSegments(segments: Segment[]): DisplaySegment[] {
+  const result: DisplaySegment[] = [];
+  let run: Segment[] = [];
+  const flush = (): void => {
+    if (run.length >= 3) result.push({ id: `tool-group:${run[0].id}`, kind: "activity-group", ts: run[run.length - 1].ts, segments: run });
+    else result.push(...run);
+    run = [];
+  };
+  for (const segment of segments) {
+    if (segment.kind === "activity" && isToolActivity(segment.block)) run.push(segment);
+    else { flush(); result.push(segment); }
+  }
+  flush();
+  return result;
 }
 
-function blockPayloadPretty(block?: ChatBlock): string {
-  const payload = parseBlockPayload(block);
-  return payload ? JSON.stringify(payload, null, 2) : "";
-}
-
-function activityHasBody(segment: Segment): boolean {
-  return Boolean(segment.block && (segment.block.text.trim() || blockPayloadPretty(segment.block)));
+function groupLatestSummary(group: ActivityGroup): string {
+  const block = group.segments[group.segments.length - 1]?.block;
+  return block ? presentToolBlock(block).summary : "";
 }
 
 // Display whitelist: actions (tool/file/command) plus thinking and tool
@@ -1125,34 +1112,32 @@ onMounted(() => {
         </div>
         <div class="chat-box-body chat-timeline">
           <div v-if="box.pending" class="chat-pending-shimmer" aria-hidden="true" />
-          <template v-for="segment in box.segments" :key="segment.id">
+          <template v-for="segment in groupedSegments(box.segments)" :key="segment.id">
             <div v-if="segment.kind === 'text' && box.kind === 'user'" class="chat-user-text">{{ segment.text }}</div>
             <div
               v-else-if="segment.kind === 'text' && (segment.text ?? '').trim()"
               class="markdown-content chat-response-body"
               v-html="renderedHtmlFor(segment.id, segment.text ?? '')"
             />
-            <div v-else-if="segment.kind === 'activity'" class="chat-activity">
-              <details v-if="activityHasBody(segment)" class="chat-activity-details">
-                <summary class="chat-activity-summary" :class="{ 'text-danger': segment.block?.kind === 'error' }">
-                  <i class="bi chat-activity-icon" :class="activityIcon(segment.block)" />
-                  <span class="chat-activity-label">{{ activityLabel(segment.block) }}</span>
-                  <span class="chat-activity-text">{{ activitySummary(segment.block) }}</span>
-                  <span class="chat-time">{{ formatTime(segment.ts) }}</span>
-                  <i class="bi bi-chevron-right chat-activity-chevron" aria-hidden="true" />
-                </summary>
-                <div class="chat-activity-body">
-                  <pre v-if="segment.block?.text">{{ segment.block.text }}</pre>
-                  <pre v-if="blockPayloadPretty(segment.block)">{{ blockPayloadPretty(segment.block) }}</pre>
-                </div>
-              </details>
-              <div v-else class="chat-activity-summary chat-activity-flat" :class="{ 'text-danger': segment.block?.kind === 'error' }">
-                <i class="bi chat-activity-icon" :class="activityIcon(segment.block)" />
-                <span class="chat-activity-label">{{ activityLabel(segment.block) }}</span>
-                <span class="chat-activity-text">{{ activitySummary(segment.block) }}</span>
+            <ToolActivity v-else-if="segment.kind === 'activity' && segment.block" :block="segment.block" :time="formatTime(segment.ts)" />
+            <details v-else-if="segment.kind === 'activity-group'" class="chat-tool-group">
+              <summary class="chat-tool-group-summary">
+                <i class="bi bi-tools" aria-hidden="true" />
+                <span class="chat-tool-group-label">Tools</span>
+                <span class="chat-tool-group-text">{{ groupLatestSummary(segment) }}</span>
+                <span class="chat-tool-group-count">×{{ segment.segments.length }}</span>
                 <span class="chat-time">{{ formatTime(segment.ts) }}</span>
+                <i class="bi bi-chevron-right chat-tool-group-chevron" aria-hidden="true" />
+              </summary>
+              <div class="chat-tool-group-body">
+                <ToolActivity
+                  v-for="item in segment.segments"
+                  :key="item.id"
+                  :block="item.block!"
+                  :time="formatTime(item.ts)"
+                />
               </div>
-            </div>
+            </details>
           </template>
         </div>
       </article>
@@ -1393,24 +1378,18 @@ onMounted(() => {
   user-select: text;
 }
 
-.chat-activity {
-  min-width: 0;
-}
-
-.chat-activity-details {
-  /* Intentionally unboxed (user direction): activity rows are low-key
-     one-liners — no panel background/border, just a dimmed single line. */
+.chat-tool-group {
   color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
   min-width: 0;
 }
 
-.chat-activity-summary {
+.chat-tool-group-summary {
   align-items: center;
   cursor: pointer;
   display: grid;
   font-size: 10px;
   gap: 4px;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
   line-height: 1.3;
   list-style: none;
   min-height: 16px;
@@ -1419,72 +1398,52 @@ onMounted(() => {
   user-select: none;
 }
 
-.chat-activity-summary::-webkit-details-marker {
+.chat-tool-group-summary::-webkit-details-marker {
   display: none;
 }
 
-.chat-activity-summary:hover {
+.chat-tool-group-summary:hover {
   color: var(--color-text-muted);
 }
 
-.chat-activity-flat {
-  cursor: default;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
-}
-
-.chat-activity-flat:hover {
-  color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
-}
-
-.chat-activity-icon {
-  color: inherit;
-  font-size: 9.5px;
-}
-
-.chat-activity-label {
-  color: inherit;
-  font-weight: 500;
+.chat-tool-group-label {
+  font-weight: 600;
   white-space: nowrap;
 }
 
-.chat-activity-text {
+.chat-tool-group-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chat-activity-chevron {
+.chat-tool-group-count {
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.chat-tool-group-chevron {
   font-size: 10px;
   transition: transform 120ms ease;
 }
 
-.chat-activity-details[open] .chat-activity-chevron {
+.chat-tool-group[open] .chat-tool-group-chevron {
   transform: rotate(90deg);
 }
 
-.chat-activity-body {
-  max-height: min(420px, 55vh);
-  overflow: auto;
-  padding: 2px 2px 4px 18px;
-  user-select: text;
-}
-
-.chat-activity-body pre {
-  background: color-mix(in srgb, var(--color-surface-muted) 35%, transparent);
-  border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 10.5px;
-  margin: 0 0 4px;
-  overflow: auto;
-  padding: 6px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.chat-activity-body pre:last-child {
-  margin-bottom: 0;
+.chat-tool-group-body {
+  border-left: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 3px 6px;
+  padding-left: 8px;
 }
 
 .chat-empty {

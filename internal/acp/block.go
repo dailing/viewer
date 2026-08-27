@@ -3,6 +3,7 @@ package acp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"viewer/internal/agentdriver"
 )
@@ -16,7 +17,19 @@ func ParseBlock(updateKind string, data map[string]any) agentdriver.Block {
 	case "agent_thought_chunk":
 		kind, text = agentdriver.KindThinking, contentText(data)
 	case "tool_call", "tool_call_update":
-		kind, text, payload = agentdriver.KindToolCall, readableText(data), selectedPayload(data, "name", "title", "arguments", "status")
+		kind, payload = agentdriver.KindToolCall, selectedPayload(data, "name", "title", "arguments", "status", "kind", "locations")
+		content := contentListText(data)
+		if updateKind == "tool_call" {
+			text = stringField(data, "title", "name")
+			if content != "" {
+				payload["input"] = content
+			}
+		} else if content != "" {
+			// ACP completion details (shell stdout/exit code, edit summaries,
+			// read previews) live in nested content[]. Keep them as output
+			// instead of losing them or replacing the stable call title.
+			payload["output"] = content
+		}
 		// The lifecycle id lets the chat plugin merge pending → in_progress →
 		// completed updates into a single block.
 		if callID := stringField(data, "toolCallId", "tool_call_id"); callID != "" {
@@ -64,6 +77,29 @@ func contentText(data map[string]any) string {
 		return stringField(content, "text")
 	}
 	return stringField(data, "text", "delta")
+}
+
+// contentListText flattens ACP's content blocks. Hermes uses
+// content: [{content: {type:"text", text:"..."}, type:"content"}]
+// for both tool inputs and results, while some ACP implementations use a
+// direct object. Non-text content remains represented by the normalized
+// arguments/locations fields.
+func contentListText(data map[string]any) string {
+	if text := contentText(data); text != "" {
+		return text
+	}
+	values, _ := data["content"].([]any)
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		entry, _ := value.(map[string]any)
+		if nested, ok := entry["content"].(map[string]any); ok {
+			entry = nested
+		}
+		if text := stringField(entry, "text"); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func readableText(data map[string]any) string {

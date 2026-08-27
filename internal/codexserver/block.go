@@ -13,22 +13,38 @@ import (
 func ParseBlock(method string, data map[string]any) agentdriver.Block {
 	kind, text, payload := agentdriver.KindOther, "", map[string]any{"method": method}
 	lower := strings.ToLower(method)
+	item, _ := data["item"].(map[string]any)
+	itemType := strings.ToLower(stringField(item, "type"))
 	switch {
 	case method == "item/agentMessage/delta":
 		kind, text, payload = agentdriver.KindAgentText, stringField(data, "delta", "text"), map[string]any{}
 	case strings.Contains(lower, "reasoning"):
 		kind, text, payload = agentdriver.KindThinking, stringField(data, "delta", "text", "summary"), map[string]any{"method": method}
-	case strings.Contains(lower, "commandexecution") || strings.Contains(lower, "/command/"):
-		kind, payload = agentdriver.KindCommand, selectedPayload(data, "command", "status", "output")
-		if item, ok := data["item"].(map[string]any); ok {
-			mergeMissing(payload, selectedPayload(item, "command", "status", "output"))
+	case strings.Contains(lower, "commandexecution") || strings.Contains(lower, "/command/") || itemType == "commandexecution":
+		// A Codex command is reported as item/started, zero or more outputDelta
+		// notifications, and item/completed. Preserve the item id on every
+		// frame so chat can append the deltas into one visible command block.
+		kind, payload = agentdriver.KindCommand, selectedPayload(data, "command", "status", "output", "cwd", "exitCode", "durationMs")
+		mergeMissing(payload, selectedPayload(item, "command", "status", "output", "cwd", "exitCode", "durationMs"))
+		if aggregate := stringField(item, "aggregatedOutput"); aggregate != "" {
+			payload["output"] = aggregate
+			payload["output_complete"] = true
+		} else if delta := stringField(data, "delta"); delta != "" {
+			payload["output"] = delta
 		}
-		if _, ok := payload["output"]; !ok {
-			if delta := stringField(data, "delta"); delta != "" {
-				payload["output"] = delta
-			}
+		activityID := stringField(data, "itemId")
+		if activityID == "" {
+			activityID = stringField(item, "id")
 		}
-		text = stringField(data, "delta", "output", "command")
+		if activityID != "" {
+			payload["activity_id"] = activityID
+		}
+		// Text is the stable one-line label. Output belongs only in payload;
+		// otherwise every stdout delta becomes both a title and a detail body.
+		text = stringField(data, "command")
+		if text == "" {
+			text = stringField(item, "command")
+		}
 	case strings.Contains(lower, "filechange") || strings.Contains(lower, "patch") || method == "turn/diff/updated":
 		kind, payload = agentdriver.KindFileChange, selectedPayload(data, "path", "patch", "diff")
 		if _, ok := payload["patch"]; !ok {

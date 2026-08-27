@@ -712,6 +712,36 @@ func TestToolCallUpdatesMergeByCallID(t *testing.T) {
 	}
 }
 
+func TestCommandOutputDeltasAggregateByActivityID(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	p.runtimes[runtimeKey("chat", "role")] = &runtime{sessionID: "session", activeTurn: "turn", roleID: "role", roleName: "Role", pluginID: "viewer.agent-codex", providerKey: "codex/default"}
+	send := func(block agentdriver.Block) {
+		p.handleAgentEvent(busclient.Frame{Channel: "viewer.agent-codex:_:event", Value: agentdriver.EventFrame{SessionID: "session", TurnID: "turn", Kind: "command", Block: block}})
+	}
+	send(agentdriver.Block{Kind: "command", Text: "go test ./...", Payload: `{"activity_id":"exec-1","command":"go test ./...","status":"inProgress"}`})
+	send(agentdriver.Block{Kind: "command", Payload: `{"activity_id":"exec-1","output":"first\n"}`})
+	send(agentdriver.Block{Kind: "command", Payload: `{"activity_id":"exec-1","output":"second\n"}`})
+	// The completed item supplies authoritative aggregate output; it replaces
+	// the accumulated deltas instead of duplicating them.
+	send(agentdriver.Block{Kind: "command", Text: "go test ./...", Payload: `{"activity_id":"exec-1","output":"first\nsecond\n","output_complete":true,"status":"completed"}`})
+
+	var blocks []MessageBlock
+	if err := p.store.db.Find(&blocks).Error; err != nil || len(blocks) != 1 {
+		t.Fatalf("blocks=%#v err=%v", blocks, err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(blocks[0].Payload), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if blocks[0].Text != "go test ./..." || payload["output"] != "first\nsecond\n" || payload["status"] != "completed" {
+		t.Fatalf("block=%#v payload=%v", blocks[0], payload)
+	}
+}
+
 func TestAgentTextDeltasAggregatePerSegment(t *testing.T) {
 	p, err := New(t.TempDir())
 	if err != nil {

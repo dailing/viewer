@@ -79,7 +79,9 @@ export default definePlugin({
       if (session.selectedRoleIds.length > 0) payload.role_ids = session.selectedRoleIds;
       if (session.forceNewSession) payload.force_new_session = true;
       if (session.parallel) payload.parallel_dispatch = true;
-      await ctx.bus.request("chat:_:dispatch", payload);
+      // Same as ChatPane.send: outwait LLM role routing (up to
+      // llm.timeout_seconds, default 60s) instead of the bus's 30s default.
+      await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 });
       return true;
     });
     ctx.onDispose(unregister);

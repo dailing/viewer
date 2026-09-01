@@ -948,7 +948,10 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
     if (roleIds.length > 0) payload.role_ids = roleIds;
     if (forceNewSession) payload.force_new_session = true;
     if (parallel) payload.parallel_dispatch = true;
-    const result = await ctx.bus.request("chat:_:dispatch", payload) as { role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[] };
+    // Dispatch replies only after LLM role routing, which may take up to
+    // llm.timeout_seconds (default 60s) under local-server queueing; the
+    // bus's 30s default would report 发送失败 while the backend proceeds.
+    const result = await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 }) as { role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[] };
     // Busy roles come back in queued_role_ids: their message is held in the
     // per-role queue and starts when the in-flight turn ends, so no
     // optimistic response box yet — the user box carries the 排队中 label.

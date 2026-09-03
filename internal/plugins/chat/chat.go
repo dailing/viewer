@@ -397,6 +397,14 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 				return
 			}
 			result["turn_targets"] = turnTargetsPayload(targets)
+			// Per-turn session records (turn_id → session): the source of the
+			// pane's session lanes and lane-continuation targets.
+			sessions, sessionsErr := p.store.chatTurnSessions(chatID)
+			if sessionsErr != nil {
+				p.reply(frame, nil, sessionsErr)
+				return
+			}
+			result["turn_sessions"] = turnSessionsPayload(sessions)
 		}
 	}
 	if request != nil && request["include_messages"] == true {
@@ -453,6 +461,24 @@ func turnTargetsPayload(turns []Turn) map[string]any {
 	return values
 }
 
+// turnSessionsPayload renders sessioned turns as turn_id → session info so
+// the pane can group boxes into session lanes and target lane continuations.
+// started_at lets the pane order lanes and pick a lane's latest turn without
+// a second query.
+func turnSessionsPayload(turns []Turn) map[string]any {
+	values := make(map[string]any, len(turns))
+	for _, turn := range turns {
+		values[turn.ID] = map[string]any{
+			"session_id":  turn.SessionID,
+			"dispatch_id": turn.DispatchID,
+			"role_id":     turn.RoleID,
+			"role_name":   turn.RoleName,
+			"started_at":  turn.StartedAt,
+		}
+	}
+	return values
+}
+
 func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 	request, _ := pluginrpc.Object(frame)
 	chatID, _ := request["chat_id"].(string)
@@ -477,12 +503,17 @@ func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 	values, truncated, nextAfter := budgetBlockPayloads(blocks, turnRoles)
 	result := map[string]any{"blocks": values}
 	targeted := make([]Turn, 0, len(turns))
+	sessioned := make([]Turn, 0, len(turns))
 	for _, turn := range turns {
 		if turn.Agent != "" {
 			targeted = append(targeted, turn)
 		}
+		if turn.SessionID != "" {
+			sessioned = append(sessioned, turn)
+		}
 	}
 	result["turn_targets"] = turnTargetsPayload(targeted)
+	result["turn_sessions"] = turnSessionsPayload(sessioned)
 	if truncated {
 		// Resume with after=next_after; boundary blocks sharing the same
 		// occurred_at are re-sent and deduplicated by id on the client.

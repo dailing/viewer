@@ -114,6 +114,10 @@ type Turn struct {
 	// triggered it (user messages carry the dispatch id as their turn_id),
 	// so the user box's routing label can be rebuilt from turn records.
 	DispatchID string `gorm:"index"`
+	// SessionID is the provider session the turn ran on, stamped once the
+	// runtime exists. Turns sharing a SessionID form a session lane — the
+	// unit the pane's lane tabs filter by and lane continuations resume.
+	SessionID string `gorm:"index"`
 	// Agent/Provider/Model record the routing candidate that actually
 	// executed the turn (planned candidate at resolve time, updated on
 	// failover). Empty on turns that predate this column or never resolved
@@ -386,6 +390,19 @@ func (s *store) completeTurn(id, reason string) error {
 // that actually ran).
 func (s *store) setTurnTarget(id, agent, provider, model string) error {
 	return s.db.Model(&Turn{}).Where("id = ?", id).Updates(map[string]any{"agent": agent, "provider": provider, "model": model}).Error
+}
+
+// setTurnSession stamps the provider session a turn ran on.
+func (s *store) setTurnSession(id, sessionID string) error {
+	return s.db.Model(&Turn{}).Where("id = ?", id).Update("session_id", sessionID).Error
+}
+
+// chatTurnSessions returns the chat's turns with a recorded session — the
+// source of the pane's session lanes and lane-continuation targets.
+func (s *store) chatTurnSessions(chatID string) ([]Turn, error) {
+	var values []Turn
+	err := s.db.Where("chat_id = ? AND session_id <> ''", chatID).Find(&values).Error
+	return values, err
 }
 
 // chatTurnTargets returns the chat's turns that have an execution target

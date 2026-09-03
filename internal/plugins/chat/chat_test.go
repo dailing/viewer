@@ -236,11 +236,11 @@ func TestForceNewSessionStartsFreshSession(t *testing.T) {
 	candidate := resolvedCandidate{pluginID: "viewer.agent-hermes", target: agentdriver.Target{Agent: "hermes", Provider: "default", Model: "m"}}
 	canonicalKey := runtimeKey(chat.ID, role.ID)
 
-	first, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-1", canonicalKey, false, false)
+	first, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-1", canonicalKey, false, false, "")
 	if err != nil || !fresh || first.sessionID != "sess-1" {
 		t.Fatalf("first start: fresh=%v session=%#v err=%v", fresh, first, err)
 	}
-	again, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-2", canonicalKey, false, false)
+	again, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-2", canonicalKey, false, false, "")
 	if err != nil || fresh || again.sessionID != "sess-1" {
 		t.Fatalf("second dispatch must reuse the in-memory runtime: fresh=%v session=%s err=%v", fresh, again.sessionID, err)
 	}
@@ -249,21 +249,21 @@ func TestForceNewSessionStartsFreshSession(t *testing.T) {
 	p.mu.Lock()
 	delete(p.runtimes, runtimeKey(chat.ID, role.ID))
 	p.mu.Unlock()
-	resumed, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-3", canonicalKey, false, false)
+	resumed, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-3", canonicalKey, false, false, "")
 	if err != nil || fresh || resumed.sessionID != "sess-1" {
 		t.Fatalf("dispatch after restart must resume the stored session: fresh=%v session=%s err=%v", fresh, resumed.sessionID, err)
 	}
-	forced, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-4", canonicalKey, true, false)
+	forced, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-4", canonicalKey, true, false, "")
 	if err != nil || !fresh || forced.sessionID == "sess-1" {
 		t.Fatalf("force_new_session must start a fresh session: fresh=%v session=%s err=%v", fresh, forced.sessionID, err)
 	}
-	after, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-5", canonicalKey, false, false)
+	after, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-5", canonicalKey, false, false, "")
 	if err != nil || fresh || after.sessionID != forced.sessionID {
 		t.Fatalf("the session after a forced one must be reused: fresh=%v session=%s err=%v", fresh, after.sessionID, err)
 	}
 	// Ephemeral (parallel send-now) runtimes must neither resume nor overwrite
 	// the stored role session.
-	ephemeral, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-6", canonicalKey+"\x00turn-6", true, true)
+	ephemeral, fresh, err := p.ensureBusRuntime(ctx, chat, role, candidate, "turn-6", canonicalKey+"\x00turn-6", true, true, "")
 	if err != nil || !fresh || ephemeral.sessionID == after.sessionID {
 		t.Fatalf("ephemeral runtime must start a fresh session: fresh=%v session=%s err=%v", fresh, ephemeral.sessionID, err)
 	}
@@ -280,6 +280,233 @@ func TestForceNewSessionStartsFreshSession(t *testing.T) {
 	// must have asked for brand-new sessions (empty session_id).
 	if requestedIDs[1] != "sess-1" || requestedIDs[2] != "" || requestedIDs[3] != "" {
 		t.Fatalf("start requests: %v", requestedIDs)
+	}
+}
+
+// TestLaneContinuation covers lane continuations (continue_turn_id) end to
+// end over a real kernel: a continuation resumes the referenced turn's
+// session under a lane-scoped key without touching the stored canonical
+// session, a continuation dispatched while the lane's session is in flight
+// queues and starts when the running turn ends, and continuing the turn that
+// owns the canonical session rides the canonical flow.
+func TestLaneContinuation(t *testing.T) {
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+
+	configClient := busclient.New(url, busclient.Manifest{ID: "lane-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = configClient.Subscribe("config:_:get", func(frame busclient.Frame) {
+		_ = pluginrpc.Respond(configClient, frame, nil)
+	})
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	// Fake agent: answers _:start with incrementing session ids (echoing a
+	// requested resume id), records every _:prompt, and lets the test drive
+	// turn ends by publishing _:turn-ended frames manually.
+	type promptRecord struct{ sessionID, turnID, text string }
+	prompts := make(chan promptRecord, 16)
+	var mu sync.Mutex
+	starts := 0
+	agent := busclient.New(url, busclient.Manifest{
+		ID:      "viewer.agent-hermes",
+		Version: "0.1.0",
+		Slots:   map[string]any{"viewer.agent-hermes:_:start": map[string]any{}, "viewer.agent-hermes:_:prompt": map[string]any{}},
+		Emits:   map[string]any{"viewer.agent-hermes:_:catalog": map[string]any{}, "viewer.agent-hermes:_:event": map[string]any{}, "viewer.agent-hermes:_:turn-ended": map[string]any{}},
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:start", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		requested, _ := value["session_id"].(string)
+		mu.Lock()
+		starts++
+		sessionID := fmt.Sprintf("sess-%d", starts)
+		if requested != "" {
+			sessionID = requested
+		}
+		mu.Unlock()
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"session_id": sessionID, "resumed": requested != ""})
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:prompt", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		record := promptRecord{}
+		record.sessionID, _ = value["session_id"].(string)
+		record.turnID, _ = value["turn_id"].(string)
+		record.text, _ = value["text"].(string)
+		prompts <- record
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"ok": true})
+	})
+	if err := agent.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	if err := agent.Set(ctx, "viewer.agent-hermes:_:catalog", agentdriver.Catalog{Agent: "hermes", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{"m"}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	role := SuperRole{ID: "role-l", Name: "L", Description: "lane test role", RoutingPolicyID: "pol-l", CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	policy := RoutingPolicyConfig{ID: "pol-l", Name: "L policy", Enabled: true, Candidates: []RoutingCandidateConfig{{ID: "cand-l", AgentID: "hermes", ProviderID: "default", ModelID: "m", Enabled: true}}}
+	if err := p.store.importDomain([]SuperRole{role}, RoutingConfig{DefaultRoutingPolicyID: "pol-l", RoutingPolicies: []RoutingPolicyConfig{policy}}); err != nil {
+		t.Fatal(err)
+	}
+	chat := Chat{ID: "chat-l", Name: "L chat", Root: t.TempDir(), MemberRoleIDsJSON: `["role-l"]`, CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	if err := p.store.saveChat(&chat); err != nil {
+		t.Fatal(err)
+	}
+
+	caller := busclient.New(url, busclient.Manifest{ID: "lane-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+
+	type dispatchReply struct {
+		Started []string `json:"started_role_ids"`
+		Queued  []string `json:"queued_role_ids"`
+		ID      string   `json:"dispatch_id"`
+	}
+	dispatch := func(payload map[string]any) dispatchReply {
+		value, err := caller.Request(ctx, "chat:_:dispatch", payload, 10*time.Second)
+		if err != nil {
+			t.Fatalf("dispatch %v: %v", payload, err)
+		}
+		var reply dispatchReply
+		raw, _ := json.Marshal(value)
+		if err := json.Unmarshal(raw, &reply); err != nil {
+			t.Fatalf("decode dispatch reply: %v", err)
+		}
+		return reply
+	}
+	nextPrompt := func() promptRecord {
+		select {
+		case record := <-prompts:
+			return record
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for agent prompt")
+			return promptRecord{}
+		}
+	}
+	endTurn := func(record promptRecord) {
+		if err := agent.Publish(ctx, "viewer.agent-hermes:_:turn-ended", map[string]any{"session_id": record.sessionID, "turn_id": record.turnID, "stop_reason": "end_turn"}); err != nil {
+			t.Fatalf("end turn %s: %v", record.turnID, err)
+		}
+	}
+	assertTurnSession := func(turnID, sessionID string) {
+		t.Helper()
+		turn, err := p.store.turn(turnID)
+		if err != nil || turn == nil {
+			t.Fatalf("turn %s missing: %v", turnID, err)
+		}
+		if turn.SessionID != sessionID {
+			t.Fatalf("turn %s session = %q, want %q", turnID, turn.SessionID, sessionID)
+		}
+	}
+
+	// 1. A canonical turn establishes the stored role session.
+	dispatch(map[string]any{"chat_id": "chat-l", "message": "canonical", "role_ids": []string{"role-l"}})
+	first := nextPrompt()
+	endTurn(first)
+	assertTurnSession(first.turnID, first.sessionID)
+
+	// 2. A parallel turn runs on a throwaway session.
+	dispatch(map[string]any{"chat_id": "chat-l", "message": "branch", "role_ids": []string{"role-l"}, "parallel_dispatch": true})
+	branch := nextPrompt()
+	if branch.sessionID == first.sessionID {
+		t.Fatalf("parallel dispatch must use a fresh session, got %s", branch.sessionID)
+	}
+	endTurn(branch)
+	assertTurnSession(branch.turnID, branch.sessionID)
+
+	// 3. Continuing the branch lane resumes its session; the stored
+	// canonical session stays untouched.
+	reply := dispatch(map[string]any{"chat_id": "chat-l", "message": "lane follow-up", "continue_turn_id": branch.turnID})
+	if len(reply.Started) != 1 || len(reply.Queued) != 0 {
+		t.Fatalf("lane continuation should start immediately: %+v", reply)
+	}
+	lane := nextPrompt()
+	if lane.sessionID != branch.sessionID {
+		t.Fatalf("lane continuation should resume %s, got %s", branch.sessionID, lane.sessionID)
+	}
+	if !strings.Contains(lane.text, "lane follow-up") {
+		t.Fatalf("lane prompt text %q should contain the message", lane.text)
+	}
+	assertTurnSession(lane.turnID, branch.sessionID)
+
+	// 4. A continuation dispatched while the lane's session is in flight
+	// queues and starts when the running turn ends.
+	reply = dispatch(map[string]any{"chat_id": "chat-l", "message": "lane queued", "continue_turn_id": branch.turnID})
+	if len(reply.Started) != 0 || len(reply.Queued) != 1 {
+		t.Fatalf("continuation behind an in-flight lane should queue: %+v", reply)
+	}
+	select {
+	case record := <-prompts:
+		t.Fatalf("queued continuation started while the lane turn was running: %+v", record)
+	case <-time.After(400 * time.Millisecond):
+	}
+	endTurn(lane)
+	laneQueued := nextPrompt()
+	if laneQueued.sessionID != branch.sessionID || !strings.Contains(laneQueued.text, "lane queued") {
+		t.Fatalf("queued continuation should resume %s with the queued message, got %+v", branch.sessionID, laneQueued)
+	}
+	endTurn(laneQueued)
+
+	// 5. Continuing the turn that owns the canonical session rides the
+	// canonical flow (and the stored pointer).
+	reply = dispatch(map[string]any{"chat_id": "chat-l", "message": "canonical follow-up", "continue_turn_id": first.turnID})
+	if len(reply.Started) != 1 {
+		t.Fatalf("canonical continuation should start immediately: %+v", reply)
+	}
+	canon := nextPrompt()
+	if canon.sessionID != first.sessionID {
+		t.Fatalf("canonical continuation should resume %s, got %s", first.sessionID, canon.sessionID)
+	}
+	endTurn(canon)
+	stored, err := p.store.roleSession("chat-l", "role-l")
+	if err != nil || stored == nil || stored.ProviderSessionID != first.sessionID {
+		t.Fatalf("stored canonical session must stay %s: stored=%#v err=%v", first.sessionID, stored, err)
+	}
+
+	// 6. An unknown continue_turn_id fails the dispatch.
+	if _, err := caller.Request(ctx, "chat:_:dispatch", map[string]any{"chat_id": "chat-l", "message": "orphan", "continue_turn_id": "no-such-turn"}, 10*time.Second); err == nil {
+		t.Fatal("continuation with an unknown turn id should fail")
+	}
+
+	// 7. chats:list exposes the per-turn session records for the pane's lanes.
+	value, err := caller.Request(ctx, "chat:_:chats:list", map[string]any{"chat_id": "chat-l"}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("chats:list: %v", err)
+	}
+	var list struct {
+		TurnSessions map[string]struct {
+			SessionID string `json:"session_id"`
+		} `json:"turn_sessions"`
+	}
+	raw, _ := json.Marshal(value)
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatalf("decode chats:list: %v", err)
+	}
+	for turnID, sessionID := range map[string]string{first.turnID: first.sessionID, branch.turnID: branch.sessionID, lane.turnID: branch.sessionID, laneQueued.turnID: branch.sessionID, canon.turnID: first.sessionID} {
+		entry, ok := list.TurnSessions[turnID]
+		if !ok || entry.SessionID != sessionID {
+			t.Fatalf("turn_sessions[%s] = %+v (ok=%v), want session %s", turnID, entry, ok, sessionID)
+		}
 	}
 }
 

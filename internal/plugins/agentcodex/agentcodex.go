@@ -276,7 +276,10 @@ func (p *Plugin) handleCatalogRefresh(frame busclient.Frame) {
 }
 
 func modelIDs(value map[string]any) []string {
-	items, _ := value["models"].([]any)
+	// codex ≥0.151 returns the list under "data" (the pre-rename "models"
+	// key is intentionally not parsed: protocol drift must surface as a
+	// catalog refresh error, not a silently stale fallback).
+	items, _ := value["data"].([]any)
 	result, seen := []string{}, map[string]bool{}
 	for _, item := range items {
 		model, _ := item.(map[string]any)

@@ -214,7 +214,7 @@ onMounted(() => void load().catch((cause) => { error.value = errorText(cause); }
             <i class="bi bi-grip-vertical candidate-grip" title="拖拽排序"></i>
             <TextSelect :model-value="candidate.agent_id" label="Agent" :options="agentOptions()" @update:model-value="changeAgent(candidate, $event)" />
             <TextSelect :model-value="candidate.provider_id" label="Provider" :options="providerOptions(candidate)" @update:model-value="changeProvider(candidate, $event)" />
-            <TextSelect v-model="candidate.model_id" label="Model" :options="modelOptions(candidate)" />
+            <TextSelect v-model="candidate.model_id" label="Model" :options="modelOptions(candidate)" allow-custom />
             <label class="candidate-enabled small"><input v-model="candidate.enabled" type="checkbox" class="form-check-input">Enabled</label>
             <button type="button" class="candidate-remove" title="删除候选" @click="removeCandidate(selected, candidateIndex)"><i class="bi bi-trash"></i></button>
           </div>

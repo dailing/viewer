@@ -21,7 +21,8 @@ for line in sys.stdin:
     if method == "initialize":
         send({"id": request_id, "result": {"userAgent": "mock-codex/1"}})
     elif method == "model/list":
-        send({"id": request_id, "result": {"models": [{"id": "gpt-test"}, {"id": "fail-start"}]}})
+        # codex ≥0.151 wire shape: models under "data".
+        send({"id": request_id, "result": {"data": [{"id": "gpt-test"}, {"id": "fail-start"}]}})
     elif method == "thread/start":
         if params.get("model") == "fail-start":
             send({"id": request_id, "error": {"code": -32000, "message": "mock start failure"}})

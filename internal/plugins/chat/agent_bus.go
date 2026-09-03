@@ -466,10 +466,14 @@ func candidateProfile(target agentdriver.Target) string {
 
 // ensureBusRuntime starts (or reuses) the agent session for a turn. `key` is
 // the runtimes map key chosen by the caller: the canonical chat+role key for
-// regular turns, a unique per-turn key for parallel send-now turns.
-// Ephemeral (parallel) runtimes never resume or overwrite the stored role
-// session — the canonical session belongs to the serial path.
-func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole, candidate resolvedCandidate, turnID, key string, forceNew bool, ephemeral bool) (*runtime, bool, error) {
+// regular turns, a unique per-turn key for parallel send-now turns, a
+// lane-scoped key for lane continuations. Ephemeral (parallel) runtimes never
+// resume or overwrite the stored role session — the canonical session belongs
+// to the serial path. Lane continuations (resumeID != "") resume the given
+// session explicitly and likewise leave the stored canonical session
+// untouched; the explicit resume also overrides a new_each_run session
+// policy, since the user picked the session to continue.
+func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole, candidate resolvedCandidate, turnID, key string, forceNew bool, ephemeral bool, resumeID string) (*runtime, bool, error) {
 	effectiveCWD := chat.Root
 	if role.CWD != "" {
 		if filepath.IsAbs(role.CWD) {
@@ -494,13 +498,18 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole
 		delete(p.runtimes, key)
 		existing = nil
 	}
-	if existing != nil && existing.pluginID == candidate.pluginID && existing.providerKey == providerKey && existing.profile == profile && existing.cwd == absolute && role.SessionPolicy != "new_each_run" {
+	if existing != nil && existing.pluginID == candidate.pluginID && existing.providerKey == providerKey && existing.profile == profile && existing.cwd == absolute && (role.SessionPolicy != "new_each_run" || resumeID != "") && (resumeID == "" || existing.sessionID == resumeID) {
 		p.mu.Unlock()
 		return existing, false, nil
 	}
 	p.mu.Unlock()
 	requested := ""
-	if !ephemeral {
+	switch {
+	case resumeID != "" && !forceNew:
+		// Lane continuation: resume the lane's session explicitly. A
+		// fresh-retry (stale session refused) drops the pin and starts new.
+		requested = resumeID
+	case !ephemeral:
 		state, err := p.store.roleSession(chat.ID, role.ID)
 		if err != nil {
 			return nil, false, err
@@ -521,7 +530,7 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole
 		return nil, false, errors.New("agent start returned no session_id")
 	}
 	current := &runtime{sessionID: started.SessionID, profile: profile, cwd: absolute, roleID: role.ID, roleName: role.Name, pluginID: candidate.pluginID, providerKey: providerKey, target: candidate.target, ended: make(chan turnEnd, 1)}
-	if !ephemeral {
+	if !ephemeral && resumeID == "" {
 		if err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: providerKey, ProviderProfile: profile, ProviderSessionID: started.SessionID, CWD: absolute, UpdatedAt: nowMillis()}); err != nil {
 			return nil, false, err
 		}

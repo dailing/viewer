@@ -129,7 +129,7 @@ onMounted(() => void load().catch((cause) => { error.value = errorText(cause); }
       <div class="row g-1">
         <div class="col-md-3"><select v-model="target.agent" class="form-select form-select-sm"><option v-for="item in catalogs" :key="item.agent" :value="item.agent" :disabled="!item.online">{{ item.agent }}{{ item.online ? "" : " (offline)" }}</option></select></div>
         <div class="col-md-3"><select v-model="target.provider" class="form-select form-select-sm"><option v-for="item in providerOptions" :key="item.provider" :value="item.provider">{{ item.provider }}</option></select></div>
-        <div class="col-md-3"><select v-model="target.model" class="form-select form-select-sm"><option value="">Default</option><option v-for="model in modelOptions" :key="model" :value="model">{{ model }}</option></select></div>
+        <div class="col-md-3"><input v-model="target.model" class="form-control form-control-sm" list="roles-panel-model-options" placeholder="Default（可手动输入模型名）"><datalist id="roles-panel-model-options"><option v-for="model in modelOptions" :key="model" :value="model"></option></datalist></div>
         <div class="col-md-3"><button class="btn btn-sm btn-outline-secondary w-100" @click="addTargetToPolicy">加入 Policy</button></div>
       </div>
 

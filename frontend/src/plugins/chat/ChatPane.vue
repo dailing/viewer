@@ -20,7 +20,7 @@ import ToolActivity from "./ToolActivity.vue";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
 import { presentToolBlock } from "./toolPresentation";
-import type { Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, Role, TurnTarget, TurnTargetEntry, Workspace } from "./types";
+import type { Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -105,16 +105,86 @@ let userScrolled = false; // manual scroll wins over the cache-hit auto-scroll
 let lastProgrammaticScrollAt = 0; // suppresses the scroll-event echo of scrollThreadTop
 let lastObservedScrollTop = 0; // direction tracking for live-edge detach
 
+/** Pane-side lane record per turn (turn_id → session lane). */
+interface TurnSessionEntry { sessionId: string; dispatchId: string; roleId: string; roleName: string; startedAt: number }
+
+const turnSessions = ref(new Map<string, TurnSessionEntry>());
+
+/** Merge one turn-session update; keeps fields a live frame doesn't carry. */
+function upsertTurnSession(turnId: string, entry: TurnSessionEntry): void {
+  const existing = turnSessions.value.get(turnId);
+  const merged: TurnSessionEntry = {
+    ...entry,
+    dispatchId: entry.dispatchId || existing?.dispatchId || "",
+    roleName: entry.roleName || existing?.roleName || "",
+    startedAt: entry.startedAt || existing?.startedAt || 0,
+  };
+  if (existing && existing.sessionId === merged.sessionId && existing.dispatchId === merged.dispatchId && existing.startedAt === merged.startedAt) return;
+  turnSessions.value = new Map([...turnSessions.value, [turnId, merged]]);
+}
+
+/** Seed turn sessions from a chats:list / blocks:list reply (turn_id → session). */
+function seedTurnSessions(map: Record<string, TurnSession> | undefined): void {
+  if (!map) return;
+  for (const [turnId, raw] of Object.entries(map)) {
+    if (!raw.session_id) continue;
+    upsertTurnSession(turnId, { sessionId: raw.session_id, dispatchId: raw.dispatch_id ?? "", roleId: raw.role_id ?? "", roleName: raw.role_name ?? "", startedAt: raw.started_at ?? 0 });
+  }
+}
+
+/** One session lane: the chain of turns sharing a provider session. */
+interface Lane { sessionId: string; roleId: string; roleName: string; firstAt: number; latestTurnId: string; latestAt: number; running: boolean }
+
+const lanes = computed<Lane[]>(() => {
+  const bySession = new Map<string, Lane>();
+  for (const [turnId, entry] of turnSessions.value) {
+    let lane = bySession.get(entry.sessionId);
+    if (!lane) {
+      lane = { sessionId: entry.sessionId, roleId: entry.roleId, roleName: entry.roleName || "Agent", firstAt: entry.startedAt, latestTurnId: turnId, latestAt: entry.startedAt, running: false };
+      bySession.set(entry.sessionId, lane);
+    }
+    if (entry.startedAt >= lane.latestAt) { lane.latestAt = entry.startedAt; lane.latestTurnId = turnId; }
+    if (lane.firstAt === 0 || (entry.startedAt > 0 && entry.startedAt < lane.firstAt)) lane.firstAt = entry.startedAt;
+    if (lane.roleName === "Agent" && entry.roleName) lane.roleName = entry.roleName;
+    if (runningTurns.value.has(turnId)) lane.running = true;
+  }
+  return [...bySession.values()].sort((a, b) => a.firstAt - b.firstAt || a.sessionId.localeCompare(b.sessionId));
+});
+
+/** Active lane tab: "" shows the whole interleaved timeline; a session id
+ *  filters the timeline to that lane AND locks the next send to continue
+ *  that lane's session (send() passes its latest turn as continue_turn_id). */
+const activeLane = ref("");
+const activeLaneEntry = computed<Lane | null>(() => lanes.value.find((lane) => lane.sessionId === activeLane.value) ?? null);
+
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
 interface ActivityGroup { id: string; kind: "activity-group"; ts: number; segments: Segment[] }
 type DisplaySegment = Segment | ActivityGroup;
 interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[]; pending?: boolean; sending?: boolean; routed?: string; failed?: string }
 
+// NOTE: lane state above must stay above timeline — watch(timeline, …) in
+// setup evaluates the computed once eagerly, so anything its getter touches
+// has to be initialized by then (TDZ crash otherwise).
 const timeline = computed<TimelineBox[]>(() => {
   const turns = new Map<string, TimelineBox>();
   const boxes: TimelineBox[] = [];
+  // Lane filter: with a lane tab active, only that session's turns (and the
+  // user messages whose dispatch spawned them) render. Turns whose session
+  // record hasn't landed yet stay visible — hiding live content flickers.
+  const lane = activeLane.value;
+  const laneOfTurn = (turnId: string): string => turnSessions.value.get(turnId)?.sessionId ?? "";
+  const dispatchVisible = (dispatchId: string): boolean => {
+    let known = false;
+    for (const entry of turnSessions.value.values()) {
+      if (entry.dispatchId !== dispatchId) continue;
+      known = true;
+      if (entry.sessionId === lane) return true;
+    }
+    return !known;
+  };
   for (const message of messages.value) {
     if (message.role === "user") {
+      if (lane !== "" && !dispatchVisible(message.turn_id)) continue;
       boxes.push({
         // User messages carry the dispatch id as turn_id; the dispatch's
         // turn records (keyed by that id) supply the "→" routing label.
@@ -123,6 +193,10 @@ const timeline = computed<TimelineBox[]>(() => {
         routed: dispatchLabels.value.get(message.turn_id) ?? "",
       });
       continue;
+    }
+    if (lane !== "") {
+      const session = laneOfTurn(message.turn_id);
+      if (session !== "" && session !== lane) continue;
     }
     let box = turns.get(message.turn_id);
     if (!box) {
@@ -138,6 +212,10 @@ const timeline = computed<TimelineBox[]>(() => {
   for (const block of blocks.value) {
     if (block.kind === "agent_text") continue; // text blocks render via messages
     if (!activityDisplayable(block)) continue; // drop empty noise rows
+    if (lane !== "") {
+      const session = laneOfTurn(block.turn_id);
+      if (session !== "" && session !== lane) continue;
+    }
     let box = turns.get(block.turn_id);
     if (!box) {
       box = { key: `t:${block.turn_id}`, kind: "role", label: "", roleId: "", turnId: block.turn_id, ts: block.occurred_at, segments: [] };
@@ -624,6 +702,7 @@ async function fetchBlocks(after: number, before = 0): Promise<ChatBlock[]> {
       chat_id: ctx.instanceId, after: cursor, ...(before > 0 ? { before } : {}),
     }) as Promise<ChatBlockList>);
     seedTurnTargets(list.turn_targets);
+    seedTurnSessions(list.turn_sessions);
     for (const block of list.blocks ?? []) byId.set(block.id, block);
     if (!(list.truncated ?? false) || !list.next_after) break;
     cursor = list.next_after;
@@ -685,6 +764,7 @@ async function load(fresh = false): Promise<void> {
     chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
     seedRunningTurns(list);
     seedTurnTargets(list.turn_targets);
+    seedTurnSessions(list.turn_sessions);
     const page = list.messages ?? [];
     messages.value = page;
     hasOlder.value = list.has_more ?? false;
@@ -743,6 +823,7 @@ async function refreshDelta(): Promise<boolean> {
       seedRunningTurns(list);
     }
     seedTurnTargets(list.turn_targets);
+    seedTurnSessions(list.turn_sessions);
     const page = list.messages ?? [];
     fetched.push(...page);
     // A no-cursor top page reports "older exist" as has_more — nothing newer
@@ -945,9 +1026,17 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
   void nextTick(() => scrollThreadToMessageEnd());
   try {
     const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message };
-    if (roleIds.length > 0) payload.role_ids = roleIds;
-    if (forceNewSession) payload.force_new_session = true;
-    if (parallel) payload.parallel_dispatch = true;
+    const lane = activeLaneEntry.value;
+    if (lane) {
+      // Lane tab active: continue that lane's session. The backend infers
+      // the role from the turn; role picks / new-session / send-now toggles
+      // don't apply to a continuation.
+      payload.continue_turn_id = lane.latestTurnId;
+    } else {
+      if (roleIds.length > 0) payload.role_ids = roleIds;
+      if (forceNewSession) payload.force_new_session = true;
+      if (parallel) payload.parallel_dispatch = true;
+    }
     // Dispatch replies only after LLM role routing, which may take up to
     // llm.timeout_seconds (default 60s) under local-server queueing; the
     // bus's 30s default would report 发送失败 while the backend proceeds.
@@ -1061,8 +1150,14 @@ onMounted(() => {
   // this feed (not the dispatch reply) is the authority on what is running;
   // it also drives the running chips of parallel turns of the same role.
   ctx.bus.subscribe("chat:_:turn", (frame) => {
-    const value = frame.value as { chat_id: string; turn_id: string; role_id: string; role_name?: string; phase: string; dispatch_id?: string; agent?: string; provider?: string; model?: string };
+    const value = frame.value as { chat_id: string; turn_id: string; role_id: string; role_name?: string; phase: string; dispatch_id?: string; agent?: string; provider?: string; model?: string; session_id?: string };
     if (value.chat_id !== ctx.instanceId || !value.turn_id) return;
+    // "session" phase stamps the turn's provider session — the lane
+    // records' live source (history seeds come from chats:list/blocks:list).
+    if (value.phase === "session") {
+      if (value.session_id) upsertTurnSession(value.turn_id, { sessionId: value.session_id, dispatchId: value.dispatch_id ?? "", roleId: value.role_id, roleName: value.role_name ?? "", startedAt: 0 });
+      return;
+    }
     // "target" phase (and completed frames) carry the turn's execution
     // target straight from the backend record — the routing labels' source.
     if (value.phase === "target" || value.phase === "completed") {
@@ -1190,6 +1285,29 @@ onMounted(() => {
         <i v-else class="bi bi-arrow-down" aria-hidden="true" /> 新消息 — 跳到最新
       </button>
     </div>
+    <div v-if="lanes.length >= 2 || activeLane" class="chat-lane-bar">
+      <button
+        type="button"
+        class="chat-lane-tab"
+        :class="{ active: activeLane === '' }"
+        title="显示全部 session 的消息"
+        @click="activeLane = ''"
+      >
+        全部
+      </button>
+      <button
+        v-for="(lane, index) in lanes"
+        :key="lane.sessionId"
+        type="button"
+        class="chat-lane-tab"
+        :class="{ active: activeLane === lane.sessionId }"
+        :title="`只看这条 session；激活后下一条消息默认续接它（${lane.roleName}）`"
+        @click="activeLane = lane.sessionId"
+      >
+        <span v-if="lane.running" class="spinner-border spinner-border-sm" aria-hidden="true" />
+        {{ lane.roleName }}#{{ index + 1 }}
+      </button>
+    </div>
     <div v-if="composerVisible" class="composer-shell" @focusout="handleComposerFocusOut">
       <div v-if="error" class="small text-danger mb-1">{{ error }}</div>
       <ComposerBox
@@ -1254,6 +1372,40 @@ onMounted(() => {
 .chat-newer-jump .spinner-border {
   height: 10px;
   width: 10px;
+}
+
+/* Lane bar: one compact row of session tabs between thread and composer.
+   The active tab both filters the timeline and locks the next send to
+   continue that lane's session. */
+.chat-lane-bar {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 0 2px 2px;
+}
+
+.chat-lane-tab {
+  align-items: center;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-size-ui);
+  gap: 4px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.chat-lane-tab.active {
+  border-bottom-color: var(--bs-primary);
+  color: var(--bs-body-color);
+}
+
+.chat-lane-tab .spinner-border {
+  height: 8px;
+  width: 8px;
 }
 
 .chat-box {

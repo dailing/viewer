@@ -29,6 +29,11 @@ type dispatchRequest struct {
 	// agent session (the composer's send-now toggle). Implies a fresh
 	// session; the canonical per-chat+role session is left untouched.
 	ParallelDispatch bool `json:"parallel_dispatch"`
+	// ContinueTurnID makes the dispatch a lane continuation: it skips LLM
+	// routing, goes to the role owning the referenced turn, and resumes
+	// that turn's session. Contradicts force_new_session / parallel_dispatch
+	// (both are cleared when set).
+	ContinueTurnID string `json:"continue_turn_id"`
 }
 
 func runtimeKey(chatID, roleID string) string { return chatID + "\x00" + roleID }
@@ -48,6 +53,16 @@ type queuedMessage struct {
 	// dispatchID of the dispatch that queued this message, so the turn that
 	// eventually runs it links back to the user message's turn_id.
 	dispatchID string
+	// resumeSession is the lane session the queued turn resumes ("" on the
+	// canonical path).
+	resumeSession string
+}
+
+// relayTarget is one role's turn within a relay, plus the lane session it
+// resumes ("" on the canonical and parallel paths).
+type relayTarget struct {
+	role   SuperRole
+	resume string
 }
 
 func (p *Plugin) handleDispatch(frame busclient.Frame) {
@@ -80,19 +95,52 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	selected, rationale, err := p.selectRoles(request, value, *chat, workspace)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
+	// Lane continuation (continue_turn_id): skip LLM routing and dispatch
+	// to the role owning the referenced turn, resuming that turn's session.
+	resumeSession := ""
+	var selected []SuperRole
+	var rationale string
+	if request.ContinueTurnID != "" {
+		var laneRole SuperRole
+		resumeSession, laneRole, err = p.resolveContinuation(*chat, workspace, request.ContinueTurnID)
+		if err != nil {
+			p.reply(frame, nil, err)
+			return
+		}
+		selected = []SuperRole{laneRole}
+		rationale = "Continue the session of turn " + request.ContinueTurnID + "."
+		request.ForceNewSession = false
+		request.ParallelDispatch = false
+	} else {
+		selected, rationale, err = p.selectRoles(request, value, *chat, workspace)
+		if err != nil {
+			p.reply(frame, nil, err)
+			return
+		}
 	}
 	parallel := request.ParallelDispatch
+	// laneOf computes a role's busy/runtime key and the lane session its
+	// turn resumes. A continuation whose lane IS the role's stored canonical
+	// session rides the canonical key and flow, keeping the stored session
+	// pointer authoritative; any other lane gets its own lane-scoped key.
+	laneOf := func(role SuperRole) (string, string) {
+		if resumeSession == "" {
+			return runtimeKey(chat.ID, role.ID), ""
+		}
+		state, stateErr := p.store.roleSession(chat.ID, role.ID)
+		if stateErr == nil && state != nil && state.ProviderSessionID == resumeSession {
+			return runtimeKey(chat.ID, role.ID), ""
+		}
+		return runtimeKey(chat.ID, role.ID) + "\x00lane\x00" + resumeSession, resumeSession
+	}
 	if !parallel {
 		// Queue-capacity pre-check: an over-full queue fails the dispatch
-		// before the user message lands in the timeline.
+		// before the user message lands in the timeline. A lane continuation
+		// also counts as busy when another key holds a turn on its session.
 		p.mu.Lock()
 		for _, role := range selected {
-			key := runtimeKey(chat.ID, role.ID)
-			if p.busy[key] && len(p.queues[key]) >= maxQueuedPerRole {
+			key, resume := laneOf(role)
+			if (p.busy[key] || (resume != "" && p.sessionInFlightLocked(resume))) && len(p.queues[key]) >= maxQueuedPerRole {
 				err = errQueueFull
 				break
 			}
@@ -113,13 +161,13 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 	// free roles start immediately. Parallel dispatch skips the busy lock and
 	// runs every role right away on a throwaway session.
 	startedKeys := []string{}
-	startedRoles := []SuperRole{}
+	started := []relayTarget{}
 	queuedRoleIDs := []string{}
 	p.mu.Lock()
 	for _, role := range selected {
-		key := runtimeKey(chat.ID, role.ID)
-		if !parallel && p.busy[key] {
-			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, role: role, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis(), dispatchID: dispatchID})
+		key, resume := laneOf(role)
+		if !parallel && (p.busy[key] || (resume != "" && p.sessionInFlightLocked(resume))) {
+			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, role: role, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis(), dispatchID: dispatchID, resumeSession: resume})
 			queuedRoleIDs = append(queuedRoleIDs, role.ID)
 			continue
 		}
@@ -127,12 +175,16 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 			p.busy[key] = true
 			startedKeys = append(startedKeys, key)
 		}
-		startedRoles = append(startedRoles, role)
+		started = append(started, relayTarget{role: role, resume: resume})
 	}
 	p.mu.Unlock()
 	p.publishMessage(user)
-	reply := map[string]any{"role_ids": roleIDs(selected), "started_role_ids": roleIDs(startedRoles), "queued_role_ids": queuedRoleIDs, "rationale": rationale, "dispatch_id": dispatchID}
-	if len(startedRoles) == 0 {
+	startedRoleIDs := make([]string, 0, len(started))
+	for _, target := range started {
+		startedRoleIDs = append(startedRoleIDs, target.role.ID)
+	}
+	reply := map[string]any{"role_ids": roleIDs(selected), "started_role_ids": startedRoleIDs, "queued_role_ids": queuedRoleIDs, "rationale": rationale, "dispatch_id": dispatchID}
+	if len(started) == 0 {
 		p.reply(frame, reply, nil)
 		return
 	}
@@ -144,7 +196,7 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		if !parallel {
 			defer p.releaseBusy(startedKeys)
 		}
-		p.runRelay(*chat, workspace, startedRoles, request.Message, user.CreatedAt, request.ForceNewSession, parallel, dispatchID)
+		p.runRelay(*chat, workspace, started, request.Message, user.CreatedAt, request.ForceNewSession, parallel, dispatchID)
 	}()
 	p.reply(frame, reply, nil)
 	close(startGate)
@@ -232,6 +284,59 @@ func roleIDs(roles []SuperRole) []string {
 	}
 	return result
 }
+
+// resolveContinuation validates a continue_turn_id dispatch: the turn must
+// belong to the chat and have a resumable session (stamped on the row once
+// its runtime starts, or visible on an in-flight runtime), and its role must
+// still exist in the workspace. Returns the session to resume and the role.
+func (p *Plugin) resolveContinuation(chat Chat, workspace Workspace, turnID string) (string, SuperRole, error) {
+	turn, err := p.store.turn(turnID)
+	if err != nil {
+		return "", SuperRole{}, err
+	}
+	if turn == nil || turn.ChatID != chat.ID {
+		return "", SuperRole{}, errors.New("continue_turn_id was not found in the chat")
+	}
+	sessionID := turn.SessionID
+	if sessionID == "" {
+		p.mu.Lock()
+		sessionID = p.inflightTurnSessionLocked(turnID)
+		p.mu.Unlock()
+	}
+	if sessionID == "" {
+		return "", SuperRole{}, errors.New("that turn has no resumable session")
+	}
+	for _, role := range workspace.Roles {
+		if role.ID == turn.RoleID {
+			return sessionID, role, nil
+		}
+	}
+	return "", SuperRole{}, errors.New("the turn's role no longer exists")
+}
+
+// inflightTurnSessionLocked returns the session of a currently running turn
+// ("" when the turn is not in flight). Caller holds p.mu.
+func (p *Plugin) inflightTurnSessionLocked(turnID string) string {
+	for _, current := range p.runtimes {
+		if current.activeTurn == turnID {
+			return current.sessionID
+		}
+	}
+	return ""
+}
+
+// sessionInFlightLocked reports whether any runtime is running a turn on the
+// session — under any key (canonical, throwaway, or lane). Lane continuations
+// queue behind it: one session never takes two prompts at once. Caller holds
+// p.mu.
+func (p *Plugin) sessionInFlightLocked(sessionID string) bool {
+	for _, current := range p.runtimes {
+		if current.sessionID == sessionID && current.activeTurn != "" {
+			return true
+		}
+	}
+	return false
+}
 func (p *Plugin) releaseBusy(keys []string) {
 	p.mu.Lock()
 	for _, key := range keys {
@@ -280,7 +385,7 @@ func (p *Plugin) startQueued(key string) {
 			go func() {
 				defer p.wg.Done()
 				defer p.releaseBusy([]string{key})
-				p.runRelay(*chat, workspace, []SuperRole{entry.role}, entry.message, entry.before, entry.forceNew, false, entry.dispatchID)
+				p.runRelay(*chat, workspace, []relayTarget{{role: entry.role, resume: entry.resumeSession}}, entry.message, entry.before, entry.forceNew, false, entry.dispatchID)
 			}()
 			return
 		}
@@ -289,8 +394,9 @@ func (p *Plugin) startQueued(key string) {
 	p.releaseBusy([]string{key})
 }
 
-func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, message string, before int64, forceNew bool, parallel bool, dispatchID string) {
-	for _, role := range roles {
+func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget, message string, before int64, forceNew bool, parallel bool, dispatchID string) {
+	for _, target := range targets {
+		role := target.role
 		turnID := newID()
 		key := runtimeKey(chat.ID, role.ID)
 		if parallel {
@@ -298,6 +404,11 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			// canonical chat+role runtime (and its stored session) stays
 			// untouched; the entry is removed when the turn ends.
 			key += "\x00" + turnID
+		} else if target.resume != "" {
+			// Lane continuation: the lane's session runs under its own key so
+			// it never fights the canonical session's busy lock, and the
+			// runtime stays resident for the lane's next continuation.
+			key += "\x00lane\x00" + target.resume
 		}
 		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, StartedAt: nowMillis()}
 		if err := p.store.beginTurn(turn); err != nil {
@@ -311,6 +422,9 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 		reason, summaryProvider := "error", ""
 		endErr := ""
 		attempts := []map[string]any{}
+		// laneSession records the session this turn ran on, for the
+		// end-of-turn lane-queue kick below.
+		laneSession := ""
 		// resolvedTarget records the candidate that actually runs the turn:
 		// the planned first candidate at resolve time, replaced on failover.
 		// Persisted on the turn row and published on the turn feed so the
@@ -329,7 +443,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 				var current *runtime
 				var fresh bool
 				attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
-				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, key, forceNew || retryFresh || parallel, parallel)
+				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, key, forceNew || retryFresh || parallel, parallel, target.resume)
 				if err != nil {
 					attempt["outcome"], attempt["error"] = "start_error", err.Error()
 					attempts = append(attempts, attempt)
@@ -340,6 +454,16 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 				if candidate.target.Agent != resolved.Agent || candidate.target.Provider != resolved.Provider || candidate.target.Model != resolved.Model {
 					resolved = candidate.target
 					p.recordTurnTarget(chat.ID, turnID, role, resolved, dispatchID)
+				}
+				// Stamp the session on the turn row and announce it on the turn
+				// feed: the pane's session lanes and lane continuations build
+				// from these records.
+				laneSession = current.sessionID
+				if laneSession != "" {
+					if sessionErr := p.store.setTurnSession(turnID, laneSession); sessionErr != nil {
+						slog.Warn("chat turn session persistence failed", "chat_id", chat.ID, "turn_id", turnID, "error", sessionErr)
+					}
+					p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "session", "dispatch_id": dispatchID, "session_id": laneSession})
 				}
 				prompt := message
 				contextBytes, promptMode := 0, "existing_session"
@@ -436,6 +560,13 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, roles []SuperRole, mes
 			p.mu.Lock()
 			delete(p.runtimes, key)
 			p.mu.Unlock()
+		}
+		if laneSession != "" {
+			// A lane continuation queued behind this turn waits on the
+			// session, which a throwaway or cross-key lane run holds no busy
+			// key for — kick its queue directly. (For a lane relay's own key
+			// this no-ops: the deferred releaseBusy drains it.)
+			p.startQueued(runtimeKey(chat.ID, role.ID) + "\x00lane\x00" + laneSession)
 		}
 		if err != nil || reason == "error" || reason == "cancelled" {
 			break

@@ -1,7 +1,7 @@
 export interface Sender { from: "user" | "role"; role_id?: string; role_name?: string }
 export interface ChatMessage { id: string; chat_id: string; turn_id: string; role: "user" | "assistant"; text: string; created_at: number; sender: Sender }
 export interface ChatBlock { id: string; chat_id: string; turn_id: string; kind: string; text: string; payload: string; occurred_at: number; role_id?: string; role_name?: string }
-export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number; turn_targets?: Record<string, TurnTarget> }
+export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession> }
 /** Per-turn execution target as persisted on the turn row — the record
  *  behind the pane's agent / provider / model routing labels. Turns without
  *  a record (pre-persistence history) render no label. */
@@ -10,8 +10,12 @@ export interface TurnTarget { dispatch_id?: string; role_id?: string; role_name?
 export interface TurnTargetEntry { dispatchId: string; roleId: string; roleName: string; label: string }
 export interface Role { id: string; name: string; description: string; prompt: string; cwd: string; routing_policy_id: string; session_policy: string; context_recycle_percent: number | null; context_recycle_tokens: number | null; created_at: number; updated_at: number }
 export interface Chat { id: string; name: string; type: string; pinned: boolean; root: string; common_prompt: string; member_role_ids: string[]; role_routing_policy_overrides: Record<string, string>; created_at: number; updated_at: number }
+/** Per-turn session record as persisted on the turn row — the source of
+ *  the pane's session lanes (turns sharing a session_id form one lane) and
+ *  of lane-continuation targets (continue_turn_id). */
+export interface TurnSession { session_id: string; dispatch_id?: string; role_id?: string; role_name?: string; started_at?: number }
 export interface RunningTurn { turn_id: string; role_id: string; role_name?: string }
-export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; turn_targets?: Record<string, TurnTarget>; messages?: ChatMessage[]; has_more?: boolean }
+export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; messages?: ChatMessage[]; has_more?: boolean }
 export interface Workspace { id: string; name: string; common_prompt: string; roles: Role[]; routing_policies: RoutingPolicy[]; default_routing_policy_id: string }
 export interface AgentProviderCatalog { provider: string; models: string[]; parameter_schema?: Record<string, unknown> }
 export interface AgentCatalog { agent: string; plugin_id: string; online: boolean; providers: AgentProviderCatalog[] }

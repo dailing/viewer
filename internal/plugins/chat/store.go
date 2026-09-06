@@ -117,7 +117,12 @@ type Turn struct {
 	// SessionID is the provider session the turn ran on, stamped once the
 	// runtime exists. Turns sharing a SessionID form a session lane — the
 	// unit the pane's lane tabs filter by and lane continuations resume.
-	SessionID string `gorm:"index"`
+	SessionID string `gorm:"index" json:"session_id"`
+	// BranchID ties the turn to a named parallel branch (framework v0.63),
+	// stamped at beginTurn from the dispatch — branch identity survives
+	// session rebuilds because it does not derive from SessionID. Empty on
+	// mainline turns.
+	BranchID string `gorm:"index" json:"branch_id"`
 	// Agent/Provider/Model record the routing candidate that actually
 	// executed the turn (planned candidate at resolve time, updated on
 	// failover). Empty on turns that predate this column or never resolved
@@ -148,6 +153,43 @@ type TurnSummary struct {
 	CreatedAt          int64
 }
 
+// Branch is a named parallel work line of a chat (framework v0.63): an
+// independent, persistent record that OWNS its turns (Turn.BranchID), so the
+// pane's branch tabs no longer derive their identity from provider sessions
+// — a session rebuild mid-branch never spawns a new tab. The branch's latest
+// SessionID is denormalized here for display; continuations resolve it from
+// the branch's newest turn. Merging dispatches a summary into the mainline
+// and archives the branch: MergedThroughTurnID records the cutoff turn (no
+// duplicate import on re-merge) and MergeMessageID links the mainline user
+// message carrying the summary, so the pane can attach the "已合并分支" card.
+type Branch struct {
+	ID       string `gorm:"primaryKey" json:"id"`
+	ChatID   string `gorm:"index;not null" json:"chat_id"`
+	Name     string `json:"name"`
+	RoleID   string `json:"role_id"`
+	RoleName string `json:"role_name"`
+	// SessionID is the provider session of the branch's newest turn
+	// (informational; the turn rows are authoritative).
+	SessionID           string `json:"session_id"`
+	ArchivedAt          *int64 `json:"archived_at"`
+	MergedThroughTurnID string `json:"merged_through_turn_id"`
+	MergeMessageID      string `json:"merge_message_id"`
+	CreatedAt           int64  `json:"created_at"`
+	UpdatedAt           int64  `json:"updated_at"`
+}
+
+func (b Branch) payload() map[string]any {
+	return map[string]any{
+		"id": b.ID, "chat_id": b.ChatID, "name": b.Name,
+		"role_id": b.RoleID, "role_name": b.RoleName, "session_id": b.SessionID,
+		"archived_at": b.ArchivedAt, "merged_through_turn_id": b.MergedThroughTurnID,
+		"merge_message_id": b.MergeMessageID,
+		"created_at":       b.CreatedAt, "updated_at": b.UpdatedAt,
+	}
+}
+
+func (b Branch) archived() bool { return b.ArchivedAt != nil }
+
 type store struct{ db *gorm.DB }
 
 func openStore(dataDir string) (*store, error) {
@@ -157,7 +199,7 @@ func openStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open chat database: %w", err)
 	}
-	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}); err != nil {
+	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &Branch{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
 	// The timeline queries blocks by (chat_id, occurred_at) windows; the
@@ -315,7 +357,7 @@ func (s *store) importDomain(roles []SuperRole, routing RoutingConfig) error {
 
 func (s *store) deleteChat(id string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}} {
+		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}, &Branch{}} {
 			if err := tx.Where("chat_id = ?", id).Delete(model).Error; err != nil {
 				return err
 			}
@@ -353,6 +395,10 @@ func (s *store) setActiveChatID(id string) error {
 
 func (s *store) beginTurn(turn *Turn) error        { return s.db.Create(turn).Error }
 func (s *store) addMessage(message *Message) error { return s.db.Create(message).Error }
+
+// deleteMessage removes one message row (queued-cancel drops the dispatch's
+// user message from the timeline).
+func (s *store) deleteMessage(id string) error { return s.db.Delete(&Message{}, "id = ?", id).Error }
 func (s *store) updateMessageText(id, text string) error {
 	return s.db.Model(&Message{}).Where("id = ?", id).Update("text", text).Error
 }
@@ -541,6 +587,69 @@ func (s *store) chatTurns(chatID string) ([]Turn, error) {
 	var values []Turn
 	err := s.db.Where("chat_id = ?", chatID).Find(&values).Error
 	return values, err
+}
+
+// --- Branches (framework v0.63) ---
+
+func (s *store) createBranch(value *Branch) error { return s.db.Create(value).Error }
+func (s *store) saveBranch(value *Branch) error   { return s.db.Save(value).Error }
+
+func (s *store) branch(id string) (*Branch, error) {
+	var value Branch
+	result := s.db.Limit(1).Find(&value, "id = ?", id)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &value, nil
+}
+
+// chatBranches lists every branch of a chat, active first then archived,
+// oldest first within each group — the pane's branch bar and the merge
+// cards both seed from it (archived rows back the 已合并分支 cards).
+func (s *store) chatBranches(chatID string) ([]Branch, error) {
+	var values []Branch
+	err := s.db.Where("chat_id = ?", chatID).Order("archived_at IS NOT NULL, created_at, id").Find(&values).Error
+	return values, err
+}
+
+// deleteBranch removes a branch record; only allowed for branches with no
+// turns (archived branches stay — they back the merged cards).
+func (s *store) deleteBranch(id string) error { return s.db.Delete(&Branch{}, "id = ?", id).Error }
+
+// branchTurns returns the branch's turns oldest-first — the merge draft's
+// transcript source and the cutoff basis.
+func (s *store) branchTurns(branchID string) ([]Turn, error) {
+	var values []Turn
+	err := s.db.Where("branch_id = ?", branchID).Order("started_at, id").Find(&values).Error
+	return values, err
+}
+
+// branchHasRunningTurn reports whether any of the branch's turns is still
+// in flight (row exists, no ended_at) — running branches refuse merges.
+func (s *store) branchHasRunningTurn(branchID string) (bool, error) {
+	var count int64
+	err := s.db.Model(&Turn{}).Where("branch_id = ? AND ended_at IS NULL", branchID).Count(&count).Error
+	return count > 0, err
+}
+
+// turnSummariesForTurns returns completed summaries keyed by turn id — the
+// merge draft prefers these over raw transcripts.
+func (s *store) turnSummariesForTurns(turnIDs []string) (map[string]TurnSummary, error) {
+	result := map[string]TurnSummary{}
+	if len(turnIDs) == 0 {
+		return result, nil
+	}
+	var values []TurnSummary
+	if err := s.db.Where("turn_id IN ? AND status = ?", turnIDs, "completed").Find(&values).Error; err != nil {
+		return nil, err
+	}
+	for _, value := range values {
+		result[value.TurnID] = value
+	}
+	return result, nil
 }
 
 func (s *store) latestUserMessage(chatID string, before int64) (*Message, error) {

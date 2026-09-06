@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -751,6 +754,423 @@ func TestQueuedAndParallelDispatch(t *testing.T) {
 	}
 }
 
+// TestQueuedCancelAndUpdate covers the queued-message management RPCs end to
+// end over a real kernel: a queued dispatch can be retexted in place (queue
+// position kept, the turn that eventually runs sees the new text) and another
+// queued dispatch can be cancelled (queue entry dropped, user message row
+// deleted, nothing ever runs for it).
+func TestQueuedCancelAndUpdate(t *testing.T) {
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+
+	configClient := busclient.New(url, busclient.Manifest{ID: "queuedit-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = configClient.Subscribe("config:_:get", func(frame busclient.Frame) {
+		_ = pluginrpc.Respond(configClient, frame, nil)
+	})
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	type promptRecord struct{ sessionID, turnID, text string }
+	prompts := make(chan promptRecord, 16)
+	var mu sync.Mutex
+	starts := 0
+	agent := busclient.New(url, busclient.Manifest{
+		ID:      "viewer.agent-hermes",
+		Version: "0.1.0",
+		Slots:   map[string]any{"viewer.agent-hermes:_:start": map[string]any{}, "viewer.agent-hermes:_:prompt": map[string]any{}},
+		Emits:   map[string]any{"viewer.agent-hermes:_:catalog": map[string]any{}, "viewer.agent-hermes:_:event": map[string]any{}, "viewer.agent-hermes:_:turn-ended": map[string]any{}},
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:start", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		requested, _ := value["session_id"].(string)
+		mu.Lock()
+		starts++
+		sessionID := fmt.Sprintf("sess-%d", starts)
+		if requested != "" {
+			sessionID = requested
+		}
+		mu.Unlock()
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"session_id": sessionID, "resumed": requested != ""})
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:prompt", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		record := promptRecord{}
+		record.sessionID, _ = value["session_id"].(string)
+		record.turnID, _ = value["turn_id"].(string)
+		record.text, _ = value["text"].(string)
+		prompts <- record
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"ok": true})
+	})
+	if err := agent.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	if err := agent.Set(ctx, "viewer.agent-hermes:_:catalog", agentdriver.Catalog{Agent: "hermes", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{"m"}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	role := SuperRole{ID: "role-qu", Name: "QU", Description: "queued edit test role", RoutingPolicyID: "pol-qu", CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	policy := RoutingPolicyConfig{ID: "pol-qu", Name: "QU policy", Enabled: true, Candidates: []RoutingCandidateConfig{{ID: "cand-qu", AgentID: "hermes", ProviderID: "default", ModelID: "m", Enabled: true}}}
+	if err := p.store.importDomain([]SuperRole{role}, RoutingConfig{DefaultRoutingPolicyID: "pol-qu", RoutingPolicies: []RoutingPolicyConfig{policy}}); err != nil {
+		t.Fatal(err)
+	}
+	chat := Chat{ID: "chat-qu", Name: "QU chat", Root: t.TempDir(), MemberRoleIDsJSON: `["role-qu"]`, CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	if err := p.store.saveChat(&chat); err != nil {
+		t.Fatal(err)
+	}
+
+	caller := busclient.New(url, busclient.Manifest{ID: "queuedit-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+
+	type dispatchReply struct {
+		Started []string `json:"started_role_ids"`
+		Queued  []string `json:"queued_role_ids"`
+		ID      string   `json:"dispatch_id"`
+	}
+	dispatch := func(message string) dispatchReply {
+		value, err := caller.Request(ctx, "chat:_:dispatch", map[string]any{"chat_id": "chat-qu", "message": message, "role_ids": []string{"role-qu"}}, 10*time.Second)
+		if err != nil {
+			t.Fatalf("dispatch %q: %v", message, err)
+		}
+		var reply dispatchReply
+		raw, _ := json.Marshal(value)
+		if err := json.Unmarshal(raw, &reply); err != nil {
+			t.Fatalf("decode dispatch reply: %v", err)
+		}
+		return reply
+	}
+	nextPrompt := func() promptRecord {
+		select {
+		case record := <-prompts:
+			return record
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for agent prompt")
+			return promptRecord{}
+		}
+	}
+	endTurn := func(record promptRecord) {
+		if err := agent.Publish(ctx, "viewer.agent-hermes:_:turn-ended", map[string]any{"session_id": record.sessionID, "turn_id": record.turnID, "stop_reason": "end_turn"}); err != nil {
+			t.Fatalf("end turn %s: %v", record.turnID, err)
+		}
+	}
+	type queuedEntry struct {
+		MessageID  string `json:"message_id"`
+		DispatchID string `json:"dispatch_id"`
+		Text       string `json:"text"`
+		Position   int    `json:"position"`
+	}
+	queuedSnapshot := func() []queuedEntry {
+		value, err := caller.Request(ctx, "chat:_:chats:list", map[string]any{"chat_id": "chat-qu"}, 10*time.Second)
+		if err != nil {
+			t.Fatalf("chats:list: %v", err)
+		}
+		var list struct {
+			Queued []queuedEntry `json:"queued_messages"`
+		}
+		raw, _ := json.Marshal(value)
+		if err := json.Unmarshal(raw, &list); err != nil {
+			t.Fatalf("decode chats:list reply: %v", err)
+		}
+		return list.Queued
+	}
+
+	// 1. First dispatch starts immediately; the next two queue behind it.
+	firstReply := dispatch("first")
+	if len(firstReply.Started) != 1 {
+		t.Fatalf("first dispatch should start: %+v", firstReply)
+	}
+	first := nextPrompt()
+	secondReply := dispatch("second")
+	if len(secondReply.Queued) != 1 {
+		t.Fatalf("second dispatch should queue: %+v", secondReply)
+	}
+	thirdReply := dispatch("third")
+	if len(thirdReply.Queued) != 1 {
+		t.Fatalf("third dispatch should queue: %+v", thirdReply)
+	}
+	snapshot := queuedSnapshot()
+	if len(snapshot) != 2 || snapshot[0].DispatchID != secondReply.ID || snapshot[1].DispatchID != thirdReply.ID {
+		t.Fatalf("queue snapshot = %+v, want second then third", snapshot)
+	}
+	if snapshot[0].Position != 1 || snapshot[1].Position != 2 || snapshot[0].MessageID == "" {
+		t.Fatalf("queue snapshot positions/message ids wrong: %+v", snapshot)
+	}
+
+	// 2. Editing the second message retexts the queue entry and the user
+	// message row; the position is kept.
+	if _, err := caller.Request(ctx, "chat:_:queued-update", map[string]any{"chat_id": "chat-qu", "dispatch_id": secondReply.ID, "message": "second edited"}, 10*time.Second); err != nil {
+		t.Fatalf("queued-update: %v", err)
+	}
+	snapshot = queuedSnapshot()
+	if len(snapshot) != 2 || snapshot[0].Text != "second edited" || snapshot[0].Position != 1 {
+		t.Fatalf("after update snapshot = %+v, want edited text at position 1", snapshot)
+	}
+	row, err := p.store.message(snapshot[0].MessageID)
+	if err != nil || row == nil || row.Text != "second edited" {
+		t.Fatalf("user message row after update = %#v err=%v", row, err)
+	}
+
+	// 3. Cancelling the third message drops its queue entry and deletes its
+	// user message row.
+	thirdMessageID := snapshot[1].MessageID
+	if _, err := caller.Request(ctx, "chat:_:queued-cancel", map[string]any{"chat_id": "chat-qu", "dispatch_id": thirdReply.ID}, 10*time.Second); err != nil {
+		t.Fatalf("queued-cancel: %v", err)
+	}
+	snapshot = queuedSnapshot()
+	if len(snapshot) != 1 || snapshot[0].DispatchID != secondReply.ID {
+		t.Fatalf("after cancel snapshot = %+v, want only second", snapshot)
+	}
+	deleted, err := p.store.message(thirdMessageID)
+	if err != nil || deleted != nil {
+		t.Fatalf("cancelled user message should be deleted, got %#v err=%v", deleted, err)
+	}
+
+	// 4. Ending the first turn runs the edited second message; nothing runs
+	// for the cancelled third afterwards.
+	endTurn(first)
+	second := nextPrompt()
+	if !strings.Contains(second.text, "second edited") {
+		t.Fatalf("queued turn should carry the edited text, got %q", second.text)
+	}
+	endTurn(second)
+	select {
+	case record := <-prompts:
+		t.Fatalf("cancelled message must never run, got %+v", record)
+	case <-time.After(400 * time.Millisecond):
+	}
+
+	// 5. Cancelling/updating a dispatch that is no longer queued fails with
+	// not_queued.
+	if _, err := caller.Request(ctx, "chat:_:queued-cancel", map[string]any{"chat_id": "chat-qu", "dispatch_id": secondReply.ID}, 10*time.Second); err == nil {
+		t.Fatal("cancelling a started dispatch should fail")
+	}
+	if _, err := caller.Request(ctx, "chat:_:queued-update", map[string]any{"chat_id": "chat-qu", "dispatch_id": secondReply.ID, "message": "too late"}, 10*time.Second); err == nil {
+		t.Fatal("updating a started dispatch should fail")
+	}
+}
+
+// TestRetainOnDispatchAndTurnEnd covers the Hindsight retain path end to end
+// over a real kernel: the user message is retained at dispatch time and the
+// turn's assistant message at turn completion, both into the chat bank with
+// sync extraction, a real timestamp, and role/agent metadata; the bank's
+// auto-consolidation is patched off once before the first retain.
+func TestRetainOnDispatchAndTurnEnd(t *testing.T) {
+	type recordedRequest struct {
+		method, path, body string
+	}
+	var recordMu sync.Mutex
+	var records []recordedRequest
+	retainServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(request.Body, 1<<20))
+		recordMu.Lock()
+		records = append(records, recordedRequest{request.Method, request.URL.Path, string(body)})
+		recordMu.Unlock()
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"results":[]}`))
+	}))
+	defer retainServer.Close()
+
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+
+	configClient := busclient.New(url, busclient.Manifest{ID: "retain-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = configClient.Subscribe("config:_:get", func(frame busclient.Frame) {
+		value, _ := pluginrpc.Object(frame)
+		if value != nil && value["key"] == "hindsight" {
+			_ = pluginrpc.Respond(configClient, frame, map[string]any{"endpoint": retainServer.URL})
+			return
+		}
+		_ = pluginrpc.Respond(configClient, frame, nil)
+	})
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	type promptRecord struct{ sessionID, turnID string }
+	prompts := make(chan promptRecord, 4)
+	agent := busclient.New(url, busclient.Manifest{
+		ID:      "viewer.agent-hermes",
+		Version: "0.1.0",
+		Slots:   map[string]any{"viewer.agent-hermes:_:start": map[string]any{}, "viewer.agent-hermes:_:prompt": map[string]any{}},
+		Emits:   map[string]any{"viewer.agent-hermes:_:catalog": map[string]any{}, "viewer.agent-hermes:_:event": map[string]any{}, "viewer.agent-hermes:_:turn-ended": map[string]any{}},
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:start", func(frame busclient.Frame) {
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"session_id": "sess-1", "resumed": false})
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:prompt", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		record := promptRecord{}
+		record.sessionID, _ = value["session_id"].(string)
+		record.turnID, _ = value["turn_id"].(string)
+		prompts <- record
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"ok": true})
+	})
+	if err := agent.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	if err := agent.Set(ctx, "viewer.agent-hermes:_:catalog", agentdriver.Catalog{Agent: "hermes", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{"m"}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	role := SuperRole{ID: "role-rm", Name: "RM", Description: "retain test role", RoutingPolicyID: "pol-rm", CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	policy := RoutingPolicyConfig{ID: "pol-rm", Name: "RM policy", Enabled: true, Candidates: []RoutingCandidateConfig{{ID: "cand-rm", AgentID: "hermes", ProviderID: "default", ModelID: "m", Enabled: true}}}
+	if err := p.store.importDomain([]SuperRole{role}, RoutingConfig{DefaultRoutingPolicyID: "pol-rm", RoutingPolicies: []RoutingPolicyConfig{policy}}); err != nil {
+		t.Fatal(err)
+	}
+	chat := Chat{ID: "chat-rm", Name: "RM chat", Root: t.TempDir(), MemberRoleIDsJSON: `["role-rm"]`, CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	if err := p.store.saveChat(&chat); err != nil {
+		t.Fatal(err)
+	}
+
+	caller := busclient.New(url, busclient.Manifest{ID: "retain-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+
+	if _, err := caller.Request(ctx, "chat:_:dispatch", map[string]any{"chat_id": "chat-rm", "message": "remember this query", "role_ids": []string{"role-rm"}}, 10*time.Second); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	var prompt promptRecord
+	select {
+	case prompt = <-prompts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for agent prompt")
+	}
+	// One visible assistant reply, then the turn ends.
+	if err := agent.Publish(ctx, "viewer.agent-hermes:_:event", agentdriver.EventFrame{SessionID: prompt.sessionID, TurnID: prompt.turnID, Kind: "agent_text", Block: agentdriver.Block{Kind: "agent_text", Text: "the answer"}}); err != nil {
+		t.Fatalf("publish event: %v", err)
+	}
+	if err := agent.Publish(ctx, "viewer.agent-hermes:_:turn-ended", map[string]any{"session_id": prompt.sessionID, "turn_id": prompt.turnID, "stop_reason": "end_turn"}); err != nil {
+		t.Fatalf("end turn: %v", err)
+	}
+
+	// Retains are async goroutines: poll until the PATCH + both POSTs land.
+	var patched, userItem, assistantItem map[string]any
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		recordMu.Lock()
+		snapshot := append([]recordedRequest(nil), records...)
+		recordMu.Unlock()
+		for _, record := range snapshot {
+			var body map[string]any
+			if json.Unmarshal([]byte(record.body), &body) != nil {
+				continue
+			}
+			if record.method == http.MethodPatch && strings.HasSuffix(record.path, "/config") {
+				patched = body
+				continue
+			}
+			if record.method != http.MethodPost || !strings.HasSuffix(record.path, "/memories") {
+				continue
+			}
+			items, _ := body["items"].([]any)
+			if len(items) == 0 {
+				continue
+			}
+			item, _ := items[0].(map[string]any)
+			metadata, _ := item["metadata"].(map[string]any)
+			switch metadata["role"] {
+			case "user":
+				userItem = item
+			case "assistant":
+				assistantItem = item
+			}
+		}
+		if patched != nil && userItem != nil && assistantItem != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if patched == nil {
+		t.Fatal("bank config was never patched (auto-consolidation disable)")
+	}
+	updates, _ := patched["updates"].(map[string]any)
+	if updates["enable_auto_consolidation"] != false {
+		t.Fatalf("config patch = %v, want enable_auto_consolidation=false", patched)
+	}
+	if userItem == nil || assistantItem == nil {
+		recordMu.Lock()
+		t.Fatalf("missing retains (user=%v assistant=%v); records=%v", userItem != nil, assistantItem != nil, records)
+	}
+	for label, item := range map[string]map[string]any{"user": userItem, "assistant": assistantItem} {
+		timestamp, _ := item["timestamp"].(string)
+		if timestamp == "" || timestamp == "unset" {
+			t.Fatalf("%s retain has no real timestamp: %v", label, item)
+		}
+		if _, parseErr := time.Parse(time.RFC3339Nano, timestamp); parseErr != nil {
+			t.Fatalf("%s retain timestamp %q unparsable: %v", label, timestamp, parseErr)
+		}
+		metadata, _ := item["metadata"].(map[string]any)
+		if metadata["chat_id"] != "chat-rm" || metadata["message_id"] == "" {
+			t.Fatalf("%s retain metadata wrong: %v", label, metadata)
+		}
+	}
+	if content, _ := userItem["content"].(string); !strings.HasPrefix(content, "User: remember this query") {
+		t.Fatalf("user retain content = %q", content)
+	}
+	if content, _ := assistantItem["content"].(string); !strings.HasPrefix(content, "RM: the answer") {
+		t.Fatalf("assistant retain content = %q", content)
+	}
+	metadata, _ := assistantItem["metadata"].(map[string]any)
+	if metadata["agent"] != "hermes" || metadata["provider"] != "default" {
+		t.Fatalf("assistant retain agent/provider metadata = %v", metadata)
+	}
+	// Extraction must be synchronous (async:true retains never land on the
+	// local single-worker deployment).
+	recordMu.Lock()
+	defer recordMu.Unlock()
+	for _, record := range records {
+		if record.method == http.MethodPost && strings.HasSuffix(record.path, "/memories") {
+			var body map[string]any
+			if json.Unmarshal([]byte(record.body), &body) == nil && body["async"] != false {
+				t.Fatalf("retain must be sync, body = %v", body)
+			}
+		}
+	}
+}
+
 func TestRoutingPolicySelectsEnabledOnlineCandidates(t *testing.T) {
 	p, err := New(t.TempDir())
 	if err != nil {
@@ -1475,5 +1895,263 @@ func TestResolveCandidatesLayeredOverride(t *testing.T) {
 	}
 	if got := providerOf(overrideChat, roleNoPolicy); got != "p-chat" {
 		t.Fatalf("chat override over workspace default provider=%q, want p-chat", got)
+	}
+}
+
+// TestBranchLifecycle covers named branches (framework v0.63) end to end over
+// a real kernel: explicit branch creation + fresh first turn + continuation
+// resume, anonymous parallel auto-branching, rename, merge draft (stub LLM),
+// merge-confirm dispatching the summary into the mainline and archiving the
+// branches with cutoff records, and the archived/empty/running guards.
+func TestBranchLifecycle(t *testing.T) {
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+
+	configClient := busclient.New(url, busclient.Manifest{ID: "branch-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = configClient.Subscribe("config:_:get", func(frame busclient.Frame) {
+		_ = pluginrpc.Respond(configClient, frame, nil)
+	})
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	// Fake agent, same contract as TestLaneContinuation.
+	type promptRecord struct{ sessionID, turnID, text string }
+	prompts := make(chan promptRecord, 16)
+	var mu sync.Mutex
+	starts := 0
+	agent := busclient.New(url, busclient.Manifest{
+		ID:      "viewer.agent-hermes",
+		Version: "0.1.0",
+		Slots:   map[string]any{"viewer.agent-hermes:_:start": map[string]any{}, "viewer.agent-hermes:_:prompt": map[string]any{}},
+		Emits:   map[string]any{"viewer.agent-hermes:_:catalog": map[string]any{}, "viewer.agent-hermes:_:event": map[string]any{}, "viewer.agent-hermes:_:turn-ended": map[string]any{}},
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:start", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		requested, _ := value["session_id"].(string)
+		mu.Lock()
+		starts++
+		sessionID := fmt.Sprintf("sess-%d", starts)
+		if requested != "" {
+			sessionID = requested
+		}
+		mu.Unlock()
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"session_id": sessionID, "resumed": requested != ""})
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:prompt", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		record := promptRecord{}
+		record.sessionID, _ = value["session_id"].(string)
+		record.turnID, _ = value["turn_id"].(string)
+		record.text, _ = value["text"].(string)
+		prompts <- record
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"ok": true})
+	})
+	if err := agent.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	if err := agent.Set(ctx, "viewer.agent-hermes:_:catalog", agentdriver.Catalog{Agent: "hermes", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{"m"}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	// Stub the LLM: jsonMode=true is the role router, anything else is the
+	// merge-draft call.
+	p.llmFn = func(_ context.Context, messages []map[string]string, jsonMode bool, _ int) (completionResult, error) {
+		if jsonMode {
+			return completionResult{Content: `{"role_ids":["role-b"],"rationale":"stub"}`, Model: "stub"}, nil
+		}
+		return completionResult{Content: "## 各分支成果\nstub draft", Model: "stub"}, nil
+	}
+
+	role := SuperRole{ID: "role-b", Name: "B", Description: "branch test role", RoutingPolicyID: "pol-b", CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	policy := RoutingPolicyConfig{ID: "pol-b", Name: "B policy", Enabled: true, Candidates: []RoutingCandidateConfig{{ID: "cand-b", AgentID: "hermes", ProviderID: "default", ModelID: "m", Enabled: true}}}
+	if err := p.store.importDomain([]SuperRole{role}, RoutingConfig{DefaultRoutingPolicyID: "pol-b", RoutingPolicies: []RoutingPolicyConfig{policy}}); err != nil {
+		t.Fatal(err)
+	}
+	chat := Chat{ID: "chat-b", Name: "B chat", Root: t.TempDir(), MemberRoleIDsJSON: `["role-b"]`, CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	if err := p.store.saveChat(&chat); err != nil {
+		t.Fatal(err)
+	}
+
+	caller := busclient.New(url, busclient.Manifest{ID: "branch-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+
+	request := func(channel string, payload map[string]any) map[string]any {
+		t.Helper()
+		value, err := caller.Request(ctx, channel, payload, 10*time.Second)
+		if err != nil {
+			t.Fatalf("%s %v: %v", channel, payload, err)
+		}
+		result, ok := value.(map[string]any)
+		if !ok {
+			raw, _ := json.Marshal(value)
+			_ = json.Unmarshal(raw, &result)
+		}
+		return result
+	}
+	nextPrompt := func() promptRecord {
+		select {
+		case record := <-prompts:
+			return record
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for agent prompt")
+			return promptRecord{}
+		}
+	}
+	endTurn := func(record promptRecord) {
+		if err := agent.Publish(ctx, "viewer.agent-hermes:_:turn-ended", map[string]any{"session_id": record.sessionID, "turn_id": record.turnID, "stop_reason": "end_turn"}); err != nil {
+			t.Fatalf("end turn %s: %v", record.turnID, err)
+		}
+	}
+	assertTurnBranch := func(turnID, branchID string) {
+		t.Helper()
+		turn, err := p.store.turn(turnID)
+		if err != nil || turn == nil {
+			t.Fatalf("turn %s missing: %v", turnID, err)
+		}
+		if turn.BranchID != branchID {
+			t.Fatalf("turn %s branch = %q, want %q", turnID, turn.BranchID, branchID)
+		}
+	}
+
+	// 1. Create a named branch and run its first turn: fresh session of its
+	// own, turn stamped with the branch id, branch role stamped.
+	created := request("chat:_:branches:create", map[string]any{"chat_id": "chat-b", "name": "排查滚动"})
+	branchID, _ := created["id"].(string)
+	if branchID == "" || created["name"] != "排查滚动" {
+		t.Fatalf("branches:create reply: %+v", created)
+	}
+	request("chat:_:dispatch", map[string]any{"chat_id": "chat-b", "message": "branch first", "branch_id": branchID, "role_ids": []string{"role-b"}})
+	first := nextPrompt()
+	assertTurnBranch(first.turnID, branchID)
+	endTurn(first)
+	stored, err := p.store.roleSession("chat-b", "role-b")
+	if err == nil && stored != nil && stored.ProviderSessionID == first.sessionID {
+		t.Fatalf("branch first turn must not overwrite the canonical session pointer: %+v", stored)
+	}
+	branch, err := p.store.branch(branchID)
+	if err != nil || branch == nil || branch.RoleID != "role-b" {
+		t.Fatalf("branch role stamp: %+v err=%v", branch, err)
+	}
+
+	// 2. A continuation resumes the branch's session.
+	request("chat:_:dispatch", map[string]any{"chat_id": "chat-b", "message": "branch follow-up", "branch_id": branchID})
+	followUp := nextPrompt()
+	if followUp.sessionID != first.sessionID {
+		t.Fatalf("branch continuation should resume %s, got %s", first.sessionID, followUp.sessionID)
+	}
+	assertTurnBranch(followUp.turnID, branchID)
+	endTurn(followUp)
+
+	// 3. Anonymous parallel dispatch auto-creates a named branch and stamps
+	// the turn with it.
+	reply := request("chat:_:dispatch", map[string]any{"chat_id": "chat-b", "message": "parallel side quest", "role_ids": []string{"role-b"}, "parallel_dispatch": true})
+	autoBranches, _ := reply["branches"].([]any)
+	if len(autoBranches) != 1 {
+		t.Fatalf("parallel dispatch should auto-create one branch: %+v", reply)
+	}
+	autoBranch, _ := autoBranches[0].(map[string]any)
+	autoBranchID, _ := autoBranch["id"].(string)
+	if autoBranchID == "" || autoBranch["name"] != "parallel sid…" {
+		t.Fatalf("auto branch payload: %+v", autoBranch)
+	}
+	parallelTurn := nextPrompt()
+	assertTurnBranch(parallelTurn.turnID, autoBranchID)
+
+	// 4. Merging a branch with a running turn fails.
+	if _, err := caller.Request(ctx, "chat:_:branches:merge", map[string]any{"chat_id": "chat-b", "branch_ids": []string{branchID, autoBranchID}}, 10*time.Second); err == nil {
+		t.Fatal("merge with a running branch should fail")
+	}
+	endTurn(parallelTurn)
+
+	// 5. Rename.
+	renamed := request("chat:_:branches:patch", map[string]any{"id": autoBranchID, "name": "优化渲染"})
+	if renamed["name"] != "优化渲染" {
+		t.Fatalf("branches:patch reply: %+v", renamed)
+	}
+
+	// 6. Merge draft: stub LLM content + per-branch cutoffs.
+	draft := request("chat:_:branches:merge", map[string]any{"chat_id": "chat-b", "branch_ids": []string{branchID, autoBranchID}})
+	summary, _ := draft["summary"].(string)
+	if !strings.Contains(summary, "stub draft") || !strings.Contains(summary, "排查滚动") {
+		t.Fatalf("merge draft summary: %q", summary)
+	}
+	cutoffs, _ := draft["branches"].([]any)
+	if len(cutoffs) != 2 {
+		t.Fatalf("merge draft cutoffs: %+v", draft)
+	}
+
+	// 7. Confirm: the (edited) summary lands in the mainline as a user
+	// message dispatched to the mainline role; both branches archive with
+	// cutoff + merge message id.
+	confirm := request("chat:_:branches:merge-confirm", map[string]any{"chat_id": "chat-b", "summary": "edited merge summary", "branches": cutoffs})
+	mergeMessageID, _ := confirm["message_id"].(string)
+	if mergeMessageID == "" {
+		t.Fatalf("merge-confirm reply: %+v", confirm)
+	}
+	mainline := nextPrompt() // the summary dispatch's turn
+	if !strings.Contains(mainline.text, "edited merge summary") {
+		t.Fatalf("mainline prompt should carry the summary, got %q", mainline.text)
+	}
+	mainlineTurn, err := p.store.turn(mainline.turnID)
+	if err != nil || mainlineTurn == nil || mainlineTurn.BranchID != "" {
+		t.Fatalf("merge summary turn must be mainline: %+v err=%v", mainlineTurn, err)
+	}
+	message, err := p.store.message(mergeMessageID)
+	if err != nil || message == nil || message.Text != "edited merge summary" {
+		t.Fatalf("merge message: %+v err=%v", message, err)
+	}
+	for _, id := range []string{branchID, autoBranchID} {
+		row, rowErr := p.store.branch(id)
+		if rowErr != nil || row == nil || row.ArchivedAt == nil || row.MergeMessageID != mergeMessageID || row.MergedThroughTurnID == "" {
+			t.Fatalf("branch %s not archived with records: %+v err=%v", id, row, rowErr)
+		}
+	}
+	endTurn(mainline)
+
+	// 8. Archived branches refuse sends and re-merge; chats:list exposes the
+	// branch records.
+	if _, err := caller.Request(ctx, "chat:_:dispatch", map[string]any{"chat_id": "chat-b", "message": "too late", "branch_id": branchID}, 10*time.Second); err == nil {
+		t.Fatal("dispatch to an archived branch should fail")
+	}
+	if _, err := caller.Request(ctx, "chat:_:branches:merge", map[string]any{"chat_id": "chat-b", "branch_ids": []string{branchID}}, 10*time.Second); err == nil {
+		t.Fatal("re-merge of an archived branch should fail")
+	}
+	list := request("chat:_:chats:list", map[string]any{"chat_id": "chat-b"})
+	listBranches, _ := list["branches"].([]any)
+	if len(listBranches) != 2 {
+		t.Fatalf("chats:list branches: %+v", list)
+	}
+
+	// 9. An empty branch can be deleted; an archived one cannot.
+	empty := request("chat:_:branches:create", map[string]any{"chat_id": "chat-b", "name": "空分支"})
+	emptyID, _ := empty["id"].(string)
+	if _, err := caller.Request(ctx, "chat:_:branches:delete", map[string]any{"id": branchID}, 10*time.Second); err == nil {
+		t.Fatal("deleting an archived branch should fail")
+	}
+	deleted := request("chat:_:branches:delete", map[string]any{"id": emptyID})
+	if deleted["deleted"] != true {
+		t.Fatalf("branches:delete reply: %+v", deleted)
 	}
 }

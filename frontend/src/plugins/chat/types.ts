@@ -1,5 +1,5 @@
 export interface Sender { from: "user" | "role"; role_id?: string; role_name?: string }
-export interface ChatMessage { id: string; chat_id: string; turn_id: string; role: "user" | "assistant"; text: string; created_at: number; sender: Sender }
+export interface ChatMessage { id: string; chat_id: string; turn_id: string; role: "user" | "assistant"; text: string; created_at: number; sender: Sender; deleted?: boolean }
 export interface ChatBlock { id: string; chat_id: string; turn_id: string; kind: string; text: string; payload: string; occurred_at: number; role_id?: string; role_name?: string }
 export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession> }
 /** Per-turn execution target as persisted on the turn row — the record
@@ -8,14 +8,24 @@ export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_
 export interface TurnTarget { dispatch_id?: string; role_id?: string; role_name?: string; agent?: string; provider?: string; model?: string }
 /** Pane-side normalized turn target: label pre-joined "agent / provider / model". */
 export interface TurnTargetEntry { dispatchId: string; roleId: string; roleName: string; label: string }
+/** One pending queue entry (a dispatch waiting behind an in-flight turn).
+ *  position is the 1-based slot inside that role's queue; enqueued_at the
+ *  queue time in ms. The pane's queued chip on a user box keys by
+ *  dispatch_id (the user message's turn_id). */
+export interface QueuedMessage { message_id: string; dispatch_id: string; chat_id: string; role_id: string; role_name?: string; text: string; enqueued_at: number; position?: number }
 export interface Role { id: string; name: string; description: string; prompt: string; cwd: string; routing_policy_id: string; session_policy: string; context_recycle_percent: number | null; context_recycle_tokens: number | null; created_at: number; updated_at: number }
 export interface Chat { id: string; name: string; type: string; pinned: boolean; root: string; common_prompt: string; member_role_ids: string[]; role_routing_policy_overrides: Record<string, string>; created_at: number; updated_at: number }
 /** Per-turn session record as persisted on the turn row — the source of
  *  the pane's session lanes (turns sharing a session_id form one lane) and
- *  of lane-continuation targets (continue_turn_id). */
-export interface TurnSession { session_id: string; dispatch_id?: string; role_id?: string; role_name?: string; started_at?: number }
+ *  of lane-continuation targets (continue_turn_id). branch_id ties the turn
+ *  to a named branch (framework v0.63): the pane's branch tabs filter by it. */
+export interface TurnSession { session_id: string; dispatch_id?: string; role_id?: string; role_name?: string; started_at?: number; branch_id?: string }
+/** A named parallel branch of a chat (framework v0.63). Active branches
+ *  (archived_at null) get bar tabs; archived ones back the 已合并分支 cards
+ *  (merge_message_id → the mainline summary message). */
+export interface Branch { id: string; chat_id: string; name: string; role_id?: string; role_name?: string; session_id?: string; archived_at?: number | null; merged_through_turn_id?: string; merge_message_id?: string; created_at: number; updated_at: number }
 export interface RunningTurn { turn_id: string; role_id: string; role_name?: string }
-export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; messages?: ChatMessage[]; has_more?: boolean }
+export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; branches?: Branch[]; messages?: ChatMessage[]; has_more?: boolean }
 export interface Workspace { id: string; name: string; common_prompt: string; roles: Role[]; routing_policies: RoutingPolicy[]; default_routing_policy_id: string }
 export interface AgentProviderCatalog { provider: string; models: string[]; parameter_schema?: Record<string, unknown> }
 export interface AgentCatalog { agent: string; plugin_id: string; online: boolean; providers: AgentProviderCatalog[] }

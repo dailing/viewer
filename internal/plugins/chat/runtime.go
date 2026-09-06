@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +35,12 @@ type dispatchRequest struct {
 	// that turn's session. Contradicts force_new_session / parallel_dispatch
 	// (both are cleared when set).
 	ContinueTurnID string `json:"continue_turn_id"`
+	// BranchID targets a named branch (framework v0.63): a branch with
+	// turns continues its latest session (same semantics as a lane
+	// continuation, keyed per branch); an empty branch starts fresh on its
+	// own session (first of the selected roles — a branch is single-role).
+	// Contradicts force_new_session / parallel_dispatch (both cleared).
+	BranchID string `json:"branch_id"`
 }
 
 func runtimeKey(chatID, roleID string) string { return chatID + "\x00" + roleID }
@@ -53,16 +60,24 @@ type queuedMessage struct {
 	// dispatchID of the dispatch that queued this message, so the turn that
 	// eventually runs it links back to the user message's turn_id.
 	dispatchID string
+	// messageID is the user message row of the dispatch, so a queued cancel
+	// removes it from the timeline and a queued edit retexts it.
+	messageID string
 	// resumeSession is the lane session the queued turn resumes ("" on the
 	// canonical path).
 	resumeSession string
+	// branchID is the branch the queued turn belongs to ("" on the
+	// canonical and anonymous-parallel paths).
+	branchID string
 }
 
 // relayTarget is one role's turn within a relay, plus the lane session it
-// resumes ("" on the canonical and parallel paths).
+// resumes ("" on the canonical and parallel paths) and the branch the turn
+// is stamped with ("" off-branch).
 type relayTarget struct {
 	role   SuperRole
 	resume string
+	branch string
 }
 
 func (p *Plugin) handleDispatch(frame busclient.Frame) {
@@ -95,35 +110,78 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	// Lane continuation (continue_turn_id): skip LLM routing and dispatch
-	// to the role owning the referenced turn, resuming that turn's session.
+	reply, _, err := p.dispatchMessage(chat, workspace, request, value)
+	p.reply(frame, reply, err)
+}
+
+// dispatchMessage is the frame-free core of handleDispatch (also used by
+// branch merge-confirm to send the summary into the mainline): it validates
+// targeting (lane continuation / branch / routing), persists the user
+// message, queues behind busy keys, starts the relay, and returns the reply
+// payload plus the user message row.
+func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispatchRequest, raw map[string]any) (map[string]any, *Message, error) {
+	// Branch dispatch (branch_id): a branch with turns continues its latest
+	// session under the branch key; an empty branch starts fresh (first of
+	// the selected roles — a branch is single-role). Lane continuation
+	// (continue_turn_id): skip LLM routing and dispatch to the role owning
+	// the referenced turn, resuming that turn's session.
 	resumeSession := ""
 	var selected []SuperRole
 	var rationale string
-	if request.ContinueTurnID != "" {
+	var branch *Branch
+	var err error
+	if request.BranchID != "" {
+		var branchRole SuperRole
+		var fresh bool
+		resumeSession, branchRole, branch, fresh, err = p.resolveBranch(*chat, workspace, request.BranchID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if fresh {
+			selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(selected) > 1 {
+				selected = selected[:1]
+			}
+			if len(selected) == 0 {
+				return nil, nil, errors.New("no role resolved for the new branch")
+			}
+			rationale = "Start branch " + branch.Name + "."
+		} else {
+			selected = []SuperRole{branchRole}
+			rationale = "Continue branch " + branch.Name + "."
+		}
+		request.ForceNewSession = false
+		request.ParallelDispatch = false
+	} else if request.ContinueTurnID != "" {
 		var laneRole SuperRole
 		resumeSession, laneRole, err = p.resolveContinuation(*chat, workspace, request.ContinueTurnID)
 		if err != nil {
-			p.reply(frame, nil, err)
-			return
+			return nil, nil, err
 		}
 		selected = []SuperRole{laneRole}
 		rationale = "Continue the session of turn " + request.ContinueTurnID + "."
 		request.ForceNewSession = false
 		request.ParallelDispatch = false
 	} else {
-		selected, rationale, err = p.selectRoles(request, value, *chat, workspace)
+		selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
 		if err != nil {
-			p.reply(frame, nil, err)
-			return
+			return nil, nil, err
 		}
 	}
 	parallel := request.ParallelDispatch
-	// laneOf computes a role's busy/runtime key and the lane session its
-	// turn resumes. A continuation whose lane IS the role's stored canonical
-	// session rides the canonical key and flow, keeping the stored session
-	// pointer authoritative; any other lane gets its own lane-scoped key.
-	laneOf := func(role SuperRole) (string, string) {
+	// keyOf computes a role's busy/runtime key and the lane session its
+	// turn resumes. Branch turns get their own per-branch key (fresh branch
+	// turns resume nothing); a continuation whose lane IS the role's stored
+	// canonical session rides the canonical key and flow, keeping the
+	// stored session pointer authoritative; any other lane gets its own
+	// lane-scoped key.
+	keyOf := func(role SuperRole) (string, string) {
+		if branch != nil {
+			return runtimeKey(chat.ID, role.ID) + "\x00branch\x00" + branch.ID, resumeSession
+		}
 		if resumeSession == "" {
 			return runtimeKey(chat.ID, role.ID), ""
 		}
@@ -135,11 +193,12 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 	}
 	if !parallel {
 		// Queue-capacity pre-check: an over-full queue fails the dispatch
-		// before the user message lands in the timeline. A lane continuation
-		// also counts as busy when another key holds a turn on its session.
+		// before the user message lands in the timeline. A lane/branch
+		// continuation also counts as busy when another key holds a turn on
+		// its session.
 		p.mu.Lock()
 		for _, role := range selected {
-			key, resume := laneOf(role)
+			key, resume := keyOf(role)
 			if (p.busy[key] || (resume != "" && p.sessionInFlightLocked(resume))) && len(p.queues[key]) >= maxQueuedPerRole {
 				err = errQueueFull
 				break
@@ -147,16 +206,15 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		}
 		p.mu.Unlock()
 		if err != nil {
-			p.reply(frame, nil, err)
-			return
+			return nil, nil, err
 		}
 	}
 	dispatchID := newID()
 	user := &Message{ID: newID(), ChatID: chat.ID, TurnID: dispatchID, Role: "user", Text: request.Message, SenderFrom: "user", CreatedAt: nowMillis()}
 	if err = p.store.addMessage(user); err != nil {
-		p.reply(frame, nil, err)
-		return
+		return nil, nil, err
 	}
+	p.retainVisibleMessage(user, "", "")
 	// Busy roles queue the message (it starts when the in-flight turn ends);
 	// free roles start immediately. Parallel dispatch skips the busy lock and
 	// runs every role right away on a throwaway session.
@@ -165,9 +223,9 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 	queuedRoleIDs := []string{}
 	p.mu.Lock()
 	for _, role := range selected {
-		key, resume := laneOf(role)
+		key, resume := keyOf(role)
 		if !parallel && (p.busy[key] || (resume != "" && p.sessionInFlightLocked(resume))) {
-			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, role: role, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis(), dispatchID: dispatchID, resumeSession: resume})
+			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, role: role, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis(), dispatchID: dispatchID, messageID: user.ID, resumeSession: resume, branchID: branchIDOf(branch)})
 			queuedRoleIDs = append(queuedRoleIDs, role.ID)
 			continue
 		}
@@ -175,18 +233,54 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 			p.busy[key] = true
 			startedKeys = append(startedKeys, key)
 		}
-		started = append(started, relayTarget{role: role, resume: resume})
+		started = append(started, relayTarget{role: role, resume: resume, branch: branchIDOf(branch)})
 	}
 	p.mu.Unlock()
+	// Anonymous parallel (send-now) dispatches open one named branch per
+	// started role (framework v0.63): the throwaway session becomes an
+	// addressable, mergeable work line instead of an untracked lane. An
+	// explicit branch dispatch stamps its role onto an empty branch.
+	touchedBranches := []*Branch{}
+	if parallel && branch == nil {
+		for index := range started {
+			now := nowMillis()
+			created := &Branch{ID: newID(), ChatID: chat.ID, Name: autoBranchName(request.Message, started[index].role, len(started)), RoleID: started[index].role.ID, RoleName: started[index].role.Name, CreatedAt: now, UpdatedAt: now}
+			if createErr := p.store.createBranch(created); createErr != nil {
+				slog.Warn("chat branch auto-create failed", "chat_id", chat.ID, "role_id", started[index].role.ID, "error", createErr)
+				continue
+			}
+			started[index].branch = created.ID
+			touchedBranches = append(touchedBranches, created)
+			p.publishBranch(created, "created")
+		}
+	} else if branch != nil && branch.RoleID == "" && len(started) > 0 {
+		branch.RoleID, branch.RoleName = started[0].role.ID, started[0].role.Name
+		branch.UpdatedAt = nowMillis()
+		if saveErr := p.store.saveBranch(branch); saveErr != nil {
+			slog.Warn("chat branch role stamp failed", "branch_id", branch.ID, "error", saveErr)
+		} else {
+			touchedBranches = append(touchedBranches, branch)
+			p.publishBranch(branch, "updated")
+		}
+	}
 	p.publishMessage(user)
+	if len(queuedRoleIDs) > 0 {
+		p.publishQueue(chat.ID)
+	}
 	startedRoleIDs := make([]string, 0, len(started))
 	for _, target := range started {
 		startedRoleIDs = append(startedRoleIDs, target.role.ID)
 	}
-	reply := map[string]any{"role_ids": roleIDs(selected), "started_role_ids": startedRoleIDs, "queued_role_ids": queuedRoleIDs, "rationale": rationale, "dispatch_id": dispatchID}
+	reply := map[string]any{"role_ids": roleIDs(selected), "started_role_ids": startedRoleIDs, "queued_role_ids": queuedRoleIDs, "rationale": rationale, "dispatch_id": dispatchID, "message_id": user.ID}
+	if len(touchedBranches) > 0 {
+		payloads := make([]map[string]any, 0, len(touchedBranches))
+		for _, item := range touchedBranches {
+			payloads = append(payloads, item.payload())
+		}
+		reply["branches"] = payloads
+	}
 	if len(started) == 0 {
-		p.reply(frame, reply, nil)
-		return
+		return reply, user, nil
 	}
 	p.wg.Add(1)
 	startGate := make(chan struct{})
@@ -198,8 +292,74 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		}
 		p.runRelay(*chat, workspace, started, request.Message, user.CreatedAt, request.ForceNewSession, parallel, dispatchID)
 	}()
-	p.reply(frame, reply, nil)
 	close(startGate)
+	return reply, user, nil
+}
+
+func branchIDOf(branch *Branch) string {
+	if branch == nil {
+		return ""
+	}
+	return branch.ID
+}
+
+// autoBranchName derives a branch name from the dispatching message (first
+// runes, so the tab is recognizable without a rename); multi-role parallel
+// dispatches suffix the role to tell the branches apart.
+func autoBranchName(message string, role SuperRole, roleCount int) string {
+	runes := []rune(strings.TrimSpace(message))
+	name := "分支"
+	if len(runes) > 0 {
+		if len(runes) > 12 {
+			name = string(runes[:12]) + "…"
+		} else {
+			name = string(runes)
+		}
+	}
+	if roleCount > 1 {
+		name += " · " + role.Name
+	}
+	return name
+}
+
+// resolveBranch validates a branch_id dispatch: the branch must belong to
+// the chat and be active (archived branches are read-only history). A branch
+// with turns resolves to its newest turn's role and session (fresh=false);
+// an empty branch resolves fresh — the caller picks the role via routing.
+func (p *Plugin) resolveBranch(chat Chat, workspace Workspace, branchID string) (string, SuperRole, *Branch, bool, error) {
+	branch, err := p.store.branch(branchID)
+	if err != nil {
+		return "", SuperRole{}, nil, false, err
+	}
+	if branch == nil || branch.ChatID != chat.ID {
+		return "", SuperRole{}, nil, false, errors.New("branch was not found in the chat")
+	}
+	if branch.archived() {
+		return "", SuperRole{}, nil, false, errBranchArchived
+	}
+	turns, err := p.store.branchTurns(branchID)
+	if err != nil {
+		return "", SuperRole{}, nil, false, err
+	}
+	if len(turns) == 0 {
+		return "", SuperRole{}, branch, true, nil
+	}
+	latest := turns[len(turns)-1]
+	sessionID := latest.SessionID
+	if sessionID == "" {
+		p.mu.Lock()
+		sessionID = p.inflightTurnSessionLocked(latest.ID)
+		p.mu.Unlock()
+	}
+	if sessionID == "" {
+		return "", SuperRole{}, nil, false, errors.New("the branch's latest turn has no resumable session")
+	}
+	for _, role := range workspace.Roles {
+		if role.ID == latest.RoleID {
+			return sessionID, role, branch, false, nil
+		}
+	}
+	return "", SuperRole{}, nil, false, errors.New("the branch's role no longer exists")
 }
 
 func (p *Plugin) selectRoles(request dispatchRequest, raw map[string]any, chat Chat, workspace Workspace) ([]SuperRole, string, error) {
@@ -372,6 +532,7 @@ func (p *Plugin) startQueued(key string) {
 	}
 	p.busy[key] = true
 	p.mu.Unlock()
+	p.publishQueue(entry.chatID)
 	chat, err := p.store.chat(entry.chatID)
 	if err == nil && chat == nil {
 		err = errors.New("chat not found")
@@ -385,7 +546,7 @@ func (p *Plugin) startQueued(key string) {
 			go func() {
 				defer p.wg.Done()
 				defer p.releaseBusy([]string{key})
-				p.runRelay(*chat, workspace, []relayTarget{{role: entry.role, resume: entry.resumeSession}}, entry.message, entry.before, entry.forceNew, false, entry.dispatchID)
+				p.runRelay(*chat, workspace, []relayTarget{{role: entry.role, resume: entry.resumeSession, branch: entry.branchID}}, entry.message, entry.before, entry.forceNew, false, entry.dispatchID)
 			}()
 			return
 		}
@@ -394,30 +555,196 @@ func (p *Plugin) startQueued(key string) {
 	p.releaseBusy([]string{key})
 }
 
+// queuedSnapshotLocked lists one chat's pending queue entries (across all
+// role/lane keys) oldest-first — the pane's queued-chip source. position is
+// the 1-based slot inside that role key's queue. Caller holds p.mu.
+func (p *Plugin) queuedSnapshotLocked(chatID string) []map[string]any {
+	keys := make([]string, 0, len(p.queues))
+	for key := range p.queues {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := []map[string]any{}
+	for _, key := range keys {
+		for index, entry := range p.queues[key] {
+			if entry.chatID != chatID {
+				continue
+			}
+			result = append(result, map[string]any{
+				"message_id": entry.messageID, "dispatch_id": entry.dispatchID,
+				"chat_id": entry.chatID, "role_id": entry.role.ID, "role_name": entry.role.Name,
+				"text": entry.message, "enqueued_at": entry.enqueued, "position": index + 1,
+			})
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i]["enqueued_at"].(int64) < result[j]["enqueued_at"].(int64)
+	})
+	return result
+}
+
+func (p *Plugin) queuedSnapshot(chatID string) []map[string]any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.queuedSnapshotLocked(chatID)
+}
+
+// publishQueue pushes the chat's full queue snapshot on the queue feed after
+// any mutation (enqueue, dequeue, cancel, edit) so every pane reseeds
+// wholesale instead of tracking per-entry deltas.
+func (p *Plugin) publishQueue(chatID string) {
+	p.publish("chat:_:queue", map[string]any{"chat_id": chatID, "queued": p.queuedSnapshot(chatID)})
+}
+
+// cancelQueued drops every queue entry of one dispatch in the chat (a
+// multi-role dispatch queues one entry per busy role) and returns the count
+// plus the dispatch's user message id. Caller holds no lock.
+func (p *Plugin) cancelQueued(chatID, dispatchID string) (int, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	removed := 0
+	messageID := ""
+	for key, queue := range p.queues {
+		if !strings.HasPrefix(key, chatID+"\x00") {
+			continue
+		}
+		kept := make([]queuedMessage, 0, len(queue))
+		for _, entry := range queue {
+			if entry.dispatchID == dispatchID {
+				removed++
+				if messageID == "" {
+					messageID = entry.messageID
+				}
+				continue
+			}
+			kept = append(kept, entry)
+		}
+		if len(kept) == 0 {
+			delete(p.queues, key)
+		} else {
+			p.queues[key] = kept
+		}
+	}
+	return removed, messageID
+}
+
+// updateQueued rewrites the message text of every queue entry of one
+// dispatch, keeping each entry's position. Returns the count plus the
+// dispatch's user message id.
+func (p *Plugin) updateQueued(chatID, dispatchID, message string) (int, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	updated := 0
+	messageID := ""
+	for key, queue := range p.queues {
+		if !strings.HasPrefix(key, chatID+"\x00") {
+			continue
+		}
+		for index := range queue {
+			if queue[index].dispatchID != dispatchID {
+				continue
+			}
+			queue[index].message = message
+			updated++
+			if messageID == "" {
+				messageID = queue[index].messageID
+			}
+		}
+	}
+	return updated, messageID
+}
+
+func (p *Plugin) handleQueuedCancel(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	chatID, _ := value["chat_id"].(string)
+	dispatchID, _ := value["dispatch_id"].(string)
+	if err == nil && (chatID == "" || dispatchID == "") {
+		err = errBadRequest
+	}
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	removed, messageID := p.cancelQueued(chatID, dispatchID)
+	if removed == 0 {
+		p.reply(frame, nil, errNotQueued)
+		return
+	}
+	// The dispatch's user message row leaves the timeline with its queue
+	// entries; the deleted frame lets panes drop the box immediately.
+	if messageID != "" {
+		if err = p.store.deleteMessage(messageID); err != nil {
+			p.reply(frame, nil, err)
+			return
+		}
+		p.publish("chat:"+chatID+":message", map[string]any{"id": messageID, "chat_id": chatID, "deleted": true})
+	}
+	p.publishQueue(chatID)
+	p.reply(frame, map[string]any{"cancelled": true, "removed": removed}, nil)
+}
+
+func (p *Plugin) handleQueuedUpdate(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	chatID, _ := value["chat_id"].(string)
+	dispatchID, _ := value["dispatch_id"].(string)
+	message := strings.TrimSpace(requestString(value, "message"))
+	if err == nil && (chatID == "" || dispatchID == "" || message == "") {
+		err = errBadRequest
+	}
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	updated, messageID := p.updateQueued(chatID, dispatchID, message)
+	if updated == 0 {
+		p.reply(frame, nil, errNotQueued)
+		return
+	}
+	if messageID != "" {
+		if err = p.store.updateMessageText(messageID, message); err != nil {
+			p.reply(frame, nil, err)
+			return
+		}
+		// Republish the row so open panes retext the query box in place.
+		if row, rowErr := p.store.message(messageID); rowErr == nil && row != nil {
+			p.publishMessage(row)
+		}
+	}
+	p.publishQueue(chatID)
+	p.reply(frame, map[string]any{"updated": true}, nil)
+}
+
 func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget, message string, before int64, forceNew bool, parallel bool, dispatchID string) {
 	for _, target := range targets {
 		role := target.role
 		turnID := newID()
 		key := runtimeKey(chat.ID, role.ID)
-		if parallel {
+		switch {
+		case parallel:
 			// Concurrent send-now turn: unique throwaway runtime key so the
 			// canonical chat+role runtime (and its stored session) stays
 			// untouched; the entry is removed when the turn ends.
 			key += "\x00" + turnID
-		} else if target.resume != "" {
+		case target.branch != "":
+			// Branch turn: the branch's session runs under its own
+			// branch-scoped key, so it never fights the canonical
+			// session's busy lock; the runtime stays resident for the
+			// branch's next continuation.
+			key += "\x00branch\x00" + target.branch
+		case target.resume != "":
 			// Lane continuation: the lane's session runs under its own key so
 			// it never fights the canonical session's busy lock, and the
 			// runtime stays resident for the lane's next continuation.
 			key += "\x00lane\x00" + target.resume
 		}
-		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, StartedAt: nowMillis()}
+		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, BranchID: target.branch, StartedAt: nowMillis()}
 		if err := p.store.beginTurn(turn); err != nil {
 			slog.Error("chat turn persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
 			continue
 		}
 		// Global turn lifecycle feed for the Dock status dots: started here,
 		// completed below alongside the per-chat turn-completed frame.
-		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "started"})
+		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "started", "branch_id": target.branch})
 		candidates, err := p.resolveCandidates(chat, workspace, role)
 		reason, summaryProvider := "error", ""
 		endErr := ""
@@ -443,7 +770,12 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 				var current *runtime
 				var fresh bool
 				attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
-				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, key, forceNew || retryFresh || parallel, parallel, target.resume)
+				// A branch's first turn starts a fresh session of its own:
+				// forceNew + ephemeral (the stored canonical session is never
+				// read or overwritten), but unlike anonymous parallel the
+				// runtime stays resident under the branch key for continuations.
+				branchFresh := target.branch != "" && target.resume == ""
+				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, key, forceNew || retryFresh || parallel || branchFresh, parallel || branchFresh, target.resume)
 				if err != nil {
 					attempt["outcome"], attempt["error"] = "start_error", err.Error()
 					attempts = append(attempts, attempt)
@@ -463,7 +795,20 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 					if sessionErr := p.store.setTurnSession(turnID, laneSession); sessionErr != nil {
 						slog.Warn("chat turn session persistence failed", "chat_id", chat.ID, "turn_id", turnID, "error", sessionErr)
 					}
-					p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "session", "dispatch_id": dispatchID, "session_id": laneSession})
+					p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "session", "dispatch_id": dispatchID, "session_id": laneSession, "branch_id": target.branch})
+					if target.branch != "" {
+						// Denormalize the branch's latest session for display;
+						// the turn rows stay authoritative.
+						if branch, branchErr := p.store.branch(target.branch); branchErr == nil && branch != nil && branch.SessionID != laneSession {
+							branch.SessionID = laneSession
+							branch.UpdatedAt = nowMillis()
+							if saveErr := p.store.saveBranch(branch); saveErr != nil {
+								slog.Warn("chat branch session stamp failed", "branch_id", branch.ID, "error", saveErr)
+							} else {
+								p.publishBranch(branch, "updated")
+							}
+						}
+					}
 				}
 				prompt := message
 				contextBytes, promptMode := 0, "existing_session"
@@ -547,9 +892,10 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 		if completeErr := p.store.completeTurn(turnID, reason); completeErr != nil {
 			slog.Error("chat turn completion persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "stop_reason", reason, "error", completeErr)
 		}
+		p.retainTurnMessages(turnID, resolved)
 		slog.Info("chat turn completed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "role_name", role.Name, "stop_reason", reason, "latency_ms", nowMillis()-turn.StartedAt, "attempts", attempts)
 		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "attempts": attempts, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
-		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "completed", "stop_reason": reason, "dispatch_id": dispatchID, "agent": resolved.Agent, "provider": resolved.Provider, "model": resolved.Model})
+		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "completed", "stop_reason": reason, "dispatch_id": dispatchID, "agent": resolved.Agent, "provider": resolved.Provider, "model": resolved.Model, "branch_id": target.branch})
 		if reason != "cancelled" {
 			p.wg.Add(1)
 			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, summaryProvider)

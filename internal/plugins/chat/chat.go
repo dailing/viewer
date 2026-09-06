@@ -28,11 +28,15 @@ var Manifest = busclient.Manifest{
 		"chat:_:routing:get": map[string]any{}, "chat:_:routing:put": map[string]any{},
 		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
 		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
+		"chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{},
+		"chat:_:branches:create": map[string]any{}, "chat:_:branches:patch": map[string]any{}, "chat:_:branches:delete": map[string]any{},
+		"chat:_:branches:merge": map[string]any{}, "chat:_:branches:merge-confirm": map[string]any{},
 		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
 		"chat:_:voice:invoke": map[string]any{},
 	},
 	Emits: map[string]any{
 		"chat:*:message": map[string]any{}, "chat:*:block": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
+		"chat:_:turn": map[string]any{}, "chat:_:queue": map[string]any{}, "chat:_:branch": map[string]any{},
 		"voice-catalog:_:chat": map[string]any{},
 	},
 }
@@ -76,12 +80,14 @@ type Plugin struct {
 	openToolCalls map[string]map[string]*MessageBlock // turnID → tool_call_id → open tool_call block (status updates merge in place)
 	activeChatID  string
 	closed        bool
+	patchedBanks  map[string]bool // chat Hindsight banks whose config was already patched this process
 	wg            sync.WaitGroup
 }
 
 var (
 	errBadRequest = errors.New("chat_id and message are required")
 	errQueueFull  = errors.New("QueueFull: chat role has too many queued messages")
+	errNotQueued  = errors.New("the message is no longer queued (already started or cancelled)")
 )
 
 func New(dataDir string, options ...Option) (*Plugin, error) {
@@ -92,7 +98,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -114,6 +120,9 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:routing:get": p.handleRoutingGet, "chat:_:routing:put": p.handleRoutingPut,
 		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
 		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
+		"chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate,
+		"chat:_:branches:create": p.handleBranchesCreate, "chat:_:branches:patch": p.handleBranchesPatch, "chat:_:branches:delete": p.handleBranchesDelete,
+		"chat:_:branches:merge": p.handleBranchesMerge, "chat:_:branches:merge-confirm": p.handleBranchesMergeConfirm,
 		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
 		"chat:_:voice:invoke": p.handleVoiceInvoke,
 	}
@@ -166,6 +175,18 @@ func (p *Plugin) reply(frame busclient.Frame, value any, err error) {
 	}
 	if errors.Is(err, errQueueFull) {
 		code = "queue_full"
+	}
+	if errors.Is(err, errNotQueued) {
+		code = "not_queued"
+	}
+	if errors.Is(err, errBranchArchived) {
+		code = "branch_archived"
+	}
+	if errors.Is(err, errBranchRunning) {
+		code = "branch_running"
+	}
+	if errors.Is(err, errBranchEmpty) {
+		code = "branch_empty"
 	}
 	_ = pluginrpc.RespondError(p.client, frame, code, err.Error())
 }
@@ -405,6 +426,23 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 				return
 			}
 			result["turn_sessions"] = turnSessionsPayload(sessions)
+			// Named parallel branches (active + archived): the branch bar and
+			// the 已合并分支 cards seed from this; the chat:_:branch feed
+			// carries live mutations.
+			branches, branchesErr := p.store.chatBranches(chatID)
+			if branchesErr != nil {
+				p.reply(frame, nil, branchesErr)
+				return
+			}
+			branchPayloads := make([]map[string]any, 0, len(branches))
+			for _, branch := range branches {
+				branchPayloads = append(branchPayloads, branch.payload())
+			}
+			result["branches"] = branchPayloads
+			// Pending per-role queue entries (waiting behind in-flight
+			// turns): the pane's queued chips on user boxes seed from this
+			// snapshot; the chat:_:queue feed takes over live.
+			result["queued_messages"] = p.queuedSnapshot(chatID)
 		}
 	}
 	if request != nil && request["include_messages"] == true {
@@ -474,6 +512,7 @@ func turnSessionsPayload(turns []Turn) map[string]any {
 			"role_id":     turn.RoleID,
 			"role_name":   turn.RoleName,
 			"started_at":  turn.StartedAt,
+			"branch_id":   turn.BranchID,
 		}
 	}
 	return values

@@ -176,7 +176,7 @@ func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
 }
 
 func (p *Plugin) hindsightConfig(ctx context.Context) HindsightConfig {
-	result := HindsightConfig{BankPrefix: "super-workspace", TimeoutSeconds: 10, MaxTokens: 800, Limit: 8}
+	result := HindsightConfig{BankPrefix: "super-workspace", TimeoutSeconds: 10, MaxTokens: 800, Limit: 8, RetainEnabled: true, RetainTimeoutSeconds: 30}
 	_ = p.configGet(ctx, "hindsight", &result)
 	for key, target := range map[string]*string{"hindsight.endpoint": &result.Endpoint, "hindsight.token": &result.Token, "hindsight.bank_prefix": &result.BankPrefix} {
 		if *target == "" {
@@ -191,6 +191,9 @@ func (p *Plugin) hindsightConfig(ctx context.Context) HindsightConfig {
 	}
 	if result.Limit <= 0 {
 		result.Limit = 8
+	}
+	if result.RetainTimeoutSeconds <= 0 {
+		result.RetainTimeoutSeconds = 30
 	}
 	return result
 }

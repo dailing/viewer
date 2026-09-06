@@ -94,6 +94,12 @@ type HindsightConfig struct {
 	TimeoutSeconds int    `json:"timeout_seconds"`
 	MaxTokens      int    `json:"max_tokens"`
 	Limit          int    `json:"limit"`
+	// RetainEnabled stores every visible message into the chat's bank
+	// (per-chat, covering all roles/agents/providers). RetainTimeoutSeconds
+	// bounds one sync server-side extraction call (default 30s — the local
+	// deployment takes 5-8s per message).
+	RetainEnabled        bool `json:"retain_enabled"`
+	RetainTimeoutSeconds int  `json:"retain_timeout_seconds"`
 }
 
 func defaultWorkspace() Workspace {

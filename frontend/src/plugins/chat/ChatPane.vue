@@ -20,7 +20,7 @@ import ToolActivity from "./ToolActivity.vue";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
 import { presentToolBlock } from "./toolPresentation";
-import type { Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
+import type { Branch, Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, QueuedMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -50,6 +50,22 @@ const composerVisible = computed(() => Boolean(inputs.session(inputSessionId)?.p
 // individually stoppable.
 const runningTurns = ref(new Map<string, { roleId: string }>());
 const runningRoleIds = computed(() => new Set([...runningTurns.value.values()].map((turn) => turn.roleId)));
+// Pending queue entries of this chat (dispatches waiting behind in-flight
+// turns), seeded from the chats:list queued_messages snapshot and reseeded
+// wholesale by the chat:_:queue feed on every backend queue mutation. The
+// queued chip on a user box keys by dispatch id (the message's turn_id).
+const queuedEntries = ref<QueuedMessage[]>([]);
+const queuedByDispatch = computed<Map<string, QueuedMessage[]>>(() => {
+  const map = new Map<string, QueuedMessage[]>();
+  for (const entry of queuedEntries.value) {
+    map.set(entry.dispatch_id, [...(map.get(entry.dispatch_id) ?? []), entry]);
+  }
+  return map;
+});
+// Queued-message edit mode: the pencil on a queued user box loads its text
+// into the composer; the next send updates the queue entry in place (queue
+// position kept) instead of dispatching a new message.
+const editingQueued = ref<{ dispatchId: string } | null>(null);
 // Optimistic per-role placeholder boxes: created the moment dispatch returns
 // so a response box appears immediately, and resolved when the turn's first
 // live message/block arrives (the real turn box takes over) or the turn ends.
@@ -105,8 +121,8 @@ let userScrolled = false; // manual scroll wins over the cache-hit auto-scroll
 let lastProgrammaticScrollAt = 0; // suppresses the scroll-event echo of scrollThreadTop
 let lastObservedScrollTop = 0; // direction tracking for live-edge detach
 
-/** Pane-side lane record per turn (turn_id → session lane). */
-interface TurnSessionEntry { sessionId: string; dispatchId: string; roleId: string; roleName: string; startedAt: number }
+/** Pane-side per-turn record (turn_id → session + branch attribution). */
+interface TurnSessionEntry { sessionId: string; dispatchId: string; roleId: string; roleName: string; startedAt: number; branchId: string }
 
 const turnSessions = ref(new Map<string, TurnSessionEntry>());
 
@@ -118,8 +134,10 @@ function upsertTurnSession(turnId: string, entry: TurnSessionEntry): void {
     dispatchId: entry.dispatchId || existing?.dispatchId || "",
     roleName: entry.roleName || existing?.roleName || "",
     startedAt: entry.startedAt || existing?.startedAt || 0,
+    branchId: entry.branchId || existing?.branchId || "",
+    sessionId: entry.sessionId || existing?.sessionId || "",
   };
-  if (existing && existing.sessionId === merged.sessionId && existing.dispatchId === merged.dispatchId && existing.startedAt === merged.startedAt) return;
+  if (existing && existing.sessionId === merged.sessionId && existing.dispatchId === merged.dispatchId && existing.startedAt === merged.startedAt && existing.branchId === merged.branchId) return;
   turnSessions.value = new Map([...turnSessions.value, [turnId, merged]]);
 }
 
@@ -127,77 +145,212 @@ function upsertTurnSession(turnId: string, entry: TurnSessionEntry): void {
 function seedTurnSessions(map: Record<string, TurnSession> | undefined): void {
   if (!map) return;
   for (const [turnId, raw] of Object.entries(map)) {
-    if (!raw.session_id) continue;
-    upsertTurnSession(turnId, { sessionId: raw.session_id, dispatchId: raw.dispatch_id ?? "", roleId: raw.role_id ?? "", roleName: raw.role_name ?? "", startedAt: raw.started_at ?? 0 });
+    if (!raw.session_id && !raw.branch_id) continue;
+    upsertTurnSession(turnId, { sessionId: raw.session_id ?? "", dispatchId: raw.dispatch_id ?? "", roleId: raw.role_id ?? "", roleName: raw.role_name ?? "", startedAt: raw.started_at ?? 0, branchId: raw.branch_id ?? "" });
   }
 }
 
-/** One session lane: the chain of turns sharing a provider session. */
-interface Lane { sessionId: string; roleId: string; roleName: string; firstAt: number; latestTurnId: string; latestAt: number; running: boolean }
+/** Named parallel branches (framework v0.63): independent persistent records
+ *  owning their turns (Turn.branch_id), so a session rebuild mid-branch
+ *  never spawns a new tab. Active branches get bar tabs; archived ones back
+ *  the 已合并分支 cards on the merge summary message. */
+const branches = ref<Branch[]>([]);
+const activeBranches = computed(() => branches.value.filter((branch) => !branch.archived_at));
+const archivedBranches = computed(() => branches.value.filter((branch) => Boolean(branch.archived_at)));
 
-const lanes = computed<Lane[]>(() => {
-  const bySession = new Map<string, Lane>();
-  for (const [turnId, entry] of turnSessions.value) {
-    let lane = bySession.get(entry.sessionId);
-    if (!lane) {
-      lane = { sessionId: entry.sessionId, roleId: entry.roleId, roleName: entry.roleName || "Agent", firstAt: entry.startedAt, latestTurnId: turnId, latestAt: entry.startedAt, running: false };
-      bySession.set(entry.sessionId, lane);
-    }
-    if (entry.startedAt >= lane.latestAt) { lane.latestAt = entry.startedAt; lane.latestTurnId = turnId; }
-    if (lane.firstAt === 0 || (entry.startedAt > 0 && entry.startedAt < lane.firstAt)) lane.firstAt = entry.startedAt;
-    if (lane.roleName === "Agent" && entry.roleName) lane.roleName = entry.roleName;
-    if (runningTurns.value.has(turnId)) lane.running = true;
+function upsertBranches(list: Branch[]): void {
+  const byId = new Map(branches.value.map((branch) => [branch.id, branch] as const));
+  for (const item of list) byId.set(item.id, item);
+  branches.value = [...byId.values()].sort((a, b) => Number(Boolean(a.archived_at)) - Number(Boolean(b.archived_at)) || a.created_at - b.created_at || a.id.localeCompare(b.id));
+}
+
+/** Merge cards: merge_message_id → the branches that summary merged. */
+const mergeCards = computed<Map<string, Branch[]>>(() => {
+  const map = new Map<string, Branch[]>();
+  for (const branch of archivedBranches.value) {
+    if (!branch.merge_message_id) continue;
+    map.set(branch.merge_message_id, [...(map.get(branch.merge_message_id) ?? []), branch]);
   }
-  return [...bySession.values()].sort((a, b) => a.firstAt - b.firstAt || a.sessionId.localeCompare(b.sessionId));
+  return map;
 });
 
-/** Active lane tab: "" shows the whole interleaved timeline; a session id
- *  filters the timeline to that lane AND locks the next send to continue
- *  that lane's session (send() passes its latest turn as continue_turn_id). */
-const activeLane = ref("");
-const activeLaneEntry = computed<Lane | null>(() => lanes.value.find((lane) => lane.sessionId === activeLane.value) ?? null);
+/** Branch bar tab: "main" (主线 — turns off any branch), "all" (the whole
+ *  interleaved record), or a branch id (active branch = filter + lock the
+ *  next send to continue it; archived branch = read-only original record). */
+const activeTab = ref("main");
+const viewingBranch = computed<Branch | null>(() => (activeTab.value === "main" || activeTab.value === "all") ? null : branches.value.find((branch) => branch.id === activeTab.value) ?? null);
+/** The branch the next send continues (null → normal mainline dispatch). */
+const sendBranch = computed<Branch | null>(() => viewingBranch.value && !viewingBranch.value.archived_at ? viewingBranch.value : null);
+
+/** Branches with an in-flight turn (tab spinner + merge-selection guard). */
+const runningBranchIds = computed<Set<string>>(() => {
+  const set = new Set<string>();
+  for (const turnId of runningTurns.value.keys()) {
+    const branchId = turnSessions.value.get(turnId)?.branchId;
+    if (branchId) set.add(branchId);
+  }
+  return set;
+});
+
+// --- Branch bar interactions (framework v0.63) ---
+
+/** Where the next send goes — the composer annotation, so a message never
+ *  lands in the wrong line by accident. */
+const sendTargetLabel = computed<string>(() => {
+  const branch = viewingBranch.value;
+  if (branch && !branch.archived_at) return `分支「${branch.name}」`;
+  if (branch) return "主线（当前查看已归档分支）";
+  return "主线";
+});
+
+// Branch creation: the ＋ tab opens an inline name input; the branch record
+// persists immediately (survives reloads), and the first send on its tab
+// starts the branch's fresh session.
+const creatingBranch = ref(false);
+const newBranchName = ref("");
+const branchOpError = ref("");
+
+async function createBranch(): Promise<void> {
+  branchOpError.value = "";
+  try {
+    const branch = await ctx.bus.request("chat:_:branches:create", { chat_id: ctx.instanceId, name: newBranchName.value.trim() }) as Branch;
+    upsertBranches([branch]);
+    activeTab.value = branch.id;
+    creatingBranch.value = false;
+    newBranchName.value = "";
+  } catch (cause) {
+    branchOpError.value = errorText(cause);
+  }
+}
+
+// Rename: double-click a branch tab turns it into an inline input.
+const renamingBranchId = ref("");
+const renameText = ref("");
+
+function beginRename(branch: Branch): void {
+  renamingBranchId.value = branch.id;
+  renameText.value = branch.name;
+}
+
+async function submitRename(): Promise<void> {
+  const id = renamingBranchId.value;
+  renamingBranchId.value = "";
+  if (!id) return;
+  try {
+    const branch = await ctx.bus.request("chat:_:branches:patch", { id, name: renameText.value.trim() }) as Branch;
+    upsertBranches([branch]);
+  } catch (cause) {
+    branchOpError.value = errorText(cause);
+  }
+}
+
+// Merge mode: tabs get checkboxes; 合并到主线 drafts an editable summary
+// (LLM over the branches' turn records), and confirming dispatches the final
+// text into the mainline and archives the branches.
+const mergeMode = ref(false);
+const mergeSelection = ref(new Set<string>());
+const mergeBusy = ref(false);
+interface MergeDraftBranch { id: string; name: string; cutoff_turn_id: string }
+const mergeDraft = ref<{ text: string; branches: MergeDraftBranch[] } | null>(null);
+
+function toggleMergeMode(): void {
+  mergeMode.value = !mergeMode.value;
+  mergeSelection.value = new Set();
+}
+
+function toggleMergeSelect(branch: Branch): void {
+  if (runningBranchIds.value.has(branch.id)) return; // running branches merge after their turn ends
+  const next = new Set(mergeSelection.value);
+  if (next.has(branch.id)) next.delete(branch.id); else next.add(branch.id);
+  mergeSelection.value = next;
+}
+
+async function draftMerge(): Promise<void> {
+  if (mergeSelection.value.size === 0) return;
+  mergeBusy.value = true;
+  branchOpError.value = "";
+  try {
+    const result = await ctx.bus.request("chat:_:branches:merge", { chat_id: ctx.instanceId, branch_ids: [...mergeSelection.value] }, { timeout: 120_000 }) as { summary: string; branches: MergeDraftBranch[] };
+    mergeDraft.value = { text: result.summary, branches: result.branches };
+    mergeMode.value = false;
+    mergeSelection.value = new Set();
+  } catch (cause) {
+    branchOpError.value = errorText(cause);
+  } finally {
+    mergeBusy.value = false;
+  }
+}
+
+async function confirmMerge(): Promise<void> {
+  const draft = mergeDraft.value;
+  if (!draft || !draft.text.trim()) return;
+  mergeBusy.value = true;
+  branchOpError.value = "";
+  try {
+    await ctx.bus.request("chat:_:branches:merge-confirm", { chat_id: ctx.instanceId, summary: draft.text.trim(), branches: draft.branches }, { timeout: 120_000 });
+    mergeDraft.value = null;
+    activeTab.value = "main";
+  } catch (cause) {
+    branchOpError.value = errorText(cause);
+  } finally {
+    mergeBusy.value = false;
+  }
+}
+
+/** View one archived branch's original conversation (read-only tab). */
+const showArchived = ref(false);
+function viewArchivedBranch(id: string): void {
+  showArchived.value = true;
+  activeTab.value = id;
+}
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
 interface ActivityGroup { id: string; kind: "activity-group"; ts: number; segments: Segment[] }
 type DisplaySegment = Segment | ActivityGroup;
-interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[]; pending?: boolean; sending?: boolean; routed?: string; failed?: string }
+interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleId: string; turnId: string; ts: number; segments: Segment[]; pending?: boolean; sending?: boolean; routed?: string; failed?: string; messageId?: string }
 
-// NOTE: lane state above must stay above timeline — watch(timeline, …) in
+// NOTE: branch state above must stay above timeline — watch(timeline, …) in
 // setup evaluates the computed once eagerly, so anything its getter touches
 // has to be initialized by then (TDZ crash otherwise).
 const timeline = computed<TimelineBox[]>(() => {
   const turns = new Map<string, TimelineBox>();
   const boxes: TimelineBox[] = [];
-  // Lane filter: with a lane tab active, only that session's turns (and the
-  // user messages whose dispatch spawned them) render. Turns whose session
-  // record hasn't landed yet stay visible — hiding live content flickers.
-  const lane = activeLane.value;
-  const laneOfTurn = (turnId: string): string => turnSessions.value.get(turnId)?.sessionId ?? "";
+  // Branch filter: "main" shows only turns off any branch (主线), "all"
+  // shows the whole interleaved record, a branch id shows that branch.
+  // Turns/dispatches whose records haven't landed yet stay visible —
+  // hiding live content flickers.
+  const tab = activeTab.value;
   const dispatchVisible = (dispatchId: string): boolean => {
+    if (tab === "all") return true;
     let known = false;
     for (const entry of turnSessions.value.values()) {
       if (entry.dispatchId !== dispatchId) continue;
       known = true;
-      if (entry.sessionId === lane) return true;
+      if (tab === "main") {
+        if (entry.branchId !== "") return false;
+      } else if (entry.branchId === tab) return true;
     }
-    return !known;
+    return tab === "main" || !known;
+  };
+  const turnVisible = (turnId: string): boolean => {
+    if (tab === "all") return true;
+    const entry = turnSessions.value.get(turnId);
+    if (!entry) return true; // unknown turns stay visible
+    return tab === "main" ? entry.branchId === "" : entry.branchId === tab;
   };
   for (const message of messages.value) {
     if (message.role === "user") {
-      if (lane !== "" && !dispatchVisible(message.turn_id)) continue;
+      if (!dispatchVisible(message.turn_id)) continue;
       boxes.push({
         // User messages carry the dispatch id as turn_id; the dispatch's
         // turn records (keyed by that id) supply the "→" routing label.
-        key: `u:${message.id}`, kind: "user", label: "You", roleId: "", turnId: message.turn_id, ts: message.created_at,
+        key: `u:${message.id}`, kind: "user", label: "You", roleId: "", turnId: message.turn_id, ts: message.created_at, messageId: message.id,
         segments: [{ id: message.id, kind: "text", ts: message.created_at, text: message.text }],
         routed: dispatchLabels.value.get(message.turn_id) ?? "",
       });
       continue;
     }
-    if (lane !== "") {
-      const session = laneOfTurn(message.turn_id);
-      if (session !== "" && session !== lane) continue;
-    }
+    if (!turnVisible(message.turn_id)) continue;
     let box = turns.get(message.turn_id);
     if (!box) {
       box = { key: `t:${message.turn_id}`, kind: "role", label: "", roleId: "", turnId: message.turn_id, ts: message.created_at, segments: [] };
@@ -212,10 +365,7 @@ const timeline = computed<TimelineBox[]>(() => {
   for (const block of blocks.value) {
     if (block.kind === "agent_text") continue; // text blocks render via messages
     if (!activityDisplayable(block)) continue; // drop empty noise rows
-    if (lane !== "") {
-      const session = laneOfTurn(block.turn_id);
-      if (session !== "" && session !== lane) continue;
-    }
+    if (!turnVisible(block.turn_id)) continue;
     let box = turns.get(block.turn_id);
     if (!box) {
       box = { key: `t:${block.turn_id}`, kind: "role", label: "", roleId: "", turnId: block.turn_id, ts: block.occurred_at, segments: [] };
@@ -719,6 +869,13 @@ function seedRunningTurns(list: ChatList): void {
   runningTurns.value = next;
 }
 
+/** Adopt the backend's queue snapshot (chats:list queued_messages); the live
+ *  chat:_:queue feed reseeds wholesale on every mutation. */
+function seedQueued(list: QueuedMessage[] | undefined): void {
+  queuedEntries.value = list ?? [];
+  if (editingQueued.value && !queuedByDispatch.value.has(editingQueued.value.dispatchId)) editingQueued.value = null;
+}
+
 async function load(fresh = false): Promise<void> {
   loadingInitial.value = true;
   streamingMessageId = "";
@@ -763,8 +920,10 @@ async function load(fresh = false): Promise<void> {
     }) as Promise<ChatList>);
     chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
     seedRunningTurns(list);
+    seedQueued(list.queued_messages);
     seedTurnTargets(list.turn_targets);
     seedTurnSessions(list.turn_sessions);
+    upsertBranches(list.branches ?? []);
     const page = list.messages ?? [];
     messages.value = page;
     hasOlder.value = list.has_more ?? false;
@@ -821,6 +980,8 @@ async function refreshDelta(): Promise<boolean> {
       chats = list.chats;
       firstHasMore = list.has_more ?? false;
       seedRunningTurns(list);
+      seedQueued(list.queued_messages);
+      upsertBranches(list.branches ?? []);
     }
     seedTurnTargets(list.turn_targets);
     seedTurnSessions(list.turn_sessions);
@@ -1018,6 +1179,21 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
   const message = text.trim();
   if (message === "") return false;
   error.value = "";
+  // Queued-message edit mode: update the queue entry in place (its position
+  // is kept) instead of dispatching a new message.
+  const editing = editingQueued.value;
+  if (editing) {
+    try {
+      await ctx.bus.request("chat:_:queued-update", { chat_id: ctx.instanceId, dispatch_id: editing.dispatchId, message });
+      editingQueued.value = null;
+      return true;
+    } catch (cause) {
+      // Typically "not_queued": the turn already started. The queue feed
+      // clears the edit mode; surface the reason and keep the draft.
+      error.value = errorText(cause);
+      return false;
+    }
+  }
   if (hasNewer.value) jumpToLatest(); // a send always targets the live edge
   // Optimistic user box with a sending marker; dispatch latency (routing,
   // agent spawn) no longer leaves the thread looking idle.
@@ -1026,12 +1202,12 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
   void nextTick(() => scrollThreadToMessageEnd());
   try {
     const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message };
-    const lane = activeLaneEntry.value;
-    if (lane) {
-      // Lane tab active: continue that lane's session. The backend infers
-      // the role from the turn; role picks / new-session / send-now toggles
-      // don't apply to a continuation.
-      payload.continue_turn_id = lane.latestTurnId;
+    const branch = sendBranch.value;
+    if (branch) {
+      // Branch tab active: continue the branch's line (its own session,
+      // role inferred from the branch's turns). Role picks / new-session /
+      // send-now toggles don't apply to a branch continuation.
+      payload.branch_id = branch.id;
     } else {
       if (roleIds.length > 0) payload.role_ids = roleIds;
       if (forceNewSession) payload.force_new_session = true;
@@ -1040,7 +1216,14 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
     // Dispatch replies only after LLM role routing, which may take up to
     // llm.timeout_seconds (default 60s) under local-server queueing; the
     // bus's 30s default would report 发送失败 while the backend proceeds.
-    const result = await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 }) as { role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[] };
+    const result = await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 }) as { role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[]; branches?: Branch[] };
+    // Parallel dispatch auto-creates one branch per started role; an
+    // explicit branch send returns the freshly role-stamped record. Adopt
+    // both into the bar; a parallel send lands the pane on its new branch.
+    if (result.branches && result.branches.length > 0) {
+      upsertBranches(result.branches);
+      if (parallel && !branch) activeTab.value = result.branches[0].id;
+    }
     // Busy roles come back in queued_role_ids: their message is held in the
     // per-role queue and starts when the in-flight turn ends, so no
     // optimistic response box yet — the user box carries the 排队中 label.
@@ -1128,10 +1311,67 @@ function clickTurnStatus(box: TimelineBox): void {
   void stop(box.roleId, box.turnId || undefined);
 }
 
+// Queued-message chip (parity with the running chip, on the query box): a
+// two-click cancel (same 10s confirm window, keyed `q:<dispatchId>`) plus a
+// pencil that loads the text into the composer for in-place editing.
+function queuedKey(box: TimelineBox): string {
+  return `q:${box.turnId}`;
+}
+
+/** Chip tooltip: which roles hold the entry and at which queue position. */
+function queuedTitle(box: TimelineBox): string {
+  const entries = queuedByDispatch.value.get(box.turnId) ?? [];
+  return entries.map((entry) => `${entry.role_name || entry.role_id} #${entry.position ?? 1}`).join(" · ");
+}
+
+async function cancelQueued(dispatchId: string): Promise<void> {
+  try {
+    await ctx.bus.request("chat:_:queued-cancel", { chat_id: ctx.instanceId, dispatch_id: dispatchId });
+  } catch (cause) {
+    error.value = errorText(cause);
+  }
+}
+
+function clickQueuedStatus(box: TimelineBox): void {
+  const key = queuedKey(box);
+  if (!confirmingStops.value.has(key)) {
+    confirmingStops.value = new Set([...confirmingStops.value, key]);
+    confirmTimers.set(key, setTimeout(() => clearConfirm(key), STOP_CONFIRM_MS));
+    return;
+  }
+  clearConfirm(key);
+  void cancelQueued(box.turnId);
+}
+
+/** Load a queued message's text into the composer; the next send updates
+ *  the queue entry in place instead of dispatching anew. */
+function beginQueuedEdit(box: TimelineBox): void {
+  const text = box.segments.find((segment) => segment.kind === "text")?.text ?? "";
+  editingQueued.value = { dispatchId: box.turnId };
+  inputs.setText(inputSessionId, text);
+  openComposer();
+}
+
+function cancelQueuedEdit(): void {
+  editingQueued.value = null;
+  inputs.setText(inputSessionId, "");
+}
+
 onMounted(() => {
   const refreshNow = (): void => { void refresh().catch(() => undefined); };
   ctx.bus.subscribe(`chat:${ctx.instanceId}:message`, (frame) => {
     const value = frame.value as ChatMessage;
+    // Queued-cancel tombstone: the backend deleted the dispatch's user
+    // message row; drop the box from the window (and any pending upsert).
+    if (value.deleted) {
+      pendingMessageUpserts.delete(value.id);
+      const index = messages.value.findIndex((item) => item.id === value.id);
+      if (index >= 0) {
+        messages.value.splice(index, 1);
+        writeBack();
+      }
+      return;
+    }
     // Detached window: frames beyond the upper edge wait for loadNewer.
     if (beyondWindowEdge(value.created_at, value.id)) return;
     pendingMessageUpserts.set(value.id, value);
@@ -1150,12 +1390,14 @@ onMounted(() => {
   // this feed (not the dispatch reply) is the authority on what is running;
   // it also drives the running chips of parallel turns of the same role.
   ctx.bus.subscribe("chat:_:turn", (frame) => {
-    const value = frame.value as { chat_id: string; turn_id: string; role_id: string; role_name?: string; phase: string; dispatch_id?: string; agent?: string; provider?: string; model?: string; session_id?: string };
+    const value = frame.value as { chat_id: string; turn_id: string; role_id: string; role_name?: string; phase: string; dispatch_id?: string; agent?: string; provider?: string; model?: string; session_id?: string; branch_id?: string };
     if (value.chat_id !== ctx.instanceId || !value.turn_id) return;
-    // "session" phase stamps the turn's provider session — the lane
-    // records' live source (history seeds come from chats:list/blocks:list).
+    // "session" phase stamps the turn's provider session — the pane's
+    // per-turn records' live source (history seeds come from
+    // chats:list/blocks:list); "started" already carries the branch
+    // attribution, so branch tabs filter correctly from the first frame.
     if (value.phase === "session") {
-      if (value.session_id) upsertTurnSession(value.turn_id, { sessionId: value.session_id, dispatchId: value.dispatch_id ?? "", roleId: value.role_id, roleName: value.role_name ?? "", startedAt: 0 });
+      if (value.session_id || value.branch_id) upsertTurnSession(value.turn_id, { sessionId: value.session_id ?? "", dispatchId: value.dispatch_id ?? "", roleId: value.role_id, roleName: value.role_name ?? "", startedAt: 0, branchId: value.branch_id ?? "" });
       return;
     }
     // "target" phase (and completed frames) carry the turn's execution
@@ -1168,6 +1410,7 @@ onMounted(() => {
       if (!runningTurns.value.has(value.turn_id)) {
         runningTurns.value = new Map([...runningTurns.value, [value.turn_id, { roleId: value.role_id }]]);
       }
+      if (value.branch_id) upsertTurnSession(value.turn_id, { sessionId: "", dispatchId: "", roleId: value.role_id, roleName: value.role_name ?? "", startedAt: 0, branchId: value.branch_id });
       return;
     }
     if (value.phase !== "completed") return;
@@ -1181,6 +1424,25 @@ onMounted(() => {
   });
   ctx.bus.subscribe("chat:_:active", (frame) => {
     if (frame.value === ctx.instanceId) refreshNow();
+  });
+  // Queue feed: the backend publishes the chat's full queue snapshot on
+  // every mutation (enqueue / dequeue / cancel / edit) — reseed wholesale.
+  ctx.bus.subscribe("chat:_:queue", (frame) => {
+    const value = frame.value as { chat_id: string; queued?: QueuedMessage[] };
+    if (value.chat_id !== ctx.instanceId) return;
+    seedQueued(value.queued);
+  });
+  // Branch feed: created / renamed / session-stamped / archived / deleted
+  // branch records. Archived branches leave the bar but stay in the list —
+  // they back the 已合并分支 cards.
+  ctx.bus.subscribe("chat:_:branch", (frame) => {
+    const value = frame.value as Branch & { phase?: string };
+    if (value.chat_id !== ctx.instanceId || !value.id) return;
+    if (value.phase === "deleted") {
+      branches.value = branches.value.filter((branch) => branch.id !== value.id);
+      return;
+    }
+    upsertBranches([value]);
   });
   window.addEventListener("viewer:chats-changed", refreshNow);
   ctx.onDispose(() => {
@@ -1223,6 +1485,32 @@ onMounted(() => {
               </button>
             </template>
             <span v-else-if="box.kind === 'user' && box.routed" class="chat-meta-detail">→ {{ box.routed }}</span>
+            <template v-if="box.kind === 'user' && box.turnId && queuedByDispatch.has(box.turnId)">
+              <button
+                class="chat-turn-status chat-turn-chip chat-queued-chip"
+                :class="{ confirming: confirmingStops.has(queuedKey(box)) }"
+                type="button"
+                :title="confirmingStops.has(queuedKey(box)) ? '10 秒内再次点击确认取消这条排队消息' : `排队中（${queuedTitle(box)}）— 点击取消`"
+                :aria-label="confirmingStops.has(queuedKey(box)) ? '确认取消这条排队消息' : '取消这条排队消息'"
+                @click="clickQueuedStatus(box)"
+              >
+                <template v-if="confirmingStops.has(queuedKey(box))">
+                  <i class="bi bi-question-circle" aria-hidden="true" /> 取消?
+                </template>
+                <template v-else>
+                  <i class="bi bi-hourglass-split" aria-hidden="true" /> queued
+                </template>
+              </button>
+              <button
+                class="btn btn-sm btn-link chat-edit-queued"
+                type="button"
+                title="编辑这条排队消息（发送后原位更新，排队位置不变）"
+                aria-label="编辑这条排队消息"
+                @click="beginQueuedEdit(box)"
+              >
+                <i class="bi bi-pencil" />
+              </button>
+            </template>
             <button
               v-if="turnActive(box)"
               class="chat-turn-status chat-turn-chip"
@@ -1273,6 +1561,18 @@ onMounted(() => {
               </div>
             </details>
           </template>
+          <div v-if="box.kind === 'user' && box.messageId && mergeCards.get(box.messageId)" class="chat-merge-card">
+            <i class="bi bi-git" aria-hidden="true" />
+            已合并分支：{{ mergeCards.get(box.messageId)!.map((branch) => branch.name).join("、") }}
+            <button
+              type="button"
+              class="chat-merge-card-view"
+              title="查看被合并分支的原始对话（只读）"
+              @click="viewArchivedBranch(mergeCards.get(box.messageId)![0].id)"
+            >
+              查看原始对话
+            </button>
+          </div>
         </div>
       </article>
       <div v-if="timeline.length" ref="messageEndRef" class="chat-thread-message-end" aria-hidden="true" />
@@ -1285,30 +1585,140 @@ onMounted(() => {
         <i v-else class="bi bi-arrow-down" aria-hidden="true" /> 新消息 — 跳到最新
       </button>
     </div>
-    <div v-if="lanes.length >= 2 || activeLane" class="chat-lane-bar">
+    <div class="chat-lane-bar">
       <button
         type="button"
         class="chat-lane-tab"
-        :class="{ active: activeLane === '' }"
-        title="显示全部 session 的消息"
-        @click="activeLane = ''"
+        :class="{ active: activeTab === 'main' }"
+        title="主线：只看不在任何分支上的对话；发送默认走主线"
+        @click="activeTab = 'main'"
+      >
+        主线
+      </button>
+      <template v-for="branch in activeBranches" :key="branch.id">
+        <input
+          v-if="renamingBranchId === branch.id"
+          v-model="renameText"
+          class="chat-lane-rename"
+          maxlength="40"
+          @keydown.enter.prevent="submitRename"
+          @keydown.esc.prevent="renamingBranchId = ''"
+          @blur="submitRename"
+        >
+        <button
+          v-else
+          type="button"
+          class="chat-lane-tab"
+          :class="{ active: activeTab === branch.id, 'merge-selected': mergeSelection.has(branch.id) }"
+          :title="mergeMode ? (runningBranchIds.has(branch.id) ? '分支仍在运行，结束后再合并' : '点击选择/取消选择') : `只看分支「${branch.name}」；激活后下一条消息续接它。双击重命名`"
+          @click="mergeMode ? toggleMergeSelect(branch) : activeTab = branch.id"
+          @dblclick="mergeMode ? undefined : beginRename(branch)"
+        >
+          <i v-if="mergeMode" class="bi" :class="mergeSelection.has(branch.id) ? 'bi-check-square' : 'bi-square'" aria-hidden="true" />
+          <span v-if="runningBranchIds.has(branch.id)" class="spinner-border spinner-border-sm" aria-hidden="true" />
+          {{ branch.name }}
+        </button>
+      </template>
+      <button
+        type="button"
+        class="chat-lane-tab"
+        :class="{ active: activeTab === 'all' }"
+        title="全部：按时间混合查看主线与所有分支的完整记录（发送仍走主线）"
+        @click="activeTab = 'all'"
       >
         全部
       </button>
       <button
-        v-for="(lane, index) in lanes"
-        :key="lane.sessionId"
+        v-if="archivedBranches.length > 0"
         type="button"
         class="chat-lane-tab"
-        :class="{ active: activeLane === lane.sessionId }"
-        :title="`只看这条 session；激活后下一条消息默认续接它（${lane.roleName}）`"
-        @click="activeLane = lane.sessionId"
+        :class="{ active: showArchived }"
+        title="已合并归档的分支；点击展开查看"
+        @click="showArchived = !showArchived"
       >
-        <span v-if="lane.running" class="spinner-border spinner-border-sm" aria-hidden="true" />
-        {{ lane.roleName }}#{{ index + 1 }}
+        已归档 {{ archivedBranches.length }}
+      </button>
+      <template v-if="showArchived">
+        <button
+          v-for="branch in archivedBranches"
+          :key="branch.id"
+          type="button"
+          class="chat-lane-tab chat-lane-tab-archived"
+          :class="{ active: activeTab === branch.id }"
+          :title="`已归档分支「${branch.name}」— 查看原始对话（只读）`"
+          @click="activeTab = branch.id"
+        >
+          {{ branch.name }}
+        </button>
+      </template>
+      <input
+        v-if="creatingBranch"
+        v-model="newBranchName"
+        class="chat-lane-rename"
+        placeholder="分支名称"
+        maxlength="40"
+        @keydown.enter.prevent="createBranch"
+        @keydown.esc.prevent="creatingBranch = false"
+      >
+      <button
+        v-else
+        type="button"
+        class="chat-lane-tab"
+        title="新建命名分支：下一条消息在它自己的 session 上并行开始，可随时合并回主线"
+        @click="creatingBranch = true"
+      >
+        <i class="bi bi-plus" aria-hidden="true" /> 分支
+      </button>
+      <button
+        v-if="activeBranches.length > 0 && !creatingBranch"
+        type="button"
+        class="chat-lane-tab chat-lane-merge-toggle"
+        :class="{ active: mergeMode }"
+        title="选择分支合并到主线：生成可编辑的合并摘要，确认后摘要送入主线、分支归档"
+        @click="toggleMergeMode"
+      >
+        <i class="bi bi-git" aria-hidden="true" /> 合并
+      </button>
+      <button
+        v-if="mergeMode"
+        type="button"
+        class="chat-lane-tab chat-lane-merge-go"
+        :disabled="mergeSelection.size === 0 || mergeBusy"
+        @click="draftMerge"
+      >
+        <span v-if="mergeBusy" class="spinner-border spinner-border-sm" aria-hidden="true" />
+        合并到主线 ({{ mergeSelection.size }})
       </button>
     </div>
+    <div v-if="mergeDraft" class="chat-merge-draft">
+      <div class="chat-merge-draft-head">
+        <i class="bi bi-git" aria-hidden="true" />
+        合并摘要（可编辑）— 确认后发送到主线并归档：{{ mergeDraft.branches.map((item) => item.name).join("、") }}
+      </div>
+      <textarea v-model="mergeDraft.text" class="chat-merge-draft-text" rows="10" />
+      <div class="chat-merge-draft-actions">
+        <button type="button" class="btn btn-sm btn-primary" :disabled="mergeBusy || !mergeDraft.text.trim()" @click="confirmMerge">
+          <span v-if="mergeBusy" class="spinner-border spinner-border-sm" aria-hidden="true" /> 确认合并
+        </button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="mergeBusy" @click="mergeDraft = null">取消</button>
+      </div>
+    </div>
+    <div v-if="branchOpError" class="small text-danger px-1">{{ branchOpError }}</div>
     <div v-if="composerVisible" class="composer-shell" @focusout="handleComposerFocusOut">
+      <div class="chat-send-target">发送到：{{ sendTargetLabel }}</div>
+      <div v-if="editingQueued" class="chat-editing-queued">
+        <i class="bi bi-pencil" aria-hidden="true" />
+        <span>编辑排队消息 — 发送后原位更新，排队位置不变</span>
+        <button
+          class="chat-editing-queued-cancel"
+          type="button"
+          title="退出编辑（丢弃改动）"
+          aria-label="退出排队消息编辑"
+          @click="cancelQueuedEdit"
+        >
+          <i class="bi bi-x-lg" />
+        </button>
+      </div>
       <div v-if="error" class="small text-danger mb-1">{{ error }}</div>
       <ComposerBox
         ref="composerRef"
@@ -1374,9 +1784,10 @@ onMounted(() => {
   width: 10px;
 }
 
-/* Lane bar: one compact row of session tabs between thread and composer.
-   The active tab both filters the timeline and locks the next send to
-   continue that lane's session. */
+/* Branch bar (framework v0.63): one compact row between thread and
+   composer — 主线 / named branch tabs / 全部 / 已归档 / ＋ / 合并. The
+   active branch tab both filters the timeline and locks the next send to
+   continue that branch. */
 .chat-lane-bar {
   display: flex;
   gap: 2px;
@@ -1403,9 +1814,92 @@ onMounted(() => {
   color: var(--bs-body-color);
 }
 
+.chat-lane-tab:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .chat-lane-tab .spinner-border {
   height: 8px;
   width: 8px;
+}
+
+.chat-lane-tab-archived {
+  opacity: 0.65;
+}
+
+.chat-lane-tab.merge-selected {
+  color: var(--bs-body-color);
+}
+
+.chat-lane-rename {
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--bs-primary);
+  color: var(--bs-body-color);
+  font-size: var(--font-size-ui);
+  outline: none;
+  padding: 0 4px;
+  width: 12em;
+}
+
+/* Send-target标注：一行小字标明下一条消息发往主线还是某个分支。 */
+.chat-send-target {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui);
+  padding: 0 2px 2px;
+}
+
+/* Merge draft editor: the LLM-drafted summary is editable before the
+   confirm dispatches it into the mainline and archives the branches. */
+.chat-merge-draft {
+  border-top: 1px solid var(--bs-border-color);
+  padding: 4px 2px;
+}
+
+.chat-merge-draft-head {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui);
+  margin-bottom: 4px;
+}
+
+.chat-merge-draft-text {
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: 4px;
+  color: var(--bs-body-color);
+  font-size: var(--font-size-ui);
+  width: 100%;
+}
+
+.chat-merge-draft-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* 已合并分支 card: attached to the merge summary user box, links back to
+   the archived branches' original records. */
+.chat-merge-card {
+  align-items: center;
+  color: var(--color-text-muted);
+  display: flex;
+  font-size: var(--font-size-ui);
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.chat-merge-card-view {
+  background: none;
+  border: 0;
+  color: var(--bs-primary);
+  cursor: pointer;
+  font-size: var(--font-size-ui);
+  padding: 0 4px;
+}
+
+.chat-merge-card-view:hover {
+  text-decoration: underline;
 }
 
 .chat-box {
@@ -1472,6 +1966,53 @@ onMounted(() => {
 .chat-turn-chip.confirming,
 .chat-turn-chip.confirming:hover {
   color: var(--bs-danger);
+}
+
+/* Queued chip on user boxes: same low-key status look as the running chip. */
+.chat-queued-chip:hover {
+  color: var(--bs-primary-text-emphasis, var(--bs-primary));
+}
+
+.chat-edit-queued {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 0;
+  text-decoration: none;
+}
+
+.chat-edit-queued:hover {
+  color: var(--color-text);
+}
+
+/* Queued-message edit-mode notice above the composer: single low-key line,
+   no box, per the activity-row styling ruling. */
+.chat-editing-queued {
+  align-items: center;
+  color: var(--color-text-muted);
+  display: flex;
+  font-size: 11px;
+  gap: 6px;
+  line-height: 1.3;
+  min-height: 18px;
+  padding: 0 4px;
+}
+
+.chat-editing-queued-cancel {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1;
+  margin-left: auto;
+  opacity: 0.7;
+  padding: 0 2px;
+}
+
+.chat-editing-queued-cancel:hover {
+  opacity: 1;
 }
 
 .chat-send-failed {

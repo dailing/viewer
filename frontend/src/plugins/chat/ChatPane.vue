@@ -174,13 +174,44 @@ const mergeCards = computed<Map<string, Branch[]>>(() => {
   return map;
 });
 
-/** Branch bar tab: "main" (主线 — turns off any branch), "all" (the whole
- *  interleaved record), or a branch id (active branch = filter + lock the
- *  next send to continue it; archived branch = read-only original record). */
-const activeTab = ref("main");
-const viewingBranch = computed<Branch | null>(() => (activeTab.value === "main" || activeTab.value === "all") ? null : branches.value.find((branch) => branch.id === activeTab.value) ?? null);
-/** The branch the next send continues (null → normal mainline dispatch). */
-const sendBranch = computed<Branch | null>(() => viewingBranch.value && !viewingBranch.value.archived_at ? viewingBranch.value : null);
+/** Branch bar tabs are multi-select (framework v0.64): the ordered active
+ *  set filters the timeline (union, time-interleaved) and IS the merge
+ *  selection — the merge target is 主线 when "main"/"all" is active,
+ *  otherwise the first-clicked branch. "all" expands to every active line. */
+const activeTabs = ref<string[]>(["main"]);
+
+function allLineIds(): string[] {
+  return ["main", ...activeBranches.value.map((branch) => branch.id)];
+}
+
+/** The active set with "all" expanded, order preserved (click order decides
+ *  the merge target when 主线 is not among them). */
+function effectiveTabs(): string[] {
+  return activeTabs.value.includes("all") ? allLineIds() : activeTabs.value;
+}
+
+function tabActive(id: string): boolean {
+  return activeTabs.value.includes("all") || activeTabs.value.includes(id);
+}
+
+function toggleTab(id: string): void {
+  const current = effectiveTabs();
+  const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+  activeTabs.value = next.length > 0 ? next : ["main"];
+}
+
+/** Active, non-archived branch tabs in click order (main/archived excluded). */
+const viewingBranches = computed<Branch[]>(() => {
+  const selected = new Set(effectiveTabs());
+  return activeBranches.value.filter((branch) => selected.has(branch.id));
+});
+
+/** The branch the next send continues: exactly one active branch tab and no
+ *  主线 in the set → that branch; anything else → mainline dispatch. */
+const sendBranch = computed<Branch | null>(() => {
+  if (tabActive("main")) return null;
+  return viewingBranches.value.length === 1 ? viewingBranches.value[0] : null;
+});
 
 /** Branches with an in-flight turn (tab spinner + merge-selection guard). */
 const runningBranchIds = computed<Set<string>>(() => {
@@ -197,27 +228,35 @@ const runningBranchIds = computed<Set<string>>(() => {
 /** Where the next send goes — the composer annotation, so a message never
  *  lands in the wrong line by accident. */
 const sendTargetLabel = computed<string>(() => {
-  const branch = viewingBranch.value;
-  if (branch && !branch.archived_at) return `分支「${branch.name}」`;
-  if (branch) return "主线（当前查看已归档分支）";
+  const branch = sendBranch.value;
+  if (branch) return `分支「${branch.name}」`;
   return "主线";
 });
 
-// Branch creation: the ＋ tab opens an inline name input; the branch record
-// persists immediately (survives reloads), and the first send on its tab
-// starts the branch's fresh session.
-const creatingBranch = ref(false);
-const newBranchName = ref("");
+// Fork (framework v0.64): every role turn box carries a fork button; the
+// branch bar's inline input names the new branch (default 分支NN), and the
+// first send on its tab starts the branch's fresh session with the fork
+// point's lineage as context. Archived lines can't be forked from.
+const forkFromTurnId = ref("");
+const forkName = ref("");
 const branchOpError = ref("");
 
-async function createBranch(): Promise<void> {
+function beginFork(turnId: string): void {
+  forkFromTurnId.value = turnId;
+  forkName.value = `分支${String(branches.value.length + 1).padStart(2, "0")}`;
+  branchOpError.value = "";
+}
+
+async function submitFork(): Promise<void> {
+  const fromTurnId = forkFromTurnId.value;
+  if (!fromTurnId) return;
   branchOpError.value = "";
   try {
-    const branch = await ctx.bus.request("chat:_:branches:create", { chat_id: ctx.instanceId, name: newBranchName.value.trim() }) as Branch;
+    const branch = await ctx.bus.request("chat:_:branches:create", { chat_id: ctx.instanceId, name: forkName.value.trim(), from_turn_id: fromTurnId }) as Branch;
     upsertBranches([branch]);
-    activeTab.value = branch.id;
-    creatingBranch.value = false;
-    newBranchName.value = "";
+    activeTabs.value = [branch.id];
+    forkFromTurnId.value = "";
+    forkName.value = "";
   } catch (cause) {
     branchOpError.value = errorText(cause);
   }
@@ -244,36 +283,39 @@ async function submitRename(): Promise<void> {
   }
 }
 
-// Merge mode: tabs get checkboxes; 合并到主线 drafts an editable summary
-// (LLM over the branches' turn records), and confirming dispatches the final
-// text into the mainline and archives the branches.
-const mergeMode = ref(false);
-const mergeSelection = ref(new Set<string>());
+// Merge (framework v0.64): the multi-selected tab set IS the merge
+// selection. Target = 主线 when it (or 全部) is active, otherwise the
+// first-clicked branch; the other selected active branches are the sources.
+// 合并 drafts an editable summary (LLM over the sources' turn records), and
+// confirming dispatches the final text into the target line and archives
+// the sources.
 const mergeBusy = ref(false);
 interface MergeDraftBranch { id: string; name: string; cutoff_turn_id: string }
-const mergeDraft = ref<{ text: string; branches: MergeDraftBranch[] } | null>(null);
+const mergeDraft = ref<{ text: string; branches: MergeDraftBranch[]; target: { id: string; name: string } } | null>(null);
 
-function toggleMergeMode(): void {
-  mergeMode.value = !mergeMode.value;
-  mergeSelection.value = new Set();
-}
+const mergeTarget = computed<{ id: string; name: string } | null>(() => {
+  const tabs = effectiveTabs();
+  if (tabs.includes("main")) return { id: "", name: "主线" };
+  const first = viewingBranches.value[0];
+  return first ? { id: first.id, name: first.name } : null;
+});
 
-function toggleMergeSelect(branch: Branch): void {
-  if (runningBranchIds.value.has(branch.id)) return; // running branches merge after their turn ends
-  const next = new Set(mergeSelection.value);
-  if (next.has(branch.id)) next.delete(branch.id); else next.add(branch.id);
-  mergeSelection.value = next;
-}
+const mergeSources = computed<Branch[]>(() => {
+  const target = mergeTarget.value;
+  if (!target) return [];
+  return viewingBranches.value.filter((branch) => branch.id !== target.id && !runningBranchIds.value.has(branch.id));
+});
+
+const canMerge = computed<boolean>(() => mergeTarget.value !== null && mergeSources.value.length > 0);
 
 async function draftMerge(): Promise<void> {
-  if (mergeSelection.value.size === 0) return;
+  const target = mergeTarget.value;
+  if (!target || mergeSources.value.length === 0) return;
   mergeBusy.value = true;
   branchOpError.value = "";
   try {
-    const result = await ctx.bus.request("chat:_:branches:merge", { chat_id: ctx.instanceId, branch_ids: [...mergeSelection.value] }, { timeout: 120_000 }) as { summary: string; branches: MergeDraftBranch[] };
-    mergeDraft.value = { text: result.summary, branches: result.branches };
-    mergeMode.value = false;
-    mergeSelection.value = new Set();
+    const result = await ctx.bus.request("chat:_:branches:merge", { chat_id: ctx.instanceId, branch_ids: mergeSources.value.map((branch) => branch.id), target_branch_id: target.id }, { timeout: 120_000 }) as { summary: string; branches: MergeDraftBranch[]; target?: { id: string; name: string } };
+    mergeDraft.value = { text: result.summary, branches: result.branches, target: result.target ?? target };
   } catch (cause) {
     branchOpError.value = errorText(cause);
   } finally {
@@ -287,9 +329,9 @@ async function confirmMerge(): Promise<void> {
   mergeBusy.value = true;
   branchOpError.value = "";
   try {
-    await ctx.bus.request("chat:_:branches:merge-confirm", { chat_id: ctx.instanceId, summary: draft.text.trim(), branches: draft.branches }, { timeout: 120_000 });
+    await ctx.bus.request("chat:_:branches:merge-confirm", { chat_id: ctx.instanceId, summary: draft.text.trim(), branches: draft.branches, target_branch_id: draft.target.id }, { timeout: 120_000 });
     mergeDraft.value = null;
-    activeTab.value = "main";
+    activeTabs.value = draft.target.id ? [draft.target.id] : ["main"];
   } catch (cause) {
     branchOpError.value = errorText(cause);
   } finally {
@@ -301,7 +343,17 @@ async function confirmMerge(): Promise<void> {
 const showArchived = ref(false);
 function viewArchivedBranch(id: string): void {
   showArchived.value = true;
-  activeTab.value = id;
+  if (!tabActive(id)) activeTabs.value = [...effectiveTabs(), id];
+}
+
+/** Fork entry on role turn boxes (framework v0.64): hidden on archived
+ *  (merged) lines — those are read-only and can't be forked from. */
+function canFork(box: TimelineBox): boolean {
+  if (box.kind !== "role" || !box.turnId) return false;
+  const branchId = turnSessions.value.get(box.turnId)?.branchId ?? "";
+  if (branchId === "") return true;
+  const branch = branches.value.find((item) => item.id === branchId);
+  return !branch?.archived_at;
 }
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
@@ -315,28 +367,27 @@ interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleI
 const timeline = computed<TimelineBox[]>(() => {
   const turns = new Map<string, TimelineBox>();
   const boxes: TimelineBox[] = [];
-  // Branch filter: "main" shows only turns off any branch (主线), "all"
-  // shows the whole interleaved record, a branch id shows that branch.
-  // Turns/dispatches whose records haven't landed yet stay visible —
-  // hiding live content flickers.
-  const tab = activeTab.value;
+  // Branch filter: the active tab set's lines show, time-interleaved ("all"
+  //  = every line). Turns/dispatches whose records haven't landed yet stay
+  //  visible — hiding live content flickers.
+  const showAll = activeTabs.value.includes("all");
+  const tabs = new Set(effectiveTabs());
+  const lineVisible = (branchId: string): boolean => tabs.has(branchId === "" ? "main" : branchId);
   const dispatchVisible = (dispatchId: string): boolean => {
-    if (tab === "all") return true;
+    if (showAll) return true;
     let known = false;
     for (const entry of turnSessions.value.values()) {
       if (entry.dispatchId !== dispatchId) continue;
       known = true;
-      if (tab === "main") {
-        if (entry.branchId !== "") return false;
-      } else if (entry.branchId === tab) return true;
+      if (lineVisible(entry.branchId)) return true;
     }
-    return tab === "main" || !known;
+    return !known;
   };
   const turnVisible = (turnId: string): boolean => {
-    if (tab === "all") return true;
+    if (showAll) return true;
     const entry = turnSessions.value.get(turnId);
     if (!entry) return true; // unknown turns stay visible
-    return tab === "main" ? entry.branchId === "" : entry.branchId === tab;
+    return lineVisible(entry.branchId);
   };
   for (const message of messages.value) {
     if (message.role === "user") {
@@ -1222,7 +1273,7 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
     // both into the bar; a parallel send lands the pane on its new branch.
     if (result.branches && result.branches.length > 0) {
       upsertBranches(result.branches);
-      if (parallel && !branch) activeTab.value = result.branches[0].id;
+      if (parallel && !branch) activeTabs.value = [result.branches[0].id];
     }
     // Busy roles come back in queued_role_ids: their message is held in the
     // per-role queue and starts when the in-flight turn ends, so no
@@ -1529,6 +1580,16 @@ onMounted(() => {
             </button>
             <span v-if="box.kind === 'role' && turnTargetLabel(box)" class="chat-meta-detail">{{ turnTargetLabel(box) }}</span>
             <span v-if="box.kind === 'role' && usageLabel(box)" class="chat-meta-detail" :title="usageTitle(box)">{{ usageLabel(box) }}</span>
+            <button
+              v-if="canFork(box)"
+              class="btn btn-sm btn-link chat-fork-turn"
+              type="button"
+              title="从这里创建分支：新分支携带此 turn 为止（含）的共享历史，之后独立并行"
+              aria-label="从这里创建分支"
+              @click="beginFork(box.turnId)"
+            >
+              <i class="bi bi-signpost-split" />
+            </button>
             <span class="chat-time">{{ formatTime(box.ts) }}</span>
           </div>
         </div>
@@ -1589,9 +1650,9 @@ onMounted(() => {
       <button
         type="button"
         class="chat-lane-tab"
-        :class="{ active: activeTab === 'main' }"
-        title="主线：只看不在任何分支上的对话；发送默认走主线"
-        @click="activeTab = 'main'"
+        :class="{ active: tabActive('main') }"
+        title="主线：不在任何分支上的对话；多选参与合并时合并进主线"
+        @click="toggleTab('main')"
       >
         主线
       </button>
@@ -1609,12 +1670,11 @@ onMounted(() => {
           v-else
           type="button"
           class="chat-lane-tab"
-          :class="{ active: activeTab === branch.id, 'merge-selected': mergeSelection.has(branch.id) }"
-          :title="mergeMode ? (runningBranchIds.has(branch.id) ? '分支仍在运行，结束后再合并' : '点击选择/取消选择') : `只看分支「${branch.name}」；激活后下一条消息续接它。双击重命名`"
-          @click="mergeMode ? toggleMergeSelect(branch) : activeTab = branch.id"
-          @dblclick="mergeMode ? undefined : beginRename(branch)"
+          :class="{ active: tabActive(branch.id) }"
+          :title="`点击加入/移出查看集合（多选，时间交错显示）；恰单独激活时下一条消息续接它；多选后可将其它分支合并进它。双击重命名`"
+          @click="toggleTab(branch.id)"
+          @dblclick="beginRename(branch)"
         >
-          <i v-if="mergeMode" class="bi" :class="mergeSelection.has(branch.id) ? 'bi-check-square' : 'bi-square'" aria-hidden="true" />
           <span v-if="runningBranchIds.has(branch.id)" class="spinner-border spinner-border-sm" aria-hidden="true" />
           {{ branch.name }}
         </button>
@@ -1622,9 +1682,9 @@ onMounted(() => {
       <button
         type="button"
         class="chat-lane-tab"
-        :class="{ active: activeTab === 'all' }"
-        title="全部：按时间混合查看主线与所有分支的完整记录（发送仍走主线）"
-        @click="activeTab = 'all'"
+        :class="{ active: activeTabs.includes('all') }"
+        title="全部：激活所有线（按时间混合显示；合并目标为主线）"
+        @click="activeTabs = ['all']"
       >
         全部
       </button>
@@ -1644,56 +1704,42 @@ onMounted(() => {
           :key="branch.id"
           type="button"
           class="chat-lane-tab chat-lane-tab-archived"
-          :class="{ active: activeTab === branch.id }"
-          :title="`已归档分支「${branch.name}」— 查看原始对话（只读）`"
-          @click="activeTab = branch.id"
+          :class="{ active: tabActive(branch.id) }"
+          :title="`已归档分支「${branch.name}」— 查看原始对话（只读，不可再分叉）`"
+          @click="toggleTab(branch.id)"
         >
           {{ branch.name }}
         </button>
       </template>
-      <input
-        v-if="creatingBranch"
-        v-model="newBranchName"
-        class="chat-lane-rename"
-        placeholder="分支名称"
-        maxlength="40"
-        @keydown.enter.prevent="createBranch"
-        @keydown.esc.prevent="creatingBranch = false"
-      >
+      <template v-if="forkFromTurnId">
+        <span class="chat-fork-hint">新分支名：</span>
+        <input
+          v-model="forkName"
+          class="chat-lane-rename"
+          placeholder="分支名称"
+          maxlength="40"
+          @keydown.enter.prevent="submitFork"
+          @keydown.esc.prevent="forkFromTurnId = ''"
+        >
+      </template>
       <button
-        v-else
-        type="button"
-        class="chat-lane-tab"
-        title="新建命名分支：下一条消息在它自己的 session 上并行开始，可随时合并回主线"
-        @click="creatingBranch = true"
-      >
-        <i class="bi bi-plus" aria-hidden="true" /> 分支
-      </button>
-      <button
-        v-if="activeBranches.length > 0 && !creatingBranch"
-        type="button"
-        class="chat-lane-tab chat-lane-merge-toggle"
-        :class="{ active: mergeMode }"
-        title="选择分支合并到主线：生成可编辑的合并摘要，确认后摘要送入主线、分支归档"
-        @click="toggleMergeMode"
-      >
-        <i class="bi bi-git" aria-hidden="true" /> 合并
-      </button>
-      <button
-        v-if="mergeMode"
+        v-if="canMerge"
         type="button"
         class="chat-lane-tab chat-lane-merge-go"
-        :disabled="mergeSelection.size === 0 || mergeBusy"
+        :disabled="mergeBusy"
+        :title="`把 ${mergeSources.map((branch) => `「${branch.name}」`).join('')} 合并进${mergeTarget!.id === '' ? '主线' : `「${mergeTarget!.name}」`}：生成可编辑摘要，确认后摘要送入目标线、源分支归档`"
         @click="draftMerge"
       >
         <span v-if="mergeBusy" class="spinner-border spinner-border-sm" aria-hidden="true" />
-        合并到主线 ({{ mergeSelection.size }})
+        <i v-else class="bi bi-git" aria-hidden="true" />
+        合并到{{ mergeTarget!.id === '' ? '主线' : `「${mergeTarget!.name}」` }} ({{ mergeSources.length }})
       </button>
+      <span v-if="composerVisible" class="chat-send-target">发送到：{{ sendTargetLabel }}</span>
     </div>
     <div v-if="mergeDraft" class="chat-merge-draft">
       <div class="chat-merge-draft-head">
         <i class="bi bi-git" aria-hidden="true" />
-        合并摘要（可编辑）— 确认后发送到主线并归档：{{ mergeDraft.branches.map((item) => item.name).join("、") }}
+        合并摘要（可编辑）— 确认后发送到{{ mergeDraft.target.id === '' ? '主线' : `分支「${mergeDraft.target.name}」` }}并归档：{{ mergeDraft.branches.map((item) => item.name).join("、") }}
       </div>
       <textarea v-model="mergeDraft.text" class="chat-merge-draft-text" rows="10" />
       <div class="chat-merge-draft-actions">
@@ -1705,7 +1751,6 @@ onMounted(() => {
     </div>
     <div v-if="branchOpError" class="small text-danger px-1">{{ branchOpError }}</div>
     <div v-if="composerVisible" class="composer-shell" @focusout="handleComposerFocusOut">
-      <div class="chat-send-target">发送到：{{ sendTargetLabel }}</div>
       <div v-if="editingQueued" class="chat-editing-queued">
         <i class="bi bi-pencil" aria-hidden="true" />
         <span>编辑排队消息 — 发送后原位更新，排队位置不变</span>
@@ -1789,6 +1834,7 @@ onMounted(() => {
    active branch tab both filters the timeline and locks the next send to
    continue that branch. */
 .chat-lane-bar {
+  align-items: center;
   display: flex;
   gap: 2px;
   overflow-x: auto;
@@ -1828,8 +1874,22 @@ onMounted(() => {
   opacity: 0.65;
 }
 
-.chat-lane-tab.merge-selected {
-  color: var(--bs-body-color);
+/* Fork button on the turn box meta row — quiet until hovered. */
+.chat-fork-turn {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui);
+  padding: 0 2px;
+  text-decoration: none;
+}
+
+.chat-fork-turn:hover {
+  color: var(--bs-primary);
+}
+
+.chat-fork-hint {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui);
+  white-space: nowrap;
 }
 
 .chat-lane-rename {
@@ -1843,11 +1903,13 @@ onMounted(() => {
   width: 12em;
 }
 
-/* Send-target标注：一行小字标明下一条消息发往主线还是某个分支。 */
+/* Send target stays inline with the branch controls. */
 .chat-send-target {
   color: var(--color-text-muted);
+  flex-shrink: 0;
   font-size: var(--font-size-ui);
-  padding: 0 2px 2px;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 /* Merge draft editor: the LLM-drafted summary is editable before the

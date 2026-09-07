@@ -242,9 +242,16 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	// explicit branch dispatch stamps its role onto an empty branch.
 	touchedBranches := []*Branch{}
 	if parallel && branch == nil {
+		// Fork point: the mainline's latest turn at dispatch time, so the
+		// auto-branches' lineage context shares the mainline history up to
+		// now and nothing after.
+		forkTurnID := ""
+		if latest, latestErr := p.store.latestLineTurn(chat.ID, ""); latestErr == nil && latest != nil {
+			forkTurnID = latest.ID
+		}
 		for index := range started {
 			now := nowMillis()
-			created := &Branch{ID: newID(), ChatID: chat.ID, Name: autoBranchName(request.Message, started[index].role, len(started)), RoleID: started[index].role.ID, RoleName: started[index].role.Name, CreatedAt: now, UpdatedAt: now}
+			created := &Branch{ID: newID(), ChatID: chat.ID, Name: autoBranchName(request.Message, started[index].role, len(started)), RoleID: started[index].role.ID, RoleName: started[index].role.Name, ForkTurnID: forkTurnID, CreatedAt: now, UpdatedAt: now}
 			if createErr := p.store.createBranch(created); createErr != nil {
 				slog.Warn("chat branch auto-create failed", "chat_id", chat.ID, "role_id", started[index].role.ID, "error", createErr)
 				continue
@@ -737,7 +744,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 			// runtime stays resident for the lane's next continuation.
 			key += "\x00lane\x00" + target.resume
 		}
-		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, BranchID: target.branch, StartedAt: nowMillis()}
+		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, BranchID: target.branch, PrevTurnID: p.prevTurnFor(chat.ID, target), StartedAt: nowMillis()}
 		if err := p.store.beginTurn(turn); err != nil {
 			slog.Error("chat turn persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
 			continue
@@ -813,10 +820,10 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 				prompt := message
 				contextBytes, promptMode := 0, "existing_session"
 				if fresh {
-					contextBridge := p.buildNewSessionContext(chat, message, before)
+					contextBridge := p.buildLineContext(chat, target.branch, message, before)
 					contextBytes, promptMode = len(contextBridge), "new_session"
 					prompt = initialPrompt(workspace, chat, role, contextBridge, message)
-				} else if bridge := p.buildRoleSwitchBridge(chat, role.ID, message, before); bridge != "" {
+				} else if bridge := p.buildLineBridge(chat, target.branch, role.ID, message, before); bridge != "" {
 					contextBytes, promptMode = len(bridge), "role_switch"
 					prompt = bridge + "\n\nCurrent routed message follows:\n" + message
 				}

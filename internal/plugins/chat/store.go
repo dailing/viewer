@@ -123,6 +123,12 @@ type Turn struct {
 	// session rebuilds because it does not derive from SessionID. Empty on
 	// mainline turns.
 	BranchID string `gorm:"index" json:"branch_id"`
+	// PrevTurnID is the turn's parent in its work line (framework v0.64),
+	// stamped at beginTurn: a branch turn points at the branch's latest turn
+	// (first turn: the fork turn in the parent line), a lane continuation at
+	// the session's latest turn, everything else at the latest mainline turn.
+	// Turns thus form a walkable commit chain that crosses fork points.
+	PrevTurnID string `gorm:"index" json:"prev_turn_id"`
 	// Agent/Provider/Model record the routing candidate that actually
 	// executed the turn (planned candidate at resolve time, updated on
 	// failover). Empty on turns that predate this column or never resolved
@@ -162,6 +168,14 @@ type TurnSummary struct {
 // and archives the branch: MergedThroughTurnID records the cutoff turn (no
 // duplicate import on re-merge) and MergeMessageID links the mainline user
 // message carrying the summary, so the pane can attach the "已合并分支" card.
+//
+// Fork points (framework v0.64): ForkTurnID records the turn the branch
+// forked from (empty on pre-v0.64 rootless branches) and ParentBranchID the
+// fork turn's line ("" = mainline); forks are allowed from any turn of any
+// active line, so branches form a DAG. MergedIntoBranchID records the merge
+// target ("" = mainline; pre-v0.64 archived rows' zero value lands them on
+// the mainline naturally). Lineage context builds walk this ancestry up to
+// each fork turn and union in turns of branches merged into the line.
 type Branch struct {
 	ID       string `gorm:"primaryKey" json:"id"`
 	ChatID   string `gorm:"index;not null" json:"chat_id"`
@@ -171,6 +185,9 @@ type Branch struct {
 	// SessionID is the provider session of the branch's newest turn
 	// (informational; the turn rows are authoritative).
 	SessionID           string `json:"session_id"`
+	ForkTurnID          string `json:"fork_turn_id"`
+	ParentBranchID      string `json:"parent_branch_id"`
+	MergedIntoBranchID  string `json:"merged_into_branch_id"`
 	ArchivedAt          *int64 `json:"archived_at"`
 	MergedThroughTurnID string `json:"merged_through_turn_id"`
 	MergeMessageID      string `json:"merge_message_id"`
@@ -182,7 +199,9 @@ func (b Branch) payload() map[string]any {
 	return map[string]any{
 		"id": b.ID, "chat_id": b.ChatID, "name": b.Name,
 		"role_id": b.RoleID, "role_name": b.RoleName, "session_id": b.SessionID,
-		"archived_at": b.ArchivedAt, "merged_through_turn_id": b.MergedThroughTurnID,
+		"fork_turn_id": b.ForkTurnID, "parent_branch_id": b.ParentBranchID,
+		"merged_into_branch_id": b.MergedIntoBranchID,
+		"archived_at":           b.ArchivedAt, "merged_through_turn_id": b.MergedThroughTurnID,
 		"merge_message_id": b.MergeMessageID,
 		"created_at":       b.CreatedAt, "updated_at": b.UpdatedAt,
 	}
@@ -635,6 +654,138 @@ func (s *store) branchHasRunningTurn(branchID string) (bool, error) {
 	return count > 0, err
 }
 
+// lineTurns returns one work line's turns (branchID "" = mainline) started
+// before cutoff, oldest-first — the lineage collector's per-line source.
+func (s *store) lineTurns(chatID, branchID string, before int64) ([]Turn, error) {
+	var values []Turn
+	err := s.db.Where("chat_id = ? AND branch_id = ? AND started_at < ?", chatID, branchID, before).Order("started_at, id").Find(&values).Error
+	return values, err
+}
+
+// branchesMergedInto returns the archived branches whose merge target is the
+// given line ("" = mainline) — pre-v0.64 rows' zero MergedIntoBranchID lands
+// them on the mainline naturally.
+func (s *store) branchesMergedInto(chatID, targetBranchID string) ([]Branch, error) {
+	var values []Branch
+	err := s.db.Where("chat_id = ? AND merged_into_branch_id = ? AND archived_at IS NOT NULL", chatID, targetBranchID).Order("created_at, id").Find(&values).Error
+	return values, err
+}
+
+// latestLineTurn returns the line's newest turn — the prev-turn stamp for the
+// line's next turn ("" branchID = mainline).
+func (s *store) latestLineTurn(chatID, branchID string) (*Turn, error) {
+	var value Turn
+	result := s.db.Where("chat_id = ? AND branch_id = ?", chatID, branchID).Order("started_at desc, id desc").Limit(1).Find(&value)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &value, nil
+}
+
+// latestSessionTurn returns the newest turn that ran on a provider session —
+// the prev-turn stamp for a lane continuation.
+func (s *store) latestSessionTurn(chatID, sessionID string) (*Turn, error) {
+	var value Turn
+	result := s.db.Where("chat_id = ? AND session_id = ?", chatID, sessionID).Order("started_at desc, id desc").Limit(1).Find(&value)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &value, nil
+}
+
+// lineTurnSummaries returns completed summaries within a turn set,
+// oldest-first — the lineage context's summary source.
+func (s *store) lineTurnSummaries(turnIDs []string, before, after int64, excludeRoleID string) ([]TurnSummary, error) {
+	if len(turnIDs) == 0 {
+		return nil, nil
+	}
+	var values []TurnSummary
+	query := s.db.Where("turn_id IN ? AND status = ? AND occurred_at < ?", turnIDs, "completed", before)
+	if after > 0 {
+		query = query.Where("occurred_at > ?", after)
+	}
+	if excludeRoleID != "" {
+		query = query.Where("role_id <> ?", excludeRoleID)
+	}
+	err := query.Order("occurred_at asc, turn_id asc").Limit(50).Find(&values).Error
+	return values, err
+}
+
+// latestSummaryTimeForTurns returns the newest completed-summary timestamp
+// within a turn set — the raw-tail floor of the lineage context.
+func (s *store) latestSummaryTimeForTurns(turnIDs []string, before int64) (int64, error) {
+	if len(turnIDs) == 0 {
+		return 0, nil
+	}
+	var value TurnSummary
+	result := s.db.Where("turn_id IN ? AND status = ? AND occurred_at < ?", turnIDs, "completed", before).Order("occurred_at desc").Limit(1).Find(&value)
+	if result.Error != nil || result.RowsAffected == 0 {
+		return 0, result.Error
+	}
+	return value.OccurredAt, nil
+}
+
+// lineHistoryAfter is historyAfter scoped to a turn-key set (turn ids plus
+// their dispatch ids — user messages key by dispatch): visible messages of
+// the lineage within (after, before), word-budgeted, oldest-first.
+func (s *store) lineHistoryAfter(chatID string, keys []string, after, before int64, wordBudget int) ([]Message, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	var values []Message
+	query := s.db.Where("chat_id = ? AND turn_id IN ? AND created_at < ?", chatID, keys, before)
+	if after > 0 {
+		query = query.Where("created_at > ?", after)
+	}
+	if err := query.Order("created_at desc").Limit(1000).Find(&values).Error; err != nil {
+		return nil, err
+	}
+	used, picked := 0, []Message{}
+	for _, value := range values {
+		words := len(splitWords(value.Text))
+		if wordBudget > 0 && used+words > wordBudget && len(picked) > 0 {
+			break
+		}
+		used += words
+		picked = append(picked, value)
+	}
+	for left, right := 0, len(picked)-1; left < right; left, right = left+1, right-1 {
+		picked[left], picked[right] = picked[right], picked[left]
+	}
+	return picked, nil
+}
+
+// lineRoleLastActivity returns the role's newest visible-message timestamp
+// within a turn-key set — the lineage bridge's "away since" basis.
+func (s *store) lineRoleLastActivity(chatID string, keys []string, roleID string, before int64) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	var value Message
+	result := s.db.Where("chat_id = ? AND turn_id IN ? AND role_id = ? AND created_at < ?", chatID, keys, roleID, before).Order("created_at desc").Limit(1).Find(&value)
+	if result.Error != nil || result.RowsAffected == 0 {
+		return 0, result.Error
+	}
+	return value.CreatedAt, nil
+}
+
+// lineHasActivityBetween reports whether the lineage saw any visible message
+// in (after, before).
+func (s *store) lineHasActivityBetween(chatID string, keys []string, after, before int64) (bool, error) {
+	if len(keys) == 0 {
+		return false, nil
+	}
+	var count int64
+	err := s.db.Model(&Message{}).Where("chat_id = ? AND turn_id IN ? AND created_at > ? AND created_at < ?", chatID, keys, after, before).Count(&count).Error
+	return count > 0, err
+}
+
 // turnSummariesForTurns returns completed summaries keyed by turn id — the
 // merge draft prefers these over raw transcripts.
 func (s *store) turnSummariesForTurns(turnIDs []string) (map[string]TurnSummary, error) {
@@ -672,67 +823,6 @@ func (m MessageBlock) payload() map[string]any {
 }
 
 func (s *store) saveTurnSummary(value *TurnSummary) error { return s.db.Save(value).Error }
-
-func (s *store) recentTurnSummaries(chatID string, before, after int64, excludeRoleID string) ([]TurnSummary, error) {
-	var values []TurnSummary
-	query := s.db.Where("chat_id = ? AND status = ? AND occurred_at < ?", chatID, "completed", before)
-	if after > 0 {
-		query = query.Where("occurred_at > ?", after)
-	}
-	if excludeRoleID != "" {
-		query = query.Where("role_id <> ?", excludeRoleID)
-	}
-	err := query.Order("occurred_at asc, turn_id asc").Limit(50).Find(&values).Error
-	return values, err
-}
-
-func (s *store) latestSummaryTime(chatID string, before int64) (int64, error) {
-	var value TurnSummary
-	result := s.db.Where("chat_id = ? AND status = ? AND occurred_at < ?", chatID, "completed", before).Order("occurred_at desc").Limit(1).Find(&value)
-	if result.Error != nil || result.RowsAffected == 0 {
-		return 0, result.Error
-	}
-	return value.OccurredAt, nil
-}
-
-func (s *store) roleLastActivity(chatID, roleID string, before int64) (int64, error) {
-	var value Message
-	result := s.db.Where("chat_id = ? AND role_id = ? AND created_at < ?", chatID, roleID, before).Order("created_at desc").Limit(1).Find(&value)
-	if result.Error != nil || result.RowsAffected == 0 {
-		return 0, result.Error
-	}
-	return value.CreatedAt, nil
-}
-
-func (s *store) hasActivityBetween(chatID string, after, before int64) (bool, error) {
-	var count int64
-	err := s.db.Model(&Message{}).Where("chat_id = ? AND created_at > ? AND created_at < ?", chatID, after, before).Count(&count).Error
-	return count > 0, err
-}
-
-func (s *store) historyAfter(chatID string, after, before int64, wordBudget int) ([]Message, error) {
-	var values []Message
-	query := s.db.Where("chat_id = ? AND created_at < ?", chatID, before)
-	if after > 0 {
-		query = query.Where("created_at > ?", after)
-	}
-	if err := query.Order("created_at desc").Limit(1000).Find(&values).Error; err != nil {
-		return nil, err
-	}
-	used, picked := 0, []Message{}
-	for _, value := range values {
-		words := len(splitWords(value.Text))
-		if wordBudget > 0 && used+words > wordBudget && len(picked) > 0 {
-			break
-		}
-		used += words
-		picked = append(picked, value)
-	}
-	for left, right := 0, len(picked)-1; left < right; left, right = left+1, right-1 {
-		picked[left], picked[right] = picked[right], picked[left]
-	}
-	return picked, nil
-}
 
 func (s *store) history(chatID string, before int64, wordBudget int) ([]Message, error) {
 	var values []Message

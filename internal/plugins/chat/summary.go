@@ -164,52 +164,6 @@ func formatSummaryTime(value int64) string {
 	return time.UnixMilli(value).Local().Format("01-02 15:04")
 }
 
-func (p *Plugin) buildTurnSummariesSection(chatID string, before, after int64, charBudget int, excludeRoleID string) string {
-	if charBudget <= 0 {
-		return ""
-	}
-	summaries, err := p.store.recentTurnSummaries(chatID, before, after, excludeRoleID)
-	if err != nil || len(summaries) == 0 {
-		return ""
-	}
-	picked, used := []TurnSummary{}, 0
-	for i := len(summaries) - 1; i >= 0; i-- {
-		length := len([]rune(summaries[i].Summary))
-		if used+length > charBudget {
-			if len(picked) == 0 {
-				item := summaries[i]
-				item.Summary = truncateText(item.Summary, charBudget)
-				picked = append(picked, item)
-			}
-			break
-		}
-		picked = append(picked, summaries[i])
-		used += length
-	}
-	lines := []string{"Summaries of earlier work turns in this chat (most recent last):"}
-	for i := len(picked) - 1; i >= 0; i-- {
-		item := picked[i]
-		label := fallback(item.RoleName, fallback(item.RoleID, "agent"))
-		lines = append(lines, fmt.Sprintf("- [%s, role %q]\n%s", formatSummaryTime(item.OccurredAt), label, item.Summary))
-	}
-	return strings.Join(lines, "\n\n")
-}
-
-func renderHistory(messages []Message, heading string) string {
-	if len(messages) == 0 {
-		return ""
-	}
-	lines := []string{heading}
-	for _, message := range messages {
-		sender := "User"
-		if message.RoleID != "" {
-			sender = fallback(message.RoleName, "Agent")
-		}
-		lines = append(lines, fmt.Sprintf("%s: %s", sender, message.Text))
-	}
-	return strings.Join(lines, "\n")
-}
-
 func truncateUTF8Prefix(value string, byteBudget int) string {
 	if byteBudget <= 0 {
 		return ""
@@ -279,61 +233,6 @@ func capRecentContext(value string, byteBudget int) string {
 		return truncateUTF8Prefix(marker, byteBudget)
 	}
 	return marker + truncateUTF8Suffix(value, byteBudget-len(marker))
-}
-
-func (p *Plugin) buildUnsummarizedTailSection(chatID string, before, after int64, wordBudget, byteBudget int) string {
-	if wordBudget <= 0 || byteBudget <= 0 {
-		return ""
-	}
-	latest, _ := p.store.latestSummaryTime(chatID, before)
-	floor := after
-	if latest > floor {
-		floor = latest
-	}
-	messages, err := p.store.historyAfter(chatID, floor, before, wordBudget)
-	if err != nil {
-		return ""
-	}
-	heading := "Recent activity not yet covered by a summary (raw messages):"
-	if latest == 0 && after == 0 {
-		heading = "Recent visible chat history before the current message:"
-	}
-	return renderRecentHistory(messages, heading, byteBudget)
-}
-
-func (p *Plugin) buildNewSessionContext(chat Chat, query string, before int64) string {
-	config := p.summaryConfig(p.ctx)
-	if !config.ContextEnabled {
-		return ""
-	}
-	sections := nonEmpty(p.buildTurnSummariesSection(chat.ID, before, 0, config.SummaryCharBudget, ""), p.buildUnsummarizedTailSection(chat.ID, before, 0, config.TailWordBudget, config.TailByteBudget))
-	if recall := p.buildHindsightRecallSection(chat.ID, query, lastString(sections), before); recall != "" {
-		sections = append(sections, recall)
-	}
-	return capRecentContext(strings.Join(sections, "\n\n"), config.ContextByteBudget)
-}
-
-func (p *Plugin) buildRoleSwitchBridge(chat Chat, roleID, query string, before int64) string {
-	config := p.summaryConfig(p.ctx)
-	if !config.ContextEnabled {
-		return ""
-	}
-	last, _ := p.store.roleLastActivity(chat.ID, roleID, before)
-	if last > 0 {
-		active, _ := p.store.hasActivityBetween(chat.ID, last, before)
-		if !active {
-			return ""
-		}
-	}
-	sections := nonEmpty(p.buildTurnSummariesSection(chat.ID, before, last, config.SummaryCharBudget, roleID), p.buildUnsummarizedTailSection(chat.ID, before, last, config.TailWordBudget, config.TailByteBudget))
-	if recall := p.buildHindsightRecallSection(chat.ID, query, "", before); recall != "" {
-		sections = append(sections, recall)
-	}
-	if len(sections) == 0 {
-		return ""
-	}
-	bridge := "While you were away, other work happened in this chat that your session did not see. Catch up from this context:\n\n" + strings.Join(sections, "\n\n")
-	return capRecentContext(bridge, config.ContextByteBudget)
 }
 
 func lastString(values []string) string {

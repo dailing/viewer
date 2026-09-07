@@ -35,6 +35,7 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
 	name := strings.TrimSpace(requestString(value, "name"))
+	fromTurnID := strings.TrimSpace(requestString(value, "from_turn_id"))
 	if err == nil && chatID == "" {
 		err = errBadRequest
 	}
@@ -50,11 +51,44 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
+	// Fork point (framework v0.64): the branch starts after the referenced
+	// turn. The turn's line must be active — archived (merged) lines are
+	// read-only and can no longer be forked from.
+	parentBranchID := ""
+	if fromTurnID != "" {
+		fork, forkErr := p.store.turn(fromTurnID)
+		if forkErr != nil || fork == nil || fork.ChatID != chatID {
+			if forkErr == nil {
+				forkErr = errors.New("fork turn was not found in the chat")
+			}
+			p.reply(frame, nil, forkErr)
+			return
+		}
+		parentBranchID = fork.BranchID
+		if parentBranchID != "" {
+			parent, parentErr := p.store.branch(parentBranchID)
+			if parentErr != nil {
+				p.reply(frame, nil, parentErr)
+				return
+			}
+			if parent == nil || parent.archived() {
+				p.reply(frame, nil, errBranchArchived)
+				return
+			}
+		}
+	}
 	if name == "" {
-		name = "分支"
+		// Default 分支NN: count over all branches (including archived) so a
+		// number, once shown, never moves to another branch.
+		existing, countErr := p.store.chatBranches(chatID)
+		if countErr != nil {
+			p.reply(frame, nil, countErr)
+			return
+		}
+		name = fmt.Sprintf("分支%02d", len(existing)+1)
 	}
 	now := nowMillis()
-	branch := &Branch{ID: newID(), ChatID: chatID, Name: name, CreatedAt: now, UpdatedAt: now}
+	branch := &Branch{ID: newID(), ChatID: chatID, Name: name, ForkTurnID: fromTurnID, ParentBranchID: parentBranchID, CreatedAt: now, UpdatedAt: now}
 	if err = p.store.createBranch(branch); err != nil {
 		p.reply(frame, nil, err)
 		return
@@ -135,7 +169,7 @@ func (p *Plugin) handleBranchesDelete(frame busclient.Frame) {
 	p.reply(frame, map[string]any{"deleted": true, "id": id}, nil)
 }
 
-const mergeSummarySystemPrompt = "You integrate the outcomes of several parallel work branches that ran in one shared working directory, writing a merge briefing for the mainline session that will continue the work. Be factual: never invent constraints, decisions, file names or numbers that are not present in the input. Keep names of files, scripts, commands and important numbers verbatim. Write in the same language as the input (Chinese if the input is Chinese). Keep the whole summary under 1500 characters."
+const mergeSummarySystemPrompt = "You integrate the outcomes of several parallel work branches that ran in one shared working directory, writing a merge briefing for the work line (mainline or another branch) that will continue the work. Be factual: never invent constraints, decisions, file names or numbers that are not present in the input. Keep names of files, scripts, commands and important numbers verbatim. Write in the same language as the input (Chinese if the input is Chinese). Keep the whole summary under 1500 characters."
 
 const mergeSummaryUserTemplate = `Below are the work records of parallel branches (each branch worked independently in the SAME shared working directory; code changes already landed in the files).
 
@@ -236,9 +270,33 @@ func (p *Plugin) validateMergeBranches(chatID string, branchIDs []string) ([]*Br
 	return branches, nil
 }
 
+// validateMergeTarget loads the merge target line ("" = mainline, no row):
+// a branch target must belong to the chat, be active, and not be among the
+// merge sources (framework v0.64 — branch-to-branch merges).
+func (p *Plugin) validateMergeTarget(chatID, targetBranchID string, sources map[string]bool) (*Branch, error) {
+	if targetBranchID == "" {
+		return nil, nil
+	}
+	if sources[targetBranchID] {
+		return nil, errors.New("the merge target cannot be merged into itself")
+	}
+	target, err := p.store.branch(targetBranchID)
+	if err != nil {
+		return nil, err
+	}
+	if target == nil || target.ChatID != chatID {
+		return nil, errors.New("the merge target branch was not found in the chat")
+	}
+	if target.archived() {
+		return nil, fmt.Errorf("merge target %w", errBranchArchived)
+	}
+	return target, nil
+}
+
 func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
+	targetBranchID := strings.TrimSpace(requestString(value, "target_branch_id"))
 	var branchIDs []string
 	if err == nil {
 		err = decodeInto(value["branch_ids"], &branchIDs)
@@ -251,6 +309,15 @@ func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 		return
 	}
 	branches, err := p.validateMergeBranches(chatID, branchIDs)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	sourceSet := map[string]bool{}
+	for _, branch := range branches {
+		sourceSet[branch.ID] = true
+	}
+	target, err := p.validateMergeTarget(chatID, targetBranchID, sourceSet)
 	if err != nil {
 		p.reply(frame, nil, err)
 		return
@@ -289,7 +356,11 @@ func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 		cutoffs = append(cutoffs, map[string]any{"id": branch.ID, "name": branch.Name, "cutoff_turn_id": cutoff})
 	}
 	header := "已合并分支" + branchNamesLabel(branches) + "：\n\n"
-	p.reply(frame, map[string]any{"summary": header + strings.TrimSpace(result.Content), "branches": cutoffs}, nil)
+	targetPayload := map[string]any{"id": "", "name": "主线"}
+	if target != nil {
+		targetPayload = map[string]any{"id": target.ID, "name": target.Name}
+	}
+	p.reply(frame, map[string]any{"summary": header + strings.TrimSpace(result.Content), "branches": cutoffs, "target": targetPayload}, nil)
 }
 
 func branchNamesLabel(branches []*Branch) string {
@@ -301,13 +372,15 @@ func branchNamesLabel(branches []*Branch) string {
 }
 
 // handleBranchesMergeConfirm dispatches the (user-edited) summary into the
-// mainline as a normal dispatch, then archives the branches with the cutoff
-// turns recorded at draft time and the merge message id linking the summary
-// box to its source branches.
+// target line (mainline by default; a branch target receives it as a
+// continuation turn of that branch, framework v0.64), then archives the
+// source branches with the cutoff turns recorded at draft time, the merge
+// target, and the merge message id linking the summary box to its sources.
 func (p *Plugin) handleBranchesMergeConfirm(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
 	summary := strings.TrimSpace(requestString(value, "summary"))
+	targetBranchID := strings.TrimSpace(requestString(value, "target_branch_id"))
 	var entries []struct {
 		ID           string `json:"id"`
 		CutoffTurnID string `json:"cutoff_turn_id"`
@@ -336,9 +409,17 @@ func (p *Plugin) handleBranchesMergeConfirm(frame busclient.Frame) {
 	}
 	// Revalidate before dispatching: a branch merged (or still running)
 	// since the draft fails the whole confirm — nothing is dispatched or
-	// archived partially.
+	// archived partially. The target must also still be active.
 	branches, err := p.validateMergeBranches(chatID, branchIDs)
 	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	sourceSet := map[string]bool{}
+	for _, branch := range branches {
+		sourceSet[branch.ID] = true
+	}
+	if _, err = p.validateMergeTarget(chatID, targetBranchID, sourceSet); err != nil {
 		p.reply(frame, nil, err)
 		return
 	}
@@ -347,7 +428,14 @@ func (p *Plugin) handleBranchesMergeConfirm(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	_, user, err := p.dispatchMessage(chat, workspace, dispatchRequest{ChatID: chatID, Message: summary}, map[string]any{"chat_id": chatID, "message": summary})
+	// Target-line dispatch: mainline rides the normal flow; a branch target
+	// gets the summary as a continuation of its own session.
+	dispatch := dispatchRequest{ChatID: chatID, Message: summary, BranchID: targetBranchID}
+	raw := map[string]any{"chat_id": chatID, "message": summary}
+	if targetBranchID != "" {
+		raw["branch_id"] = targetBranchID
+	}
+	_, user, err := p.dispatchMessage(chat, workspace, dispatch, raw)
 	if err != nil {
 		p.reply(frame, nil, err)
 		return
@@ -356,6 +444,7 @@ func (p *Plugin) handleBranchesMergeConfirm(frame busclient.Frame) {
 	archived := make([]map[string]any, 0, len(branches))
 	for index, branch := range branches {
 		branch.ArchivedAt = &now
+		branch.MergedIntoBranchID = targetBranchID
 		branch.MergedThroughTurnID = entries[index].CutoffTurnID
 		if branch.MergedThroughTurnID == "" {
 			if turns, turnErr := p.store.branchTurns(branch.ID); turnErr == nil && len(turns) > 0 {

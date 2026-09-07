@@ -20,10 +20,13 @@ export interface Chat { id: string; name: string; type: string; pinned: boolean;
  *  of lane-continuation targets (continue_turn_id). branch_id ties the turn
  *  to a named branch (framework v0.63): the pane's branch tabs filter by it. */
 export interface TurnSession { session_id: string; dispatch_id?: string; role_id?: string; role_name?: string; started_at?: number; branch_id?: string }
-/** A named parallel branch of a chat (framework v0.63). Active branches
- *  (archived_at null) get bar tabs; archived ones back the 已合并分支 cards
- *  (merge_message_id → the mainline summary message). */
-export interface Branch { id: string; chat_id: string; name: string; role_id?: string; role_name?: string; session_id?: string; archived_at?: number | null; merged_through_turn_id?: string; merge_message_id?: string; created_at: number; updated_at: number }
+/** A named parallel branch of a chat (framework v0.63; fork/merge DAG fields
+ *  v0.64). Active branches (archived_at null) get bar tabs; archived ones
+ *  back the 已合并分支 cards (merge_message_id → the summary message).
+ *  fork_turn_id/parent_branch_id record the fork point ("" = pre-v0.64
+ *  rootless / mainline parent); merged_into_branch_id the merge target
+ *  ("" = mainline). */
+export interface Branch { id: string; chat_id: string; name: string; role_id?: string; role_name?: string; session_id?: string; fork_turn_id?: string; parent_branch_id?: string; merged_into_branch_id?: string; archived_at?: number | null; merged_through_turn_id?: string; merge_message_id?: string; created_at: number; updated_at: number }
 export interface RunningTurn { turn_id: string; role_id: string; role_name?: string }
 export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; branches?: Branch[]; messages?: ChatMessage[]; has_more?: boolean }
 export interface Workspace { id: string; name: string; common_prompt: string; roles: Role[]; routing_policies: RoutingPolicy[]; default_routing_policy_id: string }

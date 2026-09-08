@@ -35,11 +35,14 @@ type dispatchRequest struct {
 	// that turn's session. Contradicts force_new_session / parallel_dispatch
 	// (both are cleared when set).
 	ContinueTurnID string `json:"continue_turn_id"`
-	// BranchID targets a named branch (framework v0.63): a branch with
-	// turns continues its latest session (same semantics as a lane
-	// continuation, keyed per branch); an empty branch starts fresh on its
-	// own session (first of the selected roles — a branch is single-role).
-	// Contradicts force_new_session / parallel_dispatch (both cleared).
+	// BranchID targets a named branch (framework v0.63+). Since v0.66 a
+	// branch is a pure CONTEXT partition — a separated corner of the
+	// chat's working group — not a role/session binding: dispatching on
+	// it selects roles exactly like a mainline dispatch (explicit
+	// role_ids or LLM routing, any number of roles; force_new_session /
+	// parallel_dispatch apply). The only differences: each role's
+	// session is scoped to the branch (role × branch lane), and context
+	// builds draw from the branch's lineage.
 	BranchID string `json:"branch_id"`
 }
 
@@ -120,41 +123,26 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 // message, queues behind busy keys, starts the relay, and returns the reply
 // payload plus the user message row.
 func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispatchRequest, raw map[string]any) (map[string]any, *Message, error) {
-	// Branch dispatch (branch_id): a branch with turns continues its latest
-	// session under the branch key; an empty branch starts fresh (first of
-	// the selected roles — a branch is single-role). Lane continuation
-	// (continue_turn_id): skip LLM routing and dispatch to the role owning
-	// the referenced turn, resuming that turn's session.
+	// Branch dispatch (branch_id): validate the branch, then route exactly
+	// like a mainline dispatch (framework v0.66 — the branch only scopes
+	// context and the role × branch session lanes; it no longer fixes a
+	// single owner role). Lane continuation (continue_turn_id): skip LLM
+	// routing and dispatch to the role owning the referenced turn,
+	// resuming that turn's session.
 	resumeSession := ""
 	var selected []SuperRole
 	var rationale string
 	var branch *Branch
 	var err error
 	if request.BranchID != "" {
-		var branchRole SuperRole
-		var fresh bool
-		resumeSession, branchRole, branch, fresh, err = p.resolveBranch(*chat, workspace, request.BranchID)
+		branch, err = p.resolveBranch(*chat, request.BranchID)
 		if err != nil {
 			return nil, nil, err
 		}
-		if fresh {
-			selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
-			if err != nil {
-				return nil, nil, err
-			}
-			if len(selected) > 1 {
-				selected = selected[:1]
-			}
-			if len(selected) == 0 {
-				return nil, nil, errors.New("no role resolved for the new branch")
-			}
-			rationale = "Start branch " + branch.Name + "."
-		} else {
-			selected = []SuperRole{branchRole}
-			rationale = "Continue branch " + branch.Name + "."
+		selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
+		if err != nil {
+			return nil, nil, err
 		}
-		request.ForceNewSession = false
-		request.ParallelDispatch = false
 	} else if request.ContinueTurnID != "" {
 		var laneRole SuperRole
 		resumeSession, laneRole, err = p.resolveContinuation(*chat, workspace, request.ContinueTurnID)
@@ -173,14 +161,20 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	}
 	parallel := request.ParallelDispatch
 	// keyOf computes a role's busy/runtime key and the lane session its
-	// turn resumes. Branch turns get their own per-branch key (fresh branch
-	// turns resume nothing); a continuation whose lane IS the role's stored
-	// canonical session rides the canonical key and flow, keeping the
-	// stored session pointer authoritative; any other lane gets its own
-	// lane-scoped key.
+	// turn resumes. Branch turns get their own per-role × per-branch key
+	// and resume the role's own latest session on the branch ("" — no
+	// prior branch session, or force_new_session — starts fresh with the
+	// branch's lineage context); a continuation whose lane IS the role's
+	// stored canonical session rides the canonical key and flow, keeping
+	// the stored session pointer authoritative; any other lane gets its
+	// own lane-scoped key.
 	keyOf := func(role SuperRole) (string, string) {
 		if branch != nil {
-			return runtimeKey(chat.ID, role.ID) + "\x00branch\x00" + branch.ID, resumeSession
+			resume := ""
+			if !request.ForceNewSession {
+				resume = p.branchRoleSession(chat.ID, branch.ID, role.ID)
+			}
+			return runtimeKey(chat.ID, role.ID) + "\x00branch\x00" + branch.ID, resume
 		}
 		if resumeSession == "" {
 			return runtimeKey(chat.ID, role.ID), ""
@@ -330,43 +324,40 @@ func autoBranchName(message string, role SuperRole, roleCount int) string {
 }
 
 // resolveBranch validates a branch_id dispatch: the branch must belong to
-// the chat and be active (archived branches are read-only history). A branch
-// with turns resolves to its newest turn's role and session (fresh=false);
-// an empty branch resolves fresh — the caller picks the role via routing.
-func (p *Plugin) resolveBranch(chat Chat, workspace Workspace, branchID string) (string, SuperRole, *Branch, bool, error) {
+// the chat and be active (archived branches are read-only history). Role
+// selection is deliberately NOT the branch's business — since framework
+// v0.66 a branch is a pure context partition, and the caller routes
+// exactly like a mainline dispatch.
+func (p *Plugin) resolveBranch(chat Chat, branchID string) (*Branch, error) {
 	branch, err := p.store.branch(branchID)
 	if err != nil {
-		return "", SuperRole{}, nil, false, err
+		return nil, err
 	}
 	if branch == nil || branch.ChatID != chat.ID {
-		return "", SuperRole{}, nil, false, errors.New("branch was not found in the chat")
+		return nil, errors.New("branch was not found in the chat")
 	}
 	if branch.archived() {
-		return "", SuperRole{}, nil, false, errBranchArchived
+		return nil, errBranchArchived
 	}
-	turns, err := p.store.branchTurns(branchID)
-	if err != nil {
-		return "", SuperRole{}, nil, false, err
+	return branch, nil
+}
+
+// branchRoleSession returns the role's latest resumable session on the
+// branch ("" when the role never ran there — the relay then starts a
+// fresh session fed with the branch's lineage context): the newest turn's
+// stamped session, or the in-flight runtime's session while that turn
+// runs.
+func (p *Plugin) branchRoleSession(chatID, branchID, roleID string) string {
+	turn, err := p.store.latestBranchRoleTurn(chatID, branchID, roleID)
+	if err != nil || turn == nil {
+		return ""
 	}
-	if len(turns) == 0 {
-		return "", SuperRole{}, branch, true, nil
+	if turn.SessionID != "" {
+		return turn.SessionID
 	}
-	latest := turns[len(turns)-1]
-	sessionID := latest.SessionID
-	if sessionID == "" {
-		p.mu.Lock()
-		sessionID = p.inflightTurnSessionLocked(latest.ID)
-		p.mu.Unlock()
-	}
-	if sessionID == "" {
-		return "", SuperRole{}, nil, false, errors.New("the branch's latest turn has no resumable session")
-	}
-	for _, role := range workspace.Roles {
-		if role.ID == latest.RoleID {
-			return sessionID, role, branch, false, nil
-		}
-	}
-	return "", SuperRole{}, nil, false, errors.New("the branch's role no longer exists")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inflightTurnSessionLocked(turn.ID)
 }
 
 func (p *Plugin) selectRoles(request dispatchRequest, raw map[string]any, chat Chat, workspace Workspace) ([]SuperRole, string, error) {

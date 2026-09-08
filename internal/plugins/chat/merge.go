@@ -18,8 +18,8 @@ import (
 )
 
 var (
-	errBranchArchived = errors.New("the branch is already merged and archived")
-	errBranchRunning  = errors.New("the branch still has a running turn — wait for it to finish before merging")
+	errBranchArchived = errors.New("the branch is archived (merged or shelved)")
+	errBranchRunning  = errors.New("the branch still has a running turn — wait for it to finish")
 	errBranchEmpty    = errors.New("the branch has no turns yet")
 )
 
@@ -371,6 +371,70 @@ func branchNamesLabel(branches []*Branch) string {
 	return strings.Join(names, "")
 }
 
+// handleBranchesArchive archives branches WITHOUT merging (framework
+// v0.66 — the "by the way" pattern): a side conversation whose content
+// should stay out of every line's context. Archive-only rows carry no
+// MergeMessageID, so lineage never unions their turns (see
+// branchesMergedInto). Archived branches leave the bar and reject
+// dispatch; unarchiving is a reserved function — deliberately not
+// implemented yet. Running branches refuse archiving (same rule as
+// merging); empty branches may be archived (or deleted outright).
+func (p *Plugin) handleBranchesArchive(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	chatID, _ := value["chat_id"].(string)
+	var branchIDs []string
+	if err == nil {
+		err = decodeInto(value["branch_ids"], &branchIDs)
+	}
+	if err == nil && (chatID == "" || len(branchIDs) == 0) {
+		err = errBadRequest
+	}
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	now := nowMillis()
+	archived := make([]map[string]any, 0, len(branchIDs))
+	seen := map[string]bool{}
+	for _, id := range branchIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		branch, loadErr := p.store.branch(id)
+		if loadErr != nil {
+			p.reply(frame, nil, loadErr)
+			return
+		}
+		if branch == nil || branch.ChatID != chatID {
+			p.reply(frame, nil, fmt.Errorf("branch was not found in the chat: %s", id))
+			return
+		}
+		if branch.archived() {
+			p.reply(frame, nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchArchived))
+			return
+		}
+		running, runErr := p.store.branchHasRunningTurn(id)
+		if runErr != nil {
+			p.reply(frame, nil, runErr)
+			return
+		}
+		if running {
+			p.reply(frame, nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchRunning))
+			return
+		}
+		branch.ArchivedAt = &now
+		branch.UpdatedAt = now
+		if saveErr := p.store.saveBranch(branch); saveErr != nil {
+			p.reply(frame, nil, saveErr)
+			return
+		}
+		p.publishBranch(branch, "archived")
+		archived = append(archived, branch.payload())
+	}
+	p.reply(frame, map[string]any{"archived": true, "branches": archived}, nil)
+}
+
 // handleBranchesMergeConfirm dispatches the (user-edited) summary into the
 // target line (mainline by default; a branch target receives it as a
 // continuation turn of that branch, framework v0.64), then archives the
@@ -428,12 +492,25 @@ func (p *Plugin) handleBranchesMergeConfirm(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	// Target-line dispatch: mainline rides the normal flow; a branch target
-	// gets the summary as a continuation of its own session.
+	// Target-line dispatch: mainline rides the normal flow. A branch
+	// target pins the summary to the branch's latest role (framework
+	// v0.66: branches are multi-role now, so without the pin the summary
+	// would go through LLM routing to an arbitrary member); the role
+	// resumes its own session lane on that branch. No turns yet, or the
+	// role left the chat → fall through to normal routing.
 	dispatch := dispatchRequest{ChatID: chatID, Message: summary, BranchID: targetBranchID}
 	raw := map[string]any{"chat_id": chatID, "message": summary}
 	if targetBranchID != "" {
 		raw["branch_id"] = targetBranchID
+		if latest, latestErr := p.store.latestLineTurn(chatID, targetBranchID); latestErr == nil && latest != nil {
+			for _, id := range decodeStrings(chat.MemberRoleIDsJSON) {
+				if id == latest.RoleID {
+					dispatch.RoleIDs = []string{id}
+					raw["role_ids"] = []string{id}
+					break
+				}
+			}
+		}
 	}
 	_, user, err := p.dispatchMessage(chat, workspace, dispatch, raw)
 	if err != nil {

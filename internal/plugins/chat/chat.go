@@ -30,7 +30,7 @@ var Manifest = busclient.Manifest{
 		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
 		"chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{},
 		"chat:_:branches:create": map[string]any{}, "chat:_:branches:patch": map[string]any{}, "chat:_:branches:delete": map[string]any{},
-		"chat:_:branches:merge": map[string]any{}, "chat:_:branches:merge-confirm": map[string]any{},
+		"chat:_:branches:merge": map[string]any{}, "chat:_:branches:merge-confirm": map[string]any{}, "chat:_:branches:archive": map[string]any{},
 		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
 		"chat:_:voice:invoke": map[string]any{},
 	},
@@ -122,7 +122,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
 		"chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate,
 		"chat:_:branches:create": p.handleBranchesCreate, "chat:_:branches:patch": p.handleBranchesPatch, "chat:_:branches:delete": p.handleBranchesDelete,
-		"chat:_:branches:merge": p.handleBranchesMerge, "chat:_:branches:merge-confirm": p.handleBranchesMergeConfirm,
+		"chat:_:branches:merge": p.handleBranchesMerge, "chat:_:branches:merge-confirm": p.handleBranchesMergeConfirm, "chat:_:branches:archive": p.handleBranchesArchive,
 		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
 		"chat:_:voice:invoke": p.handleVoiceInvoke,
 	}

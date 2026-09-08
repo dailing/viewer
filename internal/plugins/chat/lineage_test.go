@@ -68,13 +68,28 @@ func TestLineageTurnsForkAndMerge(t *testing.T) {
 	assert("branch C", ids(p.lineageTurns(chatID, "C", 100)), []string{"m1", "m2", "b1", "c1"})
 
 	// Merge B into the mainline: B's turns join the mainline record by time.
+	// (Real merge rows always carry MergeMessageID — set by merge-confirm.)
 	now := int64(60)
 	branchB.ArchivedAt = &now
 	branchB.MergedIntoBranchID = ""
+	branchB.MergeMessageID = "msg-b"
 	if err := p.store.saveBranch(branchB); err != nil {
 		t.Fatal(err)
 	}
 	assert("mainline post-merge", ids(p.lineageTurns(chatID, "", 100)), []string{"m1", "m2", "b1", "b2", "m3"})
+
+	// Archive WITHOUT merge (framework v0.66): no merge message id → the
+	// shelved branch's turns join NO line's lineage.
+	branchS := &Branch{ID: "S", ChatID: chatID, Name: "S", ForkTurnID: "m2", ParentBranchID: "", CreatedAt: 26, UpdatedAt: 26}
+	if err := p.store.createBranch(branchS); err != nil {
+		t.Fatal(err)
+	}
+	mkTurn("s1", "S", 31)
+	branchS.ArchivedAt = &now
+	if err := p.store.saveBranch(branchS); err != nil {
+		t.Fatal(err)
+	}
+	assert("mainline ignores archive-only", ids(p.lineageTurns(chatID, "", 100)), []string{"m1", "m2", "b1", "b2", "m3"})
 
 	// A branch merged into a branch joins THAT branch's lineage (and the
 	// mainline's transitively once the target itself merges).
@@ -90,6 +105,7 @@ func TestLineageTurnsForkAndMerge(t *testing.T) {
 	mkTurn("e1", "C2", 17)
 	branchC2.ArchivedAt = &now
 	branchC2.MergedIntoBranchID = "B2"
+	branchC2.MergeMessageID = "msg-c2"
 	if err := p.store.saveBranch(branchC2); err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +113,7 @@ func TestLineageTurnsForkAndMerge(t *testing.T) {
 	assert("mainline does not see B2 yet", ids(p.lineageTurns(chatID, "", 100)), []string{"m1", "m2", "b1", "b2", "m3"})
 	branchB2.ArchivedAt = &now
 	branchB2.MergedIntoBranchID = ""
+	branchB2.MergeMessageID = "msg-b2"
 	if err := p.store.saveBranch(branchB2); err != nil {
 		t.Fatal(err)
 	}

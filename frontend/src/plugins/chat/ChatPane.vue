@@ -174,10 +174,11 @@ const mergeCards = computed<Map<string, Branch[]>>(() => {
   return map;
 });
 
-/** Branch bar tabs are multi-select (framework v0.64): the ordered active
- *  set filters the timeline (union, time-interleaved) and IS the merge
- *  selection — the merge target is 主线 when "main"/"all" is active,
- *  otherwise the first-clicked branch. "all" expands to every active line. */
+/** Branch bar tabs (framework v0.65): plain click SINGLE-selects a line
+ *  (view it; when it's exactly one branch, the next send continues it);
+ *  Ctrl/⌘+click toggles multi-select — the ordered multi-selected set IS
+ *  the merge selection: target is 主线 when "main" is among them, otherwise
+ *  the first-clicked branch. "all" is view-everything, never a merge pick. */
 const activeTabs = ref<string[]>(["main"]);
 
 function allLineIds(): string[] {
@@ -194,7 +195,11 @@ function tabActive(id: string): boolean {
   return activeTabs.value.includes("all") || activeTabs.value.includes(id);
 }
 
-function toggleTab(id: string): void {
+function clickTab(id: string, event: MouseEvent): void {
+  if (!event.ctrlKey && !event.metaKey) {
+    activeTabs.value = [id];
+    return;
+  }
   const current = effectiveTabs();
   const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
   activeTabs.value = next.length > 0 ? next : ["main"];
@@ -206,8 +211,11 @@ const viewingBranches = computed<Branch[]>(() => {
   return activeBranches.value.filter((branch) => selected.has(branch.id));
 });
 
-/** The branch the next send continues: exactly one active branch tab and no
- *  主线 in the set → that branch; anything else → mainline dispatch. */
+/** The branch the next send goes to: exactly one active branch tab and no
+ *  主线 in the set → that branch; anything else → mainline dispatch. Since
+ *  v0.66 a branch is a pure context partition: sending on it behaves
+ *  exactly like a mainline send (role pick or LLM routing, new-session /
+ *  send-now toggles apply) — only the context and session lanes differ. */
 const sendBranch = computed<Branch | null>(() => {
   if (tabActive("main")) return null;
   return viewingBranches.value.length === 1 ? viewingBranches.value[0] : null;
@@ -226,11 +234,13 @@ const runningBranchIds = computed<Set<string>>(() => {
 // --- Branch bar interactions (framework v0.63) ---
 
 /** Where the next send goes — the composer annotation, so a message never
- *  lands in the wrong line by accident. */
+ *  lands in the wrong line by accident. A branch send routes exactly like
+ *  a mainline send (framework v0.66): picked roles or LLM auto-routing. */
 const sendTargetLabel = computed<string>(() => {
   const branch = sendBranch.value;
-  if (branch) return `分支「${branch.name}」`;
-  return "主线";
+  if (!branch) return "主线";
+  const names = selected.value.map((id) => roles.value.find((role) => role.id === id)?.name ?? "").filter((name) => name !== "");
+  return `分支「${branch.name}」 → ${names.length > 0 ? names.join(", ") : "自动路由"}`;
 });
 
 // Fork (framework v0.64): every role turn box carries a fork button; the
@@ -306,7 +316,9 @@ const mergeSources = computed<Branch[]>(() => {
   return viewingBranches.value.filter((branch) => branch.id !== target.id && !runningBranchIds.value.has(branch.id));
 });
 
-const canMerge = computed<boolean>(() => mergeTarget.value !== null && mergeSources.value.length > 0);
+// Merge needs an explicit Ctrl/⌘+click multi-selection (framework v0.65):
+// viewing 全部 alone is view-everything, not a merge pick.
+const canMerge = computed<boolean>(() => !activeTabs.value.includes("all") && mergeTarget.value !== null && mergeSources.value.length > 0);
 
 async function draftMerge(): Promise<void> {
   const target = mergeTarget.value;
@@ -339,11 +351,35 @@ async function confirmMerge(): Promise<void> {
   }
 }
 
-/** View one archived branch's original conversation (read-only tab). */
+/** View one archived branch's original conversation (read-only tab,
+ *  single-selected like any other line). */
 const showArchived = ref(false);
 function viewArchivedBranch(id: string): void {
   showArchived.value = true;
-  if (!tabActive(id)) activeTabs.value = [...effectiveTabs(), id];
+  activeTabs.value = [id];
+}
+
+// Archive WITHOUT merging (framework v0.66 — the "by the way" pattern):
+// the selected branches leave the bar and their content joins no line's
+// context. Still listed read-only under 已归档; unarchiving is a reserved,
+// unimplemented function.
+const archiveBusy = ref(false);
+const canArchive = computed<boolean>(() => !activeTabs.value.includes("all") && viewingBranches.value.length > 0 && !viewingBranches.value.some((branch) => runningBranchIds.value.has(branch.id)));
+
+async function archiveSelected(): Promise<void> {
+  const targets = viewingBranches.value;
+  if (targets.length === 0 || archiveBusy.value) return;
+  if (!window.confirm(`归档 ${targets.map((branch) => `「${branch.name}」`).join("")}？\n不合并、直接隐藏出分支条（已归档中可只读查看）；其内容不进入任何线的上下文。`)) return;
+  archiveBusy.value = true;
+  branchOpError.value = "";
+  try {
+    await ctx.bus.request("chat:_:branches:archive", { chat_id: ctx.instanceId, branch_ids: targets.map((branch) => branch.id) });
+    activeTabs.value = ["main"];
+  } catch (cause) {
+    branchOpError.value = errorText(cause);
+  } finally {
+    archiveBusy.value = false;
+  }
 }
 
 /** Fork entry on role turn boxes (framework v0.64): hidden on archived
@@ -1254,16 +1290,14 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
   try {
     const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message };
     const branch = sendBranch.value;
-    if (branch) {
-      // Branch tab active: continue the branch's line (its own session,
-      // role inferred from the branch's turns). Role picks / new-session /
-      // send-now toggles don't apply to a branch continuation.
-      payload.branch_id = branch.id;
-    } else {
-      if (roleIds.length > 0) payload.role_ids = roleIds;
-      if (forceNewSession) payload.force_new_session = true;
-      if (parallel) payload.parallel_dispatch = true;
-    }
+    // A branch send is a mainline send plus branch_id (framework v0.66):
+    // role picks / LLM routing, new-session and send-now toggles all
+    // apply; the backend only scopes context and session lanes per
+    // role × branch.
+    if (branch) payload.branch_id = branch.id;
+    if (roleIds.length > 0) payload.role_ids = roleIds;
+    if (forceNewSession) payload.force_new_session = true;
+    if (parallel) payload.parallel_dispatch = true;
     // Dispatch replies only after LLM role routing, which may take up to
     // llm.timeout_seconds (default 60s) under local-server queueing; the
     // bus's 30s default would report 发送失败 while the backend proceeds.
@@ -1650,9 +1684,18 @@ onMounted(() => {
       <button
         type="button"
         class="chat-lane-tab"
+        :class="{ active: activeTabs.includes('all') }"
+        title="全部：查看所有线（按时间混合显示）；仅查看，不参与合并选择"
+        @click="activeTabs = ['all']"
+      >
+        全部
+      </button>
+      <button
+        type="button"
+        class="chat-lane-tab"
         :class="{ active: tabActive('main') }"
-        title="主线：不在任何分支上的对话；多选参与合并时合并进主线"
-        @click="toggleTab('main')"
+        title="主线：单击查看/发送到主线；Ctrl+点击加入多选（多选含主线时合并进主线）"
+        @click="clickTab('main', $event)"
       >
         主线
       </button>
@@ -1671,8 +1714,8 @@ onMounted(() => {
           type="button"
           class="chat-lane-tab"
           :class="{ active: tabActive(branch.id) }"
-          :title="`点击加入/移出查看集合（多选，时间交错显示）；恰单独激活时下一条消息续接它；多选后可将其它分支合并进它。双击重命名`"
-          @click="toggleTab(branch.id)"
+          :title="`单击查看；恰单独激活时下一条消息发送到该分支（角色自选或自动路由）；Ctrl+点击多选（成为合并选择，目标为先点选者）；双击重命名`"
+          @click="clickTab(branch.id, $event)"
           @dblclick="beginRename(branch)"
         >
           <span v-if="runningBranchIds.has(branch.id)" class="spinner-border spinner-border-sm" aria-hidden="true" />
@@ -1680,20 +1723,11 @@ onMounted(() => {
         </button>
       </template>
       <button
-        type="button"
-        class="chat-lane-tab"
-        :class="{ active: activeTabs.includes('all') }"
-        title="全部：激活所有线（按时间混合显示；合并目标为主线）"
-        @click="activeTabs = ['all']"
-      >
-        全部
-      </button>
-      <button
         v-if="archivedBranches.length > 0"
         type="button"
         class="chat-lane-tab"
         :class="{ active: showArchived }"
-        title="已合并归档的分支；点击展开查看"
+        title="已归档的分支（合并或手动归档）；点击展开查看"
         @click="showArchived = !showArchived"
       >
         已归档 {{ archivedBranches.length }}
@@ -1705,8 +1739,8 @@ onMounted(() => {
           type="button"
           class="chat-lane-tab chat-lane-tab-archived"
           :class="{ active: tabActive(branch.id) }"
-          :title="`已归档分支「${branch.name}」— 查看原始对话（只读，不可再分叉）`"
-          @click="toggleTab(branch.id)"
+          :title="`已归档分支「${branch.name}」— 单击查看原始对话（只读，不可再分叉）`"
+          @click="clickTab(branch.id, $event)"
         >
           {{ branch.name }}
         </button>
@@ -1733,6 +1767,18 @@ onMounted(() => {
         <span v-if="mergeBusy" class="spinner-border spinner-border-sm" aria-hidden="true" />
         <i v-else class="bi bi-git" aria-hidden="true" />
         合并到{{ mergeTarget!.id === '' ? '主线' : `「${mergeTarget!.name}」` }} ({{ mergeSources.length }})
+      </button>
+      <button
+        v-if="canArchive"
+        type="button"
+        class="chat-lane-tab chat-lane-archive-go"
+        :disabled="archiveBusy"
+        :title="`归档 ${viewingBranches.map((branch) => `「${branch.name}」`).join('')}：不合并、直接隐藏出分支条（已归档里可只读查看）；其内容不进入任何线的上下文`"
+        @click="archiveSelected"
+      >
+        <span v-if="archiveBusy" class="spinner-border spinner-border-sm" aria-hidden="true" />
+        <i v-else class="bi bi-archive" aria-hidden="true" />
+        归档 ({{ viewingBranches.length }})
       </button>
       <span v-if="composerVisible" class="chat-send-target">发送到：{{ sendTargetLabel }}</span>
     </div>
@@ -1829,10 +1875,11 @@ onMounted(() => {
   width: 10px;
 }
 
-/* Branch bar (framework v0.63): one compact row between thread and
-   composer — 主线 / named branch tabs / 全部 / 已归档 / ＋ / 合并. The
-   active branch tab both filters the timeline and locks the next send to
-   continue that branch. */
+/* Branch bar (framework v0.63/v0.66): one compact row between thread and
+   composer — 全部 / 主线 / named branch tabs / 已归档 / ＋ / 合并 / 归档.
+   Plain click single-selects a line (the singly-active branch tab both
+   filters the timeline and targets the next send at it); Ctrl/⌘+click
+   multi-selects for merge. */
 .chat-lane-bar {
   align-items: center;
   display: flex;

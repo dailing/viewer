@@ -162,12 +162,18 @@ type TurnSummary struct {
 // Branch is a named parallel work line of a chat (framework v0.63): an
 // independent, persistent record that OWNS its turns (Turn.BranchID), so the
 // pane's branch tabs no longer derive their identity from provider sessions
-// — a session rebuild mid-branch never spawns a new tab. The branch's latest
-// SessionID is denormalized here for display; continuations resolve it from
-// the branch's newest turn. Merging dispatches a summary into the mainline
-// and archives the branch: MergedThroughTurnID records the cutoff turn (no
-// duplicate import on re-merge) and MergeMessageID links the mainline user
-// message carrying the summary, so the pane can attach the "已合并分支" card.
+// — a session rebuild mid-branch never spawns a new tab. Since v0.66 the
+// branch is a pure CONTEXT partition: it binds no role — RoleID/RoleName
+// merely record the first role that ran here (display) and every role keeps
+// its own session lane on the branch (role × branch). Merging dispatches a
+// summary into a target line and archives the branch: MergedThroughTurnID
+// records the cutoff turn (no duplicate import on re-merge) and
+// MergeMessageID links the target line's user message carrying the summary,
+// so the pane can attach the "已合并分支" card. Archiving WITHOUT merging
+// (v0.66, the "by the way" pattern) just sets ArchivedAt: the branch leaves
+// the bar, rejects dispatch, and — carrying no MergeMessageID — its turns
+// join no line's lineage. Unarchiving is a reserved, unimplemented
+// function.
 //
 // Fork points (framework v0.64): ForkTurnID records the turn the branch
 // forked from (empty on pre-v0.64 rootless branches) and ParentBranchID the
@@ -662,13 +668,32 @@ func (s *store) lineTurns(chatID, branchID string, before int64) ([]Turn, error)
 	return values, err
 }
 
-// branchesMergedInto returns the archived branches whose merge target is the
-// given line ("" = mainline) — pre-v0.64 rows' zero MergedIntoBranchID lands
-// them on the mainline naturally.
+// branchesMergedInto returns the branches MERGED into the given line (""
+// = mainline). The merge_message_id predicate separates real merges from
+// archive-only branches (framework v0.66): an archived-without-merge row
+// also has merged_into_branch_id = "" but no merge message, and its turns
+// must join NO line's lineage — archiving shelves the content, it never
+// shares it. (Pre-v0.64 archived rows all came from merges and carry a
+// merge message id, so they land on the mainline naturally.)
 func (s *store) branchesMergedInto(chatID, targetBranchID string) ([]Branch, error) {
 	var values []Branch
-	err := s.db.Where("chat_id = ? AND merged_into_branch_id = ? AND archived_at IS NOT NULL", chatID, targetBranchID).Order("created_at, id").Find(&values).Error
+	err := s.db.Where("chat_id = ? AND merged_into_branch_id = ? AND archived_at IS NOT NULL AND merge_message_id != ''", chatID, targetBranchID).Order("created_at, id").Find(&values).Error
 	return values, err
+}
+
+// latestBranchRoleTurn returns the role's newest turn on the branch — the
+// resume source for role × branch lane continuations (framework v0.66:
+// branches are multi-role, each role continues its own branch lane).
+func (s *store) latestBranchRoleTurn(chatID, branchID, roleID string) (*Turn, error) {
+	var value Turn
+	result := s.db.Where("chat_id = ? AND branch_id = ? AND role_id = ?", chatID, branchID, roleID).Order("started_at desc, id desc").Limit(1).Find(&value)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &value, nil
 }
 
 // latestLineTurn returns the line's newest turn — the prev-turn stamp for the

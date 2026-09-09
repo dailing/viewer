@@ -20,7 +20,9 @@ func TestParseBlock(t *testing.T) {
 		{"turn/diff/updated", map[string]any{"diff": "patch"}, agentdriver.KindFileChange, "patch"},
 		{"item/toolCall", map[string]any{"name": "read"}, agentdriver.KindToolCall, "read"},
 		{"item/toolResult", map[string]any{"result": "done"}, agentdriver.KindToolResult, "done"},
-		{"thread/tokenUsage/updated", map[string]any{"tokenUsage": map[string]any{"total": map[string]any{"totalTokens": 13942.0}, "modelContextWindow": 258400.0}}, agentdriver.KindTokenUsage, ""},
+		{"error", map[string]any{"error": map[string]any{"message": "usage limit", "codexErrorInfo": "usageLimitExceeded"}, "willRetry": false}, agentdriver.KindError, "usage limit"},
+		{"error", map[string]any{"error": map[string]any{"message": "Reconnecting... 2/5"}, "willRetry": true}, agentdriver.KindOther, ""},
+		{"thread/tokenUsage/updated", map[string]any{"tokenUsage": map[string]any{"last": map[string]any{"totalTokens": 13942.0}, "total": map[string]any{"totalTokens": 986390.0}, "modelContextWindow": 258400.0}}, agentdriver.KindTokenUsage, ""},
 	}
 	for _, test := range tests {
 		block := ParseBlock(test.method, test.data)
@@ -30,9 +32,33 @@ func TestParseBlock(t *testing.T) {
 		if test.kind == agentdriver.KindOther && !strings.Contains(block.Payload, test.method) {
 			t.Errorf("unknown method missing from payload: %s", block.Payload)
 		}
+		if test.kind == agentdriver.KindError && !strings.Contains(block.Payload, `"codexErrorInfo":"usageLimitExceeded"`) {
+			t.Errorf("error payload missing codexErrorInfo: %s", block.Payload)
+		}
 		if test.kind == agentdriver.KindTokenUsage && (!strings.Contains(block.Payload, `"total_tokens":13942`) || !strings.Contains(block.Payload, `"model_context_window":258400`)) {
 			t.Errorf("usage payload not normalized: %s", block.Payload)
 		}
+	}
+}
+
+func TestTokenUsagePrefersLastOverCumulativeTotal(t *testing.T) {
+	// last.totalTokens is the current context fill; total is cumulative and
+	// must not leak into the ctx percentage even when hugely larger.
+	block := ParseBlock("thread/tokenUsage/updated", map[string]any{"tokenUsage": map[string]any{
+		"last":               map[string]any{"totalTokens": 120000.0},
+		"total":              map[string]any{"totalTokens": 42334994.0},
+		"modelContextWindow": 258400.0,
+	}})
+	if !strings.Contains(block.Payload, `"total_tokens":120000`) || strings.Contains(block.Payload, "42334994") {
+		t.Fatalf("last not preferred: %s", block.Payload)
+	}
+	// Servers without last fall back to total.
+	fallback := ParseBlock("thread/tokenUsage/updated", map[string]any{"tokenUsage": map[string]any{
+		"total":              map[string]any{"totalTokens": 5000.0},
+		"modelContextWindow": 258400.0,
+	}})
+	if !strings.Contains(fallback.Payload, `"total_tokens":5000`) {
+		t.Fatalf("total fallback missing: %s", fallback.Payload)
 	}
 }
 

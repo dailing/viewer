@@ -16,6 +16,17 @@ func ParseBlock(method string, data map[string]any) agentdriver.Block {
 	item, _ := data["item"].(map[string]any)
 	itemType := strings.ToLower(stringField(item, "type"))
 	switch {
+	case method == "error" && !boolField(data, "willRetry"):
+		// Terminal codex errors (usage limit, overload, stream failure)
+		// precede a failed turn/completed and trigger chat failover; surface
+		// them as visible error rows so a silent provider swap is explicable.
+		// Transient reconnects (willRetry true) stay hidden as other blocks.
+		kind = agentdriver.KindError
+		if errObj, ok := data["error"].(map[string]any); ok {
+			text = stringField(errObj, "message")
+			mergeMissing(payload, selectedPayload(errObj, "codexErrorInfo"))
+		}
+		payload["willRetry"] = false
 	case method == "item/agentMessage/delta":
 		kind, text, payload = agentdriver.KindAgentText, stringField(data, "delta", "text"), map[string]any{}
 	case strings.Contains(lower, "reasoning"):
@@ -58,8 +69,9 @@ func ParseBlock(method string, data map[string]any) agentdriver.Block {
 		}
 		text = stringField(data, "diff", "patch", "delta")
 	case strings.Contains(lower, "tokenusage"):
-		// Codex reports cumulative thread fill under tokenUsage.total plus the
-		// window size; normalize both into the shared token_usage payload.
+		// Codex reports per-request fill under tokenUsage.last and cumulative
+		// thread usage under tokenUsage.total; the ctx indicator wants the
+		// current fill, so prefer last and normalize into the shared payload.
 		kind, payload = agentdriver.KindTokenUsage, tokenUsagePayload(data["tokenUsage"])
 	case strings.Contains(lower, "toolresult"):
 		kind, text, payload = agentdriver.KindToolResult, readableText(data), selectedPayload(data, "name", "arguments", "status", "output", "result")
@@ -117,6 +129,11 @@ func readableText(data map[string]any) string {
 	return ""
 }
 
+func boolField(data map[string]any, key string) bool {
+	value, _ := data[key].(bool)
+	return value
+}
+
 func stringField(data map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if text, ok := data[key].(string); ok {
@@ -161,12 +178,19 @@ func mergeMissing(target, source map[string]any) {
 
 // tokenUsagePayload normalizes a Codex tokenUsage object into the shared
 // {total_tokens, model_context_window} shape consumed by the ctx indicator.
+// total_tokens is the current context fill: tokenUsage.last covers the most
+// recent request, while tokenUsage.total is cumulative thread usage that
+// grows monotonically across compaction and must not drive the percentage.
 func tokenUsagePayload(value any) map[string]any {
 	usage, _ := value.(map[string]any)
 	payload := map[string]any{}
-	if total, ok := usage["total"].(map[string]any); ok {
-		if tokens, ok := total["totalTokens"].(float64); ok {
+	last, _ := usage["last"].(map[string]any)
+	total, _ := usage["total"].(map[string]any)
+	// Older servers may omit last; fall back to total rather than nothing.
+	for _, bucket := range []map[string]any{last, total} {
+		if tokens, ok := bucket["totalTokens"].(float64); ok {
 			payload["total_tokens"] = int64(tokens)
+			break
 		}
 	}
 	if window, ok := usage["modelContextWindow"].(float64); ok {

@@ -181,6 +181,44 @@ const mergeCards = computed<Map<string, Branch[]>>(() => {
  *  the first-clicked branch. "all" is view-everything, never a merge pick. */
 const activeTabs = ref<string[]>(["main"]);
 
+// Branch-tab persistence (browser-local, like dockStatus unread): the
+// selected lane set survives a pane remount / page refresh, keyed by chat
+// id — reopening a chat returns to the branches you were viewing instead
+// of always landing on 主线.
+const BRANCH_TABS_STORAGE_KEY = "viewer.chatBranchTabs.v1";
+
+function loadBranchTabs(chatId: string): string[] {
+  try {
+    const raw = localStorage.getItem(BRANCH_TABS_STORAGE_KEY);
+    if (raw === null) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
+    const tabs = (parsed as Record<string, unknown>)[chatId];
+    if (!Array.isArray(tabs)) return [];
+    return tabs.filter((tab): tab is string => typeof tab === "string" && tab !== "");
+  } catch {
+    return [];
+  }
+}
+
+function persistBranchTabs(): void {
+  try {
+    const raw = localStorage.getItem(BRANCH_TABS_STORAGE_KEY);
+    const parsed = raw === null ? {} : (JSON.parse(raw) as unknown);
+    const map = (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {}) as Record<string, string[]>;
+    // The default (主线 alone) is stored as absence to keep the map small.
+    if (activeTabs.value.length === 1 && activeTabs.value[0] === "main") delete map[ctx.instanceId];
+    else map[ctx.instanceId] = [...activeTabs.value];
+    localStorage.setItem(BRANCH_TABS_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // Quota/private-mode failures are non-fatal: tabs become session-local.
+  }
+}
+
+const restoredTabs = loadBranchTabs(ctx.instanceId);
+if (restoredTabs.length > 0) activeTabs.value = restoredTabs;
+watch(activeTabs, persistBranchTabs);
+
 function allLineIds(): string[] {
   return ["main", ...activeBranches.value.map((branch) => branch.id)];
 }
@@ -358,6 +396,18 @@ function viewArchivedBranch(id: string): void {
   showArchived.value = true;
   activeTabs.value = [id];
 }
+
+// Prune restored/selected tab ids the chat no longer has (e.g. stale storage
+// from before a branch merge/archive elsewhere) — a stale id would render no
+// tab and silently fall back to a mainline send. A selected archived branch
+// re-expands the 已归档 section so its tab stays visible.
+watch(branches, (list) => {
+  if (list.length === 0 || activeTabs.value.includes("all")) return;
+  const known = new Set(["main", ...list.map((branch) => branch.id)]);
+  const kept = activeTabs.value.filter((id) => known.has(id));
+  if (kept.length !== activeTabs.value.length) activeTabs.value = kept.length > 0 ? kept : ["main"];
+  if (kept.some((id) => list.some((branch) => branch.id === id && branch.archived_at))) showArchived.value = true;
+});
 
 // Archive WITHOUT merging (framework v0.66 — the "by the way" pattern):
 // the selected branches leave the bar and their content joins no line's
@@ -1754,6 +1804,7 @@ onMounted(() => {
           maxlength="40"
           @keydown.enter.prevent="submitFork"
           @keydown.esc.prevent="forkFromTurnId = ''"
+          @blur="submitFork"
         >
       </template>
       <button

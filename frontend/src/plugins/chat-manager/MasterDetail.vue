@@ -1,19 +1,46 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from "vue";
+
 defineProps<{
   items: Array<{ id: string; name: string }>;
   selectedId: string;
   createLabel: string;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   select: [id: string];
   create: [];
 }>();
+
+// Mobile drill-down (≤760px): the fixed 230px split leaves the detail form
+// unusable on phones, so list and detail become two full-width screens —
+// tapping an item (or ＋ 新建) opens the detail, ← 返回列表 goes back.
+// Desktop layout is unchanged.
+const narrowQuery = window.matchMedia("(max-width: 760px)");
+const narrow = ref(narrowQuery.matches);
+const detailOpen = ref(false);
+
+function onNarrowChange(event: MediaQueryListEvent): void {
+  narrow.value = event.matches;
+}
+
+onMounted(() => narrowQuery.addEventListener("change", onNarrowChange));
+onBeforeUnmount(() => narrowQuery.removeEventListener("change", onNarrowChange));
+
+function onSelect(id: string): void {
+  emit("select", id);
+  if (narrow.value) detailOpen.value = true;
+}
+
+function onCreate(): void {
+  emit("create");
+  if (narrow.value) detailOpen.value = true;
+}
 </script>
 
 <template>
   <section class="master-detail">
-    <aside class="master-column">
+    <aside v-if="!narrow || !detailOpen" class="master-column">
       <div class="master-list">
         <button
           v-for="item in items"
@@ -22,15 +49,18 @@ defineEmits<{
           class="master-item"
           :class="{ selected: item.id === selectedId }"
           :title="item.name"
-          @click="$emit('select', item.id)"
+          @click="onSelect(item.id)"
         >
           {{ item.name }}
         </button>
         <div v-if="items.length === 0" class="master-empty">暂无项目</div>
       </div>
-      <button type="button" class="master-create" @click="$emit('create')">{{ createLabel }}</button>
+      <button type="button" class="master-create" @click="onCreate">{{ createLabel }}</button>
     </aside>
-    <main class="detail-column">
+    <main v-if="!narrow || detailOpen" class="detail-column">
+      <button v-if="narrow" type="button" class="detail-back" @click="detailOpen = false">
+        <i class="bi bi-chevron-left"></i> 返回列表
+      </button>
       <slot name="detail"></slot>
     </main>
   </section>
@@ -107,5 +137,34 @@ defineEmits<{
   min-width: 0;
   overflow: auto;
   padding: 1rem;
+}
+
+.detail-back {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  display: flex;
+  font-size: var(--font-size-ui);
+  gap: 2px;
+  margin: -0.25rem 0 0.5rem -0.5rem;
+  padding: 6px 10px;
+}
+
+.detail-back:hover {
+  background: var(--color-surface-hover);
+}
+
+@media (max-width: 760px) {
+  .master-column {
+    border-right: 0;
+    flex: 1 1 auto;
+    width: auto;
+  }
+
+  .detail-column {
+    padding: 0.75rem;
+  }
 }
 </style>

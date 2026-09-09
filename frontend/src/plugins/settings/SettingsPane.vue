@@ -18,6 +18,7 @@ import { useMarkdownStyleStore } from "../../stores/markdownStyle";
 import type { MarkdownStyleOverrides } from "../../stores/markdownStyle";
 import { useThemeStore } from "../../stores/theme";
 import type { ThemeVars } from "../../stores/theme";
+import ThemePreview from "./ThemePreview.vue";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("SettingsPane requires PluginPaneHost");
@@ -513,6 +514,7 @@ function toggleScheduledRestart(): void {
           >
         </span>
       </label>
+      <ThemePreview />
     </div>
 
     <div class="settings-group">
@@ -792,5 +794,41 @@ function toggleScheduledRestart(): void {
 
 .settings-choice-btn:disabled {
   opacity: 0.55;
+}
+
+/* Phone layout: stack field label above its control, let inputs and button
+   rows take the full width instead of overflowing a narrow screen. */
+@media (max-width: 560px) {
+  .settings-pane {
+    padding: 12px 14px;
+  }
+
+  .settings-group {
+    max-width: none;
+  }
+
+  .settings-field {
+    gap: 4px;
+    grid-template-columns: 1fr;
+  }
+
+  .settings-field input[type="number"],
+  .settings-field input[type="text"],
+  .settings-field input[type="password"] {
+    width: 100%;
+  }
+
+  .settings-choice {
+    flex-wrap: wrap;
+  }
+
+  .theme-color-inputs {
+    width: 100%;
+  }
+
+  .theme-hex {
+    flex: 1;
+    width: auto;
+  }
 }
 </style>

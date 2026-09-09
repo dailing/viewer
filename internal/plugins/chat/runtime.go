@@ -943,7 +943,7 @@ func (p *Plugin) emitTurnFailure(chatID, turnID string, role SuperRole, reason s
 	if marshalErr != nil {
 		payloadJSON = []byte("{}")
 	}
-	block := &MessageBlock{ID: newID(), EventID: newID(), ChatID: chatID, TurnID: turnID, Kind: "error", Text: text, Payload: string(payloadJSON), OccurredAt: nowMillis()}
+	block := &MessageBlock{ID: newID(), EventID: newID(), ChatID: chatID, TurnID: turnID, Kind: agentdriver.KindError, Text: text, Payload: string(payloadJSON), OccurredAt: nowMillis()}
 	if err := p.store.addMessageBlock(block); err != nil {
 		slog.Warn("chat turn failure block persistence failed", "chat_id", chatID, "turn_id", turnID, "error", err)
 		return

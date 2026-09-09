@@ -12,7 +12,10 @@ const (
 	// KindTokenUsage carries context-window fill; hidden from the timeline,
 	// consumed by the turn header's ctx indicator.
 	KindTokenUsage = "token_usage"
-	KindOther      = "other"
+	// KindError surfaces a terminal agent failure as a visible timeline row
+	// (provider errors, turn-level failures). Transient retries stay other.
+	KindError = "error"
+	KindOther = "other"
 )
 
 type Target struct {

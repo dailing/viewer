@@ -10,11 +10,17 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+
 	"viewer/internal/agentdriver"
 	"viewer/sdk/go/busclient"
 )
 
 type dispatchRequest struct {
+	IdempotencyKey    string   `json:"idempotency_key"`
+	AutomationID      string   `json:"automation_id"`
+	Owner             string   `json:"owner"`
+	Fence             int64    `json:"fence"`
 	ChatID            string   `json:"chat_id"`
 	Message           string   `json:"message"`
 	Text              string   `json:"text"`
@@ -123,6 +129,13 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 // message, queues behind busy keys, starts the relay, and returns the reply
 // payload plus the user message row.
 func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispatchRequest, raw map[string]any) (map[string]any, *Message, error) {
+	p.automationMu.Lock()
+	defer p.automationMu.Unlock()
+	if request.AutomationID != "" {
+		if reply, found, err := p.existingDispatch(request); found || err != nil {
+			return reply, nil, err
+		}
+	}
 	// Branch dispatch (branch_id): validate the branch, then route exactly
 	// like a mainline dispatch (framework v0.66 — the branch only scopes
 	// context and the role × branch session lanes; it no longer fixes a
@@ -204,8 +217,12 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 		}
 	}
 	dispatchID := newID()
+	if err := p.prepareDispatch(request, dispatchID); err != nil {
+		return nil, nil, err
+	}
 	user := &Message{ID: newID(), ChatID: chat.ID, TurnID: dispatchID, Role: "user", Text: request.Message, SenderFrom: "user", CreatedAt: nowMillis()}
 	if err = p.store.addMessage(user); err != nil {
+		p.store.db.Model(&DispatchReceipt{}).Where("dispatch_id = ?", dispatchID).Update("failure", err.Error())
 		return nil, nil, err
 	}
 	p.retainVisibleMessage(user, "", "")
@@ -664,6 +681,12 @@ func (p *Plugin) handleQueuedCancel(frame busclient.Frame) {
 		return
 	}
 	removed, messageID := p.cancelQueued(chatID, dispatchID)
+	if removed > 0 {
+		if err := p.store.db.Model(&DispatchReceipt{}).Where("dispatch_id = ?", dispatchID).Update("cancelled", true).Error; err != nil {
+			p.reply(frame, nil, err)
+			return
+		}
+	}
 	if removed == 0 {
 		p.reply(frame, nil, errNotQueued)
 		return
@@ -682,6 +705,8 @@ func (p *Plugin) handleQueuedCancel(frame busclient.Frame) {
 }
 
 func (p *Plugin) handleQueuedUpdate(frame busclient.Frame) {
+	p.automationMu.Lock()
+	defer p.automationMu.Unlock()
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
 	dispatchID, _ := value["dispatch_id"].(string)
@@ -694,6 +719,21 @@ func (p *Plugin) handleQueuedUpdate(frame busclient.Frame) {
 		return
 	}
 	updated, messageID := p.updateQueued(chatID, dispatchID, message)
+	if updated > 0 {
+		var receipt DispatchReceipt
+		found := p.store.db.Where("dispatch_id = ?", dispatchID).Limit(1).Find(&receipt)
+		if found.Error != nil {
+			p.reply(frame, nil, found.Error)
+			return
+		}
+		if found.RowsAffected > 0 {
+			err := p.store.db.Model(&AutomationGate{}).Where("key = ?", gateKey(chatID, receipt.BranchID)).Updates(map[string]any{"paused": true, "revision": gorm.Expr("revision + 1"), "feedback": boundedTail(message, 8192)}).Error
+			if err != nil {
+				p.reply(frame, nil, err)
+				return
+			}
+		}
+	}
 	if updated == 0 {
 		p.reply(frame, nil, errNotQueued)
 		return
@@ -738,11 +778,12 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, BranchID: target.branch, PrevTurnID: p.prevTurnFor(chat.ID, target), StartedAt: nowMillis()}
 		if err := p.store.beginTurn(turn); err != nil {
 			slog.Error("chat turn persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
+			p.store.db.Model(&DispatchReceipt{}).Where("dispatch_id = ?", dispatchID).Update("failure", err.Error())
 			continue
 		}
 		// Global turn lifecycle feed for the Dock status dots: started here,
 		// completed below alongside the per-chat turn-completed frame.
-		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "started", "branch_id": target.branch})
+		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "started", "dispatch_id": dispatchID, "branch_id": target.branch})
 		candidates, err := p.resolveCandidates(chat, workspace, role)
 		reason, summaryProvider := "error", ""
 		endErr := ""

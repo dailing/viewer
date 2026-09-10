@@ -15,6 +15,7 @@ import (
 	"viewer/internal/plugins/inspector"
 	"viewer/internal/plugins/instancestore"
 	"viewer/internal/plugins/llm"
+	"viewer/internal/plugins/loop"
 	"viewer/internal/plugins/supervisor"
 	"viewer/internal/plugins/terminal"
 	"viewer/internal/plugins/voice"
@@ -33,6 +34,7 @@ var Registry = []Entry{
 	{ID: instancestore.Manifest.ID, Factory: newInstanceStore},
 	{ID: fileservice.Manifest.ID, Factory: newFileService},
 	{ID: chat.Manifest.ID, Factory: newChat},
+	{ID: loop.Manifest.ID, Factory: newLoop},
 	{ID: voicecontrol.Manifest.ID, Factory: newVoiceControl},
 	{ID: voice.Manifest.ID, Factory: newVoice},
 	{ID: terminal.Manifest.ID, Factory: newTerminal},
@@ -208,4 +210,12 @@ func newGateway(config RuntimeConfig) (Plugin, error) {
 		wait:  func(context.Context) error { return server.Wait() },
 		close: server.Shutdown,
 	}, nil
+}
+
+func newLoop(config RuntimeConfig) (Plugin, error) {
+	plugin, err := loop.New(config.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	return lifecycleAdapter{start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) }, wait: waitContext, close: plugin.Close}, nil
 }

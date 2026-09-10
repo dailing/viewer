@@ -81,6 +81,7 @@ run_suite inspector "$PY" "$SCRIPT_DIR/smoke_inspector.py"
 
 # 4. chat 单独拉起按需白名单 viewerd，并以 mock ACP agent 验证 turn/DB/cancel。
 run_suite chat "$PY" "$SCRIPT_DIR/smoke_chat.py"
+run_suite loop "$PY" "$SCRIPT_DIR/smoke_loop.py"
 
 # 5. voice 单独拉起 config-store + voice，并 relay 到 mock voice-service。
 run_suite voice "$PY" "$SCRIPT_DIR/smoke_voice.py"

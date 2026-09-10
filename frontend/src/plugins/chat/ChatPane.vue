@@ -17,6 +17,8 @@ import { registerInputSessionRuntime, useInputSessionsStore, type InputSession }
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
 import ToolActivity from "./ToolActivity.vue";
+import LoopStatus from "../loop/LoopStatus.vue";
+import type { LoopIteration } from "../loop/types";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
 import { presentToolBlock } from "./toolPresentation";
@@ -81,6 +83,7 @@ const pendingSends = ref<PendingSend[]>([]);
 // Both routing labels (user box "→", role box header) render from this map;
 // turns without a record — history predating persistence — show no label.
 const turnTargets = ref(new Map<string, TurnTargetEntry>());
+const loopOpen = ref(false);
 const error = ref("");
 const threadRef = ref<HTMLElement | null>(null);
 const messageEndRef = ref<HTMLElement | null>(null);
@@ -268,6 +271,37 @@ const runningBranchIds = computed<Set<string>>(() => {
   }
   return set;
 });
+
+const loopForkTurn = computed(() => [...turnSessions.value.entries()]
+  .filter(([, t]) => t.branchId === (sendBranch.value?.id ?? ""))
+  .sort((a, b) => b[1].startedAt - a[1].startedAt)[0]?.[0] ?? "");
+async function showLoopExecution(branchId: string, iteration?: LoopIteration): Promise<void> {
+  try {
+    await refresh();
+    activeTabs.value = [branchId || "main"];
+    if (!iteration) return;
+    const selector = `[data-turn-id="${CSS.escape(iteration.turn_id)}"]`;
+    await nextTick();
+    if (!threadRef.value?.querySelector(selector) && iteration.ended_at) {
+      const before = iteration.ended_at + 1;
+      const list = await ctx.bus.request("chat:_:chats:list", { chat_id: ctx.instanceId, include_messages: true, before, limit: PAGE_SIZE }) as ChatList;
+      const page = list.messages ?? [];
+      if (page.length) {
+        hasNewer.value = true;
+        loadedHi.value = { ts: page[page.length - 1].created_at, id: page[page.length - 1].id };
+        loadedLo.value = page[0].created_at;
+        olderCursor.value = { ts: page[0].created_at, id: page[0].id };
+        hasOlder.value = list.has_more ?? false;
+        messages.value = page;
+        blocks.value = await fetchBlocks(loadedLo.value, before);
+        seedTurnTargets(list.turn_targets); seedTurnSessions(list.turn_sessions);
+        writeBack();
+      }
+    }
+    await nextTick();
+    threadRef.value?.querySelector(selector)?.scrollIntoView({ block: "start" });
+  } catch (cause) { error.value = errorText(cause); }
+}
 
 // --- Branch bar interactions (framework v0.63) ---
 
@@ -815,7 +849,21 @@ function hydrate(entry: ChatCacheEntry): void {
 }
 
 function setChrome(): void {
-  ctx.setChrome({ title: chat.value?.name ?? "Chat" });
+  ctx.setChrome({
+    title: chat.value?.name ?? "Chat",
+    actions: [
+      {
+        id: "loop",
+        title: loopOpen.value ? "收起 Loop 面板" : "打开 Loop 面板",
+        icon: "bi-arrow-repeat",
+        active: loopOpen.value,
+        run: () => {
+          loopOpen.value = !loopOpen.value;
+          setChrome();
+        },
+      },
+    ],
+  });
   inputs.patch(inputSessionId, { label: `${chat.value?.name ?? "Chat"} input` });
 }
 
@@ -1591,13 +1639,14 @@ onMounted(() => {
 
 <template>
   <section class="chat-pane d-flex flex-column h-100">
+    <LoopStatus v-if="loopOpen" :chat-id="ctx.instanceId" :roles="roles.filter((role) => chat?.member_role_ids.includes(role.id))" :branches="branches" :from-turn-id="loopForkTurn" @select="showLoopExecution" />
     <div ref="threadRef" class="chat-thread flex-grow-1 overflow-auto p-2" aria-live="polite" @scroll.passive="handleThreadScroll">
       <div v-if="messages.length && (loadingOlder || !hasOlder)" class="chat-history-boundary small text-secondary">
         <span v-if="loadingOlder" class="spinner-border spinner-border-sm me-1" aria-hidden="true" />
         <template v-if="loadingOlder">加载更早消息…</template>
         <template v-else>没有更多消息</template>
       </div>
-      <article v-for="box in timeline" :key="box.key" class="chat-box" :class="box.kind === 'user' ? 'chat-box-user' : 'chat-box-role'">
+      <article v-for="box in timeline" :key="box.key" :data-turn-id="box.turnId" class="chat-box" :class="box.kind === 'user' ? 'chat-box-user' : 'chat-box-role'">
         <div class="chat-box-top">
           <div class="chat-meta">
             <span class="chat-role-label">

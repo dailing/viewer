@@ -27,6 +27,7 @@ var Manifest = busclient.Manifest{
 		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},
 		"chat:_:routing:get": map[string]any{}, "chat:_:routing:put": map[string]any{},
 		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
+		"chat:_:automation": map[string]any{}, "chat:_:dispatch-status": map[string]any{},
 		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
 		"chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{},
 		"chat:_:branches:create": map[string]any{}, "chat:_:branches:patch": map[string]any{}, "chat:_:branches:delete": map[string]any{},
@@ -62,6 +63,8 @@ type runtime struct {
 	sawEvent                                              bool
 }
 type Plugin struct {
+	automationMu  sync.Mutex
+	generation    string
 	dataDir       string
 	store         *store
 	client        *busclient.Client
@@ -98,7 +101,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plugin{dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -119,6 +122,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:roles:list": p.handleRolesList, "chat:_:roles:create": p.handleRolesCreate, "chat:_:roles:patch": p.handleRolesPatch, "chat:_:roles:delete": p.handleRolesDelete,
 		"chat:_:routing:get": p.handleRoutingGet, "chat:_:routing:put": p.handleRoutingPut,
 		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
+		"chat:_:automation": p.handleAutomation, "chat:_:dispatch-status": p.handleDispatchGet,
 		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
 		"chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate,
 		"chat:_:branches:create": p.handleBranchesCreate, "chat:_:branches:patch": p.handleBranchesPatch, "chat:_:branches:delete": p.handleBranchesDelete,
@@ -669,10 +673,19 @@ func applyChatPatch(chat *Chat, value map[string]any) {
 	}
 }
 func (p *Plugin) handleChatsDelete(frame busclient.Frame) {
+	p.automationMu.Lock()
+	defer p.automationMu.Unlock()
 	value, err := frameObject(frame)
 	id, _ := value["id"].(string)
 	if err == nil && id == "" {
 		err = errors.New("id is required")
+	}
+	if err == nil {
+		var count int64
+		err = p.store.db.Model(&AutomationGate{}).Where("chat_id = ? AND automation_id <> ''", id).Count(&count).Error
+		if err == nil && count > 0 {
+			err = errors.New("stop the chat's loop before deleting this chat")
+		}
 	}
 	if err == nil {
 		err = p.store.deleteChat(id)

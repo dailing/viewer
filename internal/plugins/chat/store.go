@@ -224,7 +224,7 @@ func openStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open chat database: %w", err)
 	}
-	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &Branch{}); err != nil {
+	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &Branch{}, &AutomationLease{}, &AutomationGate{}, &DispatchReceipt{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
 	// The timeline queries blocks by (chat_id, occurred_at) windows; the

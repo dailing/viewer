@@ -8,6 +8,7 @@ package chat
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -87,8 +88,25 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 		}
 		name = fmt.Sprintf("分支%02d", len(existing)+1)
 	}
+	id := newID()
+	if key := requestString(value, "idempotency_key"); key != "" {
+		id = fmt.Sprintf("%x", sha256.Sum256([]byte("branch:"+chatID+":"+key)))[:32]
+		existing, lookupErr := p.store.branch(id)
+		if lookupErr != nil {
+			p.reply(frame, nil, lookupErr)
+			return
+		}
+		if existing != nil {
+			if existing.ForkTurnID != fromTurnID {
+				p.reply(frame, nil, errors.New("branch key reused with a different fork"))
+				return
+			}
+			p.reply(frame, existing.payload(), nil)
+			return
+		}
+	}
 	now := nowMillis()
-	branch := &Branch{ID: newID(), ChatID: chatID, Name: name, ForkTurnID: fromTurnID, ParentBranchID: parentBranchID, CreatedAt: now, UpdatedAt: now}
+	branch := &Branch{ID: id, ChatID: chatID, Name: name, ForkTurnID: fromTurnID, ParentBranchID: parentBranchID, CreatedAt: now, UpdatedAt: now}
 	if err = p.store.createBranch(branch); err != nil {
 		p.reply(frame, nil, err)
 		return

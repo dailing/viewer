@@ -29,7 +29,7 @@ var Manifest = busclient.Manifest{
 		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
 		"chat:_:automation": map[string]any{}, "chat:_:dispatch-status": map[string]any{},
 		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
-		"chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{},
+		"chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{}, "chat:_:draft:get": map[string]any{}, "chat:_:draft:set": map[string]any{},
 		"chat:_:branches:create": map[string]any{}, "chat:_:branches:patch": map[string]any{}, "chat:_:branches:delete": map[string]any{},
 		"chat:_:branches:merge": map[string]any{}, "chat:_:branches:merge-confirm": map[string]any{}, "chat:_:branches:archive": map[string]any{},
 		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
@@ -37,7 +37,7 @@ var Manifest = busclient.Manifest{
 	},
 	Emits: map[string]any{
 		"chat:*:message": map[string]any{}, "chat:*:block": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
-		"chat:_:turn": map[string]any{}, "chat:_:queue": map[string]any{}, "chat:_:branch": map[string]any{},
+		"chat:_:turn": map[string]any{}, "chat:_:queue": map[string]any{}, "chat:_:branch": map[string]any{}, "chat:_:draft:sync": map[string]any{},
 		"voice-catalog:_:chat": map[string]any{},
 	},
 }
@@ -124,7 +124,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
 		"chat:_:automation": p.handleAutomation, "chat:_:dispatch-status": p.handleDispatchGet,
 		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
-		"chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate,
+		"chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate, "chat:_:draft:get": p.handleDraftGet, "chat:_:draft:set": p.handleDraftSet,
 		"chat:_:branches:create": p.handleBranchesCreate, "chat:_:branches:patch": p.handleBranchesPatch, "chat:_:branches:delete": p.handleBranchesDelete,
 		"chat:_:branches:merge": p.handleBranchesMerge, "chat:_:branches:merge-confirm": p.handleBranchesMergeConfirm, "chat:_:branches:archive": p.handleBranchesArchive,
 		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,

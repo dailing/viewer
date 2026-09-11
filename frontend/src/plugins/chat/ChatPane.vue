@@ -344,6 +344,26 @@ async function submitFork(): Promise<void> {
   }
 }
 
+// Fresh branch (titlebar button): same branches:create RPC with no
+// from_turn_id — the branch starts empty, without any chat history. It is
+// created immediately with the default 分支NN name; rename via double-click.
+const freshBranchBusy = ref(false);
+
+async function createFreshBranch(): Promise<void> {
+  if (freshBranchBusy.value) return;
+  freshBranchBusy.value = true;
+  branchOpError.value = "";
+  try {
+    const branch = await ctx.bus.request("chat:_:branches:create", { chat_id: ctx.instanceId, name: "", from_turn_id: "" }) as Branch;
+    upsertBranches([branch]);
+    activeTabs.value = [branch.id];
+  } catch (cause) {
+    branchOpError.value = errorText(cause);
+  } finally {
+    freshBranchBusy.value = false;
+  }
+}
+
 // Rename: double-click a branch tab turns it into an inline input.
 const renamingBranchId = ref("");
 const renameText = ref("");
@@ -860,6 +880,15 @@ function setChrome(): void {
         run: () => {
           loopOpen.value = !loopOpen.value;
           setChrome();
+        },
+      },
+      {
+        id: "fresh-branch",
+        title: "新建空白分支（无历史）",
+        icon: "bi-plus-lg",
+        active: false,
+        run: () => {
+          void createFreshBranch();
         },
       },
     ],

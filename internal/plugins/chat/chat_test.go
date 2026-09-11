@@ -111,6 +111,102 @@ func TestRoleNormalizationAndMessageSender(t *testing.T) {
 	}
 }
 
+func TestComposerDraftSyncsAcrossClients(t *testing.T) {
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+	configClient := busclient.New(url, busclient.Manifest{ID: "draft-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = configClient.Subscribe("config:_:get", func(frame busclient.Frame) {
+		_ = pluginrpc.Respond(configClient, frame, nil)
+	})
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	caller := busclient.New(url, busclient.Manifest{ID: "draft-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	events := make(chan map[string]any, 10)
+	_, _ = caller.Subscribe("chat:_:draft:sync", func(frame busclient.Frame) {
+		if value, ok := frame.Value.(map[string]any); ok {
+			events <- value
+		}
+	})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+	request := func(channel string, payload map[string]any) map[string]any {
+		t.Helper()
+		value, err := caller.Request(ctx, channel, payload, 10*time.Second)
+		if err != nil {
+			t.Fatalf("%s: %v", channel, err)
+		}
+		object, _ := value.(map[string]any)
+		return object
+	}
+	nextEvent := func() map[string]any {
+		t.Helper()
+		select {
+		case event := <-events:
+			return event
+		case <-ctx.Done():
+			t.Fatal("no draft event")
+			return nil
+		}
+	}
+	chat := request("chat:_:chats:create", map[string]any{"name": "Drafts", "root": t.TempDir()})
+	chatID, _ := chat["id"].(string)
+	if chatID == "" {
+		t.Fatalf("chat reply: %v", chat)
+	}
+
+	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "text": "from laptop", "source": "a"})
+	if event := nextEvent(); event["text"] != "from laptop" || event["source"] != "a" || event["chat_id"] != chatID {
+		t.Fatalf("event: %v", event)
+	}
+	// A later set from another device overwrites the whole row (last write wins).
+	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "text": "merged on phone", "source": "b"})
+	if event := nextEvent(); event["text"] != "merged on phone" {
+		t.Fatalf("overwrite event: %v", event)
+	}
+	draft := request("chat:_:draft:get", map[string]any{"chat_id": chatID})
+	updatedAt, _ := draft["updated_at"].(float64)
+	if draft["text"] != "merged on phone" || updatedAt <= 0 {
+		t.Fatalf("draft: %v", draft)
+	}
+	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": chatID, "text": strings.Repeat("x", maxDraftBytes+1)}, 10*time.Second); err == nil {
+		t.Fatal("oversized draft accepted")
+	}
+	// The human-send clear broadcasts an empty draft to every device.
+	p.clearDraft(chatID)
+	if event := nextEvent(); event["text"] != "" {
+		t.Fatalf("clear event: %v", event)
+	}
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID}); draft["text"] != "" {
+		t.Fatalf("cleared draft: %v", draft)
+	}
+	// Unknown chats cannot hold drafts.
+	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": "no-such-chat", "text": "x"}, 10*time.Second); err == nil {
+		t.Fatal("draft accepted for unknown chat")
+	}
+}
+
 func TestLegacyRolesAndRoutingMigrateFromConfigToPluginDB(t *testing.T) {
 	config := kernel.DefaultConfig()
 	config.Host, config.Port = "127.0.0.1", 0

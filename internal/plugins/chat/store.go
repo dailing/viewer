@@ -55,6 +55,14 @@ type PluginState struct {
 	Value string
 }
 
+// Draft is the synced composer input of a chat: one row per chat, overwritten
+// whole on every update (last write wins), shared across all devices.
+type Draft struct {
+	ChatID    string `gorm:"primaryKey" json:"chat_id"`
+	Text      string `json:"text"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
 type Message struct {
 	ID         string `gorm:"primaryKey"`
 	ChatID     string `gorm:"index;not null"`
@@ -224,7 +232,7 @@ func openStore(dataDir string) (*store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open chat database: %w", err)
 	}
-	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &Branch{}, &AutomationLease{}, &AutomationGate{}, &DispatchReceipt{}); err != nil {
+	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &Branch{}, &AutomationLease{}, &AutomationGate{}, &DispatchReceipt{}, &Draft{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
 	// The timeline queries blocks by (chat_id, occurred_at) windows; the
@@ -258,6 +266,26 @@ func (s *store) chats() ([]Chat, error) {
 }
 
 func (s *store) saveChat(value *Chat) error { return s.db.Save(value).Error }
+
+func (s *store) draft(chatID string) (*Draft, error) {
+	var value Draft
+	result := s.db.Limit(1).Find(&value, "chat_id = ?", chatID)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &value, nil
+}
+
+func (s *store) saveDraft(value *Draft) error { return s.db.Save(value).Error }
+
+// clearDraft reports whether a row existed so callers only broadcast real clears.
+func (s *store) clearDraft(chatID string) (bool, error) {
+	result := s.db.Delete(&Draft{}, "chat_id = ?", chatID)
+	return result.RowsAffected > 0, result.Error
+}
 
 func (s *store) roles() ([]SuperRole, error) {
 	var values []SuperRole

@@ -364,7 +364,7 @@ func (p *Plugin) create(v map[string]any) (any, error) {
 		return nil, err
 	}
 	// Whitelist creation fields: clients cannot forge state, paths or counters.
-	l = Loop{ID: l.ID, ChatID: l.ChatID, RoleID: l.RoleID, BranchID: l.BranchID, NewBranch: l.NewBranch, FromTurnID: l.FromTurnID, Goal: strings.TrimSpace(l.Goal), Criteria: strings.TrimSpace(l.Criteria), MaxIterations: l.MaxIterations, DurationSeconds: l.DurationSeconds, TurnTimeoutSeconds: l.TurnTimeoutSeconds, JudgeEvery: l.JudgeEvery}
+	l = Loop{ID: l.ID, ChatID: l.ChatID, RoleID: l.RoleID, BranchID: l.BranchID, NewBranch: l.NewBranch, FromTurnID: l.FromTurnID, Goal: strings.TrimSpace(l.Goal), Criteria: strings.TrimSpace(l.Criteria), MaxIterations: l.MaxIterations, DurationSeconds: l.DurationSeconds, TurnTimeoutSeconds: l.TurnTimeoutSeconds, JudgeEvery: l.JudgeEvery, MinIntervalSeconds: l.MinIntervalSeconds}
 	if l.ID == "" {
 		l.ID = newID()
 	}
@@ -403,8 +403,8 @@ func (p *Plugin) create(v map[string]any) (any, error) {
 	if l.JudgeEvery == 0 {
 		l.JudgeEvery = 3
 	}
-	if l.MaxIterations < 1 || l.MaxIterations > 1000 || l.DurationSeconds < 1 || l.DurationSeconds > 86400 || l.TurnTimeoutSeconds < 1 || l.TurnTimeoutSeconds > 86400 || l.JudgeEvery < 1 || l.JudgeEvery > 100 {
-		return nil, errors.New("invalid iteration, time or judge interval limit")
+	if l.MaxIterations < 1 || l.MaxIterations > 1000 || l.DurationSeconds < 1 || l.DurationSeconds > 86400 || l.TurnTimeoutSeconds < 1 || l.TurnTimeoutSeconds > 86400 || l.JudgeEvery < 1 || l.JudgeEvery > 100 || l.MinIntervalSeconds < 0 || l.MinIntervalSeconds > 86400 {
+		return nil, errors.New("invalid iteration, time or interval limit")
 	}
 	if _, specified := v["new_branch"]; !specified {
 		l.NewBranch = true

@@ -154,6 +154,11 @@ func (p *Plugin) advance(l *Loop) error {
 	if l.Iteration >= l.MaxIterations {
 		return p.finish(l, "limited", "达到迭代次数上限")
 	}
+	// Wait for the minimum trigger interval measured from the previous
+	// iteration's dispatch; 0 dispatches the next iteration immediately.
+	if l.MinIntervalSeconds > 0 && l.Iteration > 0 && now() < i.CreatedAt+int64(l.MinIntervalSeconds)*1000 {
+		return nil
+	}
 	// Validate role/branch/cwd again before every new logical dispatch.
 	info, err := p.automation(p.ctx, "describe", map[string]any{"chat_id": l.ChatID, "role_id": l.RoleID, "branch_id": l.BranchID})
 	if err != nil {

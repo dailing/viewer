@@ -1,6 +1,6 @@
 # Goal loop plugin
 
-Implemented contract, framework v0.67. `viewer.loop` is an in-process Go plugin
+Implemented contract, framework v0.68. `viewer.loop` is an in-process Go plugin
 registered after chat. It uses bus RPCs only; it does not import chat internals,
 read chat's database, start agents or render messages itself.
 
@@ -32,7 +32,7 @@ All times in replies are Unix milliseconds; duration inputs are seconds.
 
 | RPC | Input / behavior |
 | --- | --- |
-| `loop:_:create` | `id?` (client deduplication), `chat_id`, explicit `role_id`, `goal`, `criteria`, `new_branch?` (default true), `branch_id?`, `from_turn_id?`, `max_iterations?`, `duration_seconds?`, `turn_timeout_seconds?`, `judge_every?`. Creates a draft, provisions/claims its branch, returns the run. Retry with the same id and task after a lost reply. |
+| `loop:_:create` | `id?` (client deduplication), `chat_id`, explicit `role_id`, `goal`, `criteria`, `new_branch?` (default true), `branch_id?`, `from_turn_id?`, `max_iterations?`, `duration_seconds?`, `turn_timeout_seconds?`, `min_interval_seconds?`, `judge_every?`. Creates a draft, provisions/claims its branch, returns the run. Retry with the same id and task after a lost reply. |
 | `loop:_:list` | `chat_id?`, `before_created_at?`; pages of 20 runs, with large detail fields omitted. |
 | `loop:_:get` | `id`, `before_iteration?`; full run and pages of 20 iteration summaries with `has_more`. Full execution history is in chat. |
 | `loop:_:start` | `id`; starts a draft. |
@@ -43,8 +43,11 @@ All times in replies are Unix milliseconds; duration inputs are seconds.
 | `loop:_:changed` event | `id`, `chat_id`, `revision`; clients re-fetch a bounded snapshot. A 5s frontend poll repairs missed events/reconnects. |
 
 Defaults: 20 iterations, 3600s total, 900s per dispatch (queueing included), judge
-progress every 3 iterations. Limits: 1–1000 iterations, 1–86400s time budgets,
-1–100 judge interval, 8 KiB each goal/criteria. Deadlines include paused and
+progress every 3 iterations, no minimum trigger interval. The next iteration
+dispatches no sooner than `min_interval_seconds` after the previous iteration's
+dispatch (0 = immediately after the verdict); the wait never extends the
+deadline. Limits: 1–1000 iterations, 1–86400s time budgets, 0–86400s trigger
+interval, 1–100 judge interval, 8 KiB each goal/criteria. Deadlines include paused and
 disconnected time. Completion claims always invoke the judge. Three consecutive
 execution failures or three judge checkpoints without evidenced progress pause
 the run; three judge failures pause without executing another agent turn.

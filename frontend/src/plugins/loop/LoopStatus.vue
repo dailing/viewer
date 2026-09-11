@@ -29,6 +29,7 @@ const target = ref("new");
 const maxIterations = ref(20);
 const minutes = ref(60);
 const turnMinutes = ref(15);
+const intervalMinutes = ref(0);
 const judgeEvery = ref(3);
 const createId = ref("");
 const now = ref(Date.now());
@@ -97,7 +98,7 @@ async function create(): Promise<void> {
       id: createId.value, chat_id: props.chatId, role_id: roleId.value, goal: goal.value, criteria: criteria.value,
       new_branch: target.value === "new", branch_id: target.value === "main" || target.value === "new" ? "" : target.value,
       from_turn_id: target.value === "new" ? props.fromTurnId : "", max_iterations: maxIterations.value,
-      duration_seconds: Math.round(minutes.value * 60), turn_timeout_seconds: Math.round(turnMinutes.value * 60), judge_every: judgeEvery.value,
+      duration_seconds: Math.round(minutes.value * 60), turn_timeout_seconds: Math.round(turnMinutes.value * 60), judge_every: judgeEvery.value, min_interval_seconds: Math.max(0, Math.round(intervalMinutes.value * 60)),
     }) as LoopRun;
     chosen.value = created.id;
     // The explicit create-and-start submit authorizes starting this draft.
@@ -147,8 +148,9 @@ onBeforeUnmount(() => { alive = false; if (timer) clearInterval(timer); ctx.bus.
         <label>总时限（分钟）<input v-model.number="minutes" type="number" min="1" max="1440" required class="form-control form-control-sm" /></label>
         <label>单轮时限（分钟）<input v-model.number="turnMinutes" type="number" min="1" max="1440" required class="form-control form-control-sm" /></label>
         <label>每几轮检查进展<input v-model.number="judgeEvery" type="number" min="1" max="100" required class="form-control form-control-sm" /></label>
+        <label>最小触发间隔（分钟，0=立即）<input v-model.number="intervalMinutes" type="number" min="0" max="1440" required class="form-control form-control-sm" /></label>
       </div>
-      <p class="small text-secondary mb-1">关闭页面后继续运行。在执行分支发消息会暂停自动续轮；暂停期间总时限继续计时。完成声明始终经过验收判定。</p>
+      <p class="small text-secondary mb-1">关闭页面后继续运行。在执行分支发消息会暂停自动续轮；暂停期间总时限继续计时。完成声明始终经过验收判定。触发间隔从上轮投递起算，0 表示一轮结束后立即续轮。</p>
       <button class="btn btn-sm btn-primary" type="submit" :disabled="busy || !roleId">{{ busy ? '处理中…' : '创建并启动' }}</button>
     </form>
     <p v-if="expanded && available && !run && !creating" class="small text-secondary m-2">还没有 Loop 记录。点击「新建 Loop」开始一次循环。</p>
@@ -158,6 +160,7 @@ onBeforeUnmount(() => { alive = false; if (timer) clearInterval(timer); ctx.bus.
       <p class="mb-1"><strong>{{ run.goal }}</strong> · {{ run.role_name }}</p>
       <p class="loop-text small mb-1">验收条件：{{ run.criteria }}</p>
       <p v-if="run.reason" class="loop-text small mb-1">{{ run.reason }}</p>
+      <p v-if="run.min_interval_seconds > 0" class="small text-secondary mb-1">最小触发间隔：{{ Math.round(run.min_interval_seconds / 60) }} 分钟（从上轮投递起算）</p>
       <p class="small text-secondary mb-2 loop-path">进度文件：{{ run.progress_path }}</p>
       <div class="d-flex flex-wrap gap-2 mb-2">
         <button class="btn btn-sm btn-outline-secondary" type="button" @click="emit('select', run.branch_id)">查看执行分支</button>

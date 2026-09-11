@@ -261,6 +261,24 @@ func TestResumedGateDoesNotValidateOlderJudgeInput(t *testing.T) {
 	}
 }
 
+func TestMinIntervalDelaysNextIteration(t *testing.T) {
+	p, f, l := fixture(t)
+	l.MinIntervalSeconds = 600
+	p.db.Save(l)
+	advance(t, p, l)
+	f.states[iterationKey(l.ID, 1)] = dispatchStatus{Status: "completed", StopReason: "end_turn", Output: `<loop-result>{"status":"continue","summary":"step","next_step":"next"}</loop-result>`, EndedAt: now()}
+	advance(t, p, l)
+	advance(t, p, l)
+	if l.Iteration != 1 || f.sends != 1 {
+		t.Fatalf("dispatched inside min interval: iteration=%d sends=%d", l.Iteration, f.sends)
+	}
+	p.db.Model(&Iteration{}).Where("id = ?", iterationKey(l.ID, 1)).Update("created_at", now()-601000)
+	advance(t, p, l)
+	if l.Iteration != 2 || f.sends != 2 {
+		t.Fatalf("interval elapsed but not dispatched: iteration=%d sends=%d", l.Iteration, f.sends)
+	}
+}
+
 func TestManualQueueCancellationPausesRatherThanRequeues(t *testing.T) {
 	p, f, l := fixture(t)
 	advance(t, p, l)

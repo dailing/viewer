@@ -226,6 +226,11 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 		return nil, nil, err
 	}
 	p.retainVisibleMessage(user, "", "")
+	// A human send supersedes the synced composer draft on every device;
+	// automatic (loop) dispatches leave it alone.
+	if request.AutomationID == "" {
+		p.clearDraft(chat.ID)
+	}
 	// Busy roles queue the message (it starts when the in-flight turn ends);
 	// free roles start immediately. Parallel dispatch skips the busy lock and
 	// runs every role right away on a throwaway session.

@@ -102,6 +102,66 @@ const voiceDictation = new VoiceDictationController(injectedCtx, props.contextId
 });
 onBeforeUnmount(() => voiceDictation.dispose());
 
+// Cross-device draft sync (framework: chat drafts). The server row in
+// chat.sqlite3 is the single source of truth: local edits push debounced
+// (every set overwrites the whole row — last write wins by arrival order),
+// and updates from other devices apply to the box live. `lastSynced` tracks
+// the value the server is known to hold, so own echoes (filtered by `source`
+// anyway) and remote-applied text never trigger a re-push loop.
+// Hoisted function declarations run before the undefined-check narrowing
+// applies to `injectedCtx`, so capture the bus once here.
+const bus = injectedCtx.bus;
+const chatId = props.contextId.slice("chat:".length);
+const draftSource = crypto.randomUUID();
+let lastSynced: string | null = null;
+let syncTimer: number | undefined;
+
+async function pullDraft(): Promise<void> {
+  try {
+    const result = await bus.request("chat:_:draft:get", { chat_id: chatId }) as { text?: string };
+    const text = result.text ?? "";
+    lastSynced = text;
+    if (text !== draft.value) draft.value = text;
+  } catch {
+    // Chat RPC unavailable: keep the browser-local draft.
+  }
+}
+
+async function flushDraft(): Promise<void> {
+  const text = draft.value;
+  if (text === lastSynced) return;
+  try {
+    await bus.request("chat:_:draft:set", { chat_id: chatId, text, source: draftSource });
+    lastSynced = text;
+  } catch {
+    // Retried on the next edit.
+  }
+}
+
+function onDraftSynced(frame: { value?: unknown }): void {
+  const value = frame.value as { chat_id?: string; text?: string; source?: string } | undefined;
+  if (value === undefined || value.chat_id !== chatId || value.source === draftSource) return;
+  const text = value.text ?? "";
+  lastSynced = text;
+  if (text !== draft.value) draft.value = text;
+}
+
+watch(draft, () => {
+  window.clearTimeout(syncTimer);
+  syncTimer = window.setTimeout(() => { void flushDraft(); }, 400);
+});
+
+onMounted(() => {
+  void pullDraft();
+  bus.subscribe("chat:_:draft:sync", onDraftSynced);
+});
+
+onBeforeUnmount(() => {
+  window.clearTimeout(syncTimer);
+  void flushDraft();
+  bus.unsubscribe("chat:_:draft:sync", onDraftSynced);
+});
+
 // Send takes a snapshot of the draft, clears the box, and refocuses it.
 // Clearing after send prevents duplicate sends: the previous code emitted the
 // raw `draft` ref from both send paths and never reset it, so the message

@@ -31,6 +31,7 @@ type Loop struct {
 	MaxIterations        int    `json:"max_iterations"`
 	DurationSeconds      int    `json:"duration_seconds"`
 	TurnTimeoutSeconds   int    `json:"turn_timeout_seconds"`
+	MinIntervalSeconds   int    `json:"min_interval_seconds"`
 	JudgeEvery           int    `json:"judge_every"`
 	Deadline             int64  `json:"deadline"`
 	Iteration            int    `json:"iteration"`

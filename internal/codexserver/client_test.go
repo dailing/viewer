@@ -46,7 +46,21 @@ func TestProtocolSubset(t *testing.T) {
 			t.Errorf("missing update %s", method)
 		}
 	}
+	hangResult, hangErr := make(chan map[string]any, 1), make(chan error, 1)
+	go func() {
+		turn, err := client.TurnStart(ctx, thread, "mock hang", "gpt-test")
+		hangResult <- turn
+		hangErr <- err
+	}()
+	// TurnInterrupt must resolve the in-flight turn id itself and tolerate
+	// landing while turn/start is still being established.
 	if err := client.TurnInterrupt(ctx, thread); err != nil {
+		t.Fatal(err)
+	}
+	if turn := <-hangResult; stringValue(turn, "status") != "interrupted" {
+		t.Fatalf("interrupted turn: %#v", turn)
+	}
+	if err := <-hangErr; err != nil {
 		t.Fatal(err)
 	}
 }

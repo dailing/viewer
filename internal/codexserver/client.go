@@ -45,6 +45,7 @@ type Client struct {
 	pending     map[int64]chan response
 	turnWaiters map[string]chan map[string]any
 	completed   map[string]map[string]any
+	activeTurns map[string]string
 	bound       map[string]bool
 	onUpdate    func(Update)
 	nextID      atomic.Int64
@@ -57,7 +58,7 @@ func New(ctx context.Context, config ProcessConfig) (*Client, error) {
 		config.Command = "codex"
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	client := &Client{config: config, ctx: runCtx, cancel: cancel, pending: map[int64]chan response{}, turnWaiters: map[string]chan map[string]any{}, completed: map[string]map[string]any{}, bound: map[string]bool{}, readerDone: make(chan struct{})}
+	client := &Client{config: config, ctx: runCtx, cancel: cancel, pending: map[int64]chan response{}, turnWaiters: map[string]chan map[string]any{}, completed: map[string]map[string]any{}, activeTurns: map[string]string{}, bound: map[string]bool{}, readerDone: make(chan struct{})}
 	client.cmd = exec.CommandContext(runCtx, config.Command, config.Arguments...)
 	stdout, err := client.cmd.StdoutPipe()
 	if err != nil {
@@ -297,9 +298,15 @@ func (c *Client) TurnStart(ctx context.Context, threadID, prompt, model string) 
 		c.mu.Unlock()
 		return completed, nil
 	}
+	c.activeTurns[threadID] = id
 	waiter := make(chan map[string]any, 1)
 	c.turnWaiters[id] = waiter
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.activeTurns, threadID)
+		c.mu.Unlock()
+	}()
 	select {
 	case completed := <-waiter:
 		return completed, nil
@@ -312,9 +319,33 @@ func (c *Client) TurnStart(ctx context.Context, threadID, prompt, model string) 
 		return nil, errors.New("codex app-server closed")
 	}
 }
+
+// TurnInterrupt interrupts the thread's in-flight turn. Current codex
+// app-server builds require the turn id alongside the thread id, so the
+// client tracks the active turn registered by TurnStart. A short grace
+// period covers a cancel that lands while turn/start is still in flight.
 func (c *Client) TurnInterrupt(ctx context.Context, threadID string) error {
-	_, err := c.request(ctx, "turn/interrupt", map[string]any{"threadId": threadID})
-	return err
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		turnID, closed := c.activeTurns[threadID], c.closed
+		c.mu.Unlock()
+		if turnID != "" {
+			_, err := c.request(ctx, "turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID})
+			return err
+		}
+		if closed {
+			return errors.New("codex app-server is closed")
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("codex app-server thread %s has no active turn", threadID)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 func (c *Client) failAll(err error) {

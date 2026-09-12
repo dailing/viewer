@@ -11,6 +11,8 @@ def send(value: dict) -> None:
     sys.stdout.flush()
 
 
+hanging_turns = set()
+
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method", "")
@@ -37,6 +39,10 @@ for line in sys.stdin:
         if "mock turn error" in prompt:
             send({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": "mock-turn", "status": "failed"}}})
             continue
+        if "mock hang" in prompt:
+            # Stays in progress until turn/interrupt, like a long real turn.
+            hanging_turns.add((thread_id, "mock-turn"))
+            continue
         send({"method": "item/reasoning/summaryTextDelta", "params": {"threadId": thread_id, "turnId": "mock-turn", "itemId": "reason-1", "delta": "thinking"}})
         send({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": "mock-turn", "itemId": "answer-1", "delta": "mock answer"}})
         send({"method": "item/commandExecution/outputDelta", "params": {"threadId": thread_id, "turnId": "mock-turn", "itemId": "command-1", "delta": "command output"}})
@@ -44,6 +50,14 @@ for line in sys.stdin:
         send({"method": "thread/tokenUsage/updated", "params": {"threadId": thread_id, "tokenUsage": {"last": {"totalTokens": 10}, "modelContextWindow": 1000}}})
         send({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": "mock-turn", "status": "completed"}}})
     elif method == "turn/interrupt":
+        # Current codex app-server requires turnId next to threadId.
+        if "turnId" not in params:
+            send({"id": request_id, "error": {"code": -32600, "message": "Invalid request: missing field `turnId`"}})
+            continue
         send({"id": request_id, "result": {}})
+        key = (params.get("threadId", ""), params["turnId"])
+        if key in hanging_turns:
+            hanging_turns.discard(key)
+            send({"method": "turn/completed", "params": {"threadId": key[0], "turn": {"id": key[1], "status": "interrupted"}}})
     else:
         send({"id": request_id, "error": {"code": -32601, "message": method}})

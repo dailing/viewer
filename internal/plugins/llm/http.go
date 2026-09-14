@@ -77,6 +77,9 @@ func (p *Plugin) loadHTTPConfig(ctx context.Context) (HTTPConfig, error) {
 }
 
 func (p *Plugin) handleConfigChange(frame busclient.Frame) {
+	// Any plugins.llm edit (active/profiles/http) clears the breaker state:
+	// user edits fix endpoints, so cooled candidates deserve an immediate retry.
+	p.router.reset()
 	raw, ok := pluginrpc.Object(frame)
 	if !ok {
 		return
@@ -220,19 +223,27 @@ func (p *Plugin) httpHandler() http.Handler {
 }
 
 func (p *Plugin) serveModels(writer http.ResponseWriter, request *http.Request) {
-	config, err := p.activeConfig(request.Context())
+	chain, err := p.candidates(request.Context(), "")
 	if err != nil {
 		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if strings.TrimSpace(config.Model) == "" {
+	if len(chain) == 0 {
 		writeOpenAIError(writer, http.StatusServiceUnavailable, "LLM is not configured")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"object": "list",
-		"data":   []map[string]any{{"id": config.Model, "object": "model", "owned_by": "viewer"}},
-	})
+	// Union of the models the fallback chain can serve, in chain order.
+	seen := map[string]bool{}
+	var data []map[string]any
+	for _, entry := range chain {
+		model := entry.config.Model
+		if seen[model] {
+			continue
+		}
+		seen[model] = true
+		data = append(data, map[string]any{"id": model, "object": "model", "owned_by": "viewer"})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
 
 func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.Request) {
@@ -279,58 +290,103 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 		writeOpenAIError(writer, http.StatusBadRequest, "messages must be an array")
 		return
 	}
-	config, err := p.activeConfig(request.Context())
+	// The caller's model is the requested model: its configs are tried first
+	// (see buildCandidates); the serving config's own model is sent upstream.
+	requested, _ := body["model"].(string)
+	chain, err := p.candidates(request.Context(), requested)
 	if err != nil {
 		requestError = err.Error()
 		writeOpenAIError(writer, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if strings.TrimSpace(config.Endpoint) == "" || strings.TrimSpace(config.Model) == "" {
+	if len(chain) == 0 {
 		requestError = "LLM is not configured"
 		writeOpenAIError(writer, http.StatusServiceUnavailable, "LLM is not configured")
 		return
 	}
-	for key, value := range config.ExtraBody {
-		if _, exists := body[key]; !exists {
-			body[key] = value
+	// Fallback chain: try each candidate until one commits (2xx, or a
+	// non-retryable status passed through verbatim). Retryable failures —
+	// transport errors and 408/429/5xx — cool the endpoint down and move on
+	// before anything is written to the client.
+	var response *http.Response
+	cancel := context.CancelFunc(func() {})
+	var failures []string
+	for _, entry := range chain {
+		key := entry.key()
+		if p.router.cooled(key) {
+			continue
 		}
+		config := entry.config
+		candidateBody := make(map[string]any, len(body)+len(config.ExtraBody)+1)
+		for name, value := range body {
+			candidateBody[name] = value
+		}
+		for name, value := range config.ExtraBody {
+			if _, exists := candidateBody[name]; !exists {
+				candidateBody[name] = value
+			}
+		}
+		candidateBody["model"] = config.Model
+		encoded, err := json.Marshal(candidateBody)
+		if err != nil {
+			requestError = err.Error()
+			writeOpenAIError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		upstreamBody = string(encoded)
+		endpoint := normalizeEndpoint(config.Endpoint) + "/chat/completions"
+		upstreamEndpoint = endpoint
+		timeout := config.TimeoutSeconds
+		if timeout <= 0 {
+			timeout = defaultTimeout
+		}
+		attemptCtx, attemptCancel := context.WithTimeout(request.Context(), time.Duration(timeout)*time.Second)
+		upstream, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, strings.NewReader(upstreamBody))
+		if err != nil {
+			attemptCancel()
+			requestError = err.Error()
+			writeOpenAIError(writer, http.StatusBadGateway, err.Error())
+			return
+		}
+		upstream.Header.Set("Content-Type", "application/json")
+		upstream.Header.Set("Accept", request.Header.Get("Accept"))
+		if config.APIKey != "" {
+			upstream.Header.Set("Authorization", "Bearer "+config.APIKey)
+		}
+		response, err = p.httpClient.Do(upstream)
+		if err != nil {
+			attemptCancel()
+			p.router.fail(key)
+			upstreamStatus = 0
+			slog.Warn("llm endpoint failed, falling back", "candidate", entry.name, "error", err)
+			failures = append(failures, entry.name+": "+err.Error())
+			continue
+		}
+		if retryableStatus(response.StatusCode) {
+			status := response.StatusCode
+			upstreamStatus = status
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+			response.Body.Close()
+			response = nil
+			attemptCancel()
+			p.router.fail(key)
+			slog.Warn("llm endpoint returned a retryable status, falling back", "candidate", entry.name, "status", status)
+			failures = append(failures, fmt.Sprintf("%s: HTTP %d", entry.name, status))
+			continue
+		}
+		p.router.succeed(key)
+		cancel = attemptCancel
+		break
 	}
-	body["model"] = config.Model
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		requestError = err.Error()
-		writeOpenAIError(writer, http.StatusBadRequest, err.Error())
+	if response == nil {
+		requestError = "all LLM endpoints failed: " + strings.Join(failures, "; ")
+		if len(failures) == 0 {
+			requestError = "all LLM endpoints are cooling down after recent failures"
+		}
+		writeOpenAIError(writer, http.StatusBadGateway, requestError)
 		return
 	}
-	upstreamBody = string(encoded)
-	endpoint := strings.TrimRight(config.Endpoint, "/")
-	if !strings.HasSuffix(endpoint, "/chat/completions") {
-		endpoint += "/chat/completions"
-	}
-	upstreamEndpoint = endpoint
-	timeout := config.TimeoutSeconds
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	ctx, cancel := context.WithTimeout(request.Context(), time.Duration(timeout)*time.Second)
 	defer cancel()
-	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(encoded)))
-	if err != nil {
-		requestError = err.Error()
-		writeOpenAIError(writer, http.StatusBadGateway, err.Error())
-		return
-	}
-	upstream.Header.Set("Content-Type", "application/json")
-	upstream.Header.Set("Accept", request.Header.Get("Accept"))
-	if config.APIKey != "" {
-		upstream.Header.Set("Authorization", "Bearer "+config.APIKey)
-	}
-	response, err := p.httpClient.Do(upstream)
-	if err != nil {
-		requestError = err.Error()
-		writeOpenAIError(writer, http.StatusBadGateway, err.Error())
-		return
-	}
 	defer response.Body.Close()
 	upstreamStatus = response.StatusCode
 	for _, header := range []string{"Content-Type", "Cache-Control"} {

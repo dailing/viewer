@@ -7,9 +7,18 @@
  *
  * Storage (config-store, plugin `plugins.llm`):
  * - `profiles`: array of saved configs {id, name, endpoint, key, model,
- *   timeout_seconds} — purely a frontend-managed library.
+ *   timeout_seconds} — purely a frontend-managed library; its order is the
+ *   backend fallback order (active first, then profiles top-down).
  * - `active`: the ACTIVE config {endpoint, key, model, timeout_seconds}.
  * - `http`: facade config {enabled, port, expose}.
+ *
+ * The backend keeps a passive circuit breaker: an endpoint that fails with a
+ * retryable error (transport, 404/408/429/5xx) is skipped for 60s; any config
+ * edit clears the cooldown. Callers may pass a model name (RPC `model` /
+ * HTTP body `model`): configs carrying that model are tried first (several
+ * configs may share one model name = its providers, list order decides
+ * priority), then the chain rolls down to the rest, so callers always get a
+ * result without perceiving a switch.
  *
  * The endpoint may be the base `/v1` URL or the full `/v1/chat/completions`
  * URL (the llm plugin appends it); any OpenAI-compatible endpoint works.
@@ -312,6 +321,51 @@ async function removeProfile(): Promise<void> {
   }
 }
 
+const testing = ref(false);
+
+async function testSelected(): Promise<void> {
+  const profile = profiles.value.find((item) => item.id === selectedId.value);
+  if (profile === undefined) return;
+  if (profile.endpoint.trim() === "" || profile.model.trim() === "") {
+    setStatus("先保存：接口地址和模型不能为空。", true);
+    return;
+  }
+  testing.value = true;
+  setStatus("测试中…");
+  try {
+    const timeoutSeconds = profile.timeout_seconds ?? 60;
+    const result = await ctx.bus.request("llm:_:test", {
+      endpoint: profile.endpoint,
+      key: profile.key,
+      model: profile.model,
+      timeout_seconds: profile.timeout_seconds,
+      extra_body: profile.extra_body,
+    }, { timeout: (timeoutSeconds + 10) * 1000 }) as { ok: boolean; latency_ms: number; model?: string; error?: string };
+    if (result.ok) {
+      setStatus(`✓ 可用，${result.latency_ms} ms`);
+    } else {
+      setStatus(`✗ ${result.error ?? "不可用"}`, true);
+    }
+  } catch (error) {
+    setStatus(`测试失败：${String(error)}`, true);
+  } finally {
+    testing.value = false;
+  }
+}
+
+async function moveSelected(delta: number): Promise<void> {
+  const index = profiles.value.findIndex((item) => item.id === selectedId.value);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= profiles.value.length) return;
+  const [profile] = profiles.value.splice(index, 1);
+  profiles.value.splice(target, 0, profile);
+  try {
+    await persistProfiles();
+  } catch (error) {
+    setStatus(`排序保存失败：${String(error)}`, true);
+  }
+}
+
 onMounted(() => {
   void load();
   httpStatusTimer = window.setInterval(() => void refreshHttpStatus(), 5000);
@@ -399,6 +453,27 @@ onBeforeUnmount(() => {
           >设为当前</button>
           <button
             type="button"
+            class="btn btn-sm btn-outline-secondary"
+            :disabled="saving || testing"
+            title="向该配置发一条最小补全测试可用性（不影响熔断状态和当前配置）"
+            @click="testSelected"
+          >{{ testing ? "测试中…" : "测试" }}</button>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-secondary"
+            :disabled="saving"
+            title="上移：故障转移时更优先（当前配置之后按列表顺序尝试）"
+            @click="moveSelected(-1)"
+          >↑</button>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-secondary"
+            :disabled="saving"
+            title="下移：故障转移时更靠后"
+            @click="moveSelected(1)"
+          >↓</button>
+          <button
+            type="button"
             class="btn btn-sm btn-outline-danger"
             :disabled="saving"
             title="删除该配置（不影响正在使用的 active 配置本身）"
@@ -407,7 +482,7 @@ onBeforeUnmount(() => {
           <span class="small" :class="statusError ? 'text-danger' : 'text-secondary'">{{ status }}</span>
         </div>
         <div class="small text-secondary mt-2">
-          左侧 ● 为当前使用中的配置。这是全局语言模型转发层：所有插件（dispatch、摘要、语音控制）都经由 llm 插件调用它。配置保存在后端 config-store（plugins.llm.profiles / active），启用后立即生效，无需重启。自定义接口需兼容 OpenAI /chat/completions。
+          左侧 ● 为当前使用中的配置。这是全局语言模型转发层：所有插件（dispatch、摘要、语音控制）都经由 llm 插件调用它。配置保存在后端 config-store（plugins.llm.profiles / active），启用后立即生效，无需重启。调用失败（连接失败 / 404 / 408 / 429 / 5xx）时自动按左侧列表顺序尝试其余配置，失败的端点冷却 60 秒；任何配置修改会立即清除冷却。多个配置可填同一个模型名 = 该模型的多个供应商：调用方（RPC 或 HTTP 请求体）带模型名时优先用这些配置（按列表顺序），模型不存在或全部不可用则自动用其余配置兜底，调用方只会拿到结果。自定义接口需兼容 OpenAI /chat/completions。
         </div>
       </div>
       <div v-else class="small text-secondary">暂无配置，点击左下角「＋ 新建模型配置」。</div>

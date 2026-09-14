@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -117,6 +118,444 @@ func TestCompleteConfigExtraBody(t *testing.T) {
 	result, err := complete(context.Background(), server.Client(), config, []map[string]string{{"role": "user", "content": "hi"}}, false, extra)
 	if err != nil || result.Content != "ok" {
 		t.Fatalf("result = %#v err = %v", result, err)
+	}
+}
+
+func TestBuildCandidatesRequestedModelSortsFirst(t *testing.T) {
+	active := Config{Endpoint: "http://a/v1", Model: "m1"}
+	profiles := []storedProfile{
+		{Name: "p1", Endpoint: "http://b/v1", Model: "m2"},
+		{Name: "p2", Endpoint: "http://c/v1", Model: "m3"},
+		{Name: "p3", Endpoint: "http://d/v1", Model: "m2"},
+	}
+	chain := buildCandidates(active, profiles, "m2")
+	var order []string
+	for _, entry := range chain {
+		order = append(order, entry.name)
+	}
+	// The requested model's configs keep their list order and lead; the rest
+	// follows in default order (active, then profiles top-down).
+	want := []string{"p1", "p3", "active", "p2"}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	// An unknown model leaves the default order untouched.
+	chain = buildCandidates(active, profiles, "nope")
+	if chain[0].name != "active" || chain[1].name != "p1" {
+		t.Fatalf("unknown model must keep default order: %v", chain)
+	}
+}
+
+func TestRouteNotFoundFallsBack(t *testing.T) {
+	missing := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNotFound)
+		_, _ = writer.Write([]byte("model not found"))
+	}))
+	defer missing.Close()
+	good := okServer(t, "served")
+	chain := buildCandidates(
+		Config{Endpoint: missing.URL, Model: "m"},
+		[]storedProfile{{Name: "good", Endpoint: good.URL, Model: "m"}},
+		"",
+	)
+	result, err := newRouter().route(context.Background(), chain, routeAttempt([]map[string]string{{"role": "user", "content": "hi"}}))
+	if err != nil || result.Content != "served" {
+		t.Fatalf("result = %#v err = %v", result, err)
+	}
+}
+
+func TestBuildCandidates(t *testing.T) {
+	chain := buildCandidates(
+		Config{Endpoint: "http://a/v1", Model: "m1"},
+		[]storedProfile{
+			{Name: "dup-of-active", Endpoint: "http://a/v1/chat/completions", Model: "m1"},
+			{Name: "", Endpoint: "", Model: "m2"},                     // skipped: no endpoint
+			{Name: "cloud", Endpoint: "http://b/v1", Model: "m1"},     // kept: same model, other host
+			{Name: "", Endpoint: "http://c/v1", Model: "m3"},          // kept: name falls back to model
+			{Name: "same-server", Endpoint: "http://a/", Model: "m2"}, // kept: same host, other model
+		},
+		"",
+	)
+	if len(chain) != 4 {
+		t.Fatalf("chain = %#v", chain)
+	}
+	if chain[0].name != "active" || chain[1].name != "cloud" || chain[2].name != "m3" || chain[3].name != "same-server" {
+		t.Fatalf("chain order = %#v", chain)
+	}
+}
+
+func okServer(t *testing.T, content string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		encoded, _ := json.Marshal(map[string]any{
+			"model":   "fake",
+			"choices": []map[string]any{{"message": map[string]string{"content": content}}},
+		})
+		_, _ = writer.Write(encoded)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func routeAttempt(messages []map[string]string) func(context.Context, Config) (CompletionResult, error) {
+	return func(ctx context.Context, config Config) (CompletionResult, error) {
+		return complete(ctx, http.DefaultClient, config, messages, false, nil)
+	}
+}
+
+func TestRouteFallsBackOnRetryableStatusAndCoolsDown(t *testing.T) {
+	var badCalls int32
+	bad := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&badCalls, 1)
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer bad.Close()
+	good := okServer(t, "from-cloud")
+	chain := buildCandidates(
+		Config{Endpoint: bad.URL, Model: "m"},
+		[]storedProfile{{Name: "cloud", Endpoint: good.URL, Model: "m"}},
+		"",
+	)
+	messages := []map[string]string{{"role": "user", "content": "hi"}}
+	router := newRouter()
+	now := time.Now()
+	router.now = func() time.Time { return now }
+
+	result, err := router.route(context.Background(), chain, routeAttempt(messages))
+	if err != nil || result.Content != "from-cloud" {
+		t.Fatalf("result = %#v err = %v", result, err)
+	}
+	if atomic.LoadInt32(&badCalls) != 1 {
+		t.Fatalf("bad calls = %d, want 1", badCalls)
+	}
+	// Within the cooldown the bad endpoint is skipped entirely.
+	if _, err := router.route(context.Background(), chain, routeAttempt(messages)); err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&badCalls) != 1 {
+		t.Fatalf("bad calls during cooldown = %d, want 1", badCalls)
+	}
+	// After the cooldown it gets one retry (and cools down again on failure).
+	now = now.Add(breakerCooldown + time.Second)
+	if _, err := router.route(context.Background(), chain, routeAttempt(messages)); err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&badCalls) != 2 {
+		t.Fatalf("bad calls after cooldown = %d, want 2", badCalls)
+	}
+}
+
+func TestRouteFallsBackOnTransportError(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	good := okServer(t, "backup")
+	chain := buildCandidates(
+		Config{Endpoint: deadURL, Model: "m"},
+		[]storedProfile{{Name: "backup", Endpoint: good.URL, Model: "m"}},
+		"",
+	)
+	result, err := newRouter().route(context.Background(), chain, routeAttempt([]map[string]string{{"role": "user", "content": "hi"}}))
+	if err != nil || result.Content != "backup" {
+		t.Fatalf("result = %#v err = %v", result, err)
+	}
+}
+
+func TestRouteNonRetryableStatusAbortsChain(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte("bad request"))
+	}))
+	defer bad.Close()
+	var goodCalls int32
+	good := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&goodCalls, 1)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+	chain := buildCandidates(
+		Config{Endpoint: bad.URL, Model: "m"},
+		[]storedProfile{{Name: "good", Endpoint: good.URL, Model: "m"}},
+		"",
+	)
+	_, err := newRouter().route(context.Background(), chain, routeAttempt([]map[string]string{{"role": "user", "content": "hi"}}))
+	var statusErr *statusError
+	if !errors.As(err, &statusErr) || statusErr.status != http.StatusBadRequest {
+		t.Fatalf("err = %v, want the 400 statusError", err)
+	}
+	if atomic.LoadInt32(&goodCalls) != 0 {
+		t.Fatalf("good endpoint must not be tried after a 400, calls = %d", goodCalls)
+	}
+}
+
+func TestFallbackAcrossProfilesRPCAndHTTPFacade(t *testing.T) {
+	var badCalls int32
+	bad := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&badCalls, 1)
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	defer bad.Close()
+	good := okServer(t, "from-cloud")
+	good2 := okServer(t, "from-m2-provider")
+
+	kernelConfig := kernel.DefaultConfig()
+	kernelConfig.Host, kernelConfig.Port = "127.0.0.1", 0
+	kernelServer := kernel.New(kernelConfig)
+	if err := kernelServer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer kernelServer.Shutdown(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	kernelWS := fmt.Sprintf("ws://127.0.0.1:%d/ws", kernelServer.Port())
+
+	store, err := configstore.New(t.TempDir() + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Start(ctx, kernelWS, false); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	caller := busclient.New(kernelWS, busclient.Manifest{ID: "llm-fallback-test", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+	if _, err := caller.Request(ctx, "config:_:set", map[string]any{
+		"plugin": configNamespace, "key": "active",
+		"value": Config{Endpoint: bad.URL, Model: "m"},
+	}, rpcBudget); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := caller.Request(ctx, "config:_:set", map[string]any{
+		"plugin": configNamespace, "key": "profiles",
+		"value": []storedProfile{
+			{Name: "cloud", Endpoint: good.URL, Model: "m"},
+			{Name: "cloud-m2", Endpoint: good2.URL, Model: "m2"},
+		},
+	}, rpcBudget); err != nil {
+		t.Fatal(err)
+	}
+
+	plugin := New()
+	if err := plugin.Start(ctx, kernelWS, false); err != nil {
+		t.Fatal(err)
+	}
+	defer plugin.Close(context.Background())
+
+	// HTTP facade path shares the breaker: the bad endpoint stays skipped.
+	// (Configured before the calls: writing the http config resets the
+	// breaker like any plugins.llm edit.)
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+	if _, err := caller.Request(ctx, "llm:_:http:configure", map[string]any{"enabled": true, "port": port}, rpcBudget); err != nil {
+		t.Fatal(err)
+	}
+
+	// RPC path: active (502) falls back to the cloud profile.
+	for call := 1; call <= 2; call++ {
+		value, err := caller.Request(ctx, "llm:_:complete", map[string]any{
+			"messages": []map[string]string{{"role": "user", "content": "hi"}},
+		}, rpcBudget)
+		if err != nil {
+			t.Fatalf("call %d: %v", call, err)
+		}
+		if value.(map[string]any)["content"] != "from-cloud" {
+			t.Fatalf("call %d: value = %#v", call, value)
+		}
+	}
+	if atomic.LoadInt32(&badCalls) != 1 {
+		t.Fatalf("bad endpoint must cool down after one failure, calls = %d", badCalls)
+	}
+
+	response, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", port), "application/json", strings.NewReader(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("facade status = %d", response.StatusCode)
+	}
+	var envelope struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Choices[0].Message.Content != "from-cloud" {
+		t.Fatalf("facade envelope = %#v", envelope)
+	}
+	if atomic.LoadInt32(&badCalls) != 1 {
+		t.Fatalf("bad endpoint must stay cooled across the facade, calls = %d", badCalls)
+	}
+
+	// A requested model sorts its configs first, on the RPC and the facade.
+	value, err := caller.Request(ctx, "llm:_:complete", map[string]any{
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+		"model":    "m2",
+	}, rpcBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.(map[string]any)["content"] != "from-m2-provider" {
+		t.Fatalf("requested-model RPC value = %#v", value)
+	}
+	response2, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", port), "application/json", strings.NewReader(`{"model":"m2","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response2.Body.Close()
+	var envelope2 struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(response2.Body).Decode(&envelope2); err != nil {
+		t.Fatal(err)
+	}
+	if envelope2.Choices[0].Message.Content != "from-m2-provider" {
+		t.Fatalf("requested-model facade envelope = %#v", envelope2)
+	}
+	if atomic.LoadInt32(&badCalls) != 1 {
+		t.Fatalf("requested model must bypass the cooled default chain head, bad calls = %d", badCalls)
+	}
+
+	// An unknown requested model rolls down the default chain to a result.
+	response3, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", port), "application/json", strings.NewReader(`{"model":"unknown-model","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response3.Body.Close()
+	if response3.StatusCode != http.StatusOK {
+		t.Fatalf("unknown-model facade status = %d", response3.StatusCode)
+	}
+
+	// GET /v1/models lists the union of servable models.
+	modelsResponse, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/models", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer modelsResponse.Body.Close()
+	var modelsList struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(modelsResponse.Body).Decode(&modelsList); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, item := range modelsList.Data {
+		ids = append(ids, item.ID)
+	}
+	if strings.Join(ids, ",") != "m,m2" {
+		t.Fatalf("models = %v, want [m m2]", ids)
+	}
+
+	// A config edit clears the breaker: the bad endpoint is retried once. The
+	// mailbox reset is asynchronous, so poll until it lands.
+	if _, err := caller.Request(ctx, "config:_:set", map[string]any{
+		"plugin": configNamespace, "key": "active",
+		"value": Config{Endpoint: bad.URL, Model: "m"},
+	}, rpcBudget); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := caller.Request(ctx, "llm:_:complete", map[string]any{
+			"messages": []map[string]string{{"role": "user", "content": "hi"}},
+		}, rpcBudget); err != nil {
+			t.Fatal(err)
+		}
+		if atomic.LoadInt32(&badCalls) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("config edit must reset the breaker, bad calls = %d, want 2", badCalls)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestProbeEndpoint(t *testing.T) {
+	good := okServer(t, "ok")
+	bad := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+
+	kernelConfig := kernel.DefaultConfig()
+	kernelConfig.Host, kernelConfig.Port = "127.0.0.1", 0
+	kernelServer := kernel.New(kernelConfig)
+	if err := kernelServer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer kernelServer.Shutdown(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	kernelWS := fmt.Sprintf("ws://127.0.0.1:%d/ws", kernelServer.Port())
+
+	store, err := configstore.New(t.TempDir() + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Start(ctx, kernelWS, false); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	caller := busclient.New(kernelWS, busclient.Manifest{ID: "llm-test-probe", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+
+	plugin := New()
+	if err := plugin.Start(ctx, kernelWS, false); err != nil {
+		t.Fatal(err)
+	}
+	defer plugin.Close(context.Background())
+
+	value, err := caller.Request(ctx, "llm:_:test", map[string]any{"endpoint": good.URL, "model": "m"}, rpcBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := value.(map[string]any)
+	if probe["ok"] != true || probe["model"] != "fake" {
+		t.Fatalf("good probe = %#v", probe)
+	}
+	if latency, isNumber := probe["latency_ms"].(float64); !isNumber || latency < 0 {
+		t.Fatalf("latency_ms = %#v", probe["latency_ms"])
+	}
+
+	value, err = caller.Request(ctx, "llm:_:test", map[string]any{"endpoint": bad.URL, "model": "m"}, rpcBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe = value.(map[string]any)
+	if probe["ok"] != false || !strings.Contains(probe["error"].(string), "500") {
+		t.Fatalf("bad probe = %#v", probe)
+	}
+	// A failed probe must not touch the breaker state.
+	if plugin.router.cooled(candidate{config: Config{Endpoint: bad.URL, Model: "m"}}.key()) {
+		t.Fatal("probe must not cool the endpoint down")
+	}
+
+	if _, err := caller.Request(ctx, "llm:_:test", map[string]any{"endpoint": good.URL}, rpcBudget); err == nil {
+		t.Fatal("missing model must be a bad_request")
 	}
 }
 

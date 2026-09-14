@@ -12,7 +12,7 @@ export interface TurnTargetEntry { dispatchId: string; roleId: string; roleName:
  *  position is the 1-based slot inside that role's queue; enqueued_at the
  *  queue time in ms. The pane's queued chip on a user box keys by
  *  dispatch_id (the user message's turn_id). */
-export interface QueuedMessage { message_id: string; dispatch_id: string; chat_id: string; role_id: string; role_name?: string; text: string; enqueued_at: number; position?: number }
+export interface QueuedMessage { message_id: string; dispatch_id: string; chat_id: string; role_id: string; role_ids?: string[]; role_name?: string; branch_id?: string; text: string; enqueued_at: number; position?: number }
 export interface Role { id: string; name: string; description: string; prompt: string; cwd: string; routing_policy_id: string; session_policy: string; context_recycle_percent: number | null; context_recycle_tokens: number | null; created_at: number; updated_at: number }
 export interface Chat { id: string; name: string; type: string; pinned: boolean; root: string; common_prompt: string; member_role_ids: string[]; role_routing_policy_overrides: Record<string, string>; created_at: number; updated_at: number }
 /** Per-turn session record as persisted on the turn row — the source of
@@ -26,7 +26,8 @@ export interface TurnSession { session_id: string; dispatch_id?: string; role_id
  *  fork_turn_id/parent_branch_id record the fork point ("" = pre-v0.64
  *  rootless / mainline parent); merged_into_branch_id the merge target
  *  ("" = mainline). */
-export interface Branch { id: string; chat_id: string; name: string; role_id?: string; role_name?: string; session_id?: string; fork_turn_id?: string; parent_branch_id?: string; merged_into_branch_id?: string; archived_at?: number | null; merged_through_turn_id?: string; merge_message_id?: string; created_at: number; updated_at: number }
+export interface Branch { id: string; chat_id: string; name: string; role_id?: string; role_name?: string; session_id?: string; fork_turn_id?: string; parent_branch_id?: string; merged_into_branch_id?: string; archived_at?: number | null; merged_through_turn_id?: string; merge_message_id?: string; state?: string; merged_at?: number | null; merge_node_id?: string; created_at: number; updated_at: number }
+export interface LineKeys { chat_id: string; branch_id: string; head_node_id: string; revision: number; keys: string[] }
 export interface RunningTurn { turn_id: string; role_id: string; role_name?: string }
 export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; branches?: Branch[]; messages?: ChatMessage[]; has_more?: boolean }
 export interface Workspace { id: string; name: string; common_prompt: string; roles: Role[]; routing_policies: RoutingPolicy[]; default_routing_policy_id: string }

@@ -22,7 +22,7 @@ import type { LoopIteration } from "../loop/types";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
 import { presentToolBlock } from "./toolPresentation";
-import type { Branch, Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, QueuedMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
+import type { Branch, Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, LineKeys, QueuedMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -153,13 +153,16 @@ function seedTurnSessions(map: Record<string, TurnSession> | undefined): void {
   }
 }
 
-/** Named parallel branches (framework v0.63): independent persistent records
- *  owning their turns (Turn.branch_id), so a session rebuild mid-branch
- *  never spawns a new tab. Active branches get bar tabs; archived ones back
- *  the 已合并分支 cards on the merge summary message. */
+/** Named parallel branches (history-DAG model): independent persistent
+ *  records owning their turns (Turn.branch_id). Active branches get bar
+ *  tabs; merged branches disappear everywhere (their content joined the
+ *  target line's history); archive-only branches stay read-only under
+ *  已归档. */
 const branches = ref<Branch[]>([]);
 const activeBranches = computed(() => branches.value.filter((branch) => !branch.archived_at));
-const archivedBranches = computed(() => branches.value.filter((branch) => Boolean(branch.archived_at)));
+// 已归档 lists archive-only branches (shelved without merging); merged
+// branches are gone for good — their history lives on the target line.
+const archivedBranches = computed(() => branches.value.filter((branch) => Boolean(branch.archived_at) && !branch.merged_at));
 
 function upsertBranches(list: Branch[]): void {
   const byId = new Map(branches.value.map((branch) => [branch.id, branch] as const));
@@ -167,15 +170,87 @@ function upsertBranches(list: Branch[]): void {
   branches.value = [...byId.values()].sort((a, b) => Number(Boolean(a.archived_at)) - Number(Boolean(b.archived_at)) || a.created_at - b.created_at || a.id.localeCompare(b.id));
 }
 
-/** Merge cards: merge_message_id → the branches that summary merged. */
-const mergeCards = computed<Map<string, Branch[]>>(() => {
-  const map = new Map<string, Branch[]>();
-  for (const branch of archivedBranches.value) {
-    if (!branch.merge_message_id) continue;
-    map.set(branch.merge_message_id, [...(map.get(branch.merge_message_id) ?? []), branch]);
+/** Line keys (history-DAG model): the server-side membership set of one
+ *  line's head snapshot — turn ids, dispatch ids (user messages), and
+ *  orphan input message ids. Tab visibility is the UNION of the selected
+ *  lines' keys; a forked branch's keys include its whole fork ancestry, a
+ *  fresh branch's keys are empty. Live attribution (turnSessions) covers
+ *  in-flight turns whose nodes aren't published yet, and unknown recent
+ *  content stays visible so streaming never flickers. */
+const lineKeys = ref(new Map<string, { keys: Set<string>; fetchedAt: number }>());
+
+function invalidateLineKeys(lineId?: string): void {
+  if (lineId === undefined) lineKeys.value = new Map();
+  else if (lineKeys.value.delete(lineId)) lineKeys.value = new Map(lineKeys.value);
+}
+
+async function ensureLineKeys(): Promise<void> {
+  if (activeTabs.value.includes("all")) return;
+  for (const id of effectiveTabs()) {
+    if (lineKeys.value.has(id)) continue;
+    try {
+      const reply = await ctx.bus.request("chat:_:line:keys", { chat_id: ctx.instanceId, branch_id: id === "main" ? "" : id }) as LineKeys;
+      lineKeys.value.set(id, { keys: new Set(reply.keys ?? []), fetchedAt: Date.now() });
+      lineKeys.value = new Map(lineKeys.value);
+    } catch {
+      // Keys stay absent: visibility falls back to live attribution only.
+    }
   }
-  return map;
+}
+// The activeTabs watcher registers below, after activeTabs is declared.
+
+/** The selected lines' key union. filtered=false (everything visible) on
+ *  the 全部 tab AND while any selected line's keys are still loading — a
+ *  brief over-show beats a flash of hidden content. */
+const keyView = computed<{ filtered: boolean; keys: Set<string>; fetchedAt: number }>(() => {
+  if (activeTabs.value.includes("all")) return { filtered: false, keys: new Set(), fetchedAt: 0 };
+  const union = new Set<string>();
+  let fetchedAt = Number.POSITIVE_INFINITY;
+  let complete = true;
+  for (const id of effectiveTabs()) {
+    const entry = lineKeys.value.get(id);
+    if (!entry) {
+      complete = false;
+      continue;
+    }
+    fetchedAt = Math.min(fetchedAt, entry.fetchedAt);
+    for (const key of entry.keys) union.add(key);
+  }
+  return complete ? { filtered: true, keys: union, fetchedAt } : { filtered: false, keys: union, fetchedAt: 0 };
 });
+
+// Unknown content newer than the keys snapshot minus this grace counts as
+// live (just-sent dispatch, unsessioned in-flight turn) and stays visible;
+// anything older that no selected line claims belongs to another line.
+const LIVE_KEY_GRACE_MS = 120_000;
+
+function turnVisible(turnId: string, ts: number): boolean {
+  const view = keyView.value;
+  if (!view.filtered) return true;
+  if (view.keys.has(turnId)) return true;
+  const entry = turnSessions.value.get(turnId);
+  if (entry) return tabActive(entry.branchId === "" ? "main" : entry.branchId);
+  return ts >= view.fetchedAt - LIVE_KEY_GRACE_MS;
+}
+
+function dispatchVisible(dispatchId: string, messageId: string, ts: number): boolean {
+  const view = keyView.value;
+  if (!view.filtered) return true;
+  if (view.keys.has(dispatchId) || view.keys.has(messageId)) return true;
+  let known = false;
+  for (const entry of turnSessions.value.values()) {
+    if (entry.dispatchId !== dispatchId) continue;
+    known = true;
+    if (tabActive(entry.branchId === "" ? "main" : entry.branchId)) return true;
+  }
+  if (known) return false;
+  return ts >= view.fetchedAt - LIVE_KEY_GRACE_MS;
+}
+
+/** Row-level visibility for paging/eviction (timeline uses the two above). */
+function messageVisible(message: ChatMessage): boolean {
+  return message.role === "user" ? dispatchVisible(message.turn_id, message.id, message.created_at) : turnVisible(message.turn_id, message.created_at);
+}
 
 /** Branch bar tabs (framework v0.65): plain click SINGLE-selects a line
  *  (view it; when it's exactly one branch, the next send continues it);
@@ -221,6 +296,7 @@ function persistBranchTabs(): void {
 const restoredTabs = loadBranchTabs(ctx.instanceId);
 if (restoredTabs.length > 0) activeTabs.value = restoredTabs;
 watch(activeTabs, persistBranchTabs);
+watch(activeTabs, () => { void ensureLineKeys(); });
 
 function allLineIds(): string[] {
   return ["main", ...activeBranches.value.map((branch) => branch.id)];
@@ -385,15 +461,13 @@ async function submitRename(): Promise<void> {
   }
 }
 
-// Merge (framework v0.64): the multi-selected tab set IS the merge
-// selection. Target = 主线 when it (or 全部) is active, otherwise the
-// first-clicked branch; the other selected active branches are the sources.
-// 合并 drafts an editable summary (LLM over the sources' turn records), and
-// confirming dispatches the final text into the target line and archives
-// the sources.
+// Merge (history-DAG model): one atomic step. The multi-selected tab set
+// IS the merge selection; target = 主线 when it (or 全部) is active,
+// otherwise the first-clicked branch. Confirming grafts the sources' whole
+// history into the target line via a merge node — no LLM summary, nothing
+// dispatched, sources disappear (their content shows on the target line's
+// timeline through the snapshot's ancestor closure).
 const mergeBusy = ref(false);
-interface MergeDraftBranch { id: string; name: string; cutoff_turn_id: string }
-const mergeDraft = ref<{ text: string; branches: MergeDraftBranch[]; target: { id: string; name: string } } | null>(null);
 
 const mergeTarget = computed<{ id: string; name: string } | null>(() => {
   const tabs = effectiveTabs();
@@ -412,14 +486,24 @@ const mergeSources = computed<Branch[]>(() => {
 // viewing 全部 alone is view-everything, not a merge pick.
 const canMerge = computed<boolean>(() => !activeTabs.value.includes("all") && mergeTarget.value !== null && mergeSources.value.length > 0);
 
-async function draftMerge(): Promise<void> {
+async function mergeSelected(): Promise<void> {
   const target = mergeTarget.value;
-  if (!target || mergeSources.value.length === 0) return;
+  const sources = mergeSources.value;
+  if (!target || sources.length === 0 || mergeBusy.value) return;
+  const names = sources.map((branch) => `「${branch.name}」`).join("");
+  const targetName = target.id === "" ? "主线" : `「${target.name}」`;
+  if (!window.confirm(`把 ${names} 合并进${targetName}？\n源分支消失；其全部内容并入${targetName}的历史与上下文，按时间线展示（无摘要、不打扰 agent）。`)) return;
   mergeBusy.value = true;
   branchOpError.value = "";
   try {
-    const result = await ctx.bus.request("chat:_:branches:merge", { chat_id: ctx.instanceId, branch_ids: mergeSources.value.map((branch) => branch.id), target_branch_id: target.id }, { timeout: 120_000 }) as { summary: string; branches: MergeDraftBranch[]; target?: { id: string; name: string } };
-    mergeDraft.value = { text: result.summary, branches: result.branches, target: result.target ?? target };
+    await ctx.bus.request("chat:_:branches:merge", {
+      chat_id: ctx.instanceId,
+      branch_ids: sources.map((branch) => branch.id),
+      target_branch_id: target.id,
+      idempotency_key: crypto.randomUUID(),
+    });
+    invalidateLineKeys();
+    activeTabs.value = [target.id || "main"];
   } catch (cause) {
     branchOpError.value = errorText(cause);
   } finally {
@@ -427,40 +511,20 @@ async function draftMerge(): Promise<void> {
   }
 }
 
-async function confirmMerge(): Promise<void> {
-  const draft = mergeDraft.value;
-  if (!draft || !draft.text.trim()) return;
-  mergeBusy.value = true;
-  branchOpError.value = "";
-  try {
-    await ctx.bus.request("chat:_:branches:merge-confirm", { chat_id: ctx.instanceId, summary: draft.text.trim(), branches: draft.branches, target_branch_id: draft.target.id }, { timeout: 120_000 });
-    mergeDraft.value = null;
-    activeTabs.value = draft.target.id ? [draft.target.id] : ["main"];
-  } catch (cause) {
-    branchOpError.value = errorText(cause);
-  } finally {
-    mergeBusy.value = false;
-  }
-}
-
-/** View one archived branch's original conversation (read-only tab,
- *  single-selected like any other line). */
+/** Archive-only branches expand the 已归档 section when selected. */
 const showArchived = ref(false);
-function viewArchivedBranch(id: string): void {
-  showArchived.value = true;
-  activeTabs.value = [id];
-}
 
 // Prune restored/selected tab ids the chat no longer has (e.g. stale storage
-// from before a branch merge/archive elsewhere) — a stale id would render no
-// tab and silently fall back to a mainline send. A selected archived branch
-// re-expands the 已归档 section so its tab stays visible.
+// or a branch merged elsewhere) — a stale id would render no tab and
+// silently fall back to a mainline send. Merged branches count as gone:
+// their line no longer exists. A selected archive-only branch re-expands
+// the 已归档 section so its tab stays visible.
 watch(branches, (list) => {
   if (list.length === 0 || activeTabs.value.includes("all")) return;
-  const known = new Set(["main", ...list.map((branch) => branch.id)]);
+  const known = new Set(["main", ...list.filter((branch) => !branch.merged_at).map((branch) => branch.id)]);
   const kept = activeTabs.value.filter((id) => known.has(id));
   if (kept.length !== activeTabs.value.length) activeTabs.value = kept.length > 0 ? kept : ["main"];
-  if (kept.some((id) => list.some((branch) => branch.id === id && branch.archived_at))) showArchived.value = true;
+  if (kept.some((id) => list.some((branch) => branch.id === id && branch.archived_at && !branch.merged_at))) showArchived.value = true;
 });
 
 // Archive WITHOUT merging (framework v0.66 — the "by the way" pattern):
@@ -507,31 +571,13 @@ interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleI
 const timeline = computed<TimelineBox[]>(() => {
   const turns = new Map<string, TimelineBox>();
   const boxes: TimelineBox[] = [];
-  // Branch filter: the active tab set's lines show, time-interleaved ("all"
-  //  = every line). Turns/dispatches whose records haven't landed yet stay
-  //  visible — hiding live content flickers.
-  const showAll = activeTabs.value.includes("all");
-  const tabs = new Set(effectiveTabs());
-  const lineVisible = (branchId: string): boolean => tabs.has(branchId === "" ? "main" : branchId);
-  const dispatchVisible = (dispatchId: string): boolean => {
-    if (showAll) return true;
-    let known = false;
-    for (const entry of turnSessions.value.values()) {
-      if (entry.dispatchId !== dispatchId) continue;
-      known = true;
-      if (lineVisible(entry.branchId)) return true;
-    }
-    return !known;
-  };
-  const turnVisible = (turnId: string): boolean => {
-    if (showAll) return true;
-    const entry = turnSessions.value.get(turnId);
-    if (!entry) return true; // unknown turns stay visible
-    return lineVisible(entry.branchId);
-  };
+  // Branch filter (history-DAG model): the selected lines' snapshot-key
+  // union shows, time-interleaved ("all" = every line). In-flight turns
+  // attribute via turnSessions; unknown recent content stays visible —
+  // hiding live content flickers. See turnVisible/dispatchVisible above.
   for (const message of messages.value) {
     if (message.role === "user") {
-      if (!dispatchVisible(message.turn_id)) continue;
+      if (!dispatchVisible(message.turn_id, message.id, message.created_at)) continue;
       boxes.push({
         // User messages carry the dispatch id as turn_id; the dispatch's
         // turn records (keyed by that id) supply the "→" routing label.
@@ -541,7 +587,7 @@ const timeline = computed<TimelineBox[]>(() => {
       });
       continue;
     }
-    if (!turnVisible(message.turn_id)) continue;
+    if (!turnVisible(message.turn_id, message.created_at)) continue;
     let box = turns.get(message.turn_id);
     if (!box) {
       box = { key: `t:${message.turn_id}`, kind: "role", label: "", roleId: "", turnId: message.turn_id, ts: message.created_at, segments: [] };
@@ -556,7 +602,7 @@ const timeline = computed<TimelineBox[]>(() => {
   for (const block of blocks.value) {
     if (block.kind === "agent_text") continue; // text blocks render via messages
     if (!activityDisplayable(block)) continue; // drop empty noise rows
-    if (!turnVisible(block.turn_id)) continue;
+    if (!turnVisible(block.turn_id, block.occurred_at)) continue;
     let box = turns.get(block.turn_id);
     if (!box) {
       box = { key: `t:${block.turn_id}`, kind: "role", label: "", roleId: "", turnId: block.turn_id, ts: block.occurred_at, segments: [] };
@@ -945,11 +991,30 @@ function evictBottomPage(): void {
  *  `prefer`red edge first. The edge follows browse intent: streaming and
  *  downward catch-up shed the top, upward history reading sheds the bottom.
  *  Attached to the live edge the top is always the victim (the live tail is
- *  sacred). */
+ *  sacred).
+ *
+ *  Filtered tab guard: on a branch tab the bottom page may hold the tab's
+ *  ENTIRE visible content (e.g. a fresh branch's live edge above pages of
+ *  invisible mainline history). Shedding it would blank the timeline, so
+ *  when the bottom page contains every visible message the top is evicted
+ *  instead — the invisible pages cycle through the window harmlessly. */
 function enforceWindow(prefer: "top" | "bottom"): void {
   if (loadingOlder.value || loadingNewer.value) return; // mid-flight page merge
   while (messages.value.length > WINDOW_MAX_MESSAGES) {
-    if (!hasNewer.value || prefer === "top") evictTopPage(); else evictBottomPage();
+    if (!hasNewer.value || prefer === "top") {
+      evictTopPage();
+      continue;
+    }
+    if (keyView.value.filtered) {
+      const bottomVisible = messages.value.slice(-PAGE_SIZE).filter(messageVisible).length;
+      let totalVisible = 0;
+      for (const message of messages.value) if (messageVisible(message)) totalVisible++;
+      if (bottomVisible >= totalVisible) {
+        evictTopPage();
+        continue;
+      }
+    }
+    evictBottomPage();
   }
 }
 
@@ -1255,7 +1320,13 @@ async function refresh(): Promise<void> {
 }
 
 /** Load one older page (composite cursor) plus the blocks in the span it
- *  newly covers, then restore the scroll position (old-viewer parity). */
+ *  newly covers, then restore the scroll position (old-viewer parity).
+ *
+ *  Filtered tab sets (a branch tab) hop over pages with zero VISIBLE
+ *  content — a fresh branch's history walk would otherwise churn the whole
+ *  mainline past the window with nothing ever rendering. Hopping stops at
+ *  the first page containing a visible message, at the window cap, at the
+ *  hop bound, or when the server's history is exhausted. */
 async function loadOlder(): Promise<void> {
   if (loadingInitial.value || loadingOlder.value || !hasOlder.value || !olderCursor.value) return;
   loadingOlder.value = true;
@@ -1263,26 +1334,33 @@ async function loadOlder(): Promise<void> {
   const previousScrollHeight = thread?.scrollHeight ?? 0;
   const previousScrollTop = thread?.scrollTop ?? 0;
   try {
-    const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true,
-      before: olderCursor.value.ts, before_id: olderCursor.value.id, limit: PAGE_SIZE,
-    }) as Promise<ChatList>);
-    const page = list.messages ?? [];
-    if (page.length === 0) {
-      hasOlder.value = false;
-      return;
+    let hops = 0;
+    for (;;) {
+      const list = await (ctx.bus.request("chat:_:chats:list", {
+        chat_id: ctx.instanceId, include_messages: true,
+        before: olderCursor.value.ts, before_id: olderCursor.value.id, limit: PAGE_SIZE,
+      }) as Promise<ChatList>);
+      const page = list.messages ?? [];
+      if (page.length === 0) {
+        hasOlder.value = false;
+        break;
+      }
+      seedTurnTargets(list.turn_targets);
+      const newLo = page[0].created_at;
+      const spanBlocks = await fetchBlocks(newLo, loadedLo.value);
+      const known = new Set(messages.value.map((item) => item.id));
+      messages.value = [...page.filter((item) => !known.has(item.id)), ...messages.value];
+      for (const block of spanBlocks) {
+        if (!blocks.value.some((item) => item.id === block.id)) blocks.value.push(block);
+      }
+      hasOlder.value = list.has_more ?? false;
+      olderCursor.value = { ts: newLo, id: page[0].id };
+      loadedLo.value = newLo;
+      hops++;
+      if (!hasOlder.value || !olderCursor.value) break;
+      if (!keyView.value.filtered || page.some(messageVisible)) break;
+      if (messages.value.length >= WINDOW_MAX_MESSAGES || hops >= 20) break;
     }
-    seedTurnTargets(list.turn_targets);
-    const newLo = page[0].created_at;
-    const spanBlocks = await fetchBlocks(newLo, loadedLo.value);
-    const known = new Set(messages.value.map((item) => item.id));
-    messages.value = [...page.filter((item) => !known.has(item.id)), ...messages.value];
-    for (const block of spanBlocks) {
-      if (!blocks.value.some((item) => item.id === block.id)) blocks.value.push(block);
-    }
-    hasOlder.value = list.has_more ?? false;
-    olderCursor.value = { ts: newLo, id: page[0].id };
-    loadedLo.value = newLo;
     writeBack();
     await nextTick();
     const threadNow = threadRef.value;
@@ -1629,6 +1707,11 @@ onMounted(() => {
     if (runningTurns.value.delete(value.turn_id)) runningTurns.value = new Map(runningTurns.value);
     clearConfirm(value.turn_id);
     resolvePendingTurn(value.role_id);
+    // A completed turn published its history node: the owning line's keys
+    // are stale (they gain the turn id + dispatch id).
+    const branchId = value.branch_id ?? turnSessions.value.get(value.turn_id)?.branchId ?? "";
+    invalidateLineKeys(branchId === "" ? "main" : branchId);
+    void ensureLineKeys();
     if (streamingMessageId !== "") {
       streamingMessageId = "";
       renderMermaidAtBoundary();
@@ -1644,16 +1727,21 @@ onMounted(() => {
     if (value.chat_id !== ctx.instanceId) return;
     seedQueued(value.queued);
   });
-  // Branch feed: created / renamed / session-stamped / archived / deleted
-  // branch records. Archived branches leave the bar but stay in the list —
-  // they back the 已合并分支 cards.
+  // Branch feed: created / renamed / archived / merged / head-advanced
+  // records. Any of them can change line membership, so the line keys are
+  // invalidated wholesale and refetched lazily. "head" frames carry only
+  // the new head node id (no full record) — they must not overwrite the
+  // branch list.
   ctx.bus.subscribe("chat:_:branch", (frame) => {
     const value = frame.value as Branch & { phase?: string };
     if (value.chat_id !== ctx.instanceId || !value.id) return;
+    invalidateLineKeys();
+    void ensureLineKeys();
     if (value.phase === "deleted") {
       branches.value = branches.value.filter((branch) => branch.id !== value.id);
       return;
     }
+    if (value.phase === "head") return;
     upsertBranches([value]);
   });
   window.addEventListener("viewer:chats-changed", refreshNow);
@@ -1663,6 +1751,7 @@ onMounted(() => {
     writeBack();
   });
   void load().catch((cause) => { error.value = errorText(cause); });
+  void ensureLineKeys();
 });
 </script>
 
@@ -1784,18 +1873,6 @@ onMounted(() => {
               </div>
             </details>
           </template>
-          <div v-if="box.kind === 'user' && box.messageId && mergeCards.get(box.messageId)" class="chat-merge-card">
-            <i class="bi bi-git" aria-hidden="true" />
-            已合并分支：{{ mergeCards.get(box.messageId)!.map((branch) => branch.name).join("、") }}
-            <button
-              type="button"
-              class="chat-merge-card-view"
-              title="查看被合并分支的原始对话（只读）"
-              @click="viewArchivedBranch(mergeCards.get(box.messageId)![0].id)"
-            >
-              查看原始对话
-            </button>
-          </div>
         </div>
       </article>
       <div v-if="timeline.length" ref="messageEndRef" class="chat-thread-message-end" aria-hidden="true" />
@@ -1890,8 +1967,8 @@ onMounted(() => {
         type="button"
         class="chat-lane-tab chat-lane-merge-go"
         :disabled="mergeBusy"
-        :title="`把 ${mergeSources.map((branch) => `「${branch.name}」`).join('')} 合并进${mergeTarget!.id === '' ? '主线' : `「${mergeTarget!.name}」`}：生成可编辑摘要，确认后摘要送入目标线、源分支归档`"
-        @click="draftMerge"
+        :title="`把 ${mergeSources.map((branch) => `「${branch.name}」`).join('')} 合并进${mergeTarget!.id === '' ? '主线' : `「${mergeTarget!.name}」`}：源分支消失，其全部内容并入目标线的历史与上下文（无摘要、不发消息）`"
+        @click="mergeSelected"
       >
         <span v-if="mergeBusy" class="spinner-border spinner-border-sm" aria-hidden="true" />
         <i v-else class="bi bi-git" aria-hidden="true" />
@@ -1910,19 +1987,6 @@ onMounted(() => {
         归档 ({{ viewingBranches.length }})
       </button>
       <span v-if="composerVisible" class="chat-send-target">发送到：{{ sendTargetLabel }}</span>
-    </div>
-    <div v-if="mergeDraft" class="chat-merge-draft">
-      <div class="chat-merge-draft-head">
-        <i class="bi bi-git" aria-hidden="true" />
-        合并摘要（可编辑）— 确认后发送到{{ mergeDraft.target.id === '' ? '主线' : `分支「${mergeDraft.target.name}」` }}并归档：{{ mergeDraft.branches.map((item) => item.name).join("、") }}
-      </div>
-      <textarea v-model="mergeDraft.text" class="chat-merge-draft-text" rows="10" />
-      <div class="chat-merge-draft-actions">
-        <button type="button" class="btn btn-sm btn-primary" :disabled="mergeBusy || !mergeDraft.text.trim()" @click="confirmMerge">
-          <span v-if="mergeBusy" class="spinner-border spinner-border-sm" aria-hidden="true" /> 确认合并
-        </button>
-        <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="mergeBusy" @click="mergeDraft = null">取消</button>
-      </div>
     </div>
     <div v-if="branchOpError" class="small text-danger px-1">{{ branchOpError }}</div>
     <div v-if="composerVisible" class="composer-shell" @focusout="handleComposerFocusOut">
@@ -2086,58 +2150,6 @@ onMounted(() => {
   font-size: var(--font-size-ui);
   padding: 0 6px;
   white-space: nowrap;
-}
-
-/* Merge draft editor: the LLM-drafted summary is editable before the
-   confirm dispatches it into the mainline and archives the branches. */
-.chat-merge-draft {
-  border-top: 1px solid var(--bs-border-color);
-  padding: 4px 2px;
-}
-
-.chat-merge-draft-head {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-ui);
-  margin-bottom: 4px;
-}
-
-.chat-merge-draft-text {
-  background: var(--bs-body-bg);
-  border: 1px solid var(--bs-border-color);
-  border-radius: 4px;
-  color: var(--bs-body-color);
-  font-size: var(--font-size-ui);
-  width: 100%;
-}
-
-.chat-merge-draft-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-/* 已合并分支 card: attached to the merge summary user box, links back to
-   the archived branches' original records. */
-.chat-merge-card {
-  align-items: center;
-  color: var(--color-text-muted);
-  display: flex;
-  font-size: var(--font-size-ui);
-  gap: 4px;
-  margin-top: 4px;
-}
-
-.chat-merge-card-view {
-  background: none;
-  border: 0;
-  color: var(--bs-primary);
-  cursor: pointer;
-  font-size: var(--font-size-ui);
-  padding: 0 4px;
-}
-
-.chat-merge-card-view:hover {
-  text-decoration: underline;
 }
 
 .chat-box {

@@ -32,6 +32,7 @@ var Manifest = busclient.Manifest{
 		"chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{}, "chat:_:draft:get": map[string]any{}, "chat:_:draft:set": map[string]any{},
 		"chat:_:branches:create": map[string]any{}, "chat:_:branches:patch": map[string]any{}, "chat:_:branches:delete": map[string]any{},
 		"chat:_:branches:merge": map[string]any{}, "chat:_:branches:merge-confirm": map[string]any{}, "chat:_:branches:archive": map[string]any{},
+		"chat:_:branches:graph": map[string]any{}, "chat:_:line:keys": map[string]any{},
 		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
 		"chat:_:voice:invoke": map[string]any{},
 	},
@@ -101,6 +102,11 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
+	// One-shot history-DAG migration (backup + rebuild + validate) runs
+	// before any dispatch path can touch the graph.
+	if err := migrateHistoryGraph(database, dataDir); err != nil {
+		return nil, err
+	}
 	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
@@ -110,6 +116,13 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	p.ctx, p.cancel = context.WithCancel(context.Background())
+	// History-DAG crash recovery runs before any dispatch is accepted:
+	// interrupted turns publish their nodes, orphan inputs become input
+	// nodes (idempotent).
+	if err := p.recoverHistory(); err != nil {
+		p.cancel()
+		return fmt.Errorf("history recovery: %w", err)
+	}
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed))
 	// Protocol errors (e.g. frame_too_large when a reply exceeds the kernel
 	// frame limit) arrive only on this connection's error mailbox; without a
@@ -127,6 +140,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate, "chat:_:draft:get": p.handleDraftGet, "chat:_:draft:set": p.handleDraftSet,
 		"chat:_:branches:create": p.handleBranchesCreate, "chat:_:branches:patch": p.handleBranchesPatch, "chat:_:branches:delete": p.handleBranchesDelete,
 		"chat:_:branches:merge": p.handleBranchesMerge, "chat:_:branches:merge-confirm": p.handleBranchesMergeConfirm, "chat:_:branches:archive": p.handleBranchesArchive,
+		"chat:_:branches:graph": p.handleBranchesGraph, "chat:_:line:keys": p.handleLineKeys,
 		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
 		"chat:_:voice:invoke": p.handleVoiceInvoke,
 	}
@@ -191,6 +205,15 @@ func (p *Plugin) reply(frame busclient.Frame, value any, err error) {
 	}
 	if errors.Is(err, errBranchEmpty) {
 		code = "branch_empty"
+	}
+	if errors.Is(err, errLineBusy) {
+		code = "line_busy"
+	}
+	if errors.Is(err, errRevisionConflict) {
+		code = "revision_conflict"
+	}
+	if errors.Is(err, errMergeProtocol) {
+		code = "protocol_upgraded"
 	}
 	_ = pluginrpc.RespondError(p.client, frame, code, err.Error())
 }

@@ -42,32 +42,39 @@ func TestTurnSummaryBudgetBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	if got := p.buildLineSummariesSection(nil, 100, 0, 100, ""); got != "" {
+	empty := &historySnapshot{}
+	if got, _ := p.snapshotSummariesSection(empty, 0, 100, ""); got != "" {
 		t.Fatalf("empty DB section=%q", got)
 	}
-	turns := []Turn{{ID: "old"}, {ID: "new"}}
+	snapshot := &historySnapshot{Turns: []Turn{{ID: "old"}, {ID: "new"}}}
 	for _, item := range []TurnSummary{{TurnID: "old", ChatID: "c", RoleName: "Old", Status: "completed", Summary: "old summary", OccurredAt: 10}, {TurnID: "new", ChatID: "c", RoleName: "New", Status: "completed", Summary: "newest summary is long", OccurredAt: 20}} {
 		if err := p.store.saveTurnSummary(&item); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// A summary outside the turn set never leaks into the lineage section.
+	// A summary outside the snapshot turn set never leaks into the section.
 	if err := p.store.saveTurnSummary(&TurnSummary{TurnID: "other", ChatID: "c", RoleName: "Other", Status: "completed", Summary: "other line summary", OccurredAt: 15}); err != nil {
 		t.Fatal(err)
 	}
-	if got := p.buildLineSummariesSection(turns, 100, 0, 0, ""); got != "" {
+	if got, _ := p.snapshotSummariesSection(snapshot, 0, 0, ""); got != "" {
 		t.Fatalf("zero budget=%q", got)
 	}
-	got := p.buildLineSummariesSection(turns, 100, 0, 6, "")
+	got, covered := p.snapshotSummariesSection(snapshot, 0, 6, "")
 	if !strings.Contains(got, "newest") || strings.Contains(got, "old summary") || !strings.Contains(got, "truncated") {
 		t.Fatalf("truncated section=%q", got)
 	}
-	got = p.buildLineSummariesSection(turns, 100, 0, 100, "")
+	if !covered["new"] || covered["old"] {
+		t.Fatalf("coverage should report exactly the picked turn: %v", covered)
+	}
+	got, covered = p.snapshotSummariesSection(snapshot, 0, 100, "")
 	if strings.Index(got, "old summary") > strings.Index(got, "newest summary") {
 		t.Fatalf("not chronological: %q", got)
 	}
 	if strings.Contains(got, "other line summary") {
-		t.Fatalf("foreign turn leaked into lineage section: %q", got)
+		t.Fatalf("foreign turn leaked into snapshot section: %q", got)
+	}
+	if !covered["old"] || !covered["new"] {
+		t.Fatalf("full budget covers both turns: %v", covered)
 	}
 }
 

@@ -100,6 +100,14 @@ type HindsightConfig struct {
 	// deployment takes 5-8s per message).
 	RetainEnabled        bool `json:"retain_enabled"`
 	RetainTimeoutSeconds int  `json:"retain_timeout_seconds"`
+	// RecallEnabled gates the long-term-memory recall section in line
+	// contexts. Default OFF (history-DAG model): the chat bank mixes every
+	// line's memories and recall results carry no verifiable source ids, so
+	// no snapshot can prove membership — isolated contexts must not inject
+	// unverifiable memories (docs/chat-branch-dag-plan.md §7 检索隔离).
+	// Retain keeps running either way; re-enable knowingly for mainline-
+	// only workspaces.
+	RecallEnabled bool `json:"recall_enabled"`
 }
 
 func defaultWorkspace() Workspace {

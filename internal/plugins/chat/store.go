@@ -141,9 +141,12 @@ type Turn struct {
 	// executed the turn (planned candidate at resolve time, updated on
 	// failover). Empty on turns that predate this column or never resolved
 	// a candidate — the frontend renders no routing label for those.
-	Agent      string
-	Provider   string
-	Model      string
+	Agent    string
+	Provider string
+	Model    string
+	// BatchID links the turn to its execution batch's dispatch snapshot —
+	// the fixed input head its history node hangs off (history-DAG model).
+	BatchID    string `gorm:"index"`
 	StartedAt  int64
 	EndedAt    *int64
 	StopReason *string
@@ -173,23 +176,24 @@ type TurnSummary struct {
 // — a session rebuild mid-branch never spawns a new tab. Since v0.66 the
 // branch is a pure CONTEXT partition: it binds no role — RoleID/RoleName
 // merely record the first role that ran here (display) and every role keeps
-// its own session lane on the branch (role × branch). Merging dispatches a
-// summary into a target line and archives the branch: MergedThroughTurnID
-// records the cutoff turn (no duplicate import on re-merge) and
-// MergeMessageID links the target line's user message carrying the summary,
-// so the pane can attach the "已合并分支" card. Archiving WITHOUT merging
-// (v0.66, the "by the way" pattern) just sets ArchivedAt: the branch leaves
-// the bar, rejects dispatch, and — carrying no MergeMessageID — its turns
-// join no line's lineage. Unarchiving is a reserved, unimplemented
-// function.
+// its own session lane on the branch (role × branch).
+//
+// Lifecycle (history-DAG model, docs/chat-branch-dag-plan.md): State is the
+// operation-permission authority — open / archived / merged. Archiving
+// WITHOUT merging (the "by the way" pattern) just closes the work entry:
+// the branch leaves the bar, rejects dispatch, and its history joins no
+// line (no merge edge is ever written). Merging is a single atomic graph
+// operation: a merge node grafts the branch's head into the target line,
+// the branch disappears from every list (bar, open, archived) — the row,
+// its turns, and the graph edges stay for queries and debugging.
+// Unarchiving and merge-undo are reserved, unimplemented functions.
 //
 // Fork points (framework v0.64): ForkTurnID records the turn the branch
 // forked from (empty on pre-v0.64 rootless branches) and ParentBranchID the
-// fork turn's line ("" = mainline); forks are allowed from any turn of any
-// active line, so branches form a DAG. MergedIntoBranchID records the merge
-// target ("" = mainline; pre-v0.64 archived rows' zero value lands them on
-// the mainline naturally). Lineage context builds walk this ancestry up to
-// each fork turn and union in turns of branches merged into the line.
+// fork turn's line ("" = mainline); the fork node fork:<branchID> in the
+// history graph carries the actual parent edge. MergedIntoBranchID records
+// the merge target ("" = mainline). MergedThroughTurnID and MergeMessageID
+// are retired pre-DAG merge artifacts, kept read-only for forensics.
 type Branch struct {
 	ID       string `gorm:"primaryKey" json:"id"`
 	ChatID   string `gorm:"index;not null" json:"chat_id"`
@@ -205,8 +209,13 @@ type Branch struct {
 	ArchivedAt          *int64 `json:"archived_at"`
 	MergedThroughTurnID string `json:"merged_through_turn_id"`
 	MergeMessageID      string `json:"merge_message_id"`
-	CreatedAt           int64  `json:"created_at"`
-	UpdatedAt           int64  `json:"updated_at"`
+	// DAG lifecycle: State ∈ open/archived/merged ("" on rows not yet
+	// migrated, treated as open); MergedAt/MergeNodeID record the merge.
+	State       string `gorm:"index" json:"state"`
+	MergedAt    *int64 `json:"merged_at"`
+	MergeNodeID string `json:"merge_node_id"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
 }
 
 func (b Branch) payload() map[string]any {
@@ -217,22 +226,29 @@ func (b Branch) payload() map[string]any {
 		"merged_into_branch_id": b.MergedIntoBranchID,
 		"archived_at":           b.ArchivedAt, "merged_through_turn_id": b.MergedThroughTurnID,
 		"merge_message_id": b.MergeMessageID,
-		"created_at":       b.CreatedAt, "updated_at": b.UpdatedAt,
+		"state":            b.State, "merged_at": b.MergedAt, "merge_node_id": b.MergeNodeID,
+		"created_at": b.CreatedAt, "updated_at": b.UpdatedAt,
 	}
 }
 
+// archived reports the retired guard: merged and shelved branches both
+// reject dispatch/fork/delete-of-history. (Pre-DAG rows carry ArchivedAt
+// with an empty State; the migration backfills State.)
 func (b Branch) archived() bool { return b.ArchivedAt != nil }
+
+// merged reports the merge terminal state (grafted into a target line).
+func (b Branch) merged() bool { return b.State == branchStateMerged }
 
 type store struct{ db *gorm.DB }
 
 func openStore(dataDir string) (*store, error) {
 	path := filepath.Join(dataDir, "chat.sqlite3")
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", filepath.ToSlash(path))
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(path))
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open chat database: %w", err)
 	}
-	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &Branch{}, &AutomationLease{}, &AutomationGate{}, &DispatchReceipt{}, &Draft{}); err != nil {
+	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &Branch{}, &AutomationLease{}, &AutomationGate{}, &DispatchReceipt{}, &Draft{}, &HistoryNode{}, &HistoryEdge{}, &LineHead{}, &DispatchSnapshot{}, &MergeReceipt{}, &ContextBuild{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
 	// The timeline queries blocks by (chat_id, occurred_at) windows; the
@@ -410,10 +426,14 @@ func (s *store) importDomain(roles []SuperRole, routing RoutingConfig) error {
 
 func (s *store) deleteChat(id string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}, &Branch{}} {
+		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}, &Branch{}, &HistoryNode{}, &LineHead{}, &DispatchSnapshot{}, &MergeReceipt{}, &ContextBuild{}} {
 			if err := tx.Where("chat_id = ?", id).Delete(model).Error; err != nil {
 				return err
 			}
+		}
+		// History edges carry no chat column; they go with the chat's nodes.
+		if err := tx.Exec("DELETE FROM history_edges WHERE child_id NOT IN (SELECT id FROM history_nodes)").Error; err != nil {
+			return err
 		}
 		return tx.Delete(&Chat{}, "id = ?", id).Error
 	})
@@ -696,39 +716,12 @@ func (s *store) lineTurns(chatID, branchID string, before int64) ([]Turn, error)
 	return values, err
 }
 
-// branchesMergedInto returns the branches MERGED into the given line (""
-// = mainline). The merge_message_id predicate separates real merges from
-// archive-only branches (framework v0.66): an archived-without-merge row
-// also has merged_into_branch_id = "" but no merge message, and its turns
-// must join NO line's lineage — archiving shelves the content, it never
-// shares it. (Pre-v0.64 archived rows all came from merges and carry a
-// merge message id, so they land on the mainline naturally.)
-func (s *store) branchesMergedInto(chatID, targetBranchID string) ([]Branch, error) {
-	var values []Branch
-	err := s.db.Where("chat_id = ? AND merged_into_branch_id = ? AND archived_at IS NOT NULL AND merge_message_id != ''", chatID, targetBranchID).Order("created_at, id").Find(&values).Error
-	return values, err
-}
-
 // latestBranchRoleTurn returns the role's newest turn on the branch — the
 // resume source for role × branch lane continuations (framework v0.66:
 // branches are multi-role, each role continues its own branch lane).
 func (s *store) latestBranchRoleTurn(chatID, branchID, roleID string) (*Turn, error) {
 	var value Turn
 	result := s.db.Where("chat_id = ? AND branch_id = ? AND role_id = ?", chatID, branchID, roleID).Order("started_at desc, id desc").Limit(1).Find(&value)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
-	}
-	return &value, nil
-}
-
-// latestLineTurn returns the line's newest turn — the prev-turn stamp for the
-// line's next turn ("" branchID = mainline).
-func (s *store) latestLineTurn(chatID, branchID string) (*Turn, error) {
-	var value Turn
-	result := s.db.Where("chat_id = ? AND branch_id = ?", chatID, branchID).Order("started_at desc, id desc").Limit(1).Find(&value)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -768,20 +761,6 @@ func (s *store) lineTurnSummaries(turnIDs []string, before, after int64, exclude
 	}
 	err := query.Order("occurred_at asc, turn_id asc").Limit(50).Find(&values).Error
 	return values, err
-}
-
-// latestSummaryTimeForTurns returns the newest completed-summary timestamp
-// within a turn set — the raw-tail floor of the lineage context.
-func (s *store) latestSummaryTimeForTurns(turnIDs []string, before int64) (int64, error) {
-	if len(turnIDs) == 0 {
-		return 0, nil
-	}
-	var value TurnSummary
-	result := s.db.Where("turn_id IN ? AND status = ? AND occurred_at < ?", turnIDs, "completed", before).Order("occurred_at desc").Limit(1).Find(&value)
-	if result.Error != nil || result.RowsAffected == 0 {
-		return 0, result.Error
-	}
-	return value.OccurredAt, nil
 }
 
 // lineHistoryAfter is historyAfter scoped to a turn-key set (turn ids plus
@@ -837,23 +816,6 @@ func (s *store) lineHasActivityBetween(chatID string, keys []string, after, befo
 	var count int64
 	err := s.db.Model(&Message{}).Where("chat_id = ? AND turn_id IN ? AND created_at > ? AND created_at < ?", chatID, keys, after, before).Count(&count).Error
 	return count > 0, err
-}
-
-// turnSummariesForTurns returns completed summaries keyed by turn id — the
-// merge draft prefers these over raw transcripts.
-func (s *store) turnSummariesForTurns(turnIDs []string) (map[string]TurnSummary, error) {
-	result := map[string]TurnSummary{}
-	if len(turnIDs) == 0 {
-		return result, nil
-	}
-	var values []TurnSummary
-	if err := s.db.Where("turn_id IN ? AND status = ?", turnIDs, "completed").Find(&values).Error; err != nil {
-		return nil, err
-	}
-	for _, value := range values {
-		result[value.TurnID] = value
-	}
-	return result, nil
 }
 
 func (s *store) latestUserMessage(chatID string, before int64) (*Message, error) {

@@ -1,35 +1,51 @@
 package chat
 
-// Named parallel branches (framework v0.63): creation/rename/delete, and the
-// merge flow — branches:merge drafts an editable summary (LLM over the
-// branches' turn summaries, falling back to raw transcripts), the user edits
-// it, and branches:merge-confirm dispatches the final text into the mainline
-// and archives the branches with their cutoff turns recorded.
+// Named parallel branches (framework v0.63+, history-DAG model
+// docs/chat-branch-dag-plan.md): creation/rename/delete, archive-without-
+// merge, and the single-step atomic merge. Merge is a pure graph graft: one
+// transaction writes a merge node (parents = target old head + every source
+// head), advances the target head with sessions marked stale, and closes
+// the source lines (state=merged). No LLM summary, no dispatched message,
+// no agent wake-up; the source branch disappears from every list while its
+// rows, turns, and edges stay for queries and debugging. The retired
+// two-step draft/confirm protocol is rejected with an upgrade error.
 
 import (
-	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
+	"sort"
 	"strings"
-	"time"
+
+	"gorm.io/gorm"
 
 	"viewer/sdk/go/busclient"
 )
 
 var (
-	errBranchArchived = errors.New("the branch is archived (merged or shelved)")
-	errBranchRunning  = errors.New("the branch still has a running turn — wait for it to finish")
-	errBranchEmpty    = errors.New("the branch has no turns yet")
+	errBranchArchived   = errors.New("the branch is archived (merged or shelved)")
+	errBranchRunning    = errors.New("the branch still has a running turn — wait for it to finish")
+	errBranchEmpty      = errors.New("the branch has no turns yet")
+	errMergeProtocol    = errors.New("the merge draft/confirm protocol was retired — upgrade the client (merge is now a single-step branches:merge call)")
+	errRevisionConflict = errors.New("the work line changed since you looked — refresh and retry")
 )
 
 // publishBranch pushes one branch record on the branch feed; panes reseed or
-// upsert from it (phases: created / updated / archived / deleted).
+// upsert from it (phases: created / updated / archived / merged / deleted).
 func (p *Plugin) publishBranch(branch *Branch, phase string) {
 	payload := branch.payload()
 	payload["phase"] = phase
 	p.publish("chat:_:branch", payload)
+}
+
+// publishLineHead announces a line's head move on the branch feed, so panes
+// invalidate their cached visibility keys for the line.
+func (p *Plugin) publishLineHead(chatID, branchID string, head *LineHead) {
+	p.publish("chat:_:branch", map[string]any{
+		"chat_id": chatID, "branch_id": branchID, "phase": "head",
+		"head_node_id": head.HeadNodeID, "revision": head.Revision,
+	})
 }
 
 func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
@@ -37,6 +53,7 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 	chatID, _ := value["chat_id"].(string)
 	name := strings.TrimSpace(requestString(value, "name"))
 	fromTurnID := strings.TrimSpace(requestString(value, "from_turn_id"))
+	fromBranchID, hasFromBranch := value["from_branch_id"].(string)
 	if err == nil && chatID == "" {
 		err = errBadRequest
 	}
@@ -52,9 +69,10 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	// Fork point (framework v0.64): the branch starts after the referenced
-	// turn. The turn's line must be active — archived (merged) lines are
-	// read-only and can no longer be forked from.
+	// Fork point: from_turn_id forks the exact ancestor closure of that
+	// (finished, published) turn; from_branch_id forks a line's current
+	// head ("" = mainline); neither starts a fresh, history-less branch.
+	// The turn's line must be active — archived/merged lines are read-only.
 	parentBranchID := ""
 	if fromTurnID != "" {
 		fork, forkErr := p.store.turn(fromTurnID)
@@ -77,9 +95,33 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 				return
 			}
 		}
+		var count int64
+		if nodeErr := p.store.db.Model(&HistoryNode{}).Where("id = ? AND kind = ?", turnNodeID(fromTurnID), nodeKindTurn).Count(&count).Error; nodeErr != nil {
+			p.reply(frame, nil, nodeErr)
+			return
+		}
+		if count == 0 {
+			p.reply(frame, nil, errors.New("the fork turn is not published yet — wait for its turn to finish"))
+			return
+		}
+	} else if hasFromBranch && fromBranchID != "" {
+		parent, parentErr := p.store.branch(fromBranchID)
+		if parentErr != nil {
+			p.reply(frame, nil, parentErr)
+			return
+		}
+		if parent == nil || parent.ChatID != chatID {
+			p.reply(frame, nil, errors.New("the from_branch_id branch was not found in the chat"))
+			return
+		}
+		if parent.archived() {
+			p.reply(frame, nil, errBranchArchived)
+			return
+		}
+		parentBranchID = fromBranchID
 	}
 	if name == "" {
-		// Default 分支NN: count over all branches (including archived) so a
+		// Default 分支NN: count over all branches (including retired) so a
 		// number, once shown, never moves to another branch.
 		existing, countErr := p.store.chatBranches(chatID)
 		if countErr != nil {
@@ -106,8 +148,33 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 		}
 	}
 	now := nowMillis()
-	branch := &Branch{ID: id, ChatID: chatID, Name: name, ForkTurnID: fromTurnID, ParentBranchID: parentBranchID, CreatedAt: now, UpdatedAt: now}
-	if err = p.store.createBranch(branch); err != nil {
+	branch := &Branch{ID: id, ChatID: chatID, Name: name, ForkTurnID: fromTurnID, ParentBranchID: parentBranchID, State: branchStateOpen, CreatedAt: now, UpdatedAt: now}
+	err = p.store.db.Transaction(func(tx *gorm.DB) error {
+		parents := []string{}
+		switch {
+		case fromTurnID != "":
+			parents = []string{turnNodeID(fromTurnID)}
+		case hasFromBranch:
+			head, headErr := ensureLineHead(tx, chatID, fromBranchID)
+			if headErr != nil {
+				return headErr
+			}
+			parents = []string{head.HeadNodeID}
+		}
+		node := &HistoryNode{ID: forkNodeID(id), ChatID: chatID, Kind: nodeKindFork, OriginBranchID: id, CreatedAt: now}
+		edgeKind := edgeKindFork
+		if len(parents) == 0 {
+			edgeKind = ""
+		}
+		if err := addNode(tx, node, parents, edgeKind); err != nil {
+			return err
+		}
+		if err := tx.Create(&LineHead{ChatID: chatID, BranchID: id, HeadNodeID: node.ID, Revision: 1}).Error; err != nil {
+			return err
+		}
+		return tx.Create(branch).Error
+	})
+	if err != nil {
 		p.reply(frame, nil, err)
 		return
 	}
@@ -149,9 +216,10 @@ func (p *Plugin) handleBranchesPatch(frame busclient.Frame) {
 }
 
 // handleBranchesDelete removes a branch that never ran (no turns) and is not
-// archived — the cleanup path for a mis-clicked ＋. Branches with history
-// stay forever: archiving is the merge outcome, deletion would orphan the
-// timeline's turn attribution and the 已合并分支 cards.
+// retired — the cleanup path for a mis-clicked ＋. Its trivial graph line
+// (fork node, head row) goes with it. Branches with history stay forever:
+// archiving/merging are the terminal states, deletion would orphan the
+// timeline's turn attribution.
 func (p *Plugin) handleBranchesDelete(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	id, _ := value["id"].(string)
@@ -179,7 +247,19 @@ func (p *Plugin) handleBranchesDelete(frame busclient.Frame) {
 		p.reply(frame, nil, errors.New("only an empty, unmerged branch can be deleted"))
 		return
 	}
-	if err = p.store.deleteBranch(id); err != nil {
+	err = p.store.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&LineHead{}, "chat_id = ? AND branch_id = ?", branch.ChatID, id).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&HistoryEdge{}, "child_id = ? OR parent_id = ?", forkNodeID(id), forkNodeID(id)).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&HistoryNode{}, "id = ?", forkNodeID(id)).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&Branch{}, "id = ?", id).Error
+	})
+	if err != nil {
 		p.reply(frame, nil, err)
 		return
 	}
@@ -187,216 +267,229 @@ func (p *Plugin) handleBranchesDelete(frame busclient.Frame) {
 	p.reply(frame, map[string]any{"deleted": true, "id": id}, nil)
 }
 
-const mergeSummarySystemPrompt = "You integrate the outcomes of several parallel work branches that ran in one shared working directory, writing a merge briefing for the work line (mainline or another branch) that will continue the work. Be factual: never invent constraints, decisions, file names or numbers that are not present in the input. Keep names of files, scripts, commands and important numbers verbatim. Write in the same language as the input (Chinese if the input is Chinese). Keep the whole summary under 1500 characters."
-
-const mergeSummaryUserTemplate = `Below are the work records of parallel branches (each branch worked independently in the SAME shared working directory; code changes already landed in the files).
-
-Write a merge summary with exactly these four sections:
-## 各分支成果
-(per branch: 分支名 — what was done, conclusions)
-## 代码改动与验证
-(per branch: changed files, commands, verification results)
-## 分支间的冲突
-(overlapping edits to the same files, contradictory conclusions; write "无" if none)
-## 待办
-(open questions / next steps; write "无" if none)
-
-BRANCH RECORDS:
-%s
-`
-
-// mergeTranscriptBudget caps one branch's contribution to the merge draft
-// input, so a long branch cannot crowd out the others.
-const mergeTranscriptBudget = 6000
-
-// buildMergeInput renders the branches' turn records for the merge draft:
-// completed turn summaries where available, truncated raw transcripts
-// otherwise.
-func (p *Plugin) buildMergeInput(branches []*Branch) (string, error) {
-	config := p.summaryConfig(p.ctx)
-	sections := make([]string, 0, len(branches))
-	for _, branch := range branches {
-		turns, err := p.store.branchTurns(branch.ID)
-		if err != nil {
-			return "", err
-		}
-		turnIDs := make([]string, 0, len(turns))
-		for _, turn := range turns {
-			turnIDs = append(turnIDs, turn.ID)
-		}
-		summaries, err := p.store.turnSummariesForTurns(turnIDs)
-		if err != nil {
-			return "", err
-		}
-		lines := []string{fmt.Sprintf("### 分支「%s」(role: %s)", branch.Name, fallback(branch.RoleName, "agent"))}
-		for _, turn := range turns {
-			if summary, ok := summaries[turn.ID]; ok && strings.TrimSpace(summary.Summary) != "" {
-				lines = append(lines, summary.Summary)
-				continue
-			}
-			transcript, _, _, transcriptErr := p.buildTurnTranscript(turn.ID, config.ToolCharBudget)
-			if transcriptErr != nil || strings.TrimSpace(transcript) == "" {
-				continue
-			}
-			lines = append(lines, truncateText(transcript, 2000))
-		}
-		sections = append(sections, truncateText(strings.Join(lines, "\n\n"), mergeTranscriptBudget))
-	}
-	return strings.Join(sections, "\n\n"), nil
-}
-
-// validateMergeBranches loads and checks the merge candidates: same chat,
-// all active, none empty, none running (a running branch is merged only
-// after its turn finishes). Returns the branch rows in request order.
-func (p *Plugin) validateMergeBranches(chatID string, branchIDs []string) ([]*Branch, error) {
-	if len(branchIDs) == 0 {
-		return nil, errors.New("branch_ids is required")
-	}
-	branches := make([]*Branch, 0, len(branchIDs))
-	seen := map[string]bool{}
-	for _, id := range branchIDs {
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		branch, err := p.store.branch(id)
-		if err != nil {
-			return nil, err
-		}
-		if branch == nil || branch.ChatID != chatID {
-			return nil, fmt.Errorf("branch was not found in the chat: %s", id)
-		}
-		if branch.archived() {
-			return nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchArchived)
-		}
-		turns, err := p.store.branchTurns(id)
-		if err != nil {
-			return nil, err
-		}
-		if len(turns) == 0 {
-			return nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchEmpty)
-		}
-		running, err := p.store.branchHasRunningTurn(id)
-		if err != nil {
-			return nil, err
-		}
-		if running {
-			return nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchRunning)
-		}
-		branches = append(branches, branch)
-	}
-	return branches, nil
-}
-
-// validateMergeTarget loads the merge target line ("" = mainline, no row):
-// a branch target must belong to the chat, be active, and not be among the
-// merge sources (framework v0.64 — branch-to-branch merges).
-func (p *Plugin) validateMergeTarget(chatID, targetBranchID string, sources map[string]bool) (*Branch, error) {
-	if targetBranchID == "" {
-		return nil, nil
-	}
-	if sources[targetBranchID] {
-		return nil, errors.New("the merge target cannot be merged into itself")
-	}
-	target, err := p.store.branch(targetBranchID)
-	if err != nil {
-		return nil, err
-	}
-	if target == nil || target.ChatID != chatID {
-		return nil, errors.New("the merge target branch was not found in the chat")
-	}
-	if target.archived() {
-		return nil, fmt.Errorf("merge target %w", errBranchArchived)
-	}
-	return target, nil
-}
-
+// handleBranchesMerge is the single-step atomic merge
+// (docs/chat-branch-dag-plan.md §6): one transaction writes the merge node
+// (parents = target old head + every source head), advances the target head
+// with its sessions marked stale (the next batch rebuilds every session
+// from the new full snapshot), and closes the sources (state=merged).
+// Empty branches merge fine (their fork node is real history); shared
+// ancestry is deduplicated by the graph walk. expected_revisions (line →
+// revision, "" key = mainline) makes a stale client fail with a revision
+// conflict instead of merging blind; idempotency_key replays return the
+// stored result, and a key reused with different parameters is rejected.
 func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
 	targetBranchID := strings.TrimSpace(requestString(value, "target_branch_id"))
+	idempotencyKey := strings.TrimSpace(requestString(value, "idempotency_key"))
 	var branchIDs []string
 	if err == nil {
 		err = decodeInto(value["branch_ids"], &branchIDs)
 	}
-	if err == nil && chatID == "" {
+	expected := map[string]int64{}
+	if raw, ok := value["expected_revisions"].(map[string]any); ok {
+		for line, revision := range raw {
+			if number, ok := revision.(float64); ok {
+				expected[line] = int64(number)
+			}
+		}
+	}
+	if err == nil && (chatID == "" || len(branchIDs) == 0) {
 		err = errBadRequest
 	}
 	if err != nil {
 		p.reply(frame, nil, err)
 		return
 	}
-	branches, err := p.validateMergeBranches(chatID, branchIDs)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	sourceSet := map[string]bool{}
-	for _, branch := range branches {
-		sourceSet[branch.ID] = true
-	}
-	target, err := p.validateMergeTarget(chatID, targetBranchID, sourceSet)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	input, err := p.buildMergeInput(branches)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	config := p.summaryConfig(p.ctx)
-	timeout := config.TimeoutSeconds
-	if timeout <= 0 {
-		timeout = 60
-	}
-	ctx, cancel := context.WithTimeout(p.ctx, time.Duration(timeout)*time.Second)
-	result, err := p.llmFn(ctx, []map[string]string{
-		{"role": "system", "content": mergeSummarySystemPrompt},
-		{"role": "user", "content": fmt.Sprintf(mergeSummaryUserTemplate, input)},
-	}, false, timeout)
-	cancel()
-	if err != nil {
-		slog.Warn("chat merge summary failed", "chat_id", chatID, "error", err)
-		p.reply(frame, nil, err)
-		return
-	}
-	// Cutoff per branch: the newest turn at draft time. merge-confirm
-	// carries these back so a turn that starts after the draft is not
-	// silently covered by a summary that never saw it.
-	cutoffs := make([]map[string]any, 0, len(branches))
-	for _, branch := range branches {
-		turns, turnErr := p.store.branchTurns(branch.ID)
-		cutoff := ""
-		if turnErr == nil && len(turns) > 0 {
-			cutoff = turns[len(turns)-1].ID
+	// Serialize with dispatch intake and automation: the busy validation
+	// below cannot go stale before the merge commits.
+	p.automationMu.Lock()
+	defer p.automationMu.Unlock()
+	// Idempotency replay: same key + same parameters returns the stored
+	// result; same key + different parameters is rejected outright.
+	fingerprintSource := append([]string{chatID, targetBranchID}, branchIDs...)
+	sort.Strings(fingerprintSource[1:])
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprintSource, "\x00"))))
+	if idempotencyKey != "" {
+		var receipt MergeReceipt
+		lookup := p.store.db.Where("key = ?", idempotencyKey).Limit(1).Find(&receipt)
+		if lookup.Error != nil {
+			p.reply(frame, nil, lookup.Error)
+			return
 		}
-		cutoffs = append(cutoffs, map[string]any{"id": branch.ID, "name": branch.Name, "cutoff_turn_id": cutoff})
+		if lookup.RowsAffected > 0 {
+			if receipt.Fingerprint != fingerprint {
+				p.reply(frame, nil, errors.New("idempotency key reused with a different merge"))
+				return
+			}
+			var stored map[string]any
+			if json.Unmarshal([]byte(receipt.Payload), &stored) == nil {
+				stored["deduplicated"] = true
+				p.reply(frame, stored, nil)
+			} else {
+				p.reply(frame, map[string]any{"merged": true, "deduplicated": true}, nil)
+			}
+			return
+		}
 	}
-	header := "已合并分支" + branchNamesLabel(branches) + "：\n\n"
-	targetPayload := map[string]any{"id": "", "name": "主线"}
-	if target != nil {
-		targetPayload = map[string]any{"id": target.ID, "name": target.Name}
+	// Validate sources: same chat, all open (empty branches allowed — their
+	// fork node is real history), target open and not among sources.
+	sources := []*Branch{}
+	seen := map[string]bool{}
+	for _, id := range branchIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		branch, loadErr := p.store.branch(id)
+		if loadErr != nil {
+			p.reply(frame, nil, loadErr)
+			return
+		}
+		if branch == nil || branch.ChatID != chatID {
+			p.reply(frame, nil, fmt.Errorf("branch was not found in the chat: %s", id))
+			return
+		}
+		if branch.archived() {
+			p.reply(frame, nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchArchived))
+			return
+		}
+		sources = append(sources, branch)
 	}
-	p.reply(frame, map[string]any{"summary": header + strings.TrimSpace(result.Content), "branches": cutoffs, "target": targetPayload}, nil)
+	if seen[targetBranchID] {
+		p.reply(frame, nil, errors.New("the merge target cannot be merged into itself"))
+		return
+	}
+	var target *Branch
+	if targetBranchID != "" {
+		target, err = p.store.branch(targetBranchID)
+		if err != nil {
+			p.reply(frame, nil, err)
+			return
+		}
+		if target == nil || target.ChatID != chatID {
+			p.reply(frame, nil, errors.New("the merge target branch was not found in the chat"))
+			return
+		}
+		if target.archived() {
+			p.reply(frame, nil, fmt.Errorf("merge target %w", errBranchArchived))
+			return
+		}
+	}
+	// Busy validation: no in-flight batch, no queued batches, no live
+	// automation on any involved line.
+	for _, line := range append([]string{targetBranchID}, seenKeys(sources)...) {
+		if busyErr := p.lineMergeBlockers(chatID, line); busyErr != nil {
+			name := "主线"
+			if line != "" {
+				for _, branch := range sources {
+					if branch.ID == line {
+						name = "「" + branch.Name + "」"
+					}
+				}
+				if target != nil && target.ID == line {
+					name = "「" + target.Name + "」"
+				}
+			}
+			p.reply(frame, nil, fmt.Errorf("%s %w", name, busyErr))
+			return
+		}
+	}
+	now := nowMillis()
+	mergeNodeID := "merge:" + newID()
+	var targetHead *LineHead
+	err = p.store.db.Transaction(func(tx *gorm.DB) error {
+		parents := []string{}
+		for _, line := range append([]string{targetBranchID}, seenKeys(sources)...) {
+			head, headErr := ensureLineHead(tx, chatID, line)
+			if headErr != nil {
+				return headErr
+			}
+			if revision, ok := expected[line]; ok && head.Revision != revision {
+				return fmt.Errorf("line %s: %w", line, errRevisionConflict)
+			}
+			if line == targetBranchID {
+				targetHead = head
+			}
+			parents = append(parents, head.HeadNodeID)
+		}
+		if err := addNode(tx, &HistoryNode{ID: mergeNodeID, ChatID: chatID, Kind: nodeKindMerge, OriginBranchID: targetBranchID, CreatedAt: now}, parents, edgeKindMerge); err != nil {
+			return err
+		}
+		// Advance the target head and mark its sessions stale: the next
+		// batch on the line rebuilds every session from the new full
+		// snapshot (merged content is never bridged by time guesses).
+		result := tx.Model(&LineHead{}).Where("chat_id = ? AND branch_id = ?", chatID, targetBranchID).
+			Updates(map[string]any{"head_node_id": mergeNodeID, "revision": gorm.Expr("revision + 1"), "sessions_stale": true})
+		if result.Error != nil {
+			return result.Error
+		}
+		targetHead.HeadNodeID = mergeNodeID
+		targetHead.Revision++
+		targetHead.SessionsStale = true
+		for _, source := range sources {
+			updates := map[string]any{
+				"state": branchStateMerged, "archived_at": now, "merged_at": now,
+				"merged_into_branch_id": targetBranchID, "merge_node_id": mergeNodeID, "updated_at": now,
+			}
+			if err := tx.Model(&Branch{}).Where("id = ?", source.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+			source.State = branchStateMerged
+			source.ArchivedAt = &now
+			source.MergedAt = &now
+			source.MergedIntoBranchID = targetBranchID
+			source.MergeNodeID = mergeNodeID
+			source.UpdatedAt = now
+		}
+		if idempotencyKey != "" {
+			payload := encodeJSON(map[string]any{
+				"merged": true, "merge_node_id": mergeNodeID, "target_branch_id": targetBranchID,
+				"target_head_node_id": mergeNodeID, "branch_ids": seenKeys(sources),
+			})
+			if err := tx.Create(&MergeReceipt{Key: idempotencyKey, ChatID: chatID, Fingerprint: fingerprint, Payload: payload, CreatedAt: now}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	for _, source := range sources {
+		p.publishBranch(source, "merged")
+	}
+	p.publishLineHead(chatID, targetBranchID, targetHead)
+	p.reply(frame, map[string]any{
+		"merged": true, "merge_node_id": mergeNodeID, "target_branch_id": targetBranchID,
+		"target_head_node_id": targetHead.HeadNodeID, "target_revision": targetHead.Revision,
+		"branch_ids": seenKeys(sources),
+	}, nil)
 }
 
-func branchNamesLabel(branches []*Branch) string {
-	names := make([]string, 0, len(branches))
+func seenKeys(branches []*Branch) []string {
+	ids := make([]string, 0, len(branches))
 	for _, branch := range branches {
-		names = append(names, "「"+branch.Name+"」")
+		ids = append(ids, branch.ID)
 	}
-	return strings.Join(names, "")
+	return ids
 }
 
-// handleBranchesArchive archives branches WITHOUT merging (framework
-// v0.66 — the "by the way" pattern): a side conversation whose content
-// should stay out of every line's context. Archive-only rows carry no
-// MergeMessageID, so lineage never unions their turns (see
-// branchesMergedInto). Archived branches leave the bar and reject
-// dispatch; unarchiving is a reserved function — deliberately not
-// implemented yet. Running branches refuse archiving (same rule as
-// merging); empty branches may be archived (or deleted outright).
+// handleBranchesMergeConfirm rejects the retired two-step draft/confirm
+// protocol: merge no longer drafts an LLM summary nor dispatches anything.
+func (p *Plugin) handleBranchesMergeConfirm(frame busclient.Frame) {
+	p.reply(frame, nil, errMergeProtocol)
+}
+
+// handleBranchesArchive archives branches WITHOUT merging (the "by the
+// way" pattern): a side conversation whose content should stay out of
+// every line's history. No merge edge is written, so the branch's turns
+// stay reachable only through its own (retained) head — never through
+// another line. Archived branches leave the bar and reject dispatch;
+// unarchiving is a reserved function — deliberately not implemented yet.
+// Busy lines (running batch, queued batches) refuse archiving; empty
+// branches may be archived (or deleted outright).
 func (p *Plugin) handleBranchesArchive(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
@@ -411,6 +504,8 @@ func (p *Plugin) handleBranchesArchive(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
+	p.automationMu.Lock()
+	defer p.automationMu.Unlock()
 	now := nowMillis()
 	archived := make([]map[string]any, 0, len(branchIDs))
 	seen := map[string]bool{}
@@ -441,7 +536,15 @@ func (p *Plugin) handleBranchesArchive(frame busclient.Frame) {
 			p.reply(frame, nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchRunning))
 			return
 		}
+		p.mu.Lock()
+		busy, reason := p.lineBusyLocked(chatID, id)
+		p.mu.Unlock()
+		if busy {
+			p.reply(frame, nil, fmt.Errorf("分支「%s」%w: %s", branch.Name, errLineBusy, reason))
+			return
+		}
 		branch.ArchivedAt = &now
+		branch.State = branchStateArchived
 		branch.UpdatedAt = now
 		if saveErr := p.store.saveBranch(branch); saveErr != nil {
 			p.reply(frame, nil, saveErr)
@@ -451,109 +554,4 @@ func (p *Plugin) handleBranchesArchive(frame busclient.Frame) {
 		archived = append(archived, branch.payload())
 	}
 	p.reply(frame, map[string]any{"archived": true, "branches": archived}, nil)
-}
-
-// handleBranchesMergeConfirm dispatches the (user-edited) summary into the
-// target line (mainline by default; a branch target receives it as a
-// continuation turn of that branch, framework v0.64), then archives the
-// source branches with the cutoff turns recorded at draft time, the merge
-// target, and the merge message id linking the summary box to its sources.
-func (p *Plugin) handleBranchesMergeConfirm(frame busclient.Frame) {
-	value, err := frameObject(frame)
-	chatID, _ := value["chat_id"].(string)
-	summary := strings.TrimSpace(requestString(value, "summary"))
-	targetBranchID := strings.TrimSpace(requestString(value, "target_branch_id"))
-	var entries []struct {
-		ID           string `json:"id"`
-		CutoffTurnID string `json:"cutoff_turn_id"`
-	}
-	if err == nil {
-		err = decodeInto(value["branches"], &entries)
-	}
-	if err == nil && (chatID == "" || summary == "" || len(entries) == 0) {
-		err = errBadRequest
-	}
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	chat, err := p.store.chat(chatID)
-	if err != nil || chat == nil {
-		if err == nil {
-			err = errors.New("chat not found")
-		}
-		p.reply(frame, nil, err)
-		return
-	}
-	branchIDs := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		branchIDs = append(branchIDs, entry.ID)
-	}
-	// Revalidate before dispatching: a branch merged (or still running)
-	// since the draft fails the whole confirm — nothing is dispatched or
-	// archived partially. The target must also still be active.
-	branches, err := p.validateMergeBranches(chatID, branchIDs)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	sourceSet := map[string]bool{}
-	for _, branch := range branches {
-		sourceSet[branch.ID] = true
-	}
-	if _, err = p.validateMergeTarget(chatID, targetBranchID, sourceSet); err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	workspace, err := p.workspace(p.ctx)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	// Target-line dispatch: mainline rides the normal flow. A branch
-	// target pins the summary to the branch's latest role (framework
-	// v0.66: branches are multi-role now, so without the pin the summary
-	// would go through LLM routing to an arbitrary member); the role
-	// resumes its own session lane on that branch. No turns yet, or the
-	// role left the chat → fall through to normal routing.
-	dispatch := dispatchRequest{ChatID: chatID, Message: summary, BranchID: targetBranchID}
-	raw := map[string]any{"chat_id": chatID, "message": summary}
-	if targetBranchID != "" {
-		raw["branch_id"] = targetBranchID
-		if latest, latestErr := p.store.latestLineTurn(chatID, targetBranchID); latestErr == nil && latest != nil {
-			for _, id := range decodeStrings(chat.MemberRoleIDsJSON) {
-				if id == latest.RoleID {
-					dispatch.RoleIDs = []string{id}
-					raw["role_ids"] = []string{id}
-					break
-				}
-			}
-		}
-	}
-	_, user, err := p.dispatchMessage(chat, workspace, dispatch, raw)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	now := nowMillis()
-	archived := make([]map[string]any, 0, len(branches))
-	for index, branch := range branches {
-		branch.ArchivedAt = &now
-		branch.MergedIntoBranchID = targetBranchID
-		branch.MergedThroughTurnID = entries[index].CutoffTurnID
-		if branch.MergedThroughTurnID == "" {
-			if turns, turnErr := p.store.branchTurns(branch.ID); turnErr == nil && len(turns) > 0 {
-				branch.MergedThroughTurnID = turns[len(turns)-1].ID
-			}
-		}
-		branch.MergeMessageID = user.ID
-		branch.UpdatedAt = now
-		if err = p.store.saveBranch(branch); err != nil {
-			p.reply(frame, nil, err)
-			return
-		}
-		p.publishBranch(branch, "archived")
-		archived = append(archived, branch.payload())
-	}
-	p.reply(frame, map[string]any{"merged": true, "message_id": user.ID, "branches": archived}, nil)
 }

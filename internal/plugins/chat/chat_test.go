@@ -2180,6 +2180,24 @@ func TestBranchLifecycle(t *testing.T) {
 		t.Fatal("merge with a running branch should fail")
 	}
 	endTurn(parallelTurn)
+	// The busy flag clears only when the relay finishes settling the batch
+	// (node publishing + head advance); the merge validates idle lines.
+	waitIdle := func(branchID string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			running, runErr := p.store.lineHasRunningTurn("chat-b", branchID)
+			p.mu.Lock()
+			busy := p.busy[lineKey("chat-b", branchID)]
+			p.mu.Unlock()
+			if runErr == nil && !running && !busy {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("line %q still busy", branchID)
+	}
+	waitIdle(autoBranchID)
 
 	// 5. Rename.
 	renamed := request("chat:_:branches:patch", map[string]any{"id": autoBranchID, "name": "优化渲染"})
@@ -2187,57 +2205,81 @@ func TestBranchLifecycle(t *testing.T) {
 		t.Fatalf("branches:patch reply: %+v", renamed)
 	}
 
-	// 6. Merge draft: stub LLM content + per-branch cutoffs.
-	draft := request("chat:_:branches:merge", map[string]any{"chat_id": "chat-b", "branch_ids": []string{branchID, autoBranchID}})
-	summary, _ := draft["summary"].(string)
-	if !strings.Contains(summary, "stub draft") || !strings.Contains(summary, "排查滚动") {
-		t.Fatalf("merge draft summary: %q", summary)
-	}
-	cutoffs, _ := draft["branches"].([]any)
-	if len(cutoffs) != 2 {
-		t.Fatalf("merge draft cutoffs: %+v", draft)
-	}
-
-	// 7. Confirm: the (edited) summary lands in the mainline as a user
-	// message dispatched to the mainline role; both branches archive with
-	// cutoff + merge message id.
-	confirm := request("chat:_:branches:merge-confirm", map[string]any{"chat_id": "chat-b", "summary": "edited merge summary", "branches": cutoffs})
-	mergeMessageID, _ := confirm["message_id"].(string)
-	if mergeMessageID == "" {
-		t.Fatalf("merge-confirm reply: %+v", confirm)
-	}
-	mainline := nextPrompt() // the summary dispatch's turn
-	if !strings.Contains(mainline.text, "edited merge summary") {
-		t.Fatalf("mainline prompt should carry the summary, got %q", mainline.text)
-	}
-	mainlineTurn, err := p.store.turn(mainline.turnID)
-	if err != nil || mainlineTurn == nil || mainlineTurn.BranchID != "" {
-		t.Fatalf("merge summary turn must be mainline: %+v err=%v", mainlineTurn, err)
-	}
-	message, err := p.store.message(mergeMessageID)
-	if err != nil || message == nil || message.Text != "edited merge summary" {
-		t.Fatalf("merge message: %+v err=%v", message, err)
+	// 6. Single-step merge: one branches:merge call writes the merge node,
+	// advances the mainline head, and closes both sources (state=merged) —
+	// no draft, no confirm, no LLM, no dispatched summary message.
+	merged := request("chat:_:branches:merge", map[string]any{"chat_id": "chat-b", "branch_ids": []string{branchID, autoBranchID}})
+	mergeNodeID, _ := merged["merge_node_id"].(string)
+	if merged["merged"] != true || mergeNodeID == "" || merged["target_head_node_id"] != mergeNodeID {
+		t.Fatalf("branches:merge reply: %+v", merged)
 	}
 	for _, id := range []string{branchID, autoBranchID} {
 		row, rowErr := p.store.branch(id)
-		if rowErr != nil || row == nil || row.ArchivedAt == nil || row.MergeMessageID != mergeMessageID || row.MergedThroughTurnID == "" {
-			t.Fatalf("branch %s not archived with records: %+v err=%v", id, row, rowErr)
+		if rowErr != nil || row == nil || row.State != branchStateMerged || row.MergedAt == nil || row.MergeNodeID != mergeNodeID || row.MergedIntoBranchID != "" {
+			t.Fatalf("branch %s not closed by the merge: %+v err=%v", id, row, rowErr)
 		}
 	}
-	endTurn(mainline)
+	// The retired two-step protocol is rejected with an upgrade error.
+	if _, err := caller.Request(ctx, "chat:_:branches:merge-confirm", map[string]any{"chat_id": "chat-b", "summary": "x", "branches": []any{}}, 10*time.Second); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("merge-confirm should fail with the protocol upgrade error, got %v", err)
+	}
+	// No summary dispatch happened: the mainline has no turn yet.
+	mainlineHead, err := p.store.lineHead("chat-b", "")
+	if err != nil || mainlineHead == nil || mainlineHead.HeadNodeID != mergeNodeID || !mainlineHead.SessionsStale {
+		t.Fatalf("mainline head after merge: %+v err=%v", mainlineHead, err)
+	}
+	// The merge node parents the old mainline head plus both source heads.
+	var mergeEdges []HistoryEdge
+	if err := p.store.db.Where("child_id = ?", mergeNodeID).Find(&mergeEdges).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(mergeEdges) != 3 {
+		t.Fatalf("merge node should have 3 parents (target + 2 sources), got %+v", mergeEdges)
+	}
 
-	// 8. Archived branches refuse sends and re-merge; chats:list exposes the
+	// 7. The next mainline batch rebuilds its session (sessions-stale) and
+	// its fresh context contains the merged branches' content — the graph
+	// graft, not a summary message, carries the history.
+	reply = request("chat:_:dispatch", map[string]any{"chat_id": "chat-b", "message": "after merge", "role_ids": []string{"role-b"}})
+	afterMerge := nextPrompt()
+	if afterMerge.sessionID == first.sessionID {
+		t.Fatalf("post-merge mainline turn must start a fresh session, resumed %s", afterMerge.sessionID)
+	}
+	if !strings.Contains(afterMerge.text, "branch first") || !strings.Contains(afterMerge.text, "parallel side quest") {
+		t.Fatalf("post-merge context must carry both branches' inputs, got %q", afterMerge.text)
+	}
+	assertTurnBranch(afterMerge.turnID, "")
+	endTurn(afterMerge)
+	// Sessions-stale cleared: a follow-up resumes the new session.
+	request("chat:_:dispatch", map[string]any{"chat_id": "chat-b", "message": "steady state", "role_ids": []string{"role-b"}})
+	steady := nextPrompt()
+	if steady.sessionID != afterMerge.sessionID {
+		t.Fatalf("follow-up should resume the rebuilt session %s, got %s", afterMerge.sessionID, steady.sessionID)
+	}
+	endTurn(steady)
+
+	// 8. Merged branches refuse sends and re-merge; chats:list exposes the
 	// branch records.
 	if _, err := caller.Request(ctx, "chat:_:dispatch", map[string]any{"chat_id": "chat-b", "message": "too late", "branch_id": branchID}, 10*time.Second); err == nil {
-		t.Fatal("dispatch to an archived branch should fail")
+		t.Fatal("dispatch to a merged branch should fail")
 	}
 	if _, err := caller.Request(ctx, "chat:_:branches:merge", map[string]any{"chat_id": "chat-b", "branch_ids": []string{branchID}}, 10*time.Second); err == nil {
-		t.Fatal("re-merge of an archived branch should fail")
+		t.Fatal("re-merge of a merged branch should fail")
 	}
 	list := request("chat:_:chats:list", map[string]any{"chat_id": "chat-b"})
 	listBranches, _ := list["branches"].([]any)
 	if len(listBranches) != 2 {
 		t.Fatalf("chats:list branches: %+v", list)
+	}
+	// Merged content is reachable through the mainline snapshot (the UI's
+	// line keys show the same membership).
+	keys := request("chat:_:line:keys", map[string]any{"chat_id": "chat-b", "branch_id": ""})
+	keySet := map[string]bool{}
+	for _, key := range keys["keys"].([]any) {
+		keySet[key.(string)] = true
+	}
+	if !keySet[first.turnID] || !keySet[parallelTurn.turnID] || !keySet[afterMerge.turnID] {
+		t.Fatalf("mainline line keys should cover both branches and the post-merge turn: %v", keys)
 	}
 
 	// 9. An empty branch can be deleted; an archived one cannot.

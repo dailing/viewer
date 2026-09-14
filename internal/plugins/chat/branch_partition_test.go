@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"viewer/internal/agentdriver"
 	"viewer/internal/kernel"
 	"viewer/internal/plugins/pluginrpc"
@@ -146,18 +148,22 @@ func TestBranchContextPartition(t *testing.T) {
 		}
 	}
 	// Turn-end persistence trails the turn-ended frame; archive/merge
-	// validation reads ended_at, so wait for the branch to go idle.
+	// validation reads ended_at AND the line's busy flag (cleared only when
+	// the relay finishes settling the batch), so wait for both to go idle.
 	waitBranchIdle := func(branchID string) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			running, err := p.store.branchHasRunningTurn(branchID)
-			if err == nil && !running {
+			p.mu.Lock()
+			busy := p.busy[lineKey("chat-p", branchID)]
+			p.mu.Unlock()
+			if err == nil && !running && !busy {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		t.Fatalf("branch %s still has a running turn", branchID)
+		t.Fatalf("branch %s still busy", branchID)
 	}
 	turnOf := func(turnID string) *Turn {
 		t.Helper()
@@ -220,7 +226,8 @@ func TestBranchContextPartition(t *testing.T) {
 	endTurn(routed)
 
 	// 6. Archive WITHOUT merge: the branch shelves, dispatch is refused,
-	// re-archive is refused, and its turns join no line's lineage.
+	// re-archive is refused, and its turns join no line's snapshot (no
+	// merge edge is ever written for it).
 	waitBranchIdle(branchID)
 	archived := request("chat:_:branches:archive", map[string]any{"chat_id": "chat-p", "branch_ids": []string{branchID}})
 	if archived["archived"] != true {
@@ -232,17 +239,33 @@ func TestBranchContextPartition(t *testing.T) {
 	if _, err := caller.Request(ctx, "chat:_:branches:archive", map[string]any{"chat_id": "chat-p", "branch_ids": []string{branchID}}, 10*time.Second); err == nil {
 		t.Fatal("re-archiving should fail")
 	}
-	lineage, err := p.lineageTurns("chat-p", "", nowMillis()+1000)
+	mainlineHead, err := p.store.lineHead("chat-p", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, turn := range lineage {
+	if mainlineHead == nil {
+		// No mainline batch ever ran: create the head on demand (same as
+		// the line:keys RPC does) so the snapshot check is meaningful.
+		err = p.store.db.Transaction(func(tx *gorm.DB) error {
+			var headErr error
+			mainlineHead, headErr = ensureLineHead(tx, "chat-p", "")
+			return headErr
+		})
+		if err != nil || mainlineHead == nil {
+			t.Fatalf("mainline head: %v err=%v", mainlineHead, err)
+		}
+	}
+	snapshot, err := p.store.snapshotTurns("chat-p", mainlineHead.HeadNodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, turn := range snapshot.Turns {
 		if turn.BranchID == branchID {
-			t.Fatalf("archive-only branch turn %s leaked into the mainline lineage", turn.ID)
+			t.Fatalf("archive-only branch turn %s leaked into the mainline snapshot", turn.ID)
 		}
 	}
 	row, err := p.store.branch(branchID)
-	if err != nil || row == nil || row.ArchivedAt == nil || row.MergeMessageID != "" || row.MergedIntoBranchID != "" {
+	if err != nil || row == nil || row.ArchivedAt == nil || row.MergedAt != nil || row.MergeNodeID != "" || row.State != branchStateArchived {
 		t.Fatalf("archive-only branch record: %+v err=%v", row, err)
 	}
 

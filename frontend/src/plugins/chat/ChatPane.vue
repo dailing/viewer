@@ -252,6 +252,38 @@ function messageVisible(message: ChatMessage): boolean {
   return message.role === "user" ? dispatchVisible(message.turn_id, message.id, message.created_at) : turnVisible(message.turn_id, message.created_at);
 }
 
+/** Count of selected-line keys not yet covered by any loaded message. The
+ *  keys are the line's COMPLETE membership (head ancestor closure), so a
+ *  pending count of zero means no older page can reveal anything visible —
+ *  the view's history is exhausted even when chat-level has_more says
+ *  otherwise (fresh branch: keys empty; fully walked fork: shared ancestry
+ *  all loaded). Keys carry no timestamps, so an unloaded NEWER live edge
+ *  (detached window) also keeps this non-zero — loadOlder then runs its
+ *  bounded no-visible hop walk, same as before. */
+const visibleKeysPending = computed<number>(() => {
+  const view = keyView.value;
+  if (!view.filtered) return 0;
+  const covered = new Set<string>();
+  for (const message of messages.value) {
+    covered.add(message.id);
+    if (message.turn_id) covered.add(message.turn_id);
+  }
+  let pending = 0;
+  for (const key of view.keys) if (!covered.has(key)) pending++;
+  return pending;
+});
+
+/** View-aware hasOlder: the top sentinel and the older-page trigger follow
+ *  remaining VISIBLE history, not the chat-level pagination fact — a fresh
+ *  branch never fires an invisible mainline walk (no fetch, no scroll
+ *  restoration, the placeholder just stays parked at the top) and a fully
+ *  walked fork stops paging at its fork point. */
+const viewHasOlder = computed<boolean>(() => {
+  if (!hasOlder.value) return false;
+  if (!keyView.value.filtered) return true;
+  return visibleKeysPending.value > 0;
+});
+
 /** Branch bar tabs (framework v0.65): plain click SINGLE-selects a line
  *  (view it; when it's exactly one branch, the next send continues it);
  *  Ctrl/⌘+click toggles multi-select — the ordered multi-selected set IS
@@ -1328,7 +1360,7 @@ async function refresh(): Promise<void> {
  *  the first page containing a visible message, at the window cap, at the
  *  hop bound, or when the server's history is exhausted. */
 async function loadOlder(): Promise<void> {
-  if (loadingInitial.value || loadingOlder.value || !hasOlder.value || !olderCursor.value) return;
+  if (loadingInitial.value || loadingOlder.value || !viewHasOlder.value || !olderCursor.value) return;
   loadingOlder.value = true;
   const thread = threadRef.value;
   const previousScrollHeight = thread?.scrollHeight ?? 0;
@@ -1759,7 +1791,7 @@ onMounted(() => {
   <section class="chat-pane d-flex flex-column h-100">
     <LoopStatus v-if="loopOpen" :chat-id="ctx.instanceId" :roles="roles.filter((role) => chat?.member_role_ids.includes(role.id))" :branches="branches" :from-turn-id="loopForkTurn" @select="showLoopExecution" />
     <div ref="threadRef" class="chat-thread flex-grow-1 overflow-auto p-2" aria-live="polite" @scroll.passive="handleThreadScroll">
-      <div v-if="messages.length && (loadingOlder || !hasOlder)" class="chat-history-boundary small text-secondary">
+      <div v-if="messages.length && (loadingOlder || !viewHasOlder)" class="chat-history-boundary small text-secondary">
         <span v-if="loadingOlder" class="spinner-border spinner-border-sm me-1" aria-hidden="true" />
         <template v-if="loadingOlder">加载更早消息…</template>
         <template v-else>没有更多消息</template>

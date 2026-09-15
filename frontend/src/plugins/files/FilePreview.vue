@@ -12,6 +12,7 @@ import { RpcError } from "@viewer/bus-sdk";
 import type { PluginCtx } from "../../shell/ctx";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import type { PreviewMode } from "./instanceStore";
+import PdfPreview from "./PdfPreview.vue";
 import { imageMimeFor, kindForPath } from "./types";
 
 const props = defineProps<{
@@ -62,6 +63,11 @@ async function load(path: string | null): Promise<void> {
   imageUrl.value = "";
   if (path === null) return;
   const previewKind = kindForPath(path);
+  if (previewKind === "pdf") {
+    // PdfPreview fetches its own pages; the whole-file read is skipped.
+    status.value = "ready";
+    return;
+  }
   const maxBytes = previewKind === "image" ? IMAGE_MAX_BYTES : TEXT_MAX_BYTES;
   try {
     const result = (await ctx.bus.request("file:_:read", {
@@ -124,7 +130,8 @@ watch([rendered, renderedRef], () => {
       <div>{{ error }}</div>
     </div>
     <template v-else>
-      <div v-if="kind === 'image'" class="preview-image">
+      <PdfPreview v-if="kind === 'pdf' && path !== null" :path="path" />
+      <div v-else-if="kind === 'image'" class="preview-image">
         <img :src="imageUrl" :alt="path ?? ''" />
       </div>
       <iframe

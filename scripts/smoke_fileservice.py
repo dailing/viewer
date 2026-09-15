@@ -8,6 +8,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from sdk import BusClient, RpcError  # noqa: E402
+
+MINIMAL_PDF = (
+    b"%PDF-1.4\n"
+    b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>endobj\n"
+    b"trailer<</Root 1 0 R>>\n"
+)
 
 
 def manifest(plugin_id: str) -> dict[str, Any]:
@@ -208,6 +217,58 @@ async def run(args: argparse.Namespace) -> None:
             )
             assert [entry["name"] for entry in deep["entries"]] == ["deep.txt"]
             print("file list sorting/hidden/symlink/nesting/errors: PASS")
+
+            if shutil.which("mutool") and shutil.which("convert"):
+                pdf_path = temp / "doc.pdf"
+                pdf_path.write_bytes(MINIMAL_PDF)
+                await expect_error(client, "file:_:pdfpage", {}, "invalid_request")
+                await expect_error(
+                    client,
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 0, "scale": 1},
+                    "invalid_request",
+                )
+                await expect_error(
+                    client,
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 2, "scale": 1},
+                    "invalid_request",
+                )
+                await expect_error(
+                    client,
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 1, "scale": 4},
+                    "invalid_request",
+                )
+                await expect_error(
+                    client,
+                    "file:_:pdfpage",
+                    {"path": str(temp / "missing.pdf"), "page": 1, "scale": 1},
+                    "not_found",
+                )
+                page = await client.request(
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 1, "scale": 2},
+                    timeout=10,
+                )
+                assert page["path"] == str(pdf_path.resolve())
+                assert page["page"] == 1 and page["pages"] == 1
+                assert page["mime"] == "image/webp" and page["encoding"] == "base64"
+                assert page["page_width"] == 200 and page["page_height"] == 100
+                # Blank page: trim guard falls back to the full 400x200 raster.
+                assert page["image_width"] == 400 and page["image_height"] == 200
+                assert page["dpi"] == 144
+                payload = base64.b64decode(page["content"])
+                assert payload[:4] == b"RIFF" and payload[8:12] == b"WEBP"
+                cached = await client.request(
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 1, "scale": 2},
+                    timeout=10,
+                )
+                assert cached["content"] == page["content"]
+                print("pdfpage render/webp/cache/errors: PASS")
+            else:
+                print("pdfpage: SKIP (mutool/convert missing)")
         finally:
             await client.close()
             if process.poll() is None:

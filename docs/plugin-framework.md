@@ -1,7 +1,9 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.69**（2026-09-11）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.71**（2026-09-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
 
+> v0.71 变更：**pdfpage 自动切边 + 第三档分辨率**——渲染管线 mutool draw 后增加 convert 白边裁切（先压平 alpha 使透明背景按白色计，fuzz 5% `-trim`；病态裁切 <32px 或面积 <5% 原页时回退整页，空白页保持原样）；响应新增 `image_width`/`image_height`（切边后实际像素，供前端校正占位纵横比）；缓存文件名带尺寸后缀 `<hash>-<W>x<H>.webp`（key 不变，旧命名条目自然 miss 后由 LRU 淘汰）。前端 PDF 预览升三档：可见页 1x→2x→3x 顺序升档（3x 待 2x 完成后触发，预取仍只取相邻页 1x），升档失败静默保留已有档位，仅一页无任何图可显示时才报错。
+> v0.70 变更：**file-service 增加 PDF 逐页栅格化能力**——新增 RPC `file:_:pdfpage`：输入 `{path, page, scale}`（page 1 起；scale 钳制 [0.25, 3]、渲染像素 ≤24M、原始 WebP >700KB 自动降质重编码以守住 1 MiB 帧上限），输出 `{path, page, pages, mtime, page_width, page_height, dpi, mime, encoding, content}`（WebP base64）。渲染管线 mutool draw（PNG）→ ImageMagick convert（WebP q80），同 key 并发渲染去重、并发度 2、超时 120s；磁盘 LRU 缓存 `<data>/pdf-pages/`（key=path+size+mtime+page+dpi，预算 1 GiB，命中刷新时钟，超预算按最旧淘汰至 80%）。用途：viewer.files 的 PDF 预览（低档先上屏、可见页升档、相邻页低档预取）。总线二进制编码升级（MessagePack over WS binary frame）暂缓，见 §16-12。
 > v0.69 变更：**composer 草稿跨设备同步**——chat 新增 `drafts` 表（每 chat 一行，整值覆盖，按到达顺序 last-write-wins，上限 64 KiB）与 RPC `chat:_:draft:get`/`chat:_:draft:set {chat_id, text, source}`；每次 set 广播 `chat:_:draft:sync {chat_id, text, updated_at, source}`（事件名避开 RPC 前缀——bus 订阅按字段前缀匹配，同前缀会把 RPC 帧也投给事件订阅者）。人类消息落库即清草稿并广播空文本（自动/loop 派发不清）。前端 ComposerBox 挂载拉取、400ms 防抖推送、订阅实时应用，本端回声按 `source` 过滤。
 > v0.68 变更：viewer.loop 新增 `min_interval_seconds`（最小触发周期，默认 0=立即续轮）——从上轮投递时刻起算，不足周期不投下一轮；等待不延长总时限。前端新建表单同步暴露（分钟粒度）。
 > v0.67 变更：新增核心插件 **viewer.loop**，通过 chat 总线驱动固定角色与分支的目标迭代，独立 `loop.sqlite3` 保存调度状态。chat 新增通用自动调度租约与 fencing、分支暂停门控、dispatch 幂等键与持久化状态查询；用户插话暂停续轮，未知旧代任务不自动重放。默认 20 轮/60 分钟，进度文件 + 完成声明必经 LLM 验收，ChatPane 嵌入控制与迭代详情。已确认的完整合同见 [loop-plugin.md](loop-plugin.md)。
@@ -405,7 +407,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 | C0 | viewer.supervisor | 拉起/心跳/重启/熔断/日志全部插件进程；插件管理 RPC（install/reload/enable）归属（§9） |
 | C1 | config-store | `config:_:get/set` 等 RPC channel；`plugins.<id>.*` namespace |
 | C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件 |
-| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5） |
+| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边自动裁切（v0.71）+ 磁盘 LRU 缓存（v0.70） |
 | C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37）+ `POST /api/admin/schedule-restart`（后台 build 成功后武装、等空闲自重启，v0.43）+ `GET /api/admin/schedule-restart`（状态 none/building/armed/failed，v0.43）+ `DELETE /api/admin/schedule-restart`（取消/复位，v0.44） |
 | C6 | llm | 全局 LLM 转发层：`llm:_:complete` 纯转发 OpenAI 兼容端点；配置 `plugins.llm`（v0.48，§8.11） |
 | C7 | voice-control | 全局语音控制：`voice-catalog:_:*` 目录合并 + 连续语音对话（LLM 直答或派发条目）+ 会话上下文压缩 + `chat:_:turn` 主动播报（v0.49，§8.11）+ 交互日志/可配置 prompt 模板/prompt 预览（v0.50，§8.11） |
@@ -547,6 +549,7 @@ my-plugin/
 6. Agent service：core plugin 还是 chat runtime 插件的内部能力。 → **已定（v0.23）**：皆非——agent 实现拆为独立 headless 功能插件族 `viewer.agent-*`（无 UI 单实例服务插件，统一总线契约，见 A.7）；chat 只经契约消费，不认识任何 provider 实现。
 10. 插件前端 TS 类型与后端 envelope 类型的单一来源（schema 生成？）。
 11. 多机场景的内互联结（**暂缓**，v0.18）：当前只考虑单机 localhost；多机 federation 暂不考虑，NATS 平移路径保留（§4），触发条件以后再说。
+12. 总线二进制编码升级（**暂缓**，v0.70）：MessagePack over WS binary frame（协议语义不变，§6 预留路径），收益 = 去 base64 33% 膨胀 + 编解码开销。触发条件 = 出现第二个以上大二进制负载场景（pdfpage 之后），或实测 JSON/base64 开销占总线流量 >30%；升级时 kernel + go/python/ts 三 SDK 一起换，`protocol_version` flag-day 切换不做双栈。不选 protobuf：bus payload 由插件自由定义，schema-first 与开放 RPC 语义冲突。
 
 ## 17. 分发形态与 Go 主线
 
@@ -558,6 +561,8 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.71**（2026-09-14）：**pdfpage 自动切边 + 三档分辨率**——服务端 convert fuzz 5% 白边裁切（alpha 先压平；病态裁切回退整页），响应带 `image_width`/`image_height`，缓存文件名带尺寸后缀；前端可见页 1x→2x→3x 顺序升档、升档失败静默保低档。
+- **v0.70**（2026-09-14）：**file-service PDF 逐页栅格化（pdfpage）+ 二进制编码暂缓**——新增 RPC `file:_:pdfpage {path, page, scale}`：mutool draw → ImageMagick WebP（q80，超 700KB 自动降质守 1 MiB 帧上限），scale 钳 [0.25, 3]、像素 ≤24M，同 key 渲染去重（并发 2、超时 120s）；磁盘 LRU 缓存 `<data>/pdf-pages/`（key=path+size+mtime+page+dpi，1 GiB 预算，命中刷新时钟，淘汰至 80%）；响应带 pages/mtime/页尺寸（pt）供前端布局与缓存键。前端 viewer.files 新增 PDF 预览：双档分辨率（1x 先上屏、可见页升 2x）、相邻 ±2 页低档预取、IntersectionObserver 视口加载、模块级 LRU（blob URL，512 MiB）。§16-12 记录总线二进制编码（MessagePack over WS binary frame）暂缓及触发条件。
 - **v0.66**（2026-09-07）：**分支 = 纯 context 分区 + 手动归档**——分支不再绑定属主角色，branch_id 派发的角色选择与主线一致（显式 role_ids 或 LLM 路由、可多 role、force_new/parallel 生效），每 role 续接自己的 role × branch session lane，fresh 时以分支 lineage 建 context（开分支 = 带 lineage 的新 chat）；新增 `branches:archive` 不合并直接归档（archive-only 行无 merge_message_id，不进入任何线的 lineage；unarchive 保留不实现）；merge-confirm 分支目标摘要钉给目标线最新 role；前端分支上 composer 与主线完全一致，分支条加「归档」按钮。
 - **v0.65**（2026-09-07）：**分支条交互修订 + 空分支首轮角色选择生效**——分支条改单击单选、Ctrl/⌘+点击多选（多选集合=合并选择），「全部」仅查看不参与合并；排序定稿为全部→主线→分支→已归档；空分支首轮派发携带 composer 的 role_ids（显式选择跳过 LLM 路由、首轮定属主），非空分支续接时角色选择器置灰提示属主固定，「发送到」标注区分续接/首轮。
 - **v0.64**（2026-09-06）：**分支 fork 点 + turn 父链 + 多选合并（分支 DAG 化）**——`turns.prev_turn_id` 父链盖章（分支首轮指向 fork turn）；`branches` 新增 `fork_turn_id`/`parent_branch_id`（任意活跃线任意 turn 可分叉，多级 DAG；归档线不可再分叉）与 `merged_into_branch_id`（空 = 主线）；`branches:create` 支持 `from_turn_id`，默认名 `分支NN`；合并新增 `target_branch_id`（含主线合主线、否则合进最先点选分支；摘要送入目标线、源分支归档）；context 构建改 lineage 口径（本线 + fork 父链截止 fork turn + 递归并入 merged_into 分支，按时间交错，预算规则不变）；前端分叉按钮上移到 turn 盒顶条，分支条 tab 多选即合并选择。
@@ -661,7 +666,7 @@ my-plugin/
 - **C0 viewer.supervisor**：`restart.py` 的进程管理逻辑 + `main.py` 的插件进程拉起职责 → 独立 core plugin；内核只保留 autostart 它一个进程的逻辑（§9）。
 - **C1 config-store**：`config.py` + `models.py`（AppConfig schema）；路由 `GET/PUT /api/config`、`GET/POST /api/config/llm-provider-states(/clear)` → RPC `config:_:get/set` 等。前端 `ConfigPanel.vue` 拆为设置壳 + per-plugin section 贡献点（F2）。
 - **C2 instance-store**：新建（§7.2 bindings、instance state 落点）；同时接管 `viewer.layout.v1` 的服务端持久化（若需要跨设备）——view state 仍走 F6 localStorage。
-- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
+- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切 + 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
 - **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。admin API：`POST /api/admin/restart`（v0.34 优雅自重启）、`POST /api/admin/build-restart`（v0.37 构建成功后自重启）、`POST /api/admin/schedule-restart`（v0.43：先后台构建、成功才武装等空闲自重启：watchdog 5s 轮询 `chat:_:chats:list` 无 running + `voice:_:sessions` 无活动才触发；构建失败落 `failed` 不武装；`GET` 同路径返回 none/building/armed/failed；`DELETE` 同路径取消/复位（v0.44，armed/building/failed→none，幂等）；状态纯内存）。
 
 ### A.4 viewer.terminal（Phase 2，链路首验）

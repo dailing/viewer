@@ -153,7 +153,7 @@ func newInstanceStore(config RuntimeConfig) (Plugin, error) {
 }
 
 func newFileService(config RuntimeConfig) (Plugin, error) {
-	plugin := fileservice.New()
+	plugin := fileservice.New(config.DataDir)
 	return lifecycleAdapter{
 		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
 		wait:  waitContext, close: func(context.Context) error { return plugin.Close() },

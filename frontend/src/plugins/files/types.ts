@@ -17,7 +17,7 @@ export interface DirectoryListing {
   entries: FileEntry[];
 }
 
-export type PreviewKind = "image" | "markdown" | "html" | "text";
+export type PreviewKind = "image" | "markdown" | "html" | "text" | "pdf";
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
@@ -49,6 +49,7 @@ export function basename(path: string): string {
 export function kindForPath(path: string): PreviewKind {
   const ext = extensionOf(path);
   if (ext in IMAGE_MIME_BY_EXT) return "image";
+  if (ext === "pdf") return "pdf";
   if (MARKDOWN_EXTS.has(ext)) return "markdown";
   if (HTML_EXTS.has(ext)) return "html";
   return "text";
@@ -56,4 +57,21 @@ export function kindForPath(path: string): PreviewKind {
 
 export function imageMimeFor(path: string): string {
   return IMAGE_MIME_BY_EXT[extensionOf(path)] ?? "application/octet-stream";
+}
+
+/** Result of the file:_:pdfpage RPC — one rasterized PDF page as base64 WebP. */
+export interface PdfPageResult {
+  path: string;
+  page: number;
+  pages: number;
+  mtime: number;
+  page_width: number;
+  page_height: number;
+  /** Actual raster pixels after server-side white-margin trimming. */
+  image_width: number;
+  image_height: number;
+  dpi: number;
+  mime: string;
+  encoding: "base64";
+  content: string;
 }

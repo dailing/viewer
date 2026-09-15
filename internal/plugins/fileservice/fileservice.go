@@ -25,13 +25,16 @@ const showHiddenFiles = false
 
 var Manifest = busclient.Manifest{
 	ID: "file-service", Version: "0.1.0",
-	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}},
+	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "pdfpage": map[string]any{}},
 	Emits: map[string]any{},
 }
 
-type Plugin struct{ client *busclient.Client }
+type Plugin struct {
+	client *busclient.Client
+	pdf    *pdfRenderer
+}
 
-func New() *Plugin { return &Plugin{} }
+func New(dataDir string) *Plugin { return &Plugin{pdf: newPDFRenderer(dataDir)} }
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	client := busclient.New(kernelWS, Manifest, busclient.WithManaged(managed))
@@ -40,6 +43,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"file:_:read":    p.read,
 		"file:_:hash":    p.hash,
 		"file:_:list":    p.list,
+		"file:_:pdfpage": p.pdfpage,
 	} {
 		if _, err := client.Subscribe(pattern, handler); err != nil {
 			_ = client.Close()

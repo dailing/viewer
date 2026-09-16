@@ -149,6 +149,51 @@ async def run(args: argparse.Namespace) -> None:
             }
             print("file hash success/errors: PASS")
 
+            await expect_error(client, "file:_:watch", {}, "invalid_request")
+            await expect_error(
+                client, "file:_:watch", {"path": str(text_path)}, "invalid_request"
+            )
+            await expect_error(
+                client,
+                "file:_:watch",
+                {"path": str(temp), "watcher": "smoke"},
+                "invalid_request",
+            )
+            changes: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+            async def on_change(frame: dict[str, Any]) -> None:
+                changes.put_nowait(frame)
+
+            await client.subscribe("file:_:changed", on_change)
+            watched = await client.request(
+                "file:_:watch", {"path": str(text_path), "watcher": "smoke"}
+            )
+            assert watched["exists"] is True
+            assert watched["sha256"] == hashlib.sha256(text_path.read_bytes()).hexdigest()
+
+            text_path.write_text("changed content\n")
+            event = await asyncio.wait_for(changes.get(), 5)
+            assert event["channel"] == "file:_:changed"
+            assert event["value"]["path"] == str(text_path.resolve())
+            assert event["value"]["exists"] is True
+            assert event["value"]["sha256"] == hashlib.sha256(b"changed content\n").hexdigest()
+
+            text_path.unlink()
+            event = await asyncio.wait_for(changes.get(), 5)
+            assert event["value"]["exists"] is False
+
+            await client.request(
+                "file:_:unwatch", {"path": str(text_path), "watcher": "smoke"}
+            )
+            text_path.write_text("after unwatch\n")
+            try:
+                event = await asyncio.wait_for(changes.get(), 1.5)
+                raise AssertionError(f"event after unwatch: {event}")
+            except TimeoutError:
+                pass
+            await client.unsubscribe("file:_:changed", on_change)
+            print("file watch baseline/modify/delete/unwatch: PASS")
+
             await expect_error(client, "file:_:list", {}, "invalid_request")
             await expect_error(
                 client, "file:_:list", {"path": str(temp / "missing")}, "not_found"

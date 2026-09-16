@@ -45,6 +45,15 @@ export function basename(path: string): string {
   return segments.length === 0 ? path : segments[segments.length - 1];
 }
 
+/** Parent directory ("" for relative roots, "/" for filesystem-root children). */
+export function dirname(path: string): string {
+  const normalized = path.replace(/[\\/]+$/, "");
+  const cut = normalized.search(/[\\/][^\\/]+$/);
+  if (cut < 0) return "";
+  const dir = normalized.slice(0, cut);
+  return dir === "" ? "/" : dir;
+}
+
 /** Extension-based preview routing; "text" falls back to a binary notice when the read comes back base64. */
 export function kindForPath(path: string): PreviewKind {
   const ext = extensionOf(path);

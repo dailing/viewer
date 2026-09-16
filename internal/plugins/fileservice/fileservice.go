@@ -25,16 +25,20 @@ const showHiddenFiles = false
 
 var Manifest = busclient.Manifest{
 	ID: "file-service", Version: "0.1.0",
-	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "pdfpage": map[string]any{}},
-	Emits: map[string]any{},
+	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "pdfpage": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{}},
+	Emits: map[string]any{ChangedChannel: map[string]any{}},
 }
 
 type Plugin struct {
-	client *busclient.Client
-	pdf    *pdfRenderer
+	client  *busclient.Client
+	pdf     *pdfRenderer
+	cache   *hashCache
+	watcher *fileWatcher
 }
 
-func New(dataDir string) *Plugin { return &Plugin{pdf: newPDFRenderer(dataDir)} }
+func New(dataDir string) *Plugin {
+	return &Plugin{pdf: newPDFRenderer(dataDir), cache: newHashCache()}
+}
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	client := busclient.New(kernelWS, Manifest, busclient.WithManaged(managed))
@@ -44,6 +48,8 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"file:_:hash":    p.hash,
 		"file:_:list":    p.list,
 		"file:_:pdfpage": p.pdfpage,
+		"file:_:watch":   p.watch,
+		"file:_:unwatch": p.unwatch,
 	} {
 		if _, err := client.Subscribe(pattern, handler); err != nil {
 			_ = client.Close()
@@ -51,7 +57,21 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		}
 	}
 	p.client = client
+	watcher, err := newFileWatcher(p.cache, func(path string, value map[string]any) {
+		if err := client.Publish(context.Background(), ChangedChannel, value); err != nil {
+			slog.Error("file-service change publish failed", "path", path, "error", err)
+		}
+	})
+	if err != nil {
+		p.client = nil
+		_ = client.Close()
+		return err
+	}
+	p.watcher = watcher
+	watcher.start()
 	if err := client.Connect(ctx); err != nil {
+		p.watcher.close()
+		p.watcher = nil
 		p.client = nil
 		_ = client.Close()
 		return err
@@ -61,6 +81,10 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 }
 
 func (p *Plugin) Close() error {
+	if p.watcher != nil {
+		p.watcher.close()
+		p.watcher = nil
+	}
 	if p.client == nil {
 		return nil
 	}
@@ -87,7 +111,7 @@ func (p *Plugin) resolve(frame busclient.Frame) {
 	}
 	var digest any
 	if info.Mode().IsRegular() {
-		hash, hashErr := sha256File(path)
+		hash, hashErr := p.cache.hash(path, info)
 		if hashErr != nil {
 			p.replyError(frame, "read_error", hashErr.Error())
 			return
@@ -165,7 +189,7 @@ func (p *Plugin) hash(frame busclient.Frame) {
 		p.replyError(frame, "read_error", err.Error())
 		return
 	}
-	digest, err := sha256File(path)
+	digest, err := p.cache.hash(path, info)
 	if err != nil {
 		p.replyError(frame, "read_error", err.Error())
 		return
@@ -387,6 +411,51 @@ func sha256File(path string) (string, error) {
 		}
 	}
 	return fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+// watch registers (path, watcher id) for change events on file:_:changed and
+// replies with the current baseline state. Re-watching renews the TTL.
+func (p *Plugin) watch(frame busclient.Frame) {
+	if pluginrpc.Cancelled(frame) {
+		return
+	}
+	value, ok := pluginrpc.Object(frame)
+	path, okPath := requestPath(frame)
+	watcher, _ := value["watcher"].(string)
+	if !ok || !okPath || watcher == "" {
+		p.replyError(frame, "invalid_request", "missing required fields: path, watcher")
+		return
+	}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		p.replyError(frame, "invalid_request", "watch target must be a file: "+path)
+		return
+	}
+	state, err := p.watcher.add(path, watcher)
+	if err != nil {
+		p.replyError(frame, "watch_error", err.Error())
+		return
+	}
+	result := map[string]any{"path": path, "watcher": watcher, "exists": state.exists}
+	if state.exists {
+		result["sha256"] = state.digest
+		result["mtime"] = state.mtime
+	}
+	p.reply(frame, result)
+}
+
+func (p *Plugin) unwatch(frame busclient.Frame) {
+	if pluginrpc.Cancelled(frame) {
+		return
+	}
+	value, ok := pluginrpc.Object(frame)
+	path, okPath := requestPath(frame)
+	watcher, _ := value["watcher"].(string)
+	if !ok || !okPath || watcher == "" {
+		p.replyError(frame, "invalid_request", "missing required fields: path, watcher")
+		return
+	}
+	p.watcher.remove(path, watcher)
+	p.reply(frame, map[string]any{"path": path, "watcher": watcher})
 }
 
 func (p *Plugin) reply(frame busclient.Frame, result any) {

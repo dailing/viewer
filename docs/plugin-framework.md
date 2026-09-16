@@ -1,7 +1,10 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.71**（2026-09-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.74**（2026-09-16）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
 
+> v0.74 变更：**file-service 文件变更监听 + 打开文件自动/手动刷新**——①新增 RPC `file:_:watch {path, watcher}` / `file:_:unwatch`：watcher id 由调用方生成、按 path 引用计数，条目 TTL 120s（前端每 60s 重发 watch 续约），崩溃的浏览器不泄漏；watch 应答即当前基线 `{exists, sha256?, mtime?}`。②变更检测单一产线：fsnotify 监听**父目录**（覆盖编辑器原子保存 rename 与删除重建）→ 按 path 300ms 防抖 → 与 30s 全量巡检（覆盖 inotify 静默失效：队列溢出、网络盘）汇入同一 verify——stat → 缓存 hash → 摘要真变才广播 `file:_:changed {path, exists, sha256?, mtime?}`（touch 不触发）；事件驱动的 verify 先作废 hash 缓存（ext3 等粗 mtime 粒度下同尺寸重写 (size,mtime) 不变，巡检路径保留缓存作为权衡）。③`file:_:hash`/`resolve` 改用共享 (size,mtime)→sha256 缓存。④前端 files：FilePreview 打开即 watch + 订阅 `file:_:changed`（path 匹配才动），命中重读（text/markdown 保留滚动位置，PDF 重挂组件——页缓存 key 含 mtime 自动失效）；续约应答 digest 漂移即重载（后台 tab 节流/断连漏事件的闭环兜底）；删除事件显示「文件已被删除或移动」，重建后自动恢复；pane chrome 新增手动刷新 action（直接强制重读，不经事件）。范围：只监听打开的文件，不含目录树刷新。
+> v0.73 变更：**launcher 实例契约 + files 文件夹 pin 成为启动器**——①`DockInstance` 新增 `clickCreates`：标记的实例条目点击 = 调 `provider.create(instanceId)` 新开实例，而非聚焦自己（`create` 签名扩为可选接收来源实例 id）；launcher 条目是唯一允许带 Dock 动作按钮的条目例外——provider 实现 `remove(instanceId)` 钩子时，hover 显示 × 删除该入口（v0.42 的 remove 契约删除针对普通实例，此处为 launcher 限定恢复）。②files 的**文件夹 pin（pinned 且无打开文件）即 launcher**：点击新开一个以该目录为初始 dir 的实例，同一文件夹可开任意多个；launcher 自己的 pane 永不打开，状态冻结在 pin 时刻。③files 文件列表跟随打开的文件：打开文件或采纳恢复记录时，目录定位到文件所在目录。
+> v0.72 变更：**files 实例状态迁入 instance-store + 文件列表开关收进 pane chrome**——①files 插件的实例注册表与 per-instance 视图状态（dir/打开文件/mode/overlay）从 localStorage 迁至 instance-store 核心插件（§7.2/C2：`instance:_:list/set/delete`，每实例整值 JSON），pin 的实例由此跨重启、跨浏览器、跨机器保留；`instance-store:files:*` mailbox 在打开的浏览器间实时同步变更，本地变更乐观生效后 fire-and-forget 复制到服务端，每次总线（重）连做一次全量对账。未 pin 实例语义不变（无 pane 托管即剪枝）；被另一浏览器误剪枝的存活 pane 在下一次状态写入时自愈重建记录（upsert 语义）。②文件列表 overlay 的开关从 pane 内悬浮按钮收进 pane chrome actions（icon + active 态，默认打开），与全部实例级动作统一（v0.42 口径）。
 > v0.71 变更：**pdfpage 自动切边 + 第三档分辨率**——渲染管线 mutool draw 后增加 convert 白边裁切（先压平 alpha 使透明背景按白色计，fuzz 5% `-trim`；病态裁切 <32px 或面积 <5% 原页时回退整页，空白页保持原样）；响应新增 `image_width`/`image_height`（切边后实际像素，供前端校正占位纵横比）；缓存文件名带尺寸后缀 `<hash>-<W>x<H>.webp`（key 不变，旧命名条目自然 miss 后由 LRU 淘汰）。前端 PDF 预览升三档：可见页 1x→2x→3x 顺序升档（3x 待 2x 完成后触发，预取仍只取相邻页 1x），升档失败静默保留已有档位，仅一页无任何图可显示时才报错。
 > v0.70 变更：**file-service 增加 PDF 逐页栅格化能力**——新增 RPC `file:_:pdfpage`：输入 `{path, page, scale}`（page 1 起；scale 钳制 [0.25, 3]、渲染像素 ≤24M、原始 WebP >700KB 自动降质重编码以守住 1 MiB 帧上限），输出 `{path, page, pages, mtime, page_width, page_height, dpi, mime, encoding, content}`（WebP base64）。渲染管线 mutool draw（PNG）→ ImageMagick convert（WebP q80），同 key 并发渲染去重、并发度 2、超时 120s；磁盘 LRU 缓存 `<data>/pdf-pages/`（key=path+size+mtime+page+dpi，预算 1 GiB，命中刷新时钟，超预算按最旧淘汰至 80%）。用途：viewer.files 的 PDF 预览（低档先上屏、可见页升档、相邻页低档预取）。总线二进制编码升级（MessagePack over WS binary frame）暂缓，见 §16-12。
 > v0.69 变更：**composer 草稿跨设备同步**——chat 新增 `drafts` 表（每 chat 一行，整值覆盖，按到达顺序 last-write-wins，上限 64 KiB）与 RPC `chat:_:draft:get`/`chat:_:draft:set {chat_id, text, source}`；每次 set 广播 `chat:_:draft:sync {chat_id, text, updated_at, source}`（事件名避开 RPC 前缀——bus 订阅按字段前缀匹配，同前缀会把 RPC 帧也投给事件订阅者）。人类消息落库即清草稿并广播空文本（自动/loop 派发不清）。前端 ComposerBox 挂载拉取、400ms 防抖推送、订阅实时应用，本端回声按 `source` 过滤。
@@ -323,7 +326,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 - **四种 tiling mode**：`cascade` 每层根据该层实际矩形长边二等分（宽高相等时上下切），first pane 占根一半、其余在 second 区递归；`columns` 横向等宽；`rows` 纵向等高；`free` 直接渲染 binary split tree 并开放横/纵 split + ratio drag。模式选择存 `viewer.layout.mode.v1`。前三种只显示通用「新增 pane」，不允许手改由算法确定的 geometry。
 - **移动语义**：共享抬头的「向树根/向叶端」将 active pane 内容与 DFS tile 顺序的前/后相邻项交换，并把 active 跟随到新位置；连续操作即可置首/置末，四模式与模式切换保持同一顺序语义。
 - **Dock singleton 条目常驻**：singleton provider（bus-inspector、chat-manager 等）的条目无条件常驻 dock，点击 = 打开或聚焦。（v0.24 引入的 pin/unpin 切换在 v0.42 随 dock hover 按钮一并移除。）
-- **Dock 条目无动作按钮（v0.42）**：dock 条目上不放任何按钮；实例的终止/删除动作归 pane chrome（§8.8）——terminal 的终止是 chrome danger action（杀 PTY + 关 pane，plain close 只摘 pane、实例保留可回看 scrollback），files 是 pin + 关闭剪枝。`DockProvider` 契约不再有 `remove` 钩子。
+- **Dock 条目无动作按钮（v0.42；v0.73 修订）**：dock 条目上不放任何按钮；实例的终止/删除动作归 pane chrome（§8.8）——terminal 的终止是 chrome danger action（杀 PTY + 关 pane，plain close 只摘 pane、实例保留可回看 scrollback），files 是 pin + 关闭剪枝。唯一例外是 **launcher 实例**（v0.73）：`DockInstance.clickCreates` 标记的条目点击 = `provider.create(instanceId)` 新开实例而非聚焦自己，且 provider 实现 `remove(instanceId)` 时条目 hover 显示 × 删除该入口（files 的文件夹 pin 即 launcher：pinned 且无打开文件的实例，点击新开一个以 pin 时刻目录为初始 dir 的实例，同一文件夹可重复开多个；launcher 自身 pane 永不打开）。普通实例的 `remove` 契约仍然不存在。
 - **Dock 分区契约不变**：一个前端插件贡献一个 DockProvider（一个 dock 分区 + instances 列表）；一个插件可注册任意数量 pane 组件类型。需要第二个 dock 分区时拆第二个前端插件（如 chat / chat-manager），shell 契约零改动。
 
 ### 8.8 Pane chrome 注册（v0.56 修订）
@@ -406,8 +409,8 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 |---|---|---|
 | C0 | viewer.supervisor | 拉起/心跳/重启/熔断/日志全部插件进程；插件管理 RPC（install/reload/enable）归属（§9） |
 | C1 | config-store | `config:_:get/set` 等 RPC channel；`plugins.<id>.*` namespace |
-| C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件 |
-| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边自动裁切（v0.71）+ 磁盘 LRU 缓存（v0.70） |
+| C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件；每实例变更发 `instance-store:<plugin>:<instance>` mailbox（v0.72 起前端 files 实例注册表接入） |
+| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边自动裁切（v0.71）+ 磁盘 LRU 缓存（v0.70）+ watch/unwatch：打开文件变更监听（TTL 续约、目录级 fsnotify + 巡检、digest 变更才广播 `file:_:changed`，v0.74） |
 | C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37）+ `POST /api/admin/schedule-restart`（后台 build 成功后武装、等空闲自重启，v0.43）+ `GET /api/admin/schedule-restart`（状态 none/building/armed/failed，v0.43）+ `DELETE /api/admin/schedule-restart`（取消/复位，v0.44） |
 | C6 | llm | 全局 LLM 转发层：`llm:_:complete` 纯转发 OpenAI 兼容端点；配置 `plugins.llm`（v0.48，§8.11） |
 | C7 | voice-control | 全局语音控制：`voice-catalog:_:*` 目录合并 + 连续语音对话（LLM 直答或派发条目）+ 会话上下文压缩 + `chat:_:turn` 主动播报（v0.49，§8.11）+ 交互日志/可配置 prompt 模板/prompt 预览（v0.50，§8.11） |
@@ -561,6 +564,10 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.74**（2026-09-16）：**file-service 文件变更监听 + 打开文件自动/手动刷新**——`file:_:watch/unwatch`（watcher id 引用计数 + 120s TTL + 60s 续约）；目录级 fsnotify（原子保存/删除重建覆盖）+ 300ms 防抖 + 30s 巡检汇入同一 verify，digest 真变才广播 `file:_:changed`，事件路径先作废 (size,mtime)→sha256 共享缓存（粗 mtime 粒度文件系统）；hash/resolve 共用该缓存。前端 files：打开即 watch + 订阅事件重读（保留滚动、PDF 重挂）、续约 digest 漂移兜底、删除 notice、chrome 手动刷新 action。
+- **v0.73**（2026-09-16）：**launcher 实例契约 + files 文件夹 pin 成为启动器**——`DockInstance.clickCreates` + `create(fromInstanceId?)` + launcher 限定的 `remove` hover ×（§8.7）；files 文件夹 pin = launcher（点击新开实例、初始 dir = pin 时刻目录、可重复开）；files 文件列表跟随打开文件定位目录。
+
+- **v0.72**（2026-09-16）：**files 实例状态迁入 instance-store + 文件列表开关收进 pane chrome**——实例注册表/视图状态从 localStorage 迁至 instance-store（pin 跨重启/浏览器/机器保留，`instance-store:files:*` mailbox 跨浏览器实时同步，重连全量对账，误剪枝自愈）；文件列表 overlay 开关改为 pane chrome action（默认打开）。
 - **v0.71**（2026-09-14）：**pdfpage 自动切边 + 三档分辨率**——服务端 convert fuzz 5% 白边裁切（alpha 先压平；病态裁切回退整页），响应带 `image_width`/`image_height`，缓存文件名带尺寸后缀；前端可见页 1x→2x→3x 顺序升档、升档失败静默保低档。
 - **v0.70**（2026-09-14）：**file-service PDF 逐页栅格化（pdfpage）+ 二进制编码暂缓**——新增 RPC `file:_:pdfpage {path, page, scale}`：mutool draw → ImageMagick WebP（q80，超 700KB 自动降质守 1 MiB 帧上限），scale 钳 [0.25, 3]、像素 ≤24M，同 key 渲染去重（并发 2、超时 120s）；磁盘 LRU 缓存 `<data>/pdf-pages/`（key=path+size+mtime+page+dpi，1 GiB 预算，命中刷新时钟，淘汰至 80%）；响应带 pages/mtime/页尺寸（pt）供前端布局与缓存键。前端 viewer.files 新增 PDF 预览：双档分辨率（1x 先上屏、可见页升 2x）、相邻 ±2 页低档预取、IntersectionObserver 视口加载、模块级 LRU（blob URL，512 MiB）。§16-12 记录总线二进制编码（MessagePack over WS binary frame）暂缓及触发条件。
 - **v0.66**（2026-09-07）：**分支 = 纯 context 分区 + 手动归档**——分支不再绑定属主角色，branch_id 派发的角色选择与主线一致（显式 role_ids 或 LLM 路由、可多 role、force_new/parallel 生效），每 role 续接自己的 role × branch session lane，fresh 时以分支 lineage 建 context（开分支 = 带 lineage 的新 chat）；新增 `branches:archive` 不合并直接归档（archive-only 行无 merge_message_id，不进入任何线的 lineage；unarchive 保留不实现）；merge-confirm 分支目标摘要钉给目标线最新 role；前端分支上 composer 与主线完全一致，分支条加「归档」按钮。

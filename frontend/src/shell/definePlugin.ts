@@ -20,6 +20,12 @@ export interface DockInstance {
   state?: string;
   /** Per-instance icon override; falls back to the provider's icon. */
   icon?: string;
+  /**
+   * Launcher instance (files pinned folders): clicking the Dock entry calls
+   * `provider.create(id)` to spawn a fresh instance instead of opening this
+   * one. Launchers are removable via the provider's `remove` hook.
+   */
+  clickCreates?: boolean;
 }
 
 /**
@@ -45,8 +51,14 @@ export interface DockProvider {
   clickCreates?: boolean;
   /** Reactive list of running instances, maintained by the provider. */
   instances: DockInstance[];
-  /** "+" menu action (create a new instance); absent = not user-creatable. */
-  create?: () => Promise<void> | void;
+  /**
+   * "+" menu action (create a new instance); absent = not user-creatable.
+   * Receives the source instance id when invoked from a launcher entry
+   * (`DockInstance.clickCreates`).
+   */
+  create?: (fromInstanceId?: string) => Promise<void> | void;
+  /** Remove a launcher instance (Dock hover ×); absent = not removable. */
+  remove?: (instanceId: string) => Promise<void> | void;
 }
 
 /**

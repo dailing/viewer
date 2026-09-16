@@ -4,10 +4,18 @@
  * (rendered, with a source mode toggled from the pane chrome), otherwise
  * utf-8 text. Oversized reads come back as `too_large` and binary files as
  * base64; both get a plain notice instead of a preview.
+ *
+ * Open files are watched server-side (file:_:watch, renewed on an interval;
+ * the server entry expires if the browser dies): an external change pushes
+ * one `file:_:changed` event and the preview reloads. The watch RPC reply
+ * doubles as a digest heartbeat — after a background-tab throttle or bus
+ * reconnect, a baseline mismatch triggers the same reload. The pane chrome's
+ * refresh action bumps `reloadTick` for a manual re-read.
  */
-import { computed, inject, ref, watch } from "vue";
+import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
 
 import { RpcError } from "@viewer/bus-sdk";
+import type { BusFrame } from "@viewer/bus-sdk";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
@@ -18,6 +26,8 @@ import { imageMimeFor, kindForPath } from "./types";
 const props = defineProps<{
   path: string | null;
   mode: PreviewMode;
+  /** Bumped by the pane's manual-refresh action; forces a re-read. */
+  reloadTick: number;
 }>();
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -26,8 +36,9 @@ const ctx: PluginCtx = injectedCtx;
 
 const IMAGE_MAX_BYTES = 16 * 1024 * 1024;
 const TEXT_MAX_BYTES = 4 * 1024 * 1024;
+const WATCH_RENEW_MS = 60_000;
 
-type Status = "empty" | "loading" | "ready" | "too-large" | "binary" | "error";
+type Status = "empty" | "loading" | "ready" | "too-large" | "binary" | "deleted" | "error";
 
 interface ReadResult {
   path: string;
@@ -36,14 +47,24 @@ interface ReadResult {
   content: string;
 }
 
+interface WatchReply {
+  path: string;
+  exists: boolean;
+  sha256?: string;
+}
+
 const status = ref<Status>("empty");
 const error = ref("");
 const limit = ref(0);
 const text = ref("");
 const imageUrl = ref("");
+const rootRef = ref<HTMLElement | null>(null);
 const renderedRef = ref<HTMLElement | null>(null);
+/** Bumped by server change events; remounts PdfPreview (its cache re-keys on mtime). */
+const autoTick = ref(0);
 
 const kind = computed(() => (props.path === null ? null : kindForPath(props.path)));
+const pdfKey = computed(() => `${props.path ?? ""}:${props.reloadTick}:${autoTick.value}`);
 const rendered = computed(() =>
   kind.value === "markdown" && props.mode === "render" && status.value === "ready"
     ? renderMarkdown(text.value)
@@ -56,7 +77,11 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-async function load(path: string | null): Promise<void> {
+async function load(path: string | null, preserveScroll = false): Promise<void> {
+  const scroller = preserveScroll
+    ? rootRef.value?.querySelector<HTMLElement>(".preview-text, .preview-markdown")
+    : null;
+  const previousTop = scroller?.scrollTop ?? 0;
   status.value = path === null ? "empty" : "loading";
   error.value = "";
   text.value = "";
@@ -88,6 +113,11 @@ async function load(path: string | null): Promise<void> {
       text.value = result.content;
     }
     status.value = "ready";
+    if (previousTop > 0) {
+      await nextTick();
+      const next = rootRef.value?.querySelector<HTMLElement>(".preview-text, .preview-markdown");
+      if (next !== null && next !== undefined) next.scrollTop = previousTop;
+    }
   } catch (cause) {
     if (cause instanceof RpcError && cause.code === "too_large") {
       limit.value = maxBytes;
@@ -99,7 +129,87 @@ async function load(path: string | null): Promise<void> {
   }
 }
 
-watch(() => props.path, (path) => void load(path), { immediate: true });
+// --- Server-side watch: one (path, watcher id) per open preview, renewed ---
+const watcherId = crypto.randomUUID();
+let watchedPath: string | null = null;
+let lastDigest: string | null = null;
+let renewTimer: ReturnType<typeof setInterval> | null = null;
+
+function onWatchReply(reply: WatchReply): void {
+  if (reply.path !== props.path) return;
+  if (!reply.exists) {
+    if (lastDigest !== null) status.value = "deleted";
+    lastDigest = null;
+    return;
+  }
+  const digest = reply.sha256 ?? null;
+  if (lastDigest !== null && digest !== null && digest !== lastDigest) {
+    // Missed events (background-tab throttle, bus reconnect): the renewal
+    // heartbeat found a drift — reload like a change event would.
+    autoTick.value += 1;
+    void load(props.path, true);
+  }
+  lastDigest = digest;
+}
+
+function unwatchFile(): void {
+  if (renewTimer !== null) {
+    clearInterval(renewTimer);
+    renewTimer = null;
+  }
+  if (watchedPath !== null) {
+    ctx.bus
+      .request("file:_:unwatch", { path: watchedPath, watcher: watcherId })
+      .catch(() => undefined);
+    watchedPath = null;
+  }
+  lastDigest = null;
+}
+
+function watchFile(path: string | null): void {
+  unwatchFile();
+  if (path === null) return;
+  watchedPath = path;
+  const renew = (): void => {
+    ctx.bus
+      .request("file:_:watch", { path, watcher: watcherId })
+      .then((reply) => onWatchReply(reply as WatchReply))
+      .catch(() => undefined);
+  };
+  renew();
+  renewTimer = setInterval(renew, WATCH_RENEW_MS);
+}
+
+ctx.bus.subscribe("file:_:changed", (frame: BusFrame) => {
+  const value = frame.value as { path?: string; exists?: boolean; sha256?: string } | null;
+  if (value === null || value.path === undefined || value.path !== props.path) return;
+  if (value.exists === false) {
+    status.value = "deleted";
+    lastDigest = null;
+    return;
+  }
+  lastDigest = value.sha256 ?? lastDigest;
+  autoTick.value += 1;
+  void load(props.path, true);
+});
+
+watch(
+  () => props.path,
+  (path) => {
+    watchFile(path);
+    void load(path);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.reloadTick,
+  () => {
+    if (props.path !== null) void load(props.path, true);
+  },
+);
+
+onUnmounted(unwatchFile);
 
 // Mermaid fences need a post-render pass once the v-html is in the DOM.
 watch([rendered, renderedRef], () => {
@@ -108,7 +218,7 @@ watch([rendered, renderedRef], () => {
 </script>
 
 <template>
-  <div class="file-preview">
+  <div ref="rootRef" class="file-preview">
     <div v-if="status === 'empty'" class="preview-notice">
       <i class="bi bi-file-earmark"></i>
       <div>从文件列表选择文件</div>
@@ -125,12 +235,16 @@ watch([rendered, renderedRef], () => {
       <i class="bi bi-file-earmark-binary"></i>
       <div>二进制文件，无法预览</div>
     </div>
+    <div v-else-if="status === 'deleted'" class="preview-notice">
+      <i class="bi bi-file-earmark-x"></i>
+      <div>文件已被删除或移动</div>
+    </div>
     <div v-else-if="status === 'error'" class="preview-notice">
       <i class="bi bi-exclamation-triangle"></i>
       <div>{{ error }}</div>
     </div>
     <template v-else>
-      <PdfPreview v-if="kind === 'pdf' && path !== null" :path="path" />
+      <PdfPreview v-if="kind === 'pdf' && path !== null" :key="pdfKey" :path="path" />
       <div v-else-if="kind === 'image'" class="preview-image">
         <img :src="imageUrl" :alt="path ?? ''" />
       </div>

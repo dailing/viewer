@@ -186,7 +186,18 @@ function openEntry(entry: DockEntry): void {
     void entry.provider.create?.();
     return;
   }
+  if (entry.instance?.clickCreates === true) {
+    // Launcher instance: spawn a fresh instance seeded from this one instead
+    // of focusing it (files pinned folders open the same folder repeatedly).
+    void entry.provider.create?.(entry.instance.id);
+    return;
+  }
   layout.openInstance(entry.provider.type, entry.instance?.id ?? "main");
+}
+
+function removeEntry(entry: DockEntry): void {
+  if (entry.instance === undefined) return;
+  void entry.provider.remove?.(entry.instance.id);
 }
 
 async function createFrom(provider: DockProvider): Promise<void> {
@@ -295,6 +306,16 @@ const buildTime = (() => {
           <button type="button" class="dock-btn" :title="entry.label" :aria-label="entry.label" @click="openEntry(entry)">
             <i class="bi" :class="entry.icon"></i>
             <span v-if="isExpanded" class="dock-label">{{ entry.displayLabel }}</span>
+          </button>
+          <button
+            v-if="entry.instance?.clickCreates === true && entry.provider.remove !== undefined"
+            type="button"
+            class="dock-item-remove"
+            title="移除此固定入口"
+            :aria-label="`移除 ${entry.label}`"
+            @click.stop="removeEntry(entry)"
+          >
+            <i class="bi bi-x"></i>
           </button>
           <span v-if="entry.state !== undefined" class="dock-dot" :class="dockDotClass(entry.state)"></span>
         </div>
@@ -471,6 +492,33 @@ const buildTime = (() => {
   min-width: 0;
   position: relative;
   width: 28px;
+}
+
+.dock-item-remove {
+  align-items: center;
+  background: var(--color-surface);
+  border: 0;
+  border-radius: 50%;
+  color: var(--color-text-muted);
+  display: none;
+  font-size: 10px;
+  height: 14px;
+  justify-content: center;
+  padding: 0;
+  position: absolute;
+  right: -2px;
+  top: -2px;
+  width: 14px;
+  z-index: 2;
+}
+
+.dock-item:hover .dock-item-remove {
+  display: inline-flex;
+}
+
+.dock-item-remove:hover {
+  background: var(--color-danger);
+  color: #fff;
 }
 
 .dock.expanded .dock-item {

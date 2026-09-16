@@ -1,3 +1,14 @@
+<script lang="ts">
+/* Module scope (runs once per app load, shared by every PdfPreview instance
+ * — <script setup> top-level state would be PER-INSTANCE): scroll memory
+ * across refresh remounts. FilePreview remounts this component on every
+ * server change event / manual refresh (fresh rasters key off the new
+ * mtime), which would reset the scroll position to the top. Positions are
+ * remembered per path as (anchor page, fractional offset into the page), so
+ * the restore survives page aspect corrections landing after it. */
+const pdfScrollMemory = new Map<string, { page: number; ratio: number }>();
+</script>
+
 <script setup lang="ts">
 /**
  * PDF preview: per-page WebP rasters via the file:_:pdfpage RPC. Three
@@ -41,7 +52,9 @@ interface PageState {
   error: string | null;
 }
 
-// Module-level page cache: key = `${path}@${mtime}:${page}:${scale}`.
+// Page raster cache: key = `${path}@${mtime}:${page}:${scale}`. NOTE: in
+// <script setup> this is PER-INSTANCE, not module-level — cross-instance and
+// cross-remount reuse is backed by the server-side disk LRU.
 const pageCache = new Map<string, { url: string; bytes: number }>();
 let cacheBytes = 0;
 const inflight = new Map<string, Promise<string>>();
@@ -90,6 +103,42 @@ const pageStates = ref<PageState[]>([]);
 const scrollRef = ref<HTMLElement | null>(null);
 let generation = 0;
 let observer: IntersectionObserver | null = null;
+
+function saveScroll(): void {
+  const scroller = scrollRef.value;
+  if (scroller === null) return;
+  const scrollerRect = scroller.getBoundingClientRect();
+  for (const element of scroller.querySelectorAll<HTMLElement>(".pdf-page")) {
+    const rect = element.getBoundingClientRect();
+    const contentTop = rect.top - scrollerRect.top + scroller.scrollTop;
+    if (contentTop + rect.height > scroller.scrollTop && rect.height > 0) {
+      pdfScrollMemory.set(props.path, {
+        page: Number(element.dataset.page ?? 1),
+        ratio: (scroller.scrollTop - contentTop) / rect.height,
+      });
+      return;
+    }
+  }
+  // No page elements rendered (loading/error notice after a transient bad
+  // write): keep the previous memory so the next successful reload still
+  // restores the position.
+}
+
+function restoreScroll(): void {
+  const scroller = scrollRef.value;
+  const saved = pdfScrollMemory.get(props.path);
+  if (scroller === null || saved === undefined) return;
+  const scrollerRect = scroller.getBoundingClientRect();
+  for (const element of scroller.querySelectorAll<HTMLElement>(".pdf-page")) {
+    if (Number(element.dataset.page ?? 0) === saved.page) {
+      const rect = element.getBoundingClientRect();
+      scroller.scrollTop = rect.top - scrollerRect.top + scroller.scrollTop + saved.ratio * rect.height;
+      return;
+    }
+  }
+  // The anchor page lies beyond the (shorter) new document: park at the end.
+  scroller.scrollTop = scroller.scrollHeight;
+}
 
 function cacheKey(page: number, scale: number): string {
   return `${props.path}@${mtime.value === 0 ? "open" : mtime.value}:${page}:${scale}`;
@@ -221,7 +270,14 @@ async function load(path: string, gen: number): Promise<void> {
     if (gen !== generation) return;
     loadError.value = cause instanceof Error ? cause.message : "PDF 加载失败";
   } finally {
-    if (gen === generation) loading.value = false;
+    if (gen === generation) {
+      loading.value = false;
+      // Page divs mount with their aspect placeholders in the same flush, so
+      // the anchor restore lands on correct offsets immediately.
+      void nextTick(() => {
+        if (gen === generation) restoreScroll();
+      });
+    }
   }
 }
 
@@ -235,6 +291,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  saveScroll();
   generation++;
   observer?.disconnect();
 });

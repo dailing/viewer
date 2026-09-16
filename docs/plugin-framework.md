@@ -564,6 +564,7 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.75**（2026-09-16）：**cite message（@消息id 引用注入）**——chat `cite.go`：外发用户消息中的 `@<32位hex消息id>` token 全局解析（跨 chat/branch，去重保序、上限 8 条、单条 8 KiB UTF-8 安全截断），只取 messages 表可见文本（tool call/thinking 在 message_blocks 结构上不可达），组装标注段统一注入 user query 正前方（三种 prompt 模式一致），跨 chat 标注来源、未找到明确标注 unavailable；hindsight recall 仍用原始消息。前端可见消息 hover 出现引用按钮 = 复制 token + 追加当前 chat 输入框草稿。
 - **v0.74**（2026-09-16）：**file-service 文件变更监听 + 打开文件自动/手动刷新**——`file:_:watch/unwatch`（watcher id 引用计数 + 120s TTL + 60s 续约）；目录级 fsnotify（原子保存/删除重建覆盖）+ 300ms 防抖 + 30s 巡检汇入同一 verify，digest 真变才广播 `file:_:changed`，事件路径先作废 (size,mtime)→sha256 共享缓存（粗 mtime 粒度文件系统）；hash/resolve 共用该缓存。前端 files：打开即 watch + 订阅事件重读（保留滚动、PDF 重挂）、续约 digest 漂移兜底、删除 notice、chrome 手动刷新 action。
 - **v0.73**（2026-09-16）：**launcher 实例契约 + files 文件夹 pin 成为启动器**——`DockInstance.clickCreates` + `create(fromInstanceId?)` + launcher 限定的 `remove` hover ×（§8.7）；files 文件夹 pin = launcher（点击新开实例、初始 dir = pin 时刻目录、可重复开）；files 文件列表跟随打开文件定位目录。
 

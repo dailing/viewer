@@ -784,6 +784,11 @@ func (p *Plugin) handleQueuedUpdate(frame busclient.Frame) {
 }
 
 func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget, message string, before int64, forceNew bool, parallel bool, dispatchID string) {
+	// Resolve @<message id> citations once per dispatch (cite.go): the
+	// section precedes the user query in every prompt mode below, while
+	// context builders keep the raw message as their recall query.
+	cited := p.buildCitedSection(chat.ID, message)
+	routedMessage := withCitedSection(cited, message)
 	// Batch settlement collects each line's published result nodes; after
 	// all targets terminate, every touched line's head advances (join node
 	// for multi-role results).
@@ -885,15 +890,15 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 						}
 					}
 				}
-				prompt := message
+				prompt := routedMessage
 				contextBytes, promptMode := 0, "existing_session"
 				if fresh {
 					contextBridge := p.buildLineContext(chat, target.inputNode, target.branch, message, before, dispatchID)
 					contextBytes, promptMode = len(contextBridge), "new_session"
-					prompt = initialPrompt(workspace, chat, role, contextBridge, message)
+					prompt = initialPrompt(workspace, chat, role, contextBridge, routedMessage)
 				} else if bridge := p.buildLineBridge(chat, target.inputNode, target.branch, role.ID, message, before, dispatchID); bridge != "" {
 					contextBytes, promptMode = len(bridge), "role_switch"
-					prompt = bridge + "\n\nCurrent routed message follows:\n" + message
+					prompt = bridge + "\n\nCurrent routed message follows:\n" + routedMessage
 				}
 				slog.Info("agent prompt prepared",
 					"chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID,

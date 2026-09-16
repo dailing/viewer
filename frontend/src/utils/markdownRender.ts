@@ -123,6 +123,22 @@ const md: MarkdownIt = new MarkdownIt({
   });
 
 const fence = md.renderer.rules.fence;
+
+// Chat message citations: an @<message id> token (32 lowercase hex chars,
+// produced by the chat pane's per-message cite button) renders as a subtle
+// inline chip instead of raw text. The full token stays in the title.
+const CITE_TOKEN = /^@[0-9a-f]{32}/;
+md.inline.ruler.push("cite", (state, silent): boolean => {
+  const match = CITE_TOKEN.exec(state.src.slice(state.pos));
+  if (match === null) return false;
+  if (!silent) {
+    const token = state.push("html_inline", "", 0);
+    const escaped = md.utils.escapeHtml(match[0]);
+    token.content = `<span class="chat-cite-token" title="引用消息 ${escaped.slice(1)}">${escaped}</span>`;
+  }
+  state.pos += match[0].length;
+  return true;
+});
 md.renderer.rules.fence = (tokens, idx, options, env, self): string => {
   const token = tokens[idx];
   const language = normalizeLanguage(token.info);

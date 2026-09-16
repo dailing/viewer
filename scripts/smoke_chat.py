@@ -134,7 +134,7 @@ async def run() -> None:
 
             codex_role = await client.request("chat:_:roles:create", {"name": "Codex", "description": "codex", "prompt": "CODEX-RULE", "provider": "codex-app-server", "routing_policy_id": "codex-policy"})
             codex_chat = await client.request("chat:_:chats:create", {"name": "Codex bus", "root": str(ROOT), "type": "direct", "member_role_ids": [codex_role["id"]]})
-            await client.request("chat:_:dispatch", {"chat_id": codex_chat["id"], "message": "codex hello", "role_ids": [codex_role["id"]]})
+            codex_dispatched = await client.request("chat:_:dispatch", {"chat_id": codex_chat["id"], "message": "codex hello", "role_ids": [codex_role["id"]]})
             await wait_for(lambda: any(item["chat_id"] == codex_chat["id"] for item in completions))
             codex_done = next(item for item in completions if item["chat_id"] == codex_chat["id"])
             assert codex_done["stop_reason"] == "end_turn" and codex_done["attempts"][0]["outcome"] == "completed"
@@ -184,6 +184,19 @@ async def run() -> None:
             assert [item["outcome"] for item in turn_error_done["attempts"]] == ["turn_error", "completed"]
             print("TURN_ERROR_FAILOVER_SAMPLE", json.dumps(turn_error_done["attempts"], separators=(",", ":")))
             print("PASS automatic failover advances after turn-ended error")
+
+            # Message citation: @<message id> tokens in an outgoing message
+            # resolve GLOBALLY (cross-chat included) and the cited messages'
+            # visible text is injected directly before the user query — the
+            # mock echoes the full prompt, so the reply carries the section.
+            await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": f"cite check @{dispatched['message_id']} and @{codex_dispatched['message_id']}", "role_ids": [first["id"]]})
+            await wait_for(lambda: len([item for item in completions if item["chat_id"] == chat["id"]]) >= 4)
+            cite_replies = [item for item in messages if item["chat_id"] == chat["id"] and item["role"] == "assistant" and "user cited message id" in item.get("text", "")]
+            assert cite_replies, "no assistant reply carried the injected citation section"
+            cite_text = cite_replies[-1]["text"]
+            assert f"user cited message id {dispatched['message_id']}" in cite_text and "relay hello" in cite_text
+            assert f"user cited message id {codex_dispatched['message_id']}" in cite_text and "codex hello" in cite_text and "from a different chat" in cite_text
+            print("PASS message citation injects same-chat and cross-chat cited content before the query")
 
             try: await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "auto"})
             except Exception as exc: assert "LLM router is not configured" in str(exc)

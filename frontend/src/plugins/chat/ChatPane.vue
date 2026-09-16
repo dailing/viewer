@@ -690,6 +690,43 @@ function renderedHtmlFor(id: string, text: string): string {
   return html;
 }
 
+/* Message citation: every persisted text segment gets a hover cite button.
+ * Clicking copies the `@<message id>` token to the clipboard (pasteable into
+ * any chat/branch — the backend resolves ids globally) AND appends it to this
+ * chat's composer draft, which is the common same-chat precise-cite flow. */
+const CITE_TOKEN_RE = /@([0-9a-f]{32})/g;
+const citeFlashed = ref("");
+let citeFlashTimer: ReturnType<typeof setTimeout> | null = null;
+function citeMessage(id: string): void {
+  const token = `@${id}`;
+  if (navigator.clipboard !== undefined) void navigator.clipboard.writeText(token).catch(() => {});
+  const current = inputs.session(inputSessionId)?.text ?? "";
+  const base = current.trimEnd();
+  inputs.setText(inputSessionId, base === "" ? `${token} ` : `${base} ${token} `);
+  citeFlashed.value = id;
+  if (citeFlashTimer !== null) clearTimeout(citeFlashTimer);
+  citeFlashTimer = setTimeout(() => {
+    citeFlashed.value = "";
+    citeFlashTimer = null;
+  }, 1200);
+}
+
+/** Split plain user text into cite-token chips and literal runs (role text
+ *  goes through the markdown-it "cite" inline rule in markdownRender). */
+interface CitePart { text: string; cite?: string }
+function citeParts(text: string): CitePart[] {
+  const parts: CitePart[] = [];
+  let last = 0;
+  for (const match of text.matchAll(CITE_TOKEN_RE)) {
+    const index = match.index;
+    if (index > last) parts.push({ text: text.slice(last, index) });
+    parts.push({ text: match[0], cite: match[1] });
+    last = index + match[0].length;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
+}
+
 let mermaidRenderTimer: ReturnType<typeof setTimeout> | null = null;
 let mermaidRenderDeadline = 0;
 let streamingMessageId = "";
@@ -1879,12 +1916,37 @@ onMounted(() => {
         <div class="chat-box-body chat-timeline">
           <div v-if="box.pending" class="chat-pending-shimmer" aria-hidden="true" />
           <template v-for="segment in groupedSegments(box.segments)" :key="segment.id">
-            <div v-if="segment.kind === 'text' && box.kind === 'user'" class="chat-user-text">{{ segment.text }}</div>
+            <div v-if="segment.kind === 'text' && box.kind === 'user'" class="chat-citeable">
+              <div class="chat-user-text"><template v-for="(part, partIndex) in citeParts(segment.text ?? '')" :key="partIndex"><span v-if="part.cite" class="chat-cite-token" :title="`引用消息 ${part.cite}`">{{ part.text }}</span><template v-else>{{ part.text }}</template></template></div>
+              <button
+                v-if="!box.sending && !box.failed"
+                class="btn btn-sm btn-link chat-cite-btn"
+                type="button"
+                title="引用这条消息：@消息id 已复制到剪贴板并插入输入框，可粘贴到任意 chat/branch 引用"
+                aria-label="引用这条消息"
+                @click="citeMessage(segment.id)"
+              >
+                <i class="bi" :class="citeFlashed === segment.id ? 'bi-check2' : 'bi-quote'" />
+              </button>
+            </div>
             <div
               v-else-if="segment.kind === 'text' && (segment.text ?? '').trim()"
-              class="markdown-content chat-response-body"
-              v-html="renderedHtmlFor(segment.id, segment.text ?? '')"
-            />
+              class="chat-citeable"
+            >
+              <div
+                class="markdown-content chat-response-body"
+                v-html="renderedHtmlFor(segment.id, segment.text ?? '')"
+              />
+              <button
+                class="btn btn-sm btn-link chat-cite-btn"
+                type="button"
+                title="引用这条消息：@消息id 已复制到剪贴板并插入输入框，可粘贴到任意 chat/branch 引用"
+                aria-label="引用这条消息"
+                @click="citeMessage(segment.id)"
+              >
+                <i class="bi" :class="citeFlashed === segment.id ? 'bi-check2' : 'bi-quote'" />
+              </button>
+            </div>
             <ToolActivity v-else-if="segment.kind === 'activity' && segment.block" :block="segment.block" :time="formatTime(segment.ts)" />
             <details v-else-if="segment.kind === 'activity-group'" class="chat-tool-group">
               <summary class="chat-tool-group-summary">
@@ -2383,6 +2445,42 @@ onMounted(() => {
   user-select: text;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Citation: hover cite button pinned to the segment's top-right corner, and
+ * the @<message id> token chip (both plain user text and markdown output). */
+.chat-citeable {
+  position: relative;
+}
+
+.chat-cite-btn {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui);
+  line-height: 1;
+  opacity: 0;
+  padding: 0 2px;
+  position: absolute;
+  right: 0;
+  text-decoration: none;
+  top: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chat-citeable:hover .chat-cite-btn,
+.chat-cite-btn:focus-visible {
+  opacity: 1;
+}
+
+.chat-cite-btn:hover {
+  color: var(--bs-primary);
+}
+
+.chat-cite-token {
+  background: var(--color-surface-muted, var(--bs-tertiary-bg));
+  border-radius: 4px;
+  font-family: var(--bs-font-monospace);
+  font-size: 0.85em;
+  padding: 0 3px;
 }
 
 /* Compact markdown inside chat turns: sizes pin to the UI scale (colors and

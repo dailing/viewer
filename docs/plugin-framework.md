@@ -564,6 +564,7 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.76**（2026-09-16）：**chat 分支可见性过滤下沉后端（view_filter）**——`chats:list`/`blocks:list` 新增 `branch_ids`：后端按选中线的 snapshot 闭包并集（含在飞 turn 与排队 dispatch）服务端过滤分页（500 行扫描块攒页），`has_more` 为视图级语义、传输只含可见消息；`chats:list` 新增 `include_counts` 返回 `line_message_counts`（每线已落定可见消息数，tab 徽章）；批次落定线头后发布 `chat:_:branch` phase `head` 轻帧（chat_id + 线 id）作为计数刷新触发（per-turn completed 帧先于 settle 发布，直接刷新会竞态锁死旧计数）；`chat:_:line:keys` RPC 移除——前端不再持有闭包状态，live 帧凭 `branch_ids` 盖章（turn 系帧经 turn feed 的 `branch_id`）在入口过滤，无归属帧保持可见防流式闪烁；chatCache 按 (chat, view) 键控；loadOlder 零可见页跳跃、viewHasOlder 门控、空视图自动补载 watcher 一并删除。
 - **v0.75**（2026-09-16）：**cite message（@消息id 引用注入）**——chat `cite.go`：外发用户消息中的 `@<32位hex消息id>` token 全局解析（跨 chat/branch，去重保序、上限 8 条、单条 8 KiB UTF-8 安全截断），只取 messages 表可见文本（tool call/thinking 在 message_blocks 结构上不可达），组装标注段统一注入 user query 正前方（三种 prompt 模式一致），跨 chat 标注来源、未找到明确标注 unavailable；hindsight recall 仍用原始消息。前端可见消息 hover 出现引用按钮 = 复制 token + 追加当前 chat 输入框草稿。
 - **v0.74**（2026-09-16）：**file-service 文件变更监听 + 打开文件自动/手动刷新**——`file:_:watch/unwatch`（watcher id 引用计数 + 120s TTL + 60s 续约）；目录级 fsnotify（原子保存/删除重建覆盖）+ 300ms 防抖 + 30s 巡检汇入同一 verify，digest 真变才广播 `file:_:changed`，事件路径先作废 (size,mtime)→sha256 共享缓存（粗 mtime 粒度文件系统）；hash/resolve 共用该缓存。前端 files：打开即 watch + 订阅事件重读（保留滚动、PDF 重挂）、续约 digest 漂移兜底、删除 notice、chrome 手动刷新 action。
 - **v0.73**（2026-09-16）：**launcher 实例契约 + files 文件夹 pin 成为启动器**——`DockInstance.clickCreates` + `create(fromInstanceId?)` + launcher 限定的 `remove` hover ×（§8.7）；files 文件夹 pin = launcher（点击新开实例、初始 dir = pin 时刻目录、可重复开）；files 文件列表跟随打开文件定位目录。

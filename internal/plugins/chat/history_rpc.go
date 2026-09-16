@@ -1,53 +1,13 @@
 package chat
 
-// Read-side history RPCs (history-DAG model): the pane's line visibility
-// membership (no second branch recursion on the frontend) and the paged
-// debug graph view.
+// Read-side history RPC (history-DAG model): the paged debug graph view.
+// Line visibility membership is resolved inside the view-filtered
+// chats:list / blocks:list paths (view_filter.go) — there is no separate
+// keys RPC for the frontend to filter by.
 
 import (
-	"gorm.io/gorm"
-
 	"viewer/sdk/go/busclient"
 )
-
-// handleLineKeys returns the membership set of one line's current head
-// snapshot: reachable turn ids, their dispatch ids (user messages key by
-// dispatch), and orphan input message ids. The pane unions the sets of its
-// selected lines to filter the timeline; streaming/unknown content stays
-// visible on top. Works for open, archived, and merged lines alike (heads
-// are retained forever).
-func (p *Plugin) handleLineKeys(frame busclient.Frame) {
-	value, err := frameObject(frame)
-	chatID, _ := value["chat_id"].(string)
-	branchID := requestString(value, "branch_id")
-	if err == nil && chatID == "" {
-		err = errBadRequest
-	}
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	var head *LineHead
-	err = p.store.db.Transaction(func(tx *gorm.DB) error {
-		var headErr error
-		head, headErr = ensureLineHead(tx, chatID, branchID)
-		return headErr
-	})
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	snapshot, err := p.store.snapshotTurns(chatID, head.HeadNodeID)
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	p.reply(frame, map[string]any{
-		"chat_id": chatID, "branch_id": branchID,
-		"head_node_id": head.HeadNodeID, "revision": head.Revision,
-		"keys": snapshot.keys(),
-	}, nil)
-}
 
 // handleBranchesGraph pages the chat's history graph for debugging and a
 // future DAG view: nodes ordered by the chat-monotonic seq (cursor =

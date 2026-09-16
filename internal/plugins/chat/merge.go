@@ -39,15 +39,6 @@ func (p *Plugin) publishBranch(branch *Branch, phase string) {
 	p.publish("chat:_:branch", payload)
 }
 
-// publishLineHead announces a line's head move on the branch feed, so panes
-// invalidate their cached visibility keys for the line.
-func (p *Plugin) publishLineHead(chatID, branchID string, head *LineHead) {
-	p.publish("chat:_:branch", map[string]any{
-		"chat_id": chatID, "branch_id": branchID, "phase": "head",
-		"head_node_id": head.HeadNodeID, "revision": head.Revision,
-	})
-}
-
 func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
@@ -460,7 +451,6 @@ func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 	for _, source := range sources {
 		p.publishBranch(source, "merged")
 	}
-	p.publishLineHead(chatID, targetBranchID, targetHead)
 	p.reply(frame, map[string]any{
 		"merged": true, "merge_node_id": mergeNodeID, "target_branch_id": targetBranchID,
 		"target_head_node_id": targetHead.HeadNodeID, "target_revision": targetHead.Revision,

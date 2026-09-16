@@ -32,8 +32,8 @@ var Manifest = busclient.Manifest{
 		"chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{}, "chat:_:draft:get": map[string]any{}, "chat:_:draft:set": map[string]any{},
 		"chat:_:branches:create": map[string]any{}, "chat:_:branches:patch": map[string]any{}, "chat:_:branches:delete": map[string]any{},
 		"chat:_:branches:merge": map[string]any{}, "chat:_:branches:merge-confirm": map[string]any{}, "chat:_:branches:archive": map[string]any{},
-		"chat:_:branches:graph": map[string]any{}, "chat:_:line:keys": map[string]any{},
-		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
+		"chat:_:branches:graph": map[string]any{},
+		"chat:_:agent-catalog":  map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
 		"chat:_:voice:invoke": map[string]any{},
 	},
 	Emits: map[string]any{
@@ -79,6 +79,7 @@ type Plugin struct {
 	queues        map[string][]queuedMessage
 	agents        map[string]string
 	catalogs      map[string]agentdriver.Catalog
+	turnBranches  map[string]string                   // turnID → owning line, stamped at beginTurn (live frame attribution; deleted at turn end)
 	openText      map[string]*Message                 // turnID → currently open assistant text message (deltas append until sealed)
 	openBlock     map[string]*MessageBlock            // turnID → currently open streaming block (agent_text/thinking deltas append until sealed)
 	openToolCalls map[string]map[string]*MessageBlock // turnID → tool_call_id → open tool_call block (status updates merge in place)
@@ -107,7 +108,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err := migrateHistoryGraph(database, dataDir); err != nil {
 		return nil, err
 	}
-	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, turnBranches: map[string]string{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -140,8 +141,8 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate, "chat:_:draft:get": p.handleDraftGet, "chat:_:draft:set": p.handleDraftSet,
 		"chat:_:branches:create": p.handleBranchesCreate, "chat:_:branches:patch": p.handleBranchesPatch, "chat:_:branches:delete": p.handleBranchesDelete,
 		"chat:_:branches:merge": p.handleBranchesMerge, "chat:_:branches:merge-confirm": p.handleBranchesMergeConfirm, "chat:_:branches:archive": p.handleBranchesArchive,
-		"chat:_:branches:graph": p.handleBranchesGraph, "chat:_:line:keys": p.handleLineKeys,
-		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
+		"chat:_:branches:graph": p.handleBranchesGraph,
+		"chat:_:agent-catalog":  p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
 		"chat:_:voice:invoke": p.handleVoiceInvoke,
 	}
 	for pattern, handler := range handlers {
@@ -477,13 +478,35 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 		var messages []Message
 		var hasMore bool
 		var historyErr error
+		// View-scoped filtering: branch_ids (main = "") restricts the page
+		// to the selected lines' visible membership, resolved server-side;
+		// has_more then reports older/newer VISIBLE history. No branch_ids
+		// (the 全部 view) pages the whole chat unfiltered.
+		branchIDs := sortedBranchIDs(requestStrings(request, "branch_ids"))
+		var view *viewKeys
+		if len(branchIDs) > 0 {
+			var viewErr error
+			view, viewErr = p.viewLineKeys(chatID, branchIDs)
+			if viewErr != nil {
+				p.reply(frame, nil, viewErr)
+				return
+			}
+		}
 		if requestInt64(request, "after") > 0 {
 			// Incremental fetch (v0.32): messages at-or-newer than the client's
 			// newest cached message; the inclusive boundary row is re-fetched so
 			// a still-streaming cached copy is replaced with its final text.
-			messages, hasMore, historyErr = p.store.historyPageAfter(chatID, requestInt64(request, "after"), requestString(request, "after_id"), int(requestInt64(request, "limit")))
+			if view != nil {
+				messages, hasMore, historyErr = p.store.historyPageAfterView(chatID, view, requestInt64(request, "after"), requestString(request, "after_id"), int(requestInt64(request, "limit")))
+			} else {
+				messages, hasMore, historyErr = p.store.historyPageAfter(chatID, requestInt64(request, "after"), requestString(request, "after_id"), int(requestInt64(request, "limit")))
+			}
 		} else {
-			messages, hasMore, historyErr = p.store.historyPage(chatID, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
+			if view != nil {
+				messages, hasMore, historyErr = p.store.historyPageView(chatID, view, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
+			} else {
+				messages, hasMore, historyErr = p.store.historyPage(chatID, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
+			}
 		}
 		if historyErr != nil {
 			p.reply(frame, nil, historyErr)
@@ -495,6 +518,19 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 		}
 		result["messages"] = values
 		result["has_more"] = hasMore
+	}
+	// Per-line visible message counts (the pane's branch-tab badges),
+	// explicit opt-in: resolving every line's snapshot is worth it on view
+	// loads and branch mutations, not on every older-page fetch.
+	if request != nil && request["include_counts"] == true {
+		if chatID, _ := request["chat_id"].(string); chatID != "" {
+			counts, countsErr := p.lineMessageCounts(chatID)
+			if countsErr != nil {
+				p.reply(frame, nil, countsErr)
+				return
+			}
+			result["line_message_counts"] = counts
+		}
 	}
 	p.reply(frame, result, nil)
 }
@@ -556,6 +592,23 @@ func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 	if err != nil {
 		p.reply(frame, nil, err)
 		return
+	}
+	// View-scoped filtering (branch_ids, main = ""): blocks attach to their
+	// turn, so the view's turn membership decides — resolved server-side,
+	// same as the chats:list message pages.
+	if branchIDs := sortedBranchIDs(requestStrings(request, "branch_ids")); len(branchIDs) > 0 {
+		view, viewErr := p.viewLineKeys(chatID, branchIDs)
+		if viewErr != nil {
+			p.reply(frame, nil, viewErr)
+			return
+		}
+		visible := blocks[:0]
+		for _, block := range blocks {
+			if view.turnKeys[block.TurnID] {
+				visible = append(visible, block)
+			}
+		}
+		blocks = visible
 	}
 	turns, err := p.store.chatTurns(chatID)
 	if err != nil {

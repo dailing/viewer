@@ -2271,15 +2271,27 @@ func TestBranchLifecycle(t *testing.T) {
 	if len(listBranches) != 2 {
 		t.Fatalf("chats:list branches: %+v", list)
 	}
-	// Merged content is reachable through the mainline snapshot (the UI's
-	// line keys show the same membership).
-	keys := request("chat:_:line:keys", map[string]any{"chat_id": "chat-b", "branch_id": ""})
-	keySet := map[string]bool{}
-	for _, key := range keys["keys"].([]any) {
-		keySet[key.(string)] = true
+	// Merged content is reachable through the mainline snapshot: the
+	// view-filtered chats:list (branch_ids [""]) serves the same
+	// membership, with the per-line count beside it.
+	view := request("chat:_:chats:list", map[string]any{"chat_id": "chat-b", "include_messages": true, "branch_ids": []string{""}, "limit": 500, "include_counts": true})
+	texts := map[string]bool{}
+	for _, raw := range view["messages"].([]any) {
+		message, _ := raw.(map[string]any)
+		text, _ := message["text"].(string)
+		texts[text] = true
 	}
-	if !keySet[first.turnID] || !keySet[parallelTurn.turnID] || !keySet[afterMerge.turnID] {
-		t.Fatalf("mainline line keys should cover both branches and the post-merge turn: %v", keys)
+	for _, want := range []string{"branch first", "branch follow-up", "parallel side quest", "after merge", "steady state"} {
+		if !texts[want] {
+			t.Fatalf("mainline view should serve %q after the merge: %v", want, texts)
+		}
+	}
+	counts, _ := view["line_message_counts"].(map[string]any)
+	if mainCount, _ := counts[""].(float64); int(mainCount) != len(view["messages"].([]any)) {
+		t.Fatalf("mainline message count %v should match the served view (%d messages)", counts[""], len(view["messages"].([]any)))
+	}
+	if view["has_more"] != false {
+		t.Fatalf("the full mainline view fits one page: has_more = %v", view["has_more"])
 	}
 
 	// 9. An empty branch can be deleted; an archived one cannot.
@@ -2287,6 +2299,16 @@ func TestBranchLifecycle(t *testing.T) {
 	emptyID, _ := empty["id"].(string)
 	if _, err := caller.Request(ctx, "chat:_:branches:delete", map[string]any{"id": branchID}, 10*time.Second); err == nil {
 		t.Fatal("deleting an archived branch should fail")
+	}
+	// A fresh empty branch's view is empty with no older history — the
+	// starved-view walk the frontend needed under chat-level paging is
+	// structurally gone.
+	emptyView := request("chat:_:chats:list", map[string]any{"chat_id": "chat-b", "include_messages": true, "branch_ids": []string{emptyID}})
+	if messages, _ := emptyView["messages"].([]any); len(messages) != 0 {
+		t.Fatalf("empty branch view should serve no messages: %v", messages)
+	}
+	if emptyView["has_more"] != false {
+		t.Fatalf("empty branch view must report has_more=false: %v", emptyView["has_more"])
 	}
 	deleted := request("chat:_:branches:delete", map[string]any{"id": emptyID})
 	if deleted["deleted"] != true {

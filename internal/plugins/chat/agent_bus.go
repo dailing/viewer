@@ -237,7 +237,11 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 			err = p.store.addMessage(&message)
 		}
 		if err == nil {
-			p.publishMessage(&message)
+			if branch, ok := p.branchForTurn(turnID); ok {
+				p.publishMessage(&message, branch)
+			} else {
+				p.publishMessage(&message)
+			}
 		}
 	} else if update.Block.Kind != agentdriver.KindAgentText {
 		// A non-text block seals the current text segment; the next delta opens a new one.
@@ -344,7 +348,7 @@ func (p *Plugin) runningTurns(chatID string) []map[string]any {
 			continue
 		}
 		seen[current.activeTurn] = true
-		result = append(result, map[string]any{"turn_id": current.activeTurn, "role_id": current.roleID, "role_name": current.roleName})
+		result = append(result, map[string]any{"turn_id": current.activeTurn, "role_id": current.roleID, "role_name": current.roleName, "branch_id": p.turnBranches[current.activeTurn]})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i]["turn_id"].(string) < result[j]["turn_id"].(string) })
 	return result

@@ -245,7 +245,7 @@ func TestBranchContextPartition(t *testing.T) {
 	}
 	if mainlineHead == nil {
 		// No mainline batch ever ran: create the head on demand (same as
-		// the line:keys RPC does) so the snapshot check is meaningful.
+		// the view-filtered load does) so the snapshot check is meaningful.
 		err = p.store.db.Transaction(func(tx *gorm.DB) error {
 			var headErr error
 			mainlineHead, headErr = ensureLineHead(tx, "chat-p", "")

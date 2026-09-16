@@ -10,9 +10,14 @@
  * new cost a few KiB instead of a full page + window refetch; already-loaded
  * older pages cost zero.
  *
- * Memory bounds: LRU across chats (Map insertion order, touched on load/save)
- * plus per-chat caps. Trimming drops the oldest half and resets the older
- * pagination boundary so scrolling to the top transparently re-fetches.
+ * Entries are keyed by chat AND view (`<chatId>\x00<viewKey>`): branch
+ * visibility is filtered server-side, so each tab selection has its own
+ * message/block span. removeEntry drops every view of a chat.
+ *
+ * Memory bounds: LRU across entries (Map insertion order, touched on
+ * load/save) plus per-entry caps. Trimming drops the oldest half and resets
+ * the older pagination boundary so scrolling to the top transparently
+ * re-fetches.
  */
 import type { Chat, ChatBlock, ChatMessage, Role, TurnTargetEntry, Workspace } from "./types";
 
@@ -45,11 +50,11 @@ const MAX_BLOCKS = 4000;
 
 const entries = new Map<string, ChatCacheEntry>();
 
-function touch(chatId: string): void {
-  const entry = entries.get(chatId);
+function touch(key: string): void {
+  const entry = entries.get(key);
   if (!entry) return;
-  entries.delete(chatId);
-  entries.set(chatId, entry);
+  entries.delete(key);
+  entries.set(key, entry);
   while (entries.size > MAX_CHATS) {
     entries.delete(entries.keys().next().value as string);
   }
@@ -70,19 +75,22 @@ function trim(entry: ChatCacheEntry): void {
   }
 }
 
-export function loadEntry(chatId: string): ChatCacheEntry | undefined {
-  const entry = entries.get(chatId);
+export function loadEntry(key: string): ChatCacheEntry | undefined {
+  const entry = entries.get(key);
   if (!entry) return undefined;
-  touch(chatId);
+  touch(key);
   return entry;
 }
 
-export function saveEntry(chatId: string, entry: ChatCacheEntry): void {
+export function saveEntry(key: string, entry: ChatCacheEntry): void {
   trim(entry);
-  entries.set(chatId, entry);
-  touch(chatId);
+  entries.set(key, entry);
+  touch(key);
 }
 
+/** Drop every cached view of a chat (deletion, membership-changing merge). */
 export function removeEntry(chatId: string): void {
-  entries.delete(chatId);
+  for (const key of [...entries.keys()]) {
+    if (key === chatId || key.startsWith(`${chatId}\x00`)) entries.delete(key);
+  }
 }

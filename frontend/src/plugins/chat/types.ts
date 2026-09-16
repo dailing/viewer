@@ -1,5 +1,5 @@
 export interface Sender { from: "user" | "role"; role_id?: string; role_name?: string }
-export interface ChatMessage { id: string; chat_id: string; turn_id: string; role: "user" | "assistant"; text: string; created_at: number; sender: Sender; deleted?: boolean }
+export interface ChatMessage { id: string; chat_id: string; turn_id: string; role: "user" | "assistant"; text: string; created_at: number; sender: Sender; deleted?: boolean; branch_ids?: string[] /* live frames only: owning line(s) attribution (main = "") for view filtering */ }
 export interface ChatBlock { id: string; chat_id: string; turn_id: string; kind: string; text: string; payload: string; occurred_at: number; role_id?: string; role_name?: string }
 export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession> }
 /** Per-turn execution target as persisted on the turn row — the record
@@ -27,9 +27,8 @@ export interface TurnSession { session_id: string; dispatch_id?: string; role_id
  *  rootless / mainline parent); merged_into_branch_id the merge target
  *  ("" = mainline). */
 export interface Branch { id: string; chat_id: string; name: string; role_id?: string; role_name?: string; session_id?: string; fork_turn_id?: string; parent_branch_id?: string; merged_into_branch_id?: string; archived_at?: number | null; merged_through_turn_id?: string; merge_message_id?: string; state?: string; merged_at?: number | null; merge_node_id?: string; created_at: number; updated_at: number }
-export interface LineKeys { chat_id: string; branch_id: string; head_node_id: string; revision: number; keys: string[] }
-export interface RunningTurn { turn_id: string; role_id: string; role_name?: string }
-export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; branches?: Branch[]; messages?: ChatMessage[]; has_more?: boolean }
+export interface RunningTurn { turn_id: string; role_id: string; role_name?: string; branch_id?: string }
+export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; branches?: Branch[]; messages?: ChatMessage[]; has_more?: boolean; line_message_counts?: Record<string, number> }
 export interface Workspace { id: string; name: string; common_prompt: string; roles: Role[]; routing_policies: RoutingPolicy[]; default_routing_policy_id: string }
 export interface AgentProviderCatalog { provider: string; models: string[]; parameter_schema?: Record<string, unknown> }
 export interface AgentCatalog { agent: string; plugin_id: string; online: boolean; providers: AgentProviderCatalog[] }

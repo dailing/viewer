@@ -22,7 +22,7 @@ import type { LoopIteration } from "../loop/types";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
 import { presentToolBlock } from "./toolPresentation";
-import type { Branch, Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, LineKeys, QueuedMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
+import type { Branch, Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, QueuedMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -50,7 +50,7 @@ const composerVisible = computed(() => Boolean(inputs.session(inputSessionId)?.p
 // updated live by the chat:_:turn started/completed feed. Per-turn binding
 // keeps parallel send-now turns of the same role individually marked — and
 // individually stoppable.
-const runningTurns = ref(new Map<string, { roleId: string }>());
+const runningTurns = ref(new Map<string, { roleId: string; branchId?: string }>());
 const runningRoleIds = computed(() => new Set([...runningTurns.value.values()].map((turn) => turn.roleId)));
 // Pending queue entries of this chat (dispatches waiting behind in-flight
 // turns), seeded from the chats:list queued_messages snapshot and reseeded
@@ -148,6 +148,7 @@ function upsertTurnSession(turnId: string, entry: TurnSessionEntry): void {
 function seedTurnSessions(map: Record<string, TurnSession> | undefined): void {
   if (!map) return;
   for (const [turnId, raw] of Object.entries(map)) {
+    noteTurnLine(turnId, raw.branch_id);
     if (!raw.session_id && !raw.branch_id) continue;
     upsertTurnSession(turnId, { sessionId: raw.session_id ?? "", dispatchId: raw.dispatch_id ?? "", roleId: raw.role_id ?? "", roleName: raw.role_name ?? "", startedAt: raw.started_at ?? 0, branchId: raw.branch_id ?? "" });
   }
@@ -159,6 +160,20 @@ function seedTurnSessions(map: Record<string, TurnSession> | undefined): void {
  *  target line's history); archive-only branches stay read-only under
  *  已归档. */
 const branches = ref<Branch[]>([]);
+
+/** Per-line settled visible message counts (branch tab badges), seeded by
+ *  chats:list include_counts replies and refreshed on turn completion and
+ *  branch mutations. */
+const lineCounts = ref<Record<string, number>>({});
+
+async function refreshCounts(): Promise<void> {
+  try {
+    const list = await (ctx.bus.request("chat:_:chats:list", { chat_id: ctx.instanceId, include_counts: true }) as Promise<ChatList>);
+    lineCounts.value = list.line_message_counts ?? {};
+  } catch {
+    // Counts are cosmetic; a failed refresh keeps the last snapshot.
+  }
+}
 const activeBranches = computed(() => branches.value.filter((branch) => !branch.archived_at));
 // 已归档 lists archive-only branches (shelved without merging); merged
 // branches are gone for good — their history lives on the target line.
@@ -170,119 +185,63 @@ function upsertBranches(list: Branch[]): void {
   branches.value = [...byId.values()].sort((a, b) => Number(Boolean(a.archived_at)) - Number(Boolean(b.archived_at)) || a.created_at - b.created_at || a.id.localeCompare(b.id));
 }
 
-/** Line keys (history-DAG model): the server-side membership set of one
- *  line's head snapshot — turn ids, dispatch ids (user messages), and
- *  orphan input message ids. Tab visibility is the UNION of the selected
- *  lines' keys; a forked branch's keys include its whole fork ancestry, a
- *  fresh branch's keys are empty. Live attribution (turnSessions) covers
- *  in-flight turns whose nodes aren't published yet, and unknown recent
- *  content stays visible so streaming never flickers. */
-const lineKeys = ref(new Map<string, { keys: Set<string>; fetchedAt: number }>());
+/** View-scoped visibility (server-side branch filtering): every load
+ *  carries the selected lines as branch_ids and the backend resolves
+ *  membership (snapshot closure + in-flight turns + queued dispatches) —
+ *  has_more is view-scoped and everything loaded is visible, so paging,
+ *  detach anchoring and window eviction stay aligned with the view by
+ *  construction. The pane holds no closure state; live frames are filtered
+ *  at ingress by their branch attribution (message frames carry
+ *  branch_ids; turns resolve via liveTurnLines) and unattributed frames
+ *  stay visible (anti-flicker). */
 
-function invalidateLineKeys(lineId?: string): void {
-  if (lineId === undefined) lineKeys.value = new Map();
-  else if (lineKeys.value.delete(lineId)) lineKeys.value = new Map(lineKeys.value);
+/** The selected lines as backend branch ids (main = ""), sorted; null on
+ *  the 全部 view = unfiltered. */
+function viewBranchIds(): string[] | null {
+  if (activeTabs.value.includes("all")) return null;
+  return effectiveTabs().map((id) => (id === "main" ? "" : id)).sort();
 }
 
-async function ensureLineKeys(): Promise<void> {
-  if (activeTabs.value.includes("all")) return;
-  for (const id of effectiveTabs()) {
-    if (lineKeys.value.has(id)) continue;
-    try {
-      const reply = await ctx.bus.request("chat:_:line:keys", { chat_id: ctx.instanceId, branch_id: id === "main" ? "" : id }) as LineKeys;
-      lineKeys.value.set(id, { keys: new Set(reply.keys ?? []), fetchedAt: Date.now() });
-      lineKeys.value = new Map(lineKeys.value);
-    } catch {
-      // Keys stay absent: visibility falls back to live attribution only.
-    }
-  }
-}
-// The activeTabs watcher registers below, after activeTabs is declared.
-
-/** The selected lines' key union. filtered=false (everything visible) on
- *  the 全部 tab AND while any selected line's keys are still loading — a
- *  brief over-show beats a flash of hidden content. */
-const keyView = computed<{ filtered: boolean; keys: Set<string>; fetchedAt: number }>(() => {
-  if (activeTabs.value.includes("all")) return { filtered: false, keys: new Set(), fetchedAt: 0 };
-  const union = new Set<string>();
-  let fetchedAt = Number.POSITIVE_INFINITY;
-  let complete = true;
-  for (const id of effectiveTabs()) {
-    const entry = lineKeys.value.get(id);
-    if (!entry) {
-      complete = false;
-      continue;
-    }
-    fetchedAt = Math.min(fetchedAt, entry.fetchedAt);
-    for (const key of entry.keys) union.add(key);
-  }
-  return complete ? { filtered: true, keys: union, fetchedAt } : { filtered: false, keys: union, fetchedAt: 0 };
-});
-
-// Unknown content newer than the keys snapshot minus this grace counts as
-// live (just-sent dispatch, unsessioned in-flight turn) and stays visible;
-// anything older that no selected line claims belongs to another line.
-const LIVE_KEY_GRACE_MS = 120_000;
-
-function turnVisible(turnId: string, ts: number): boolean {
-  const view = keyView.value;
-  if (!view.filtered) return true;
-  if (view.keys.has(turnId)) return true;
-  const entry = turnSessions.value.get(turnId);
-  if (entry) return tabActive(entry.branchId === "" ? "main" : entry.branchId);
-  return ts >= view.fetchedAt - LIVE_KEY_GRACE_MS;
+/** Extra request fields scoping a load to the selected lines ({} = 全部). */
+function viewRequest(): Record<string, unknown> {
+  const ids = viewBranchIds();
+  return ids === null ? {} : { branch_ids: ids };
 }
 
-function dispatchVisible(dispatchId: string, messageId: string, ts: number): boolean {
-  const view = keyView.value;
-  if (!view.filtered) return true;
-  if (view.keys.has(dispatchId) || view.keys.has(messageId)) return true;
-  let known = false;
-  for (const entry of turnSessions.value.values()) {
-    if (entry.dispatchId !== dispatchId) continue;
-    known = true;
-    if (tabActive(entry.branchId === "" ? "main" : entry.branchId)) return true;
-  }
-  if (known) return false;
-  return ts >= view.fetchedAt - LIVE_KEY_GRACE_MS;
+/** Session-cache key: one entry per chat × view — each view holds a
+ *  different server-filtered message/block span. */
+function cacheKey(): string {
+  return `${ctx.instanceId}\x00${viewBranchIds()?.join("\x00") ?? "all"}`;
 }
 
-/** Row-level visibility for paging/eviction (timeline uses the two above). */
-function messageVisible(message: ChatMessage): boolean {
-  return message.role === "user" ? dispatchVisible(message.turn_id, message.id, message.created_at) : turnVisible(message.turn_id, message.created_at);
+/** turn_id → owning line ("" = main) for live-frame attribution, fed by
+ *  the turn feed (started/session/completed all carry branch_id) and the
+ *  turn_sessions / running_turns seeds. Pane-scoped, non-reactive. */
+const liveTurnLines = new Map<string, string>();
+
+function noteTurnLine(turnId: string | undefined, branchId: string | undefined): void {
+  if (turnId) liveTurnLines.set(turnId, branchId ?? "");
 }
 
-/** Count of selected-line keys not yet covered by any loaded message. The
- *  keys are the line's COMPLETE membership (head ancestor closure), so a
- *  pending count of zero means no older page can reveal anything visible —
- *  the view's history is exhausted even when chat-level has_more says
- *  otherwise (fresh branch: keys empty; fully walked fork: shared ancestry
- *  all loaded). Keys carry no timestamps, so an unloaded NEWER live edge
- *  (detached window) also keeps this non-zero — loadOlder then runs its
- *  bounded no-visible hop walk, same as before. */
-const visibleKeysPending = computed<number>(() => {
-  const view = keyView.value;
-  if (!view.filtered) return 0;
-  const covered = new Set<string>();
-  for (const message of messages.value) {
-    covered.add(message.id);
-    if (message.turn_id) covered.add(message.turn_id);
-  }
-  let pending = 0;
-  for (const key of view.keys) if (!covered.has(key)) pending++;
-  return pending;
-});
+/** Live ingress filter for turn-keyed frames (assistant messages, blocks). */
+function liveTurnVisible(turnId: string): boolean {
+  const ids = viewBranchIds();
+  if (ids === null) return true;
+  const branch = liveTurnLines.get(turnId);
+  if (branch === undefined) return true; // unattributed: anti-flicker
+  return ids.includes(branch);
+}
 
-/** View-aware hasOlder: the top sentinel and the older-page trigger follow
- *  remaining VISIBLE history, not the chat-level pagination fact — a fresh
- *  branch never fires an invisible mainline walk (no fetch, no scroll
- *  restoration, the placeholder just stays parked at the top) and a fully
- *  walked fork stops paging at its fork point. */
-const viewHasOlder = computed<boolean>(() => {
-  if (!hasOlder.value) return false;
-  if (!keyView.value.filtered) return true;
-  return visibleKeysPending.value > 0;
-});
+/** Live ingress filter for message frames: the backend stamps branch_ids
+ *  on attributed publishes (dispatch user messages carry their target
+ *  lines, assistant streams their turn's line); fall back to the turn map,
+ *  then to visible. */
+function liveMessageVisible(value: ChatMessage): boolean {
+  const ids = viewBranchIds();
+  if (ids === null) return true;
+  if (Array.isArray(value.branch_ids)) return value.branch_ids.some((id) => ids.includes(id));
+  return liveTurnVisible(value.turn_id);
+}
 
 /** Branch bar tabs (framework v0.65): plain click SINGLE-selects a line
  *  (view it; when it's exactly one branch, the next send continues it);
@@ -328,7 +287,15 @@ function persistBranchTabs(): void {
 const restoredTabs = loadBranchTabs(ctx.instanceId);
 if (restoredTabs.length > 0) activeTabs.value = restoredTabs;
 watch(activeTabs, persistBranchTabs);
-watch(activeTabs, () => { void ensureLineKeys(); });
+// The view's message span is server-filtered per tab selection, so a tab
+// switch is a reload (per-view session cache hydrates instantly when warm),
+// landing on the live edge of the newly selected lines.
+watch(activeTabs, (next, prev) => {
+  if (next.length === prev.length && next.every((id, index) => id === prev[index])) return; // re-click of the same selection
+  everLoaded = false;
+  userScrolled = false;
+  void load().catch((cause) => { error.value = errorText(cause); });
+});
 
 function allLineIds(): string[] {
   return ["main", ...activeBranches.value.map((branch) => branch.id)];
@@ -534,7 +501,6 @@ async function mergeSelected(): Promise<void> {
       target_branch_id: target.id,
       idempotency_key: crypto.randomUUID(),
     });
-    invalidateLineKeys();
     activeTabs.value = [target.id || "main"];
   } catch (cause) {
     branchOpError.value = errorText(cause);
@@ -603,13 +569,11 @@ interface TimelineBox { key: string; kind: "user" | "role"; label: string; roleI
 const timeline = computed<TimelineBox[]>(() => {
   const turns = new Map<string, TimelineBox>();
   const boxes: TimelineBox[] = [];
-  // Branch filter (history-DAG model): the selected lines' snapshot-key
-  // union shows, time-interleaved ("all" = every line). In-flight turns
-  // attribute via turnSessions; unknown recent content stays visible —
-  // hiding live content flickers. See turnVisible/dispatchVisible above.
+  // Branch filtering happens server-side (viewRequest on every load) and
+  // at live-frame ingress (liveMessageVisible/liveTurnVisible): every
+  // message/block resident here is visible on the selected lines.
   for (const message of messages.value) {
     if (message.role === "user") {
-      if (!dispatchVisible(message.turn_id, message.id, message.created_at)) continue;
       boxes.push({
         // User messages carry the dispatch id as turn_id; the dispatch's
         // turn records (keyed by that id) supply the "→" routing label.
@@ -619,7 +583,6 @@ const timeline = computed<TimelineBox[]>(() => {
       });
       continue;
     }
-    if (!turnVisible(message.turn_id, message.created_at)) continue;
     let box = turns.get(message.turn_id);
     if (!box) {
       box = { key: `t:${message.turn_id}`, kind: "role", label: "", roleId: "", turnId: message.turn_id, ts: message.created_at, segments: [] };
@@ -634,7 +597,6 @@ const timeline = computed<TimelineBox[]>(() => {
   for (const block of blocks.value) {
     if (block.kind === "agent_text") continue; // text blocks render via messages
     if (!activityDisplayable(block)) continue; // drop empty noise rows
-    if (!turnVisible(block.turn_id, block.occurred_at)) continue;
     let box = turns.get(block.turn_id);
     if (!box) {
       box = { key: `t:${block.turn_id}`, kind: "role", label: "", roleId: "", turnId: block.turn_id, ts: block.occurred_at, segments: [] };
@@ -966,7 +928,7 @@ function writeBack(): void {
     blockHigh,
     turnTargets: Object.fromEntries(turnTargets.value),
   };
-  saveEntry(ctx.instanceId, entry);
+  saveEntry(cacheKey(), entry);
 }
 
 /** Restore pane state from a cache entry without any network traffic. */
@@ -1060,28 +1022,14 @@ function evictBottomPage(): void {
  *  `prefer`red edge first. The edge follows browse intent: streaming and
  *  downward catch-up shed the top, upward history reading sheds the bottom.
  *  Attached to the live edge the top is always the victim (the live tail is
- *  sacred).
- *
- *  Filtered tab guard: on a branch tab the bottom page may hold the tab's
- *  ENTIRE visible content (e.g. a fresh branch's live edge above pages of
- *  invisible mainline history). Shedding it would blank the timeline, so
- *  when the bottom page contains every visible message the top is evicted
- *  instead — the invisible pages cycle through the window harmlessly. */
+ *  sacred). Everything loaded is visible (server-side view filtering), so
+ *  eviction needs no visibility guard. */
 function enforceWindow(prefer: "top" | "bottom"): void {
   if (loadingOlder.value || loadingNewer.value) return; // mid-flight page merge
   while (messages.value.length > WINDOW_MAX_MESSAGES) {
     if (!hasNewer.value || prefer === "top") {
       evictTopPage();
       continue;
-    }
-    if (keyView.value.filtered) {
-      const bottomVisible = messages.value.slice(-PAGE_SIZE).filter(messageVisible).length;
-      let totalVisible = 0;
-      for (const message of messages.value) if (messageVisible(message)) totalVisible++;
-      if (bottomVisible >= totalVisible) {
-        evictTopPage();
-        continue;
-      }
     }
     evictBottomPage();
   }
@@ -1197,7 +1145,7 @@ async function fetchBlocks(after: number, before = 0): Promise<ChatBlock[]> {
   let cursor = after;
   for (;;) {
     const list = await (ctx.bus.request("chat:_:blocks:list", {
-      chat_id: ctx.instanceId, after: cursor, ...(before > 0 ? { before } : {}),
+      chat_id: ctx.instanceId, after: cursor, ...viewRequest(), ...(before > 0 ? { before } : {}),
     }) as Promise<ChatBlockList>);
     seedTurnTargets(list.turn_targets);
     seedTurnSessions(list.turn_sessions);
@@ -1212,8 +1160,11 @@ async function fetchBlocks(after: number, before = 0): Promise<ChatBlock[]> {
  *  so chips are correct after a pane reload/remount mid-turn; the live
  *  chat:_:turn feed takes over from there. */
 function seedRunningTurns(list: ChatList): void {
-  const next = new Map<string, { roleId: string }>();
-  for (const turn of list.running_turns ?? []) next.set(turn.turn_id, { roleId: turn.role_id });
+  const next = new Map<string, { roleId: string; branchId: string }>();
+  for (const turn of list.running_turns ?? []) {
+    next.set(turn.turn_id, { roleId: turn.role_id, branchId: turn.branch_id ?? "" });
+    noteTurnLine(turn.turn_id, turn.branch_id);
+  }
   runningTurns.value = next;
 }
 
@@ -1240,7 +1191,7 @@ async function load(fresh = false): Promise<void> {
     // (jump-to-latest, detached refresh) skips the cache: the detached window
     // can sit arbitrarily far from the live edge, beyond what the bounded
     // delta refresh would close.
-    const cached = fresh ? undefined : loadEntry(ctx.instanceId);
+    const cached = fresh ? undefined : loadEntry(cacheKey());
     if (cached) {
       hydrate(cached);
       enforceWindow("top"); // trim over-cap cache before the first paint
@@ -1264,9 +1215,10 @@ async function load(fresh = false): Promise<void> {
       return;
     }
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true, limit: PAGE_SIZE,
+      chat_id: ctx.instanceId, include_messages: true, include_counts: true, ...viewRequest(), limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
+    lineCounts.value = list.line_message_counts ?? {};
     seedRunningTurns(list);
     seedQueued(list.queued_messages);
     seedTurnTargets(list.turn_targets);
@@ -1320,13 +1272,15 @@ async function refreshDelta(): Promise<boolean> {
   const incremental = cursor !== null;
   for (let pageCount = 0; pageCount < 3; pageCount++) {
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true,
+      chat_id: ctx.instanceId, include_messages: true, ...viewRequest(),
+      ...(pageCount === 0 ? { include_counts: true } : {}),
       ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}),
       limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     if (pageCount === 0) {
       chats = list.chats;
       firstHasMore = list.has_more ?? false;
+      lineCounts.value = list.line_message_counts ?? {};
       seedRunningTurns(list);
       seedQueued(list.queued_messages);
       upsertBranches(list.branches ?? []);
@@ -1390,31 +1344,23 @@ async function refresh(): Promise<void> {
 
 /** Load one older page (composite cursor) plus the blocks in the span it
  *  newly covers, then restore the scroll position (old-viewer parity).
- *
- *  Filtered tab sets (a branch tab) hop over pages with zero VISIBLE
- *  content — a fresh branch's history walk would otherwise churn the whole
- *  mainline past the window with nothing ever rendering. Hopping stops at
- *  the first page containing a visible message, at the window cap, at the
- *  hop bound, or when the server's history is exhausted. */
+ *  has_more is view-scoped (server-side branch filtering), so one fetch
+ *  always returns the next VISIBLE page — no invisible-page hops. */
 async function loadOlder(): Promise<void> {
-  if (loadingInitial.value || loadingOlder.value || !viewHasOlder.value || !olderCursor.value) return;
+  if (loadingInitial.value || loadingOlder.value || !hasOlder.value || !olderCursor.value) return;
   loadingOlder.value = true;
   const thread = threadRef.value;
   const previousScrollHeight = thread?.scrollHeight ?? 0;
   const previousScrollTop = thread?.scrollTop ?? 0;
   try {
-    let hops = 0;
-    for (;;) {
-      const list = await (ctx.bus.request("chat:_:chats:list", {
-        chat_id: ctx.instanceId, include_messages: true,
-        before: olderCursor.value.ts, before_id: olderCursor.value.id, limit: PAGE_SIZE,
-      }) as Promise<ChatList>);
-      const page = list.messages ?? [];
-      if (page.length === 0) {
-        hasOlder.value = false;
-        break;
-      }
+    const list = await (ctx.bus.request("chat:_:chats:list", {
+      chat_id: ctx.instanceId, include_messages: true, ...viewRequest(),
+      before: olderCursor.value.ts, before_id: olderCursor.value.id, limit: PAGE_SIZE,
+    }) as Promise<ChatList>);
+    const page = list.messages ?? [];
+    if (page.length > 0) {
       seedTurnTargets(list.turn_targets);
+      seedTurnSessions(list.turn_sessions);
       const newLo = page[0].created_at;
       const spanBlocks = await fetchBlocks(newLo, loadedLo.value);
       const known = new Set(messages.value.map((item) => item.id));
@@ -1422,18 +1368,14 @@ async function loadOlder(): Promise<void> {
       for (const block of spanBlocks) {
         if (!blocks.value.some((item) => item.id === block.id)) blocks.value.push(block);
       }
-      hasOlder.value = list.has_more ?? false;
       olderCursor.value = { ts: newLo, id: page[0].id };
       loadedLo.value = newLo;
-      hops++;
-      if (!hasOlder.value || !olderCursor.value) break;
-      if (!keyView.value.filtered || page.some(messageVisible)) break;
-      if (messages.value.length >= WINDOW_MAX_MESSAGES || hops >= 20) break;
+      writeBack();
+      await nextTick();
+      const threadNow = threadRef.value;
+      if (threadNow) scrollThreadTop(threadNow.scrollHeight - previousScrollHeight + previousScrollTop);
     }
-    writeBack();
-    await nextTick();
-    const threadNow = threadRef.value;
-    if (threadNow) scrollThreadTop(threadNow.scrollHeight - previousScrollHeight + previousScrollTop);
+    hasOlder.value = page.length > 0 && (list.has_more ?? false);
   } catch (cause) {
     error.value = errorText(cause);
   } finally {
@@ -1453,7 +1395,7 @@ async function loadNewer(): Promise<void> {
     const newest = messages.value[messages.value.length - 1];
     const cursor = loadedHi.value ?? (newest ? { ts: newest.created_at, id: newest.id } : null);
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true,
+      chat_id: ctx.instanceId, include_messages: true, ...viewRequest(),
       ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}), limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     seedRunningTurns(list);
@@ -1731,6 +1673,9 @@ onMounted(() => {
       }
       return;
     }
+    // Server-side view filtering's live half: merge only the selected
+    // lines' frames (unattributed frames stay, anti-flicker).
+    if (!liveMessageVisible(value)) return;
     // Detached window: frames beyond the upper edge wait for loadNewer.
     if (beyondWindowEdge(value.created_at, value.id)) return;
     pendingMessageUpserts.set(value.id, value);
@@ -1740,6 +1685,7 @@ onMounted(() => {
   });
   ctx.bus.subscribe(`chat:${ctx.instanceId}:block`, (frame) => {
     const value = frame.value as ChatBlock;
+    if (!liveTurnVisible(value.turn_id)) return;
     if (beyondWindowEdge(value.occurred_at, value.id)) return;
     pendingBlockUpserts.set(value.id, value);
     scheduleStreamFlush();
@@ -1755,6 +1701,7 @@ onMounted(() => {
     // per-turn records' live source (history seeds come from
     // chats:list/blocks:list); "started" already carries the branch
     // attribution, so branch tabs filter correctly from the first frame.
+    noteTurnLine(value.turn_id, value.branch_id);
     if (value.phase === "session") {
       if (value.session_id || value.branch_id) upsertTurnSession(value.turn_id, { sessionId: value.session_id ?? "", dispatchId: value.dispatch_id ?? "", roleId: value.role_id, roleName: value.role_name ?? "", startedAt: 0, branchId: value.branch_id ?? "" });
       return;
@@ -1767,7 +1714,7 @@ onMounted(() => {
     }
     if (value.phase === "started") {
       if (!runningTurns.value.has(value.turn_id)) {
-        runningTurns.value = new Map([...runningTurns.value, [value.turn_id, { roleId: value.role_id }]]);
+        runningTurns.value = new Map([...runningTurns.value, [value.turn_id, { roleId: value.role_id, branchId: value.branch_id ?? "" }]]);
       }
       if (value.branch_id) upsertTurnSession(value.turn_id, { sessionId: "", dispatchId: "", roleId: value.role_id, roleName: value.role_name ?? "", startedAt: 0, branchId: value.branch_id });
       return;
@@ -1776,11 +1723,9 @@ onMounted(() => {
     if (runningTurns.value.delete(value.turn_id)) runningTurns.value = new Map(runningTurns.value);
     clearConfirm(value.turn_id);
     resolvePendingTurn(value.role_id);
-    // A completed turn published its history node: the owning line's keys
-    // are stale (they gain the turn id + dispatch id).
-    const branchId = value.branch_id ?? turnSessions.value.get(value.turn_id)?.branchId ?? "";
-    invalidateLineKeys(branchId === "" ? "main" : branchId);
-    void ensureLineKeys();
+    // View counts refresh off the post-settlement "head" branch-feed frame
+    // — this completed frame fires before the batch settles, so refreshing
+    // here would race and latch stale counts.
     if (streamingMessageId !== "") {
       streamingMessageId = "";
       renderMermaidAtBoundary();
@@ -1796,21 +1741,35 @@ onMounted(() => {
     if (value.chat_id !== ctx.instanceId) return;
     seedQueued(value.queued);
   });
-  // Branch feed: created / renamed / archived / merged / head-advanced
-  // records. Any of them can change line membership, so the line keys are
-  // invalidated wholesale and refetched lazily. "head" frames carry only
-  // the new head node id (no full record) — they must not overwrite the
+  // Branch feed: created / renamed / archived / merged records plus the
+  // lightweight "head" frame (chat_id + line id only) the backend publishes
+  // after a batch settles a line's history head — the view-counts refresh
+  // trigger (per-turn completed frames race settlement, so counts must not
+  // refresh off them). A merge changes the target line's membership
+  // retroactively (full fresh reload); head frames must not overwrite the
   // branch list.
   ctx.bus.subscribe("chat:_:branch", (frame) => {
     const value = frame.value as Branch & { phase?: string };
-    if (value.chat_id !== ctx.instanceId || !value.id) return;
-    invalidateLineKeys();
-    void ensureLineKeys();
+    if (value.chat_id !== ctx.instanceId) return;
+    if (value.phase === "head") {
+      void refreshCounts();
+      return;
+    }
+    if (!value.id) return;
+    if (value.phase === "merged") {
+      // A merge grafts the source's history onto the target line
+      // retroactively: cached views and the current window may miss it —
+      // evict every cached view of this chat and reload fresh.
+      upsertBranches([value]);
+      removeEntry(ctx.instanceId);
+      void load(true).catch((cause) => { error.value = errorText(cause); });
+      return;
+    }
+    void refreshCounts();
     if (value.phase === "deleted") {
       branches.value = branches.value.filter((branch) => branch.id !== value.id);
       return;
     }
-    if (value.phase === "head") return;
     upsertBranches([value]);
   });
   window.addEventListener("viewer:chats-changed", refreshNow);
@@ -1820,7 +1779,6 @@ onMounted(() => {
     writeBack();
   });
   void load().catch((cause) => { error.value = errorText(cause); });
-  void ensureLineKeys();
 });
 </script>
 
@@ -1828,7 +1786,7 @@ onMounted(() => {
   <section class="chat-pane d-flex flex-column h-100">
     <LoopStatus v-if="loopOpen" :chat-id="ctx.instanceId" :roles="roles.filter((role) => chat?.member_role_ids.includes(role.id))" :branches="branches" :from-turn-id="loopForkTurn" @select="showLoopExecution" />
     <div ref="threadRef" class="chat-thread flex-grow-1 overflow-auto p-2" aria-live="polite" @scroll.passive="handleThreadScroll">
-      <div v-if="messages.length && (loadingOlder || !viewHasOlder)" class="chat-history-boundary small text-secondary">
+      <div v-if="messages.length && (loadingOlder || !hasOlder)" class="chat-history-boundary small text-secondary">
         <span v-if="loadingOlder" class="spinner-border spinner-border-sm me-1" aria-hidden="true" />
         <template v-if="loadingOlder">加载更早消息…</template>
         <template v-else>没有更多消息</template>
@@ -1996,7 +1954,7 @@ onMounted(() => {
         title="主线：单击查看/发送到主线；Ctrl+点击加入多选（多选含主线时合并进主线）"
         @click="clickTab('main', $event)"
       >
-        主线
+        主线 <span v-if="lineCounts[''] !== undefined" class="chat-tab-count">{{ lineCounts[""] }}</span>
       </button>
       <template v-for="branch in activeBranches" :key="branch.id">
         <input
@@ -2018,7 +1976,7 @@ onMounted(() => {
           @dblclick="beginRename(branch)"
         >
           <span v-if="runningBranchIds.has(branch.id)" class="spinner-border spinner-border-sm" aria-hidden="true" />
-          {{ branch.name }}
+          {{ branch.name }} <span v-if="lineCounts[branch.id] !== undefined" class="chat-tab-count">{{ lineCounts[branch.id] }}</span>
         </button>
       </template>
       <button
@@ -2041,7 +1999,7 @@ onMounted(() => {
           :title="`已归档分支「${branch.name}」— 单击查看原始对话（只读，不可再分叉）`"
           @click="clickTab(branch.id, $event)"
         >
-          {{ branch.name }}
+          {{ branch.name }} <span v-if="lineCounts[branch.id] !== undefined" class="chat-tab-count">{{ lineCounts[branch.id] }}</span>
         </button>
       </template>
       <template v-if="forkFromTurnId">
@@ -2192,6 +2150,11 @@ onMounted(() => {
 .chat-lane-tab.active {
   border-bottom-color: var(--bs-primary);
   color: var(--bs-body-color);
+}
+
+.chat-tab-count {
+  font-size: 0.78em;
+  opacity: 0.6;
 }
 
 .chat-lane-tab:disabled {

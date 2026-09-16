@@ -229,7 +229,7 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 		if p.busy[key] {
 			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, targets: targets, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis(), dispatchID: dispatchID, messageID: user.ID, branchID: line})
 			p.mu.Unlock()
-			p.publishMessage(user)
+			p.publishMessage(user, line)
 			p.publishQueue(chat.ID)
 			return map[string]any{"role_ids": roleIDs(selected), "started_role_ids": []string{}, "queued_role_ids": roleIDs(selected), "rationale": rationale, "dispatch_id": dispatchID, "message_id": user.ID}, user, nil
 		}
@@ -299,7 +299,13 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 			p.publishBranch(branch, "updated")
 		}
 	}
-	p.publishMessage(user)
+	dispatchLines := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if !branchIDListed(dispatchLines, target.branch) {
+			dispatchLines = append(dispatchLines, target.branch)
+		}
+	}
+	p.publishMessage(user, dispatchLines...)
 	startedRoleIDs := make([]string, 0, len(targets))
 	for _, target := range targets {
 		startedRoleIDs = append(startedRoleIDs, target.role.ID)
@@ -776,7 +782,11 @@ func (p *Plugin) handleQueuedUpdate(frame busclient.Frame) {
 		}
 		// Republish the row so open panes retext the query box in place.
 		if row, rowErr := p.store.message(messageID); rowErr == nil && row != nil {
-			p.publishMessage(row)
+			if line, ok := p.queuedDispatchLine(chatID, row.TurnID); ok {
+				p.publishMessage(row, line)
+			} else {
+				p.publishMessage(row)
+			}
 		}
 	}
 	p.publishQueue(chatID)
@@ -822,6 +832,9 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 			p.store.db.Model(&DispatchReceipt{}).Where("dispatch_id = ?", dispatchID).Update("failure", err.Error())
 			continue
 		}
+		p.mu.Lock()
+		p.turnBranches[turnID] = target.branch
+		p.mu.Unlock()
 		// Global turn lifecycle feed for the Dock status dots: started here,
 		// completed below alongside the per-chat turn-completed frame.
 		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "started", "dispatch_id": dispatchID, "branch_id": target.branch})
@@ -972,6 +985,9 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 		if completeErr := p.store.completeTurn(turnID, reason); completeErr != nil {
 			slog.Error("chat turn completion persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "stop_reason", reason, "error", completeErr)
 		}
+		p.mu.Lock()
+		delete(p.turnBranches, turnID)
+		p.mu.Unlock()
 		// Publish the terminated turn into the line's history DAG off the
 		// batch's fixed input snapshot (idempotent; recovery republishes
 		// whatever a crash drops here).
@@ -1009,11 +1025,15 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 	}
 	// Batch settlement: every touched line's head advances to its result
 	// (multi-role results收束 into one join node, so no finisher overwrites
-	// another's work).
+	// another's work). The "head" branch-feed frame announces the settled
+	// line — panes refresh their view counts off it (the per-turn
+	// completed frames fire BEFORE settlement, so they race the counts).
 	for branch, nodeIDs := range results {
 		if err := p.advanceBatch(chat.ID, branch, batches[branch], nodeIDs); err != nil {
 			slog.Error("chat line head advance failed", "chat_id", chat.ID, "branch", branch, "error", err)
+			continue
 		}
+		p.publish("chat:_:branch", map[string]any{"chat_id": chat.ID, "id": branch, "phase": "head"})
 	}
 }
 
@@ -1183,8 +1203,49 @@ func (p *Plugin) stopTurn(chatID, roleID, turnID string) (bool, error) {
 	}
 	return len(targets) > 0, result
 }
-func (p *Plugin) publishMessage(message *Message) {
-	p.publish("chat:"+message.ChatID+":message", message.payload())
+
+// publishMessage pushes one message on the chat's live feed. branchIDs
+// attributes the frame to its owning line(s) (main = "") so panes on a
+// filtered view merge only their lines' frames; frames without attribution
+// stay visible everywhere (anti-flicker fallback).
+func (p *Plugin) publishMessage(message *Message, branchIDs ...string) {
+	payload := message.payload()
+	if len(branchIDs) > 0 {
+		payload["branch_ids"] = branchIDs
+	}
+	p.publish("chat:"+message.ChatID+":message", payload)
+}
+
+// queuedDispatchLine resolves the line a queued dispatch sits on — the live
+// attribution source for in-place edits of its user message.
+func (p *Plugin) queuedDispatchLine(chatID, dispatchID string) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, queue := range p.queues {
+		for _, entry := range queue {
+			if entry.chatID == chatID && entry.dispatchID == dispatchID {
+				return entry.branchID, true
+			}
+		}
+	}
+	return "", false
+}
+
+// branchForTurn resolves a turn's owning line for live frame attribution:
+// the in-memory map stamped at beginTurn covers the streaming hot path; the
+// row lookup covers turns begun before this process started.
+func (p *Plugin) branchForTurn(turnID string) (string, bool) {
+	p.mu.Lock()
+	branch, ok := p.turnBranches[turnID]
+	p.mu.Unlock()
+	if ok {
+		return branch, true
+	}
+	turn, err := p.store.turn(turnID)
+	if err != nil || turn == nil {
+		return "", false
+	}
+	return turn.BranchID, true
 }
 func (p *Plugin) publish(channel string, value any) {
 	if p.client != nil {

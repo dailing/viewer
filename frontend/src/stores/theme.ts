@@ -10,13 +10,32 @@
  * overrides only) and persists themes to localStorage (viewer.themes.v2).
  * Built-in Light/Dark themes ship by default: editable and resettable, not
  * deletable; custom themes duplicate the active one and can be renamed and
- * deleted. Legacy keys (viewer.themes.v1, viewer.markdownTheme.v1) are
- * discarded on load.
+ * deleted.
+ *
+ * Persistence (framework v0.81): theme DEFINITIONS live server-side in the
+ * instance-store core plugin (plugin "shell", instance "themes", whole-state
+ * {themes:[...]}), so custom themes follow the user across browsers and
+ * machines; the `instance-store:shell:themes` mailbox propagates edits live
+ * to other open browsers and every bus (re)connect triggers a full refresh
+ * (server wins). The ACTIVE theme id is browser-local (localStorage
+ * viewer.theme.active.v1), so each browser may default to a different theme.
+ * localStorage viewer.themes.v2 remains as a boot cache (applied instantly
+ * at startup, replaced by the server state on connect) and as the one-shot
+ * seed source when the server has no record yet. Legacy keys
+ * (viewer.themes.v1, viewer.markdownTheme.v1) are discarded on load.
  */
 import { defineStore } from "pinia";
 
-const STORAGE_KEY = "viewer.themes.v2";
+import { bus } from "../shell/bus";
+
+/** Boot cache (browser-local copy of the server-held definitions). */
+const CACHE_KEY = "viewer.themes.v2";
+/** Browser-local active theme id (each browser may pick its own). */
+const ACTIVE_KEY = "viewer.theme.active.v1";
 const LEGACY_KEYS = ["viewer.themes.v1", "viewer.markdownTheme.v1"];
+const SERVER_PLUGIN = "shell";
+const SERVER_INSTANCE = "themes";
+const MAILBOX = "instance-store:shell:themes";
 
 export type ThemeScheme = "light" | "dark";
 
@@ -123,25 +142,10 @@ function normalizeTheme(raw: unknown, fallbackBase: BaseVars, builtin: boolean):
   };
 }
 
-function loadState(): { themes: ThemeDef[]; activeId: string } {
-  for (const key of LEGACY_KEYS) localStorage.removeItem(key);
-  const defaults = builtinThemes();
-  let stored: unknown[] = [];
-  let storedActive = "";
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as { themes?: unknown; activeId?: unknown };
-      if (Array.isArray(parsed.themes)) stored = parsed.themes;
-      if (typeof parsed.activeId === "string") storedActive = parsed.activeId;
-    }
-  } catch {
-    stored = [];
-    storedActive = "";
-  }
-  // Built-ins always exist (edits persist, deletion is impossible); anything
-  // else in storage is a custom theme.
-  const themes: ThemeDef[] = defaults.map((def) => {
+/** Merge a stored/server theme list over the built-ins: built-ins always
+ *  exist (edits persist, deletion is impossible); anything else is custom. */
+function mergeThemes(stored: unknown[]): ThemeDef[] {
+  const themes: ThemeDef[] = builtinThemes().map((def) => {
     const found = stored.find((t) => (t as Partial<ThemeDef>)?.id === def.id);
     return found ? { ...normalizeTheme(found, def.base, true), id: def.id } : def;
   });
@@ -153,9 +157,78 @@ function loadState(): { themes: ThemeDef[]; activeId: string } {
     theme.id = record.id;
     themes.push(theme);
   }
+  return themes;
+}
+
+/** Initial state: boot cache for definitions, browser-local key for active. */
+function loadState(): { themes: ThemeDef[]; activeId: string } {
+  for (const key of LEGACY_KEYS) localStorage.removeItem(key);
+  let stored: unknown[] = [];
+  let storedActive = "";
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { themes?: unknown; activeId?: unknown };
+      if (Array.isArray(parsed.themes)) stored = parsed.themes;
+      // One-shot migration: v2 cache used to carry the active id.
+      if (typeof parsed.activeId === "string") storedActive = parsed.activeId;
+    }
+  } catch {
+    stored = [];
+  }
+  const activeRaw = localStorage.getItem(ACTIVE_KEY);
+  if (activeRaw !== null && activeRaw !== "") storedActive = activeRaw;
+  const themes = mergeThemes(stored);
   const activeId = themes.some((t) => t.id === storedActive) ? storedActive : "light";
   return { themes, activeId };
 }
+
+type ThemeStore = ReturnType<typeof useThemeStore>;
+
+/** Fire-and-forget replication of the definitions to the server. */
+function pushThemes(themes: ThemeDef[]): void {
+  bus
+    .request("instance:_:set", {
+      plugin: SERVER_PLUGIN,
+      instance: SERVER_INSTANCE,
+      value: { themes },
+    })
+    .catch(() => undefined);
+}
+
+/** Server state replaces local definitions (server wins); the browser-local
+ *  active id is kept unless it points at a now-deleted theme. */
+function applyRemoteThemes(store: ThemeStore, remote: unknown[]): void {
+  store.themes = mergeThemes(remote);
+  if (!store.themes.some((t) => t.id === store.activeId)) {
+    store.activeId = "light";
+    localStorage.setItem(ACTIVE_KEY, store.activeId);
+  }
+  localStorage.setItem(CACHE_KEY, JSON.stringify({ themes: store.themes }));
+  applyTheme(store.active);
+}
+
+/** Full refresh from the server; runs on init and on every (re)connect. */
+async function refreshFromServer(store: ThemeStore): Promise<void> {
+  try {
+    const result = (await bus.request("instance:_:get", {
+      plugin: SERVER_PLUGIN,
+      instance: SERVER_INSTANCE,
+    })) as { themes?: unknown } | null;
+    if (result === null || typeof result !== "object" || Array.isArray(result)) {
+      // No server record yet: the first browser with a boot cache seeds it;
+      // browsers without a cache keep defaults until the record exists.
+      if (localStorage.getItem(CACHE_KEY) !== null) pushThemes(store.themes);
+      return;
+    }
+    applyRemoteThemes(store, Array.isArray(result.themes) ? result.themes : []);
+  } catch {
+    // Not connected yet (bootstrap order) or instance-store missing — the
+    // next connect triggers another refresh.
+  }
+}
+
+let syncStarted = false;
 
 function targetElement(): HTMLElement | null {
   if (typeof document === "undefined") return null;
@@ -276,12 +349,29 @@ export const useThemeStore = defineStore("theme", {
       this.persist();
       if (id === this.activeId) applyTheme(theme);
     },
-    /** Apply the persisted active theme; call once at app startup. */
+    /** Apply the active theme and start server sync; call once at startup. */
     init(): void {
       applyTheme(this.active);
+      if (syncStarted) return;
+      syncStarted = true;
+      const store = this as ThemeStore;
+      bus.subscribe(MAILBOX, (frame) => {
+        const value = frame.value;
+        if (value === null || typeof value !== "object" || Array.isArray(value)) return;
+        const themes = (value as { themes?: unknown }).themes;
+        if (Array.isArray(themes)) applyRemoteThemes(store, themes);
+      });
+      bus.onStateChange((connected) => {
+        if (connected) void refreshFromServer(store);
+      });
+      void refreshFromServer(store);
     },
+    /** Persist: active id stays browser-local; definitions go to the cache
+     *  and replicate to the server (fire-and-forget, server reconciles). */
     persist(): void {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ activeId: this.activeId, themes: this.themes }));
+      localStorage.setItem(ACTIVE_KEY, this.activeId);
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ themes: this.themes }));
+      pushThemes(this.themes);
     },
   },
 });

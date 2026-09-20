@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /**
  * Settings pane: the unified, full-page configuration surface (opened from
- * the Dock gear). All toggles are browser-local (localStorage) and take
- * effect immediately; the backend section drives the gateway admin API.
+ * the Dock gear). Toggles are browser-local (localStorage) and take effect
+ * immediately — except theme DEFINITIONS, which persist server-side via
+ * instance-store (cross-browser/machine; the active theme id stays
+ * browser-local); the backend section drives the gateway admin API.
  * Sections: 布局 (open mode), 聊天 (virtual space), Dock (hover expand
  * delay), 外观 (theme list + 4 base colors + advanced overrides,
  * `stores/theme.ts`), 后端 (restart / build-restart / scheduled

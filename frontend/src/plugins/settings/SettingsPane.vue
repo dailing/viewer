@@ -4,8 +4,8 @@
  * the Dock gear). All toggles are browser-local (localStorage) and take
  * effect immediately; the backend section drives the gateway admin API.
  * Sections: 布局 (open mode), 聊天 (virtual space), Dock (hover expand
- * delay), 主题 (app theme management, `stores/theme.ts`), 消息样式
- * (markdown theme overrides), 后端 (restart / build-restart / scheduled
+ * delay), 外观 (theme list + 4 base colors + advanced overrides,
+ * `stores/theme.ts`), 后端 (restart / build-restart / scheduled
  * restart toggle with live status). The chat
  * dispatch/summary LLM lives in 聊天管理 → 模型 (chat-manager LLMPanel).
  */
@@ -14,10 +14,9 @@ import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { useDockSettingsStore } from "../../stores/dockSettings";
 import { useLayoutStore } from "../../stores/layout";
-import { useMarkdownStyleStore } from "../../stores/markdownStyle";
-import type { MarkdownStyleOverrides } from "../../stores/markdownStyle";
 import { useThemeStore } from "../../stores/theme";
-import type { ThemeVars } from "../../stores/theme";
+import type { BaseVars, OverrideKind } from "../../stores/theme";
+import { OVERRIDE_VARS } from "../../stores/theme";
 import ThemePreview from "./ThemePreview.vue";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -26,8 +25,36 @@ const ctx: PluginCtx = injectedCtx;
 
 const layout = useLayoutStore();
 const chatSettings = useChatSettingsStore();
+
+/** Turn-completion system notifications: enabling requests the browser
+ *  Notification permission (a user gesture is required — the toggle click
+ *  qualifies). A denial is surfaced next to the toggle instead of silently
+ *  flipping on. */
+const notificationHint = ref("");
+async function toggleTurnNotifications(): Promise<void> {
+  notificationHint.value = "";
+  if (chatSettings.turnNotifications) {
+    chatSettings.setTurnNotifications(false);
+    return;
+  }
+  if (!("Notification" in window)) {
+    notificationHint.value = "此浏览器不支持系统通知。";
+    return;
+  }
+  if (Notification.permission === "denied") {
+    notificationHint.value = "通知权限被浏览器拒绝——请在地址栏的站点设置中允许通知后再开启。";
+    return;
+  }
+  if (Notification.permission !== "granted") {
+    const result = await Notification.requestPermission();
+    if (result !== "granted") {
+      notificationHint.value = "未授予通知权限，开关未开启。";
+      return;
+    }
+  }
+  chatSettings.setTurnNotifications(true);
+}
 const dockSettings = useDockSettingsStore();
-const markdownStyle = useMarkdownStyleStore();
 const theme = useThemeStore();
 
 onMounted(() => {
@@ -39,39 +66,110 @@ onBeforeUnmount(() => {
   if (schedPollTimer !== null) clearInterval(schedPollTimer);
 });
 
-/* ---- 主题 (app themes) ---- */
+/* ---- 外观 (themes: base colors + advanced overrides) ---- */
 
-const THEME_FIELDS: Array<{ key: keyof ThemeVars; label: string }> = [
-  { key: "canvas", label: "画布底色" },
+const BASE_FIELDS: Array<{ key: keyof BaseVars; label: string }> = [
+  { key: "canvas", label: "背景底色" },
   { key: "surface", label: "面板底色" },
-  { key: "surfaceRaised", label: "浮起面底色" },
-  { key: "surfaceMuted", label: "柔和面底色" },
-  { key: "surfaceHover", label: "悬停底色" },
-  { key: "surfaceSelected", label: "选中底色" },
-  { key: "titlebar", label: "抬头底色" },
-  { key: "titlebarText", label: "抬头文字" },
-  { key: "text", label: "正文文字" },
-  { key: "textMuted", label: "次要文字" },
-  { key: "textSubtle", label: "弱化文字" },
-  { key: "textInverse", label: "反色文字" },
-  { key: "border", label: "边框" },
-  { key: "borderStrong", label: "强调边框" },
+  { key: "text", label: "文字颜色" },
   { key: "accent", label: "主题色" },
-  { key: "accentHover", label: "主题色（悬停）" },
-  { key: "accentSoft", label: "主题色（浅底）" },
-  { key: "focus", label: "焦点色" },
-  { key: "success", label: "成功色" },
-  { key: "warning", label: "警告色" },
-  { key: "danger", label: "危险色" },
-  { key: "info", label: "信息色" },
-  { key: "overlay", label: "遮罩层" },
 ];
+
+interface AdvancedField {
+  key: string;
+  label: string;
+  kind: OverrideKind;
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+const ADVANCED_GROUPS: Array<{ title: string; fields: AdvancedField[] }> = [
+  {
+    title: "界面",
+    fields: [
+      { key: "surfaceRaised", label: "浮起面底色", kind: "color" },
+      { key: "surfaceMuted", label: "柔和面底色", kind: "color" },
+      { key: "surfaceHover", label: "悬停底色", kind: "color" },
+      { key: "surfaceSelected", label: "选中底色", kind: "color" },
+      { key: "titlebar", label: "抬头底色", kind: "color" },
+      { key: "titlebarText", label: "抬头文字", kind: "color" },
+      { key: "textMuted", label: "次要文字", kind: "color" },
+      { key: "textSubtle", label: "弱化文字", kind: "color" },
+      { key: "textInverse", label: "反色文字", kind: "color" },
+      { key: "border", label: "边框", kind: "color" },
+      { key: "borderStrong", label: "强调边框", kind: "color" },
+      { key: "accentHover", label: "主题色（悬停）", kind: "color" },
+      { key: "accentSoft", label: "主题色（浅底）", kind: "color" },
+      { key: "focus", label: "焦点色", kind: "color" },
+      { key: "overlay", label: "遮罩层", kind: "color" },
+    ],
+  },
+  {
+    title: "语义色",
+    fields: [
+      { key: "success", label: "成功色", kind: "color" },
+      { key: "warning", label: "警告色", kind: "color" },
+      { key: "danger", label: "危险色", kind: "color" },
+      { key: "info", label: "信息色", kind: "color" },
+    ],
+  },
+  {
+    title: "消息",
+    fields: [
+      { key: "bodyFontSize", label: "正文字号", kind: "px", min: 10, max: 24, step: 1 },
+      { key: "bodyLineHeight", label: "正文行高", kind: "number", min: 1.1, max: 2.4, step: 0.05 },
+      { key: "codeFontSize", label: "代码字号", kind: "px", min: 9, max: 20, step: 1 },
+      { key: "markdownBody", label: "正文颜色", kind: "color" },
+      { key: "markdownStrong", label: "加粗颜色", kind: "color" },
+      { key: "markdownLink", label: "链接颜色", kind: "color" },
+      { key: "markdownCodeColor", label: "行内代码文字", kind: "color" },
+      { key: "markdownCodeBackground", label: "行内代码底色", kind: "color" },
+      { key: "syntaxText", label: "代码块文字", kind: "color" },
+      { key: "syntaxBackground", label: "代码块底色", kind: "color" },
+      { key: "markdownBorder", label: "消息边框", kind: "color" },
+    ],
+  },
+];
+
+/** Seed values for the numeric overrides (mirror the styles.css constants). */
+const NUMBER_SEEDS: Record<string, string> = { bodyFontSize: "15", bodyLineHeight: "1.65", codeFontSize: "13" };
+
+const overrideCount = computed(() => Object.keys(theme.active.overrides).length);
+
+function isOverridden(key: string): boolean {
+  return theme.active.overrides[key] !== undefined;
+}
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
 /** <input type="color"> only accepts #rrggbb; fall back for rgb()/named values. */
-function colorInputValue(value: string): string {
-  return HEX_COLOR_RE.test(value) ? value : "#888888";
+function colorInputValue(value: string | undefined): string {
+  return value !== undefined && HEX_COLOR_RE.test(value) ? value : "#888888";
+}
+
+/** Resolve a derived CSS var to a concrete #rrggbb by probing a real
+ *  element: color-mix() defaults only evaluate in a used property. */
+function resolveCssColor(cssVar: string): string {
+  const shell = document.querySelector(".app-shell");
+  if (!shell) return "#888888";
+  const probe = document.createElement("span");
+  probe.style.color = `var(${cssVar})`;
+  probe.style.display = "none";
+  shell.appendChild(probe);
+  const computedColor = getComputedStyle(probe).color;
+  probe.remove();
+  const match = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(computedColor);
+  if (!match) return "#888888";
+  const hex = (n: string | undefined): string => Number(n ?? 0).toString(16).padStart(2, "0");
+  return `#${hex(match[1])}${hex(match[2])}${hex(match[3])}`;
+}
+
+/** Begin customizing an advanced field: seed it with the currently
+ *  computed default so the palette doesn't jump on the first edit. */
+function startOverride(field: AdvancedField): void {
+  const seed = field.kind === "color" ? resolveCssColor(OVERRIDE_VARS[field.key].cssVar) : NUMBER_SEEDS[field.key] ?? "15";
+  theme.setOverride(theme.activeId, field.key, seed);
 }
 
 function addTheme(): void {
@@ -80,37 +178,15 @@ function addTheme(): void {
   theme.createTheme(name);
 }
 
-function removeTheme(id: string, name: string): void {
-  if (!window.confirm(`删除主题「${name}」？此操作不可撤销。`)) return;
-  theme.deleteTheme(id);
+function renameActive(): void {
+  const name = window.prompt("主题名称：", theme.active.name);
+  if (name === null) return;
+  theme.renameTheme(theme.activeId, name);
 }
 
-/* ---- 消息样式 (markdown theme overrides) ---- */
-
-const STYLE_DEFAULTS: Required<MarkdownStyleOverrides> = {
-  bodyFontSize: 15, bodyLineHeight: 1.65, bodyColor: "#404449", strongColor: "#1f4e79",
-  linkColor: "#58749a", codeFontSize: 13, codeColor: "#4a4e53", codeBackground: "#f5f5f5",
-  syntaxText: "#4a4e53", syntaxBackground: "#f5f5f5",
-  borderColor: "#e3e4e6",
-};
-const NUMBER_FIELDS = new Set<keyof MarkdownStyleOverrides>(["bodyFontSize", "bodyLineHeight", "codeFontSize"]);
-
-function overrideValue(field: keyof MarkdownStyleOverrides): string {
-  const value = markdownStyle.overrides[field];
-  return value === undefined ? String(STYLE_DEFAULTS[field]) : String(value);
-}
-
-function setOverride(field: keyof MarkdownStyleOverrides, raw: string): void {
-  if (raw === "") {
-    markdownStyle.set(field, undefined);
-    return;
-  }
-  if (NUMBER_FIELDS.has(field)) {
-    const numeric = Number(raw);
-    markdownStyle.set(field, Number.isFinite(numeric) && numeric > 0 ? numeric : undefined);
-    return;
-  }
-  markdownStyle.set(field, raw);
+function removeActive(): void {
+  if (!window.confirm(`删除主题「${theme.active.name}」？此操作不可撤销。`)) return;
+  theme.deleteTheme(theme.activeId);
 }
 
 /* ---- 后端 (gateway admin API) ---- */
@@ -416,6 +492,17 @@ function toggleScheduledRestart(): void {
           @click="chatSettings.toggleVirtualSpace()"
         ><i class="bi bi-distribute-vertical"></i> {{ chatSettings.virtualSpace ? "开启" : "关闭" }}</button>
       </label>
+      <label class="settings-field">
+        <span>轮次完成系统通知（仅当页面不可见时推送；点击通知切回并打开对应聊天）</span>
+        <button
+          type="button"
+          class="settings-choice-btn"
+          :class="{ active: chatSettings.turnNotifications }"
+          :title="chatSettings.turnNotifications ? '已开启，点击关闭' : '已关闭，点击开启（首次会请求浏览器通知权限）'"
+          @click="toggleTurnNotifications"
+        ><i class="bi bi-bell"></i> {{ chatSettings.turnNotifications ? "开启" : "关闭" }}</button>
+      </label>
+      <div v-if="notificationHint" class="settings-hint">{{ notificationHint }}</div>
     </div>
 
     <div class="settings-group">
@@ -435,7 +522,7 @@ function toggleScheduledRestart(): void {
 
     <div class="settings-group">
       <div class="settings-group-title">
-        <span><i class="bi bi-palette2"></i> 主题</span>
+        <span><i class="bi bi-palette2"></i> 外观</span>
         <span class="settings-choice">
           <button
             v-if="theme.active.builtin"
@@ -445,6 +532,13 @@ function toggleScheduledRestart(): void {
             @click="theme.resetTheme(theme.activeId)"
           >恢复默认</button>
           <button
+            v-else
+            type="button"
+            class="btn btn-sm btn-outline-secondary"
+            title="清空该主题的全部高级定制（保留基色）"
+            @click="theme.clearOverrides(theme.activeId)"
+          >清空定制</button>
+          <button
             type="button"
             class="btn btn-sm btn-outline-secondary"
             title="以当前主题为模板新建一个自定义主题"
@@ -452,120 +546,96 @@ function toggleScheduledRestart(): void {
           ><i class="bi bi-plus-lg"></i> 新建主题</button>
         </span>
       </div>
-      <div class="theme-list">
-        <div v-for="t in theme.themes" :key="t.id" class="theme-row" :class="{ active: t.id === theme.activeId }">
-          <button
-            type="button"
-            class="theme-row-main"
-            :title="t.id === theme.activeId ? '当前启用的主题' : '启用该主题'"
-            @click="theme.setActive(t.id)"
-          >
-            <i class="bi" :class="t.id === theme.activeId ? 'bi-check-circle-fill' : 'bi-circle'"></i>
-            <span class="theme-swatch" :style="{ background: t.vars.accent }"></span>
-            <span class="theme-name">{{ t.name }}</span>
-            <span class="theme-scheme">{{ t.scheme === "dark" ? "深色" : "浅色" }}</span>
-          </button>
-          <button
-            v-if="!t.builtin"
-            type="button"
-            class="theme-row-btn"
-            title="删除该主题"
-            @click="removeTheme(t.id, t.name)"
-          ><i class="bi bi-trash"></i></button>
-        </div>
-      </div>
-      <div class="settings-hint">编辑作用于当前启用的主题；内置主题可修改、可恢复默认，不可删除。</div>
       <label class="settings-field">
-        <span>名称</span>
-        <input type="text" :value="theme.active.name" @change="theme.renameTheme(theme.activeId, ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>基底（滚动条 / 表单 / Markdown 配色）</span>
+        <span>主题</span>
         <span class="settings-choice">
+          <select
+            class="form-select form-select-sm theme-select"
+            :value="theme.activeId"
+            @change="theme.setActive(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="t in theme.themes" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </select>
           <button
+            v-if="!theme.active.builtin"
             type="button"
             class="settings-choice-btn"
-            :class="{ active: theme.active.scheme === 'light' }"
-            title="浅色基底：Markdown 采用浅色配色"
-            @click="theme.setScheme(theme.activeId, 'light')"
-          ><i class="bi bi-sun"></i> 浅色</button>
+            title="重命名该主题"
+            @click="renameActive"
+          ><i class="bi bi-pencil"></i></button>
           <button
+            v-if="!theme.active.builtin"
             type="button"
             class="settings-choice-btn"
-            :class="{ active: theme.active.scheme === 'dark' }"
-            title="深色基底：Markdown 采用深色配色"
-            @click="theme.setScheme(theme.activeId, 'dark')"
-          ><i class="bi bi-moon"></i> 深色</button>
+            title="删除该主题"
+            @click="removeActive"
+          ><i class="bi bi-trash"></i></button>
         </span>
       </label>
-      <label v-for="field in THEME_FIELDS" :key="field.key" class="settings-field">
+      <label v-for="field in BASE_FIELDS" :key="field.key" class="settings-field">
         <span>{{ field.label }}</span>
         <span class="theme-color-inputs">
           <input
             type="color"
-            :value="colorInputValue(theme.active.vars[field.key])"
-            @input="theme.setVar(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
+            :value="colorInputValue(theme.active.base[field.key])"
+            @input="theme.setBase(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
           >
           <input
             type="text"
             class="theme-hex"
-            :value="theme.active.vars[field.key]"
-            @change="theme.setVar(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
+            :value="theme.active.base[field.key]"
+            @change="theme.setBase(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
           >
         </span>
       </label>
+      <div class="settings-hint">其余颜色（悬停、边框、消息、代码块等）由这四个基色自动计算；明暗模式随背景底色自动切换。</div>
       <ThemePreview />
-    </div>
-
-    <div class="settings-group">
-      <div class="settings-group-title">
-        <span><i class="bi bi-palette"></i> 消息样式</span>
-        <button type="button" class="btn btn-sm btn-outline-secondary" @click="markdownStyle.reset()">恢复默认</button>
-      </div>
-      <label class="settings-field">
-        <span>正文字号</span>
-        <input type="number" min="10" max="24" step="1" :value="overrideValue('bodyFontSize')" @change="setOverride('bodyFontSize', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>正文行高</span>
-        <input type="number" min="1.1" max="2.4" step="0.05" :value="overrideValue('bodyLineHeight')" @change="setOverride('bodyLineHeight', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>正文颜色</span>
-        <input type="color" :value="overrideValue('bodyColor')" @input="setOverride('bodyColor', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>加粗颜色</span>
-        <input type="color" :value="overrideValue('strongColor')" @input="setOverride('strongColor', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>链接颜色</span>
-        <input type="color" :value="overrideValue('linkColor')" @input="setOverride('linkColor', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>代码字号</span>
-        <input type="number" min="9" max="20" step="1" :value="overrideValue('codeFontSize')" @change="setOverride('codeFontSize', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>行内代码文字</span>
-        <input type="color" :value="overrideValue('codeColor')" @input="setOverride('codeColor', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>行内代码底色</span>
-        <input type="color" :value="overrideValue('codeBackground')" @input="setOverride('codeBackground', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>代码块文字</span>
-        <input type="color" :value="overrideValue('syntaxText')" @input="setOverride('syntaxText', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>代码块底色</span>
-        <input type="color" :value="overrideValue('syntaxBackground')" @input="setOverride('syntaxBackground', ($event.target as HTMLInputElement).value)">
-      </label>
-      <label class="settings-field">
-        <span>边框颜色</span>
-        <input type="color" :value="overrideValue('borderColor')" @input="setOverride('borderColor', ($event.target as HTMLInputElement).value)">
-      </label>
+      <details class="settings-advanced">
+        <summary>
+          高级定制<span v-if="overrideCount > 0" class="advanced-count">（{{ overrideCount }} 项已定制）</span>
+        </summary>
+        <div class="settings-hint">以下各项默认跟随基色自动计算；点「定制」单独修改，× 恢复自动。</div>
+        <div v-for="group in ADVANCED_GROUPS" :key="group.title" class="advanced-group">
+          <div class="advanced-group-title">{{ group.title }}</div>
+          <div v-for="field in group.fields" :key="field.key" class="settings-field">
+            <span>{{ field.label }}</span>
+            <span v-if="isOverridden(field.key)" class="theme-color-inputs">
+              <template v-if="field.kind === 'color'">
+                <input
+                  type="color"
+                  :value="colorInputValue(theme.active.overrides[field.key])"
+                  @input="theme.setOverride(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
+                >
+                <input
+                  type="text"
+                  class="theme-hex"
+                  :value="theme.active.overrides[field.key]"
+                  @change="theme.setOverride(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
+                >
+              </template>
+              <input
+                v-else
+                type="number"
+                :min="field.min"
+                :max="field.max"
+                :step="field.step"
+                :value="theme.active.overrides[field.key]"
+                @change="theme.setOverride(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
+              >
+              <button
+                type="button"
+                class="advanced-reset"
+                title="恢复自动（跟随基色计算）"
+                @click="theme.setOverride(theme.activeId, field.key, undefined)"
+              ><i class="bi bi-x-lg"></i></button>
+            </span>
+            <span v-else class="settings-choice">
+              <span class="advanced-auto">自动</span>
+              <button type="button" class="settings-choice-btn" @click="startOverride(field)">定制</button>
+            </span>
+          </div>
+        </div>
+      </details>
     </div>
 
     <div class="settings-group">
@@ -662,80 +732,66 @@ function toggleScheduledRestart(): void {
   width: 170px;
 }
 
-.theme-list {
+.theme-select {
+  font-size: var(--font-size-ui);
+  width: 170px;
+}
+
+.settings-advanced {
+  border-top: 1px solid var(--color-border);
+  padding-top: 6px;
+}
+
+.settings-advanced > summary {
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-size-ui);
+  font-weight: 700;
+  user-select: none;
+}
+
+.settings-advanced > summary:hover {
+  color: var(--color-text);
+}
+
+.settings-advanced[open] {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
 }
 
-.theme-row {
-  align-items: center;
-  display: flex;
-  gap: 4px;
-}
-
-.theme-row-main {
-  align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  color: var(--color-text);
-  display: flex;
-  flex: 1;
-  font-size: var(--font-size-ui);
-  gap: 7px;
-  min-width: 0;
-  padding: 4px 8px;
-  text-align: left;
-}
-
-.theme-row-main:hover {
-  background: var(--color-surface-hover);
-}
-
-.theme-row.active .theme-row-main {
-  background: var(--color-surface-selected);
-}
-
-.theme-row.active .bi-check-circle-fill {
-  color: var(--color-accent);
-}
-
-.theme-row-main .bi-circle {
+.advanced-count {
   color: var(--color-text-subtle);
+  font-weight: 400;
 }
 
-.theme-swatch {
-  border: 1px solid var(--color-border-strong);
-  border-radius: 50%;
-  flex: none;
-  height: 10px;
-  width: 10px;
+.advanced-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.theme-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.theme-scheme {
+.advanced-group-title {
   color: var(--color-text-subtle);
-  flex: none;
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
+  font-weight: 700;
+  margin-top: 4px;
 }
 
-.theme-row-btn {
+.advanced-auto {
+  color: var(--color-text-subtle);
+  font-size: var(--font-size-ui-small);
+}
+
+.advanced-reset {
   background: transparent;
   border: none;
   border-radius: var(--radius-sm);
   color: var(--color-text-subtle);
-  flex: none;
   padding: 3px 5px;
 }
 
-.theme-row-btn:hover {
+.advanced-reset:hover {
   background: var(--color-surface-hover);
   color: var(--color-danger);
 }

@@ -7,8 +7,8 @@
  * carries the info strip: role icon + name, running status, routing target
  * (from the turn's persisted execution record — blank when none), time. Markdown
  * goes through renderMarkdown (markdown-it + KaTeX + hljs line numbers +
- * mermaid); styling follows the --markdown-* theme variables (markdownStyle
- * store, customizable via the settings pane).
+ * mermaid); styling follows the --markdown-* theme variables (derived from
+ * the active theme's base colors; customizable via 设置 → 外观).
  */
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
@@ -157,32 +157,15 @@ function seedTurnSessions(map: Record<string, TurnSession> | undefined): void {
 /** Named parallel branches (history-DAG model): independent persistent
  *  records owning their turns (Turn.branch_id). Active branches get bar
  *  tabs; merged branches disappear everywhere (their content joined the
- *  target line's history); archive-only branches stay read-only under
- *  已归档. */
+ *  target line's history). Archiving merges into the chat's 归档 line
+ *  (v0.78) — a normal tab holding everything shelved. */
 const branches = ref<Branch[]>([]);
-
-/** Per-line settled visible message counts (branch tab badges), seeded by
- *  chats:list include_counts replies and refreshed on turn completion and
- *  branch mutations. */
-const lineCounts = ref<Record<string, number>>({});
-
-async function refreshCounts(): Promise<void> {
-  try {
-    const list = await (ctx.bus.request("chat:_:chats:list", { chat_id: ctx.instanceId, include_counts: true }) as Promise<ChatList>);
-    lineCounts.value = list.line_message_counts ?? {};
-  } catch {
-    // Counts are cosmetic; a failed refresh keeps the last snapshot.
-  }
-}
 const activeBranches = computed(() => branches.value.filter((branch) => !branch.archived_at));
-// 已归档 lists archive-only branches (shelved without merging); merged
-// branches are gone for good — their history lives on the target line.
-const archivedBranches = computed(() => branches.value.filter((branch) => Boolean(branch.archived_at) && !branch.merged_at));
 
 function upsertBranches(list: Branch[]): void {
   const byId = new Map(branches.value.map((branch) => [branch.id, branch] as const));
   for (const item of list) byId.set(item.id, item);
-  branches.value = [...byId.values()].sort((a, b) => Number(Boolean(a.archived_at)) - Number(Boolean(b.archived_at)) || a.created_at - b.created_at || a.id.localeCompare(b.id));
+  branches.value = [...byId.values()].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
 }
 
 /** View-scoped visibility (server-side branch filtering): every load
@@ -509,33 +492,27 @@ async function mergeSelected(): Promise<void> {
   }
 }
 
-/** Archive-only branches expand the 已归档 section when selected. */
-const showArchived = ref(false);
-
 // Prune restored/selected tab ids the chat no longer has (e.g. stale storage
 // or a branch merged elsewhere) — a stale id would render no tab and
-// silently fall back to a mainline send. Merged branches count as gone:
-// their line no longer exists. A selected archive-only branch re-expands
-// the 已归档 section so its tab stays visible.
+// silently fall back to a mainline send. Retired (merged/archived) branches
+// count as gone: their line no longer exists.
 watch(branches, (list) => {
   if (list.length === 0 || activeTabs.value.includes("all")) return;
-  const known = new Set(["main", ...list.filter((branch) => !branch.merged_at).map((branch) => branch.id)]);
+  const known = new Set(["main", ...list.filter((branch) => !branch.archived_at).map((branch) => branch.id)]);
   const kept = activeTabs.value.filter((id) => known.has(id));
   if (kept.length !== activeTabs.value.length) activeTabs.value = kept.length > 0 ? kept : ["main"];
-  if (kept.some((id) => list.some((branch) => branch.id === id && branch.archived_at && !branch.merged_at))) showArchived.value = true;
 });
 
-// Archive WITHOUT merging (framework v0.66 — the "by the way" pattern):
-// the selected branches leave the bar and their content joins no line's
-// context. Still listed read-only under 已归档; unarchiving is a reserved,
-// unimplemented function.
+// Archive = merge into the chat's 归档 line (v0.78): the selected branches
+// leave the bar and their content joins the 归档 line's history — viewable
+// on its tab, forkable, never in another line's context.
 const archiveBusy = ref(false);
 const canArchive = computed<boolean>(() => !activeTabs.value.includes("all") && viewingBranches.value.length > 0 && !viewingBranches.value.some((branch) => runningBranchIds.value.has(branch.id)));
 
 async function archiveSelected(): Promise<void> {
   const targets = viewingBranches.value;
   if (targets.length === 0 || archiveBusy.value) return;
-  if (!window.confirm(`归档 ${targets.map((branch) => `「${branch.name}」`).join("")}？\n不合并、直接隐藏出分支条（已归档中可只读查看）；其内容不进入任何线的上下文。`)) return;
+  if (!window.confirm(`归档 ${targets.map((branch) => `「${branch.name}」`).join("")}？\n等同于合并进「归档」线：源分支从分支条消失，内容并入「归档」线的历史与上下文（选中「归档」tab 可查看、可再分叉），不进入其他线的上下文。`)) return;
   archiveBusy.value = true;
   branchOpError.value = "";
   try {
@@ -548,14 +525,16 @@ async function archiveSelected(): Promise<void> {
   }
 }
 
-/** Fork entry on role turn boxes (framework v0.64): hidden on archived
- *  (merged) lines — those are read-only and can't be forked from. */
+/** Fork entry on role turn boxes (framework v0.64): hidden on shelved
+ *  (archive-only) lines — those are read-only. Merged lines stay forkable
+ *  (v0.77): their content lives on in the merge target's history. */
 function canFork(box: TimelineBox): boolean {
   if (box.kind !== "role" || !box.turnId) return false;
   const branchId = turnSessions.value.get(box.turnId)?.branchId ?? "";
   if (branchId === "") return true;
   const branch = branches.value.find((item) => item.id === branchId);
-  return !branch?.archived_at;
+  if (!branch) return true;
+  return !branch.archived_at || Boolean(branch.merged_at);
 }
 
 interface Segment { id: string; kind: "text" | "activity"; ts: number; text?: string; block?: ChatBlock }
@@ -652,10 +631,11 @@ function renderedHtmlFor(id: string, text: string): string {
   return html;
 }
 
-/* Message citation: every persisted text segment gets a hover cite button.
- * Clicking copies the `@<message id>` token to the clipboard (pasteable into
- * any chat/branch — the backend resolves ids globally) AND appends it to this
- * chat's composer draft, which is the common same-chat precise-cite flow. */
+/* Message citation: every message box carries a cite button on its meta row
+ * (next to the fork button). Clicking copies the `@<message id>` token to
+ * the clipboard (pasteable into any chat/branch — the backend resolves ids
+ * globally) AND appends it to this chat's composer draft, which is the
+ * common same-chat precise-cite flow. */
 const CITE_TOKEN_RE = /@([0-9a-f]{32})/g;
 const citeFlashed = ref("");
 let citeFlashTimer: ReturnType<typeof setTimeout> | null = null;
@@ -671,6 +651,18 @@ function citeMessage(id: string): void {
     citeFlashed.value = "";
     citeFlashTimer = null;
   }, 1200);
+}
+
+/** The box's cite target: its last text message — the turn's final text for
+ * role boxes, the only message for user boxes. Pending/optimistic/failed
+ * boxes hold no persisted message, so they offer no citation. */
+function citeTargetId(box: TimelineBox): string {
+  if (box.pending || box.sending || box.failed) return "";
+  for (let index = box.segments.length - 1; index >= 0; index--) {
+    const segment = box.segments[index];
+    if (segment.kind === "text" && (segment.text ?? "").trim()) return segment.id;
+  }
+  return "";
 }
 
 /** Split plain user text into cite-token chips and literal runs (role text
@@ -1215,10 +1207,9 @@ async function load(fresh = false): Promise<void> {
       return;
     }
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true, include_counts: true, ...viewRequest(), limit: PAGE_SIZE,
+      chat_id: ctx.instanceId, include_messages: true, ...viewRequest(), limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
-    lineCounts.value = list.line_message_counts ?? {};
     seedRunningTurns(list);
     seedQueued(list.queued_messages);
     seedTurnTargets(list.turn_targets);
@@ -1273,14 +1264,12 @@ async function refreshDelta(): Promise<boolean> {
   for (let pageCount = 0; pageCount < 3; pageCount++) {
     const list = await (ctx.bus.request("chat:_:chats:list", {
       chat_id: ctx.instanceId, include_messages: true, ...viewRequest(),
-      ...(pageCount === 0 ? { include_counts: true } : {}),
       ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}),
       limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     if (pageCount === 0) {
       chats = list.chats;
       firstHasMore = list.has_more ?? false;
-      lineCounts.value = list.line_message_counts ?? {};
       seedRunningTurns(list);
       seedQueued(list.queued_messages);
       upsertBranches(list.branches ?? []);
@@ -1741,20 +1730,11 @@ onMounted(() => {
     if (value.chat_id !== ctx.instanceId) return;
     seedQueued(value.queued);
   });
-  // Branch feed: created / renamed / archived / merged records plus the
-  // lightweight "head" frame (chat_id + line id only) the backend publishes
-  // after a batch settles a line's history head — the view-counts refresh
-  // trigger (per-turn completed frames race settlement, so counts must not
-  // refresh off them). A merge changes the target line's membership
-  // retroactively (full fresh reload); head frames must not overwrite the
-  // branch list.
+  // Branch feed: created / renamed / archived / merged records. A merge
+  // changes the target line's membership retroactively (full fresh reload).
   ctx.bus.subscribe("chat:_:branch", (frame) => {
     const value = frame.value as Branch & { phase?: string };
     if (value.chat_id !== ctx.instanceId) return;
-    if (value.phase === "head") {
-      void refreshCounts();
-      return;
-    }
     if (!value.id) return;
     if (value.phase === "merged") {
       // A merge grafts the source's history onto the target line
@@ -1765,7 +1745,6 @@ onMounted(() => {
       void load(true).catch((cause) => { error.value = errorText(cause); });
       return;
     }
-    void refreshCounts();
     if (value.phase === "deleted") {
       branches.value = branches.value.filter((branch) => branch.id !== value.id);
       return;
@@ -1859,6 +1838,16 @@ onMounted(() => {
             <span v-if="box.kind === 'role' && turnTargetLabel(box)" class="chat-meta-detail">{{ turnTargetLabel(box) }}</span>
             <span v-if="box.kind === 'role' && usageLabel(box)" class="chat-meta-detail" :title="usageTitle(box)">{{ usageLabel(box) }}</span>
             <button
+              v-if="citeTargetId(box)"
+              class="btn btn-sm btn-link chat-cite-turn"
+              type="button"
+              title="引用这条消息：@消息id 已复制到剪贴板并插入输入框，可粘贴到任意 chat/branch 引用"
+              aria-label="引用这条消息"
+              @click="citeMessage(citeTargetId(box))"
+            >
+              <i class="bi" :class="citeFlashed === citeTargetId(box) ? 'bi-check2' : 'bi-quote'" />
+            </button>
+            <button
               v-if="canFork(box)"
               class="btn btn-sm btn-link chat-fork-turn"
               type="button"
@@ -1874,37 +1863,12 @@ onMounted(() => {
         <div class="chat-box-body chat-timeline">
           <div v-if="box.pending" class="chat-pending-shimmer" aria-hidden="true" />
           <template v-for="segment in groupedSegments(box.segments)" :key="segment.id">
-            <div v-if="segment.kind === 'text' && box.kind === 'user'" class="chat-citeable">
-              <div class="chat-user-text"><template v-for="(part, partIndex) in citeParts(segment.text ?? '')" :key="partIndex"><span v-if="part.cite" class="chat-cite-token" :title="`引用消息 ${part.cite}`">{{ part.text }}</span><template v-else>{{ part.text }}</template></template></div>
-              <button
-                v-if="!box.sending && !box.failed"
-                class="btn btn-sm btn-link chat-cite-btn"
-                type="button"
-                title="引用这条消息：@消息id 已复制到剪贴板并插入输入框，可粘贴到任意 chat/branch 引用"
-                aria-label="引用这条消息"
-                @click="citeMessage(segment.id)"
-              >
-                <i class="bi" :class="citeFlashed === segment.id ? 'bi-check2' : 'bi-quote'" />
-              </button>
-            </div>
+            <div v-if="segment.kind === 'text' && box.kind === 'user'" class="chat-user-text"><template v-for="(part, partIndex) in citeParts(segment.text ?? '')" :key="partIndex"><span v-if="part.cite" class="chat-cite-token" :title="`引用消息 ${part.cite}`">{{ part.text }}</span><template v-else>{{ part.text }}</template></template></div>
             <div
               v-else-if="segment.kind === 'text' && (segment.text ?? '').trim()"
-              class="chat-citeable"
-            >
-              <div
-                class="markdown-content chat-response-body"
-                v-html="renderedHtmlFor(segment.id, segment.text ?? '')"
-              />
-              <button
-                class="btn btn-sm btn-link chat-cite-btn"
-                type="button"
-                title="引用这条消息：@消息id 已复制到剪贴板并插入输入框，可粘贴到任意 chat/branch 引用"
-                aria-label="引用这条消息"
-                @click="citeMessage(segment.id)"
-              >
-                <i class="bi" :class="citeFlashed === segment.id ? 'bi-check2' : 'bi-quote'" />
-              </button>
-            </div>
+              class="markdown-content chat-response-body"
+              v-html="renderedHtmlFor(segment.id, segment.text ?? '')"
+            />
             <ToolActivity v-else-if="segment.kind === 'activity' && segment.block" :block="segment.block" :time="formatTime(segment.ts)" />
             <details v-else-if="segment.kind === 'activity-group'" class="chat-tool-group">
               <summary class="chat-tool-group-summary">
@@ -1954,7 +1918,7 @@ onMounted(() => {
         title="主线：单击查看/发送到主线；Ctrl+点击加入多选（多选含主线时合并进主线）"
         @click="clickTab('main', $event)"
       >
-        主线 <span v-if="lineCounts[''] !== undefined" class="chat-tab-count">{{ lineCounts[""] }}</span>
+        主线
       </button>
       <template v-for="branch in activeBranches" :key="branch.id">
         <input
@@ -1976,30 +1940,7 @@ onMounted(() => {
           @dblclick="beginRename(branch)"
         >
           <span v-if="runningBranchIds.has(branch.id)" class="spinner-border spinner-border-sm" aria-hidden="true" />
-          {{ branch.name }} <span v-if="lineCounts[branch.id] !== undefined" class="chat-tab-count">{{ lineCounts[branch.id] }}</span>
-        </button>
-      </template>
-      <button
-        v-if="archivedBranches.length > 0"
-        type="button"
-        class="chat-lane-tab"
-        :class="{ active: showArchived }"
-        title="已归档的分支（合并或手动归档）；点击展开查看"
-        @click="showArchived = !showArchived"
-      >
-        已归档 {{ archivedBranches.length }}
-      </button>
-      <template v-if="showArchived">
-        <button
-          v-for="branch in archivedBranches"
-          :key="branch.id"
-          type="button"
-          class="chat-lane-tab chat-lane-tab-archived"
-          :class="{ active: tabActive(branch.id) }"
-          :title="`已归档分支「${branch.name}」— 单击查看原始对话（只读，不可再分叉）`"
-          @click="clickTab(branch.id, $event)"
-        >
-          {{ branch.name }} <span v-if="lineCounts[branch.id] !== undefined" class="chat-tab-count">{{ lineCounts[branch.id] }}</span>
+          {{ branch.name }}
         </button>
       </template>
       <template v-if="forkFromTurnId">
@@ -2031,7 +1972,7 @@ onMounted(() => {
         type="button"
         class="chat-lane-tab chat-lane-archive-go"
         :disabled="archiveBusy"
-        :title="`归档 ${viewingBranches.map((branch) => `「${branch.name}」`).join('')}：不合并、直接隐藏出分支条（已归档里可只读查看）；其内容不进入任何线的上下文`"
+        :title="`归档 ${viewingBranches.map((branch) => `「${branch.name}」`).join('')}：合并进「归档」线——源分支从分支条消失，内容并入「归档」线的历史与上下文，不进入其他线的上下文`"
         @click="archiveSelected"
       >
         <span v-if="archiveBusy" class="spinner-border spinner-border-sm" aria-hidden="true" />
@@ -2121,7 +2062,7 @@ onMounted(() => {
 }
 
 /* Branch bar (framework v0.63/v0.66): one compact row between thread and
-   composer — 全部 / 主线 / named branch tabs / 已归档 / ＋ / 合并 / 归档.
+   composer — 全部 / 主线 / named branch tabs / ＋ / 合并 / 归档.
    Plain click single-selects a line (the singly-active branch tab both
    filters the timeline and targets the next send at it); Ctrl/⌘+click
    multi-selects for merge. */
@@ -2152,11 +2093,6 @@ onMounted(() => {
   color: var(--bs-body-color);
 }
 
-.chat-tab-count {
-  font-size: 0.78em;
-  opacity: 0.6;
-}
-
 .chat-lane-tab:disabled {
   cursor: default;
   opacity: 0.6;
@@ -2167,19 +2103,17 @@ onMounted(() => {
   width: 8px;
 }
 
-.chat-lane-tab-archived {
-  opacity: 0.65;
-}
-
-/* Fork button on the turn box meta row — quiet until hovered. */
-.chat-fork-turn {
+/* Fork/cite buttons on the turn box meta row — quiet until hovered. */
+.chat-fork-turn,
+.chat-cite-turn {
   color: var(--color-text-muted);
   font-size: var(--font-size-ui);
   padding: 0 2px;
   text-decoration: none;
 }
 
-.chat-fork-turn:hover {
+.chat-fork-turn:hover,
+.chat-cite-turn:hover {
   color: var(--bs-primary);
 }
 
@@ -2410,34 +2344,8 @@ onMounted(() => {
   word-break: break-word;
 }
 
-/* Citation: hover cite button pinned to the segment's top-right corner, and
- * the @<message id> token chip (both plain user text and markdown output). */
-.chat-citeable {
-  position: relative;
-}
-
-.chat-cite-btn {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-ui);
-  line-height: 1;
-  opacity: 0;
-  padding: 0 2px;
-  position: absolute;
-  right: 0;
-  text-decoration: none;
-  top: 0;
-  transition: opacity 0.12s ease;
-}
-
-.chat-citeable:hover .chat-cite-btn,
-.chat-cite-btn:focus-visible {
-  opacity: 1;
-}
-
-.chat-cite-btn:hover {
-  color: var(--bs-primary);
-}
-
+/* Citation: the @<message id> token chip (both plain user text and
+ * markdown output); the cite button itself rides the box meta row. */
 .chat-cite-token {
   background: var(--color-surface-muted, var(--bs-tertiary-bg));
   border-radius: 4px;

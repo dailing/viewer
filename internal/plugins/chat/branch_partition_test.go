@@ -1,10 +1,10 @@
 package chat
 
-// Branch context partitions (framework v0.66): a branch binds no role —
+// Branch context partitions (framework v0.66+): a branch binds no role —
 // dispatching on it routes exactly like a mainline dispatch (explicit
 // role_ids or LLM router), each role keeps its own session lane on the
 // branch, force_new_session restarts a role's branch lane, and archiving
-// without merging shelves the branch out of every line's lineage.
+// (v0.78) merges the branch into the chat's terminal 归档 line.
 
 import (
 	"context"
@@ -225,12 +225,14 @@ func TestBranchContextPartition(t *testing.T) {
 	}
 	endTurn(routed)
 
-	// 6. Archive WITHOUT merge: the branch shelves, dispatch is refused,
-	// re-archive is refused, and its turns join no line's snapshot (no
-	// merge edge is ever written for it).
+	// 6. Archive = merge into the chat's terminal 归档 line (v0.78): the
+	// line is born on first archive, the source closes as merged into it,
+	// dispatch to the source is refused, re-archive is refused, and the
+	// source's turns join the 归档 line's snapshot — never the mainline's.
 	waitBranchIdle(branchID)
+	archiveLineID := archiveBranchID("chat-p")
 	archived := request("chat:_:branches:archive", map[string]any{"chat_id": "chat-p", "branch_ids": []string{branchID}})
-	if archived["archived"] != true {
+	if archived["archived"] != true || archived["archive_branch_id"] != archiveLineID {
 		t.Fatalf("branches:archive reply: %+v", archived)
 	}
 	if _, err := caller.Request(ctx, "chat:_:dispatch", map[string]any{"chat_id": "chat-p", "message": "too late", "branch_id": branchID}, 10*time.Second); err == nil {
@@ -238,6 +240,27 @@ func TestBranchContextPartition(t *testing.T) {
 	}
 	if _, err := caller.Request(ctx, "chat:_:branches:archive", map[string]any{"chat_id": "chat-p", "branch_ids": []string{branchID}}, 10*time.Second); err == nil {
 		t.Fatal("re-archiving should fail")
+	}
+	archiveRow, err := p.store.branch(archiveLineID)
+	if err != nil || archiveRow == nil || archiveRow.Name != archiveBranchName || archiveRow.State != branchStateOpen {
+		t.Fatalf("archive line record: %+v err=%v", archiveRow, err)
+	}
+	archiveHead, err := p.store.lineHead("chat-p", archiveLineID)
+	if err != nil || archiveHead == nil {
+		t.Fatalf("archive line head: %v err=%v", archiveHead, err)
+	}
+	archiveSnapshot, err := p.store.snapshotTurns("chat-p", archiveHead.HeadNodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedContent := false
+	for _, turn := range archiveSnapshot.Turns {
+		if turn.BranchID == branchID {
+			archivedContent = true
+		}
+	}
+	if !archivedContent {
+		t.Fatal("archived branch turns should join the 归档 line's snapshot")
 	}
 	mainlineHead, err := p.store.lineHead("chat-p", "")
 	if err != nil {
@@ -261,26 +284,68 @@ func TestBranchContextPartition(t *testing.T) {
 	}
 	for _, turn := range snapshot.Turns {
 		if turn.BranchID == branchID {
-			t.Fatalf("archive-only branch turn %s leaked into the mainline snapshot", turn.ID)
+			t.Fatalf("archived branch turn %s leaked into the mainline snapshot", turn.ID)
 		}
 	}
 	row, err := p.store.branch(branchID)
-	if err != nil || row == nil || row.ArchivedAt == nil || row.MergedAt != nil || row.MergeNodeID != "" || row.State != branchStateArchived {
-		t.Fatalf("archive-only branch record: %+v err=%v", row, err)
+	if err != nil || row == nil || row.ArchivedAt == nil || row.MergedAt == nil || row.MergeNodeID == "" || row.State != branchStateMerged || row.MergedIntoBranchID != archiveLineID {
+		t.Fatalf("archived branch record: %+v err=%v", row, err)
 	}
 
 	// 7. A running branch refuses archiving.
-	second := request("chat:_:branches:create", map[string]any{"chat_id": "chat-p", "name": "running"})
+	second := request("chat:_:branches:create", map[string]any{"chat_id": "chat-p", "name": "busy-lane"})
 	secondID, _ := second["id"].(string)
 	request("chat:_:dispatch", map[string]any{"chat_id": "chat-p", "message": "long work", "branch_id": secondID, "role_ids": []string{"role-b"}})
 	running := nextPrompt()
-	if _, err := caller.Request(ctx, "chat:_:branches:archive", map[string]any{"chat_id": "chat-p", "branch_ids": []string{secondID}}, 10*time.Second); err == nil || !strings.Contains(err.Error(), "running") {
-		t.Fatalf("archiving a running branch should fail with the running error, got %v", err)
+	if _, err := caller.Request(ctx, "chat:_:branches:archive", map[string]any{"chat_id": "chat-p", "branch_ids": []string{secondID}}, 10*time.Second); err == nil || !strings.Contains(err.Error(), "busy-lane") {
+		t.Fatalf("archiving a running branch should fail naming the busy line, got %v", err)
 	}
 	endTurn(running)
 	waitBranchIdle(secondID)
 	done := request("chat:_:branches:archive", map[string]any{"chat_id": "chat-p", "branch_ids": []string{secondID}})
 	if done["archived"] != true {
 		t.Fatalf("archive after turn end: %+v", done)
+	}
+
+	// 8. A turn on a MERGED line stays forkable: its content joined the
+	// target line's history, so the fork attributes to the surviving line
+	// ("" = mainline here).
+	mergeSrc := request("chat:_:branches:create", map[string]any{"chat_id": "chat-p", "name": "to-merge"})
+	mergeSrcID, _ := mergeSrc["id"].(string)
+	request("chat:_:dispatch", map[string]any{"chat_id": "chat-p", "message": "merge me", "branch_id": mergeSrcID, "role_ids": []string{"role-b"}})
+	mergedTurn := nextPrompt()
+	endTurn(mergedTurn)
+	waitBranchIdle(mergeSrcID)
+	mergedReply := request("chat:_:branches:merge", map[string]any{"chat_id": "chat-p", "branch_ids": []string{mergeSrcID}})
+	if mergedReply["merged"] != true {
+		t.Fatalf("branches:merge reply: %+v", mergedReply)
+	}
+	forked := request("chat:_:branches:create", map[string]any{"chat_id": "chat-p", "name": "post-merge-fork", "from_turn_id": mergedTurn.turnID})
+	forkedID, _ := forked["id"].(string)
+	forkedRow, err := p.store.branch(forkedID)
+	if err != nil || forkedRow == nil || forkedRow.ParentBranchID != "" || forkedRow.ForkTurnID != mergedTurn.turnID {
+		t.Fatalf("fork from a merged turn should attribute to the mainline: %+v err=%v", forkedRow, err)
+	}
+
+	// 9. A turn on an ARCHIVED line stays forkable too: archiving is a
+	// merge, so the fork resolves the merge chain and attributes to the
+	// surviving 归档 line.
+	forkedArchive := request("chat:_:branches:create", map[string]any{"chat_id": "chat-p", "name": "post-archive-fork", "from_turn_id": bFirst.turnID})
+	forkedArchiveID, _ := forkedArchive["id"].(string)
+	forkedArchiveRow, err := p.store.branch(forkedArchiveID)
+	if err != nil || forkedArchiveRow == nil || forkedArchiveRow.ParentBranchID != archiveLineID || forkedArchiveRow.ForkTurnID != bFirst.turnID {
+		t.Fatalf("fork from an archived turn should attribute to the 归档 line: %+v err=%v", forkedArchiveRow, err)
+	}
+
+	// 10. The 归档 line is terminal: it refuses being merged away,
+	// archived, or deleted.
+	if _, err := caller.Request(ctx, "chat:_:branches:merge", map[string]any{"chat_id": "chat-p", "branch_ids": []string{archiveLineID}}, 10*time.Second); err == nil {
+		t.Fatal("merging the archive line away should fail")
+	}
+	if _, err := caller.Request(ctx, "chat:_:branches:archive", map[string]any{"chat_id": "chat-p", "branch_ids": []string{archiveLineID}}, 10*time.Second); err == nil {
+		t.Fatal("archiving the archive line should fail")
+	}
+	if _, err := caller.Request(ctx, "chat:_:branches:delete", map[string]any{"id": archiveLineID}, 10*time.Second); err == nil {
+		t.Fatal("deleting the archive line should fail")
 	}
 }

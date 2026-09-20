@@ -2273,8 +2273,8 @@ func TestBranchLifecycle(t *testing.T) {
 	}
 	// Merged content is reachable through the mainline snapshot: the
 	// view-filtered chats:list (branch_ids [""]) serves the same
-	// membership, with the per-line count beside it.
-	view := request("chat:_:chats:list", map[string]any{"chat_id": "chat-b", "include_messages": true, "branch_ids": []string{""}, "limit": 500, "include_counts": true})
+	// membership.
+	view := request("chat:_:chats:list", map[string]any{"chat_id": "chat-b", "include_messages": true, "branch_ids": []string{""}, "limit": 500})
 	texts := map[string]bool{}
 	for _, raw := range view["messages"].([]any) {
 		message, _ := raw.(map[string]any)
@@ -2285,10 +2285,6 @@ func TestBranchLifecycle(t *testing.T) {
 		if !texts[want] {
 			t.Fatalf("mainline view should serve %q after the merge: %v", want, texts)
 		}
-	}
-	counts, _ := view["line_message_counts"].(map[string]any)
-	if mainCount, _ := counts[""].(float64); int(mainCount) != len(view["messages"].([]any)) {
-		t.Fatalf("mainline message count %v should match the served view (%d messages)", counts[""], len(view["messages"].([]any)))
 	}
 	if view["has_more"] != false {
 		t.Fatalf("the full mainline view fits one page: has_more = %v", view["has_more"])

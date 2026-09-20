@@ -3,15 +3,15 @@
  * 主题效果预览: a static mock of the shell's common elements — titlebar,
  * surface variants, chat boxes (with a markdown sample), buttons, status
  * colors and a form input — all painted from the live --color-* /
- * --markdown-* / --syntax-* custom properties. Theme edits above apply to
- * .app-shell immediately, and 消息样式 overrides likewise, so this block is
- * always a real-time WYSIWYG preview; no local state needed.
+ * --markdown-* / --syntax-* custom properties. Theme edits (base colors and
+ * advanced overrides alike) apply to .app-shell immediately, so this block
+ * is always a real-time WYSIWYG preview; no local state needed.
  */
 </script>
 
 <template>
   <div class="preview">
-    <div class="preview-caption">效果预览（实时，含下方「消息样式」的改动）</div>
+    <div class="preview-caption">效果预览（实时）</div>
     <div class="preview-window">
       <div class="preview-titlebar">
         <i class="bi bi-chat-left-text"></i> 聊天 · 抬头底色/文字
@@ -41,7 +41,7 @@
           </div>
           <div class="preview-box-body markdown-content">
             <p>好的，这段是正文，含<strong>加粗</strong>、<a href="#" @click.prevent>链接</a>和<code>inline code</code>。</p>
-            <pre><code>theme.setVar("accent", "#58749a")</code></pre>
+            <pre><code>theme.setBase(id, "accent", "#58749a")</code></pre>
           </div>
         </div>
 

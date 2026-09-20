@@ -11,35 +11,43 @@
   --font-size-ui: 12px;
   --font-size-ui-small: 11px;
   --font-size-content: 13px;
+  /* Theme base colors (light fallback): the theme store sets these four
+     inline on .app-shell for the active theme; every other color derives
+     from them via the color-mix() defaults in the .app-shell block below. */
   --color-canvas: #ffffff;
   --color-surface: #ffffff;
-  --color-surface-raised: #f5f5f5;
-  --color-surface-muted: #f5f5f5;
-  --color-surface-hover: #eeeeee;
-  --color-surface-selected: #e9edf2;
-  --color-titlebar: #e7eaef;
-  --color-titlebar-text: #5f666d;
   --color-text: #34383d;
-  --color-text-muted: #747980;
-  --color-text-subtle: #969ba1;
-  --color-text-inverse: #ffffff;
-  --color-border: #e3e4e6;
-  --color-border-strong: #ced1d4;
   --color-accent: #58749a;
-  --color-accent-hover: #486487;
-  --color-accent-soft: #edf0f4;
-  --color-focus: #6b85a8;
-  --color-success: #4f765f;
-  --color-warning: #8a7047;
-  --color-danger: #a05b57;
-  --color-info: #557799;
-  --color-overlay: rgb(15 23 42 / 0.38);
   --radius-sm: 2px;
   --radius-md: 2px;
   --dock-width: 40px;
   --pane-titlebar-height: 28px;
   --nav-button-size: 22px;
   --nav-icon-size: 12px;
+  /* Markdown typography constants (colors derive from the theme below). */
+  --markdown-body-font-size: 15px;
+  --markdown-body-line-height: 1.65;
+  --markdown-h1-font-size: 28px;
+  --markdown-h1-font-weight: 700;
+  --markdown-h1-line-height: 1.2;
+  --markdown-h2-font-size: 23px;
+  --markdown-h2-font-weight: 700;
+  --markdown-h2-line-height: 1.25;
+  --markdown-h3-font-size: 19px;
+  --markdown-h3-font-weight: 700;
+  --markdown-h3-line-height: 1.3;
+  --markdown-h4-font-size: 16px;
+  --markdown-h4-font-weight: 700;
+  --markdown-h4-line-height: 1.35;
+  --markdown-strong-font-weight: 700;
+  --markdown-code-font-size: 13px;
+  /* Syntax highlighting palette (light scheme constants). */
+  --syntax-keyword: #8f5f63;
+  --syntax-string: #55706b;
+  --syntax-number: #627796;
+  --syntax-title: #766b8c;
+  --syntax-comment: #8a8e93;
+  --syntax-meta: #72777c;
 }
 
 html,
@@ -88,32 +96,67 @@ body {
   width: 100%;
 }
 
+/**
+ * Derived theme colors (framework v0.80): every non-base --color-* /
+ * --markdown-* default is computed from the four base colors, so a whole
+ * palette follows 背景/面板/文字/主题色. Declared on .app-shell (not :root)
+ * because custom-property var() references resolve where they are declared —
+ * this binds the color-mix() formulas to the theme's inline base colors. A
+ * theme's advanced overrides are set inline on the same element and win.
+ */
+.app-shell {
+  --color-surface-raised: color-mix(in srgb, var(--color-text) 4%, var(--color-canvas));
+  --color-surface-muted: var(--color-surface-raised);
+  --color-surface-hover: color-mix(in srgb, var(--color-text) 8%, var(--color-canvas));
+  --color-surface-selected: color-mix(in srgb, var(--color-accent) 13%, var(--color-canvas));
+  --color-titlebar: color-mix(in srgb, var(--color-text) 8%, var(--color-canvas));
+  --color-text-muted: color-mix(in srgb, var(--color-text) 68%, var(--color-canvas));
+  --color-text-subtle: color-mix(in srgb, var(--color-text) 50%, var(--color-canvas));
+  --color-text-inverse: var(--color-canvas);
+  --color-titlebar-text: var(--color-text-muted);
+  --color-border: color-mix(in srgb, var(--color-text) 12%, var(--color-canvas));
+  --color-border-strong: color-mix(in srgb, var(--color-text) 24%, var(--color-canvas));
+  --color-accent-hover: color-mix(in srgb, var(--color-accent) 85%, #000000);
+  --color-accent-soft: var(--color-surface-selected);
+  --color-focus: var(--color-accent);
+  --color-success: #4f765f;
+  --color-warning: #8a7047;
+  --color-danger: #a05b57;
+  --color-info: #557799;
+  --color-overlay: rgb(15 23 42 / 0.38);
+  --markdown-body-color: var(--color-text);
+  --markdown-h1-color: var(--markdown-body-color);
+  --markdown-h2-color: var(--markdown-body-color);
+  --markdown-h3-color: var(--markdown-body-color);
+  --markdown-h4-color: var(--markdown-body-color);
+  --markdown-paragraph-color: var(--markdown-body-color);
+  --markdown-paragraph-font-size: var(--markdown-body-font-size);
+  --markdown-paragraph-line-height: var(--markdown-body-line-height);
+  --markdown-strong-color: var(--color-accent);
+  --markdown-link-color: var(--color-accent);
+  --markdown-code-color: var(--color-text);
+  --markdown-code-background: var(--color-surface-raised);
+  --markdown-border-color: var(--color-border);
+  --syntax-background: var(--color-surface-raised);
+  --syntax-text: var(--color-text);
+}
+
+/* Dark-scheme constants: semantic hues, overlay, syntax palette, and the
+   accent hover direction (lighter instead of darker). */
 .app-shell[data-theme="dark"] {
   color-scheme: dark;
-  --color-canvas: #111720;
-  --color-surface: #111720;
-  --color-surface-raised: #171f2a;
-  --color-surface-muted: #171f2a;
-  --color-surface-hover: #1d2937;
-  --color-surface-selected: #102a43;
-  --color-titlebar: #171f2a;
-  --color-titlebar-text: #9aa7b6;
-  --color-text: #e6edf3;
-  --color-text-muted: #9aa7b6;
-  --color-text-subtle: #748094;
-  --color-text-inverse: #07111f;
-  --color-border: #303a47;
-  --color-border-strong: #4b596a;
-  --color-accent: #58a6ff;
-  --color-accent-hover: #79c0ff;
-  --color-accent-soft: #102a43;
-  --color-focus: #58a6ff;
+  --color-accent-hover: color-mix(in srgb, var(--color-accent) 80%, #ffffff);
   --color-success: #56d364;
   --color-warning: #e3b341;
   --color-danger: #ff7b72;
   --color-info: #79c0ff;
   --color-overlay: rgb(0 0 0 / 0.58);
-  --bs-primary-rgb: 88, 166, 255;
+  --syntax-keyword: #ff7b72;
+  --syntax-string: #a5d6ff;
+  --syntax-number: #79c0ff;
+  --syntax-title: #d2a8ff;
+  --syntax-comment: #8b949e;
+  --syntax-meta: #ffa657;
 }
 
 /* Bootstrap flattening (scoped): quiet the frosted/gradient defaults. */
@@ -214,75 +257,6 @@ body {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
-}
-
-/**
- * Markdown rendering theme (framework v0.30): --markdown-* / --syntax-*
- * variables style .markdown-content blocks (chat messages). Defaults below
- * follow the app theme; user overrides layer on top via the markdownStyle
- * store (inline vars on .app-shell, localStorage viewer.markdownTheme.v1).
- * Values mirror the production viewer's Default / Dark markdown themes.
- */
-:root {
-  --markdown-body-font-size: 15px;
-  --markdown-body-color: #404449;
-  --markdown-body-line-height: 1.65;
-  --markdown-h1-font-size: 28px;
-  --markdown-h1-color: #30343a;
-  --markdown-h1-font-weight: 700;
-  --markdown-h1-line-height: 1.2;
-  --markdown-h2-font-size: 23px;
-  --markdown-h2-color: #30343a;
-  --markdown-h2-font-weight: 700;
-  --markdown-h2-line-height: 1.25;
-  --markdown-h3-font-size: 19px;
-  --markdown-h3-color: #34383d;
-  --markdown-h3-font-weight: 700;
-  --markdown-h3-line-height: 1.3;
-  --markdown-h4-font-size: 16px;
-  --markdown-h4-color: #34383d;
-  --markdown-h4-font-weight: 700;
-  --markdown-h4-line-height: 1.35;
-  --markdown-paragraph-font-size: 15px;
-  --markdown-paragraph-color: #404449;
-  --markdown-paragraph-line-height: 1.65;
-  --markdown-strong-color: #1f4e79;
-  --markdown-strong-font-weight: 700;
-  --markdown-code-font-size: 13px;
-  --markdown-code-color: #4a4e53;
-  --markdown-code-background: #f5f5f5;
-  --markdown-link-color: #58749a;
-  --markdown-border-color: #e3e4e6;
-  --syntax-background: #f5f5f5;
-  --syntax-text: #4a4e53;
-  --syntax-keyword: #8f5f63;
-  --syntax-string: #55706b;
-  --syntax-number: #627796;
-  --syntax-title: #766b8c;
-  --syntax-comment: #8a8e93;
-  --syntax-meta: #72777c;
-}
-
-.app-shell[data-theme="dark"] {
-  --markdown-body-color: #d8dee9;
-  --markdown-h1-color: #f8fafc;
-  --markdown-h2-color: #f1f5f9;
-  --markdown-h3-color: #e5edf7;
-  --markdown-h4-color: #dbe7f3;
-  --markdown-paragraph-color: #d8dee9;
-  --markdown-strong-color: #f2d675;
-  --markdown-code-color: #e6edf3;
-  --markdown-code-background: #161b22;
-  --markdown-link-color: #79c0ff;
-  --markdown-border-color: #30363d;
-  --syntax-background: #0d1117;
-  --syntax-text: #e6edf3;
-  --syntax-keyword: #ff7b72;
-  --syntax-string: #a5d6ff;
-  --syntax-number: #79c0ff;
-  --syntax-title: #d2a8ff;
-  --syntax-comment: #8b949e;
-  --syntax-meta: #ffa657;
 }
 
 .markdown-content {

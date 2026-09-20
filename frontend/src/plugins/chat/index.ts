@@ -3,14 +3,35 @@ import type { PluginCtx } from "../../shell/ctx";
 import type { DockInstance, DockProvider } from "../../shell/definePlugin";
 import { definePlugin } from "../../shell/definePlugin";
 import { useLayoutStore } from "../../stores/layout";
+import { useChatSettingsStore } from "../../stores/chatSettings";
 import { registerInputSessionSender, type InputSession } from "../../stores/inputSessions";
-import { dockStateFor, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
+import { dockStateFor, isErrorStopReason, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
 import type { ChatList } from "./types";
 
 function createDockProvider(ctx: PluginCtx): DockProvider {
   const layout = useLayoutStore();
+  const chatSettings = useChatSettingsStore();
   const instances = reactive<DockInstance[]>([]);
   let chats: ChatList["chats"] = [];
+
+  /** System notification on turn completion (framework v0.79): fires only
+   *  while the viewer tab is hidden (an in-view completion is already
+   *  covered by the dock dot) and only with the setting on + permission
+   *  granted. The per-chat tag coalesces a multi-role batch into one
+   *  notification; clicking focuses the window and opens the chat. */
+  const notifyTurnCompleted = (chatId: string, roleName: string | undefined, stopReason: string): void => {
+    if (!chatSettings.turnNotifications) return;
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    if (!document.hidden) return;
+    const chat = chats.find((item) => item.id === chatId);
+    const failed = isErrorStopReason(stopReason);
+    const body = `${roleName || "角色"} · ${failed ? `失败：${stopReason}` : "一轮完成"}`;
+    const notification = new Notification(chat?.name ?? "聊天", { body, tag: `chat-turn:${chatId}` });
+    notification.onclick = () => {
+      window.focus();
+      layout.openInstance("chat", chatId);
+    };
+  };
   const sync = (): void => {
     // Opening a chat marks it read; clear its unread entry before mapping so
     // the dot disappears in the same rebuild.
@@ -32,12 +53,14 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   // Global turn lifecycle feed: green dot while a turn runs; on completion
   // an amber (unread) or red (failed) dot until the chat is opened.
   ctx.bus.subscribe("chat:_:turn", (frame) => {
-    const value = frame.value as { chat_id?: string; phase?: string; stop_reason?: string } | undefined;
+    const value = frame.value as { chat_id?: string; phase?: string; stop_reason?: string; role_name?: string } | undefined;
     if (value === undefined || typeof value.chat_id !== "string") return;
     if (value.phase === "started") {
       markTurnStarted(value.chat_id);
     } else if (value.phase === "completed") {
-      markTurnCompleted(value.chat_id, typeof value.stop_reason === "string" ? value.stop_reason : "", layout.isUidOpen(`chat:${value.chat_id}`));
+      const stopReason = typeof value.stop_reason === "string" ? value.stop_reason : "";
+      markTurnCompleted(value.chat_id, stopReason, layout.isUidOpen(`chat:${value.chat_id}`));
+      notifyTurnCompleted(value.chat_id, value.role_name, stopReason);
     } else {
       return;
     }

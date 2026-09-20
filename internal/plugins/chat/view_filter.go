@@ -199,42 +199,6 @@ func (s *store) historyPageAfterView(chatID string, keys *viewKeys, afterTs int6
 	return page, hasMore, nil
 }
 
-// lineMessageCounts returns every line's settled visible-message count
-// (main under ""): each line head's snapshot membership summed over
-// per-turn_id message counts, plus orphan inputs. In-flight turns and
-// queued dispatches are excluded — counts track persisted history.
-func (p *Plugin) lineMessageCounts(chatID string) (map[string]int, error) {
-	type turnCount struct {
-		TurnID string
-		N      int
-	}
-	var rows []turnCount
-	if err := p.store.db.Model(&Message{}).Select("turn_id, COUNT(*) AS n").Where("chat_id = ?", chatID).Group("turn_id").Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	perKey := make(map[string]int, len(rows))
-	for _, row := range rows {
-		perKey[row.TurnID] = row.N
-	}
-	var heads []LineHead
-	if err := p.store.db.Where("chat_id = ?", chatID).Find(&heads).Error; err != nil {
-		return nil, err
-	}
-	counts := make(map[string]int, len(heads))
-	for _, head := range heads {
-		snapshot, err := p.store.snapshotTurns(chatID, head.HeadNodeID)
-		if err != nil {
-			return nil, err
-		}
-		count := len(snapshot.InputMessageIDs)
-		for _, turn := range snapshot.Turns {
-			count += perKey[turn.ID] + perKey[turn.DispatchID]
-		}
-		counts[head.BranchID] = count
-	}
-	return counts, nil
-}
-
 // sortedBranchIDs normalizes a request's branch id list (dedupe + sort) so
 // equivalent views resolve identically.
 func sortedBranchIDs(ids []string) []string {

@@ -1,13 +1,15 @@
 package chat
 
 // Named parallel branches (framework v0.63+, history-DAG model
-// docs/chat-branch-dag-plan.md): creation/rename/delete, archive-without-
-// merge, and the single-step atomic merge. Merge is a pure graph graft: one
-// transaction writes a merge node (parents = target old head + every source
-// head), advances the target head with sessions marked stale, and closes
-// the source lines (state=merged). No LLM summary, no dispatched message,
-// no agent wake-up; the source branch disappears from every list while its
-// rows, turns, and edges stay for queries and debugging. The retired
+// docs/chat-branch-dag-plan.md): creation/rename/delete and the single-step
+// atomic merge. Merge is a pure graph graft: one transaction writes a merge
+// node (parents = target old head + every source head), advances the target
+// head with sessions marked stale, and closes the source lines
+// (state=merged). No LLM summary, no dispatched message, no agent wake-up;
+// the source branch disappears from every list while its rows, turns, and
+// edges stay for queries and debugging. Archiving IS a merge (v0.78): the
+// sources graft onto the chat's terminal 归档 line (born on first use), so
+// shelved content stays on a real, viewable, forkable line. The retired
 // two-step draft/confirm protocol is rejected with an upgrade error.
 
 import (
@@ -28,6 +30,7 @@ var (
 	errBranchRunning    = errors.New("the branch still has a running turn — wait for it to finish")
 	errBranchEmpty      = errors.New("the branch has no turns yet")
 	errMergeProtocol    = errors.New("the merge draft/confirm protocol was retired — upgrade the client (merge is now a single-step branches:merge call)")
+	errArchiveSink      = errors.New("the 归档 archive line is the terminal sink — it cannot be merged away, archived, or deleted")
 	errRevisionConflict = errors.New("the work line changed since you looked — refresh and retry")
 )
 
@@ -63,7 +66,9 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 	// Fork point: from_turn_id forks the exact ancestor closure of that
 	// (finished, published) turn; from_branch_id forks a line's current
 	// head ("" = mainline); neither starts a fresh, history-less branch.
-	// The turn's line must be active — archived/merged lines are read-only.
+	// Shelved (archive-only) lines are read-only; a turn on a MERGED line
+	// stays forkable — its content joined the merge target's history, so
+	// the fork attributes to the surviving line (v0.77).
 	parentBranchID := ""
 	if fromTurnID != "" {
 		fork, forkErr := p.store.turn(fromTurnID)
@@ -81,7 +86,30 @@ func (p *Plugin) handleBranchesCreate(frame busclient.Frame) {
 				p.reply(frame, nil, parentErr)
 				return
 			}
-			if parent == nil || parent.archived() {
+			// Follow the merge chain to the surviving line ("" = mainline
+			// when the chain ends there); the hop cap guards a corrupted
+			// cyclic chain.
+			for hops := 0; parent != nil && parent.archived() && parent.merged(); hops++ {
+				if hops >= 16 {
+					p.reply(frame, nil, errors.New("the fork turn's merge chain does not terminate"))
+					return
+				}
+				parentBranchID = parent.MergedIntoBranchID
+				if parentBranchID == "" {
+					parent = nil
+					break
+				}
+				if parent, parentErr = p.store.branch(parentBranchID); parentErr != nil {
+					p.reply(frame, nil, parentErr)
+					return
+				}
+			}
+			if parent == nil && parentBranchID != "" {
+				// Dangling branch record (deleted mid-chain).
+				p.reply(frame, nil, errBranchArchived)
+				return
+			}
+			if parent != nil && parent.archived() {
 				p.reply(frame, nil, errBranchArchived)
 				return
 			}
@@ -229,6 +257,10 @@ func (p *Plugin) handleBranchesDelete(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
+	if branch.ID == archiveBranchID(branch.ChatID) {
+		p.reply(frame, nil, errArchiveSink)
+		return
+	}
 	turns, err := p.store.branchTurns(id)
 	if err != nil {
 		p.reply(frame, nil, err)
@@ -258,16 +290,17 @@ func (p *Plugin) handleBranchesDelete(frame busclient.Frame) {
 	p.reply(frame, map[string]any{"deleted": true, "id": id}, nil)
 }
 
-// handleBranchesMerge is the single-step atomic merge
-// (docs/chat-branch-dag-plan.md §6): one transaction writes the merge node
-// (parents = target old head + every source head), advances the target head
-// with its sessions marked stale (the next batch rebuilds every session
-// from the new full snapshot), and closes the sources (state=merged).
-// Empty branches merge fine (their fork node is real history); shared
-// ancestry is deduplicated by the graph walk. expected_revisions (line →
-// revision, "" key = mainline) makes a stale client fail with a revision
-// conflict instead of merging blind; idempotency_key replays return the
-// stored result, and a key reused with different parameters is rejected.
+// archiveBranchName is the display name of the chat's archive line.
+const archiveBranchName = "归档"
+
+// archiveBranchID is the deterministic id of the chat's archive line — a
+// normal open branch acting as the terminal merge sink for shelving
+// (v0.78). The deterministic id makes birth-on-first-use idempotent and
+// lets the sink guard work without a schema flag.
+func archiveBranchID(chatID string) string { return "archive:" + chatID }
+
+// handleBranchesMerge parses the single-step atomic merge RPC
+// (docs/chat-branch-dag-plan.md §6) and delegates to mergeLines.
 func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
@@ -292,6 +325,24 @@ func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
+	result, mergeErr := p.mergeLines(chatID, branchIDs, targetBranchID, expected, idempotencyKey, false)
+	p.reply(frame, result, mergeErr)
+}
+
+// mergeLines is the merge core shared by branches:merge and
+// branches:archive: one transaction writes the merge node (parents =
+// target old head + every source head), advances the target head with its
+// sessions marked stale (the next batch rebuilds every session from the
+// new full snapshot), and closes the sources (state=merged). Empty
+// branches merge fine (their fork node is real history); shared ancestry
+// is deduplicated by the graph walk. expected_revisions (line → revision,
+// "" key = mainline) makes a stale client fail with a revision conflict
+// instead of merging blind; idempotency_key replays return the stored
+// result, and a key reused with different parameters is rejected.
+// createTarget allows a not-yet-existing target line and births it inside
+// the merge transaction (archiving creates the 归档 line on first use), so
+// a failed merge leaves no empty target behind.
+func (p *Plugin) mergeLines(chatID string, branchIDs []string, targetBranchID string, expected map[string]int64, idempotencyKey string, createTarget bool) (map[string]any, error) {
 	// Serialize with dispatch intake and automation: the busy validation
 	// below cannot go stale before the merge commits.
 	p.automationMu.Lock()
@@ -305,26 +356,24 @@ func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 		var receipt MergeReceipt
 		lookup := p.store.db.Where("key = ?", idempotencyKey).Limit(1).Find(&receipt)
 		if lookup.Error != nil {
-			p.reply(frame, nil, lookup.Error)
-			return
+			return nil, lookup.Error
 		}
 		if lookup.RowsAffected > 0 {
 			if receipt.Fingerprint != fingerprint {
-				p.reply(frame, nil, errors.New("idempotency key reused with a different merge"))
-				return
+				return nil, errors.New("idempotency key reused with a different merge")
 			}
 			var stored map[string]any
 			if json.Unmarshal([]byte(receipt.Payload), &stored) == nil {
 				stored["deduplicated"] = true
-				p.reply(frame, stored, nil)
-			} else {
-				p.reply(frame, map[string]any{"merged": true, "deduplicated": true}, nil)
+				return stored, nil
 			}
-			return
+			return map[string]any{"merged": true, "deduplicated": true}, nil
 		}
 	}
 	// Validate sources: same chat, all open (empty branches allowed — their
-	// fork node is real history), target open and not among sources.
+	// fork node is real history), target open and not among sources. The
+	// 归档 line is terminal: merging it away would strand everything shelved
+	// into it.
 	sources := []*Branch{}
 	seen := map[string]bool{}
 	for _, id := range branchIDs {
@@ -332,39 +381,39 @@ func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 			continue
 		}
 		seen[id] = true
+		if id == archiveBranchID(chatID) {
+			return nil, errArchiveSink
+		}
 		branch, loadErr := p.store.branch(id)
 		if loadErr != nil {
-			p.reply(frame, nil, loadErr)
-			return
+			return nil, loadErr
 		}
 		if branch == nil || branch.ChatID != chatID {
-			p.reply(frame, nil, fmt.Errorf("branch was not found in the chat: %s", id))
-			return
+			return nil, fmt.Errorf("branch was not found in the chat: %s", id)
 		}
 		if branch.archived() {
-			p.reply(frame, nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchArchived))
-			return
+			return nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchArchived)
 		}
 		sources = append(sources, branch)
 	}
 	if seen[targetBranchID] {
-		p.reply(frame, nil, errors.New("the merge target cannot be merged into itself"))
-		return
+		return nil, errors.New("the merge target cannot be merged into itself")
 	}
 	var target *Branch
 	if targetBranchID != "" {
-		target, err = p.store.branch(targetBranchID)
-		if err != nil {
-			p.reply(frame, nil, err)
-			return
+		var targetErr error
+		target, targetErr = p.store.branch(targetBranchID)
+		if targetErr != nil {
+			return nil, targetErr
 		}
-		if target == nil || target.ChatID != chatID {
-			p.reply(frame, nil, errors.New("the merge target branch was not found in the chat"))
-			return
+		if target == nil && !createTarget {
+			return nil, errors.New("the merge target branch was not found in the chat")
 		}
-		if target.archived() {
-			p.reply(frame, nil, fmt.Errorf("merge target %w", errBranchArchived))
-			return
+		if target != nil && target.ChatID != chatID {
+			return nil, errors.New("the merge target branch was not found in the chat")
+		}
+		if target != nil && target.archived() {
+			return nil, fmt.Errorf("merge target %w", errBranchArchived)
 		}
 	}
 	// Busy validation: no in-flight batch, no queued batches, no live
@@ -381,15 +430,29 @@ func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 				if target != nil && target.ID == line {
 					name = "「" + target.Name + "」"
 				}
+				if line == archiveBranchID(chatID) {
+					name = "「" + archiveBranchName + "」"
+				}
 			}
-			p.reply(frame, nil, fmt.Errorf("%s %w", name, busyErr))
-			return
+			return nil, fmt.Errorf("%s %w", name, busyErr)
 		}
 	}
 	now := nowMillis()
 	mergeNodeID := "merge:" + newID()
 	var targetHead *LineHead
-	err = p.store.db.Transaction(func(tx *gorm.DB) error {
+	createdTarget := false
+	err := p.store.db.Transaction(func(tx *gorm.DB) error {
+		if target == nil && targetBranchID != "" {
+			// Birth the target line (the 归档 archive sink) inside the
+			// merge transaction: a merge that fails later leaves no empty
+			// branch behind. ensureLineHead below creates its fork node
+			// and head row.
+			target = &Branch{ID: targetBranchID, ChatID: chatID, Name: archiveBranchName, State: branchStateOpen, CreatedAt: now, UpdatedAt: now}
+			if err := tx.Create(target).Error; err != nil {
+				return err
+			}
+			createdTarget = true
+		}
 		parents := []string{}
 		for _, line := range append([]string{targetBranchID}, seenKeys(sources)...) {
 			head, headErr := ensureLineHead(tx, chatID, line)
@@ -445,17 +508,19 @@ func (p *Plugin) handleBranchesMerge(frame busclient.Frame) {
 		return nil
 	})
 	if err != nil {
-		p.reply(frame, nil, err)
-		return
+		return nil, err
+	}
+	if createdTarget {
+		p.publishBranch(target, "created")
 	}
 	for _, source := range sources {
 		p.publishBranch(source, "merged")
 	}
-	p.reply(frame, map[string]any{
+	return map[string]any{
 		"merged": true, "merge_node_id": mergeNodeID, "target_branch_id": targetBranchID,
 		"target_head_node_id": targetHead.HeadNodeID, "target_revision": targetHead.Revision,
 		"branch_ids": seenKeys(sources),
-	}, nil)
+	}, nil
 }
 
 func seenKeys(branches []*Branch) []string {
@@ -472,14 +537,10 @@ func (p *Plugin) handleBranchesMergeConfirm(frame busclient.Frame) {
 	p.reply(frame, nil, errMergeProtocol)
 }
 
-// handleBranchesArchive archives branches WITHOUT merging (the "by the
-// way" pattern): a side conversation whose content should stay out of
-// every line's history. No merge edge is written, so the branch's turns
-// stay reachable only through its own (retained) head — never through
-// another line. Archived branches leave the bar and reject dispatch;
-// unarchiving is a reserved function — deliberately not implemented yet.
-// Busy lines (running batch, queued batches) refuse archiving; empty
-// branches may be archived (or deleted outright).
+// handleBranchesArchive retires branches into the chat's archive line:
+// archiving IS a merge (v0.78) onto the terminal 归档 line, so shelved
+// content keeps living in a real, viewable, forkable history instead of
+// dropping out of every line. The 归档 line is born on first use.
 func (p *Plugin) handleBranchesArchive(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
@@ -494,54 +555,13 @@ func (p *Plugin) handleBranchesArchive(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	p.automationMu.Lock()
-	defer p.automationMu.Unlock()
-	now := nowMillis()
-	archived := make([]map[string]any, 0, len(branchIDs))
-	seen := map[string]bool{}
-	for _, id := range branchIDs {
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		branch, loadErr := p.store.branch(id)
-		if loadErr != nil {
-			p.reply(frame, nil, loadErr)
-			return
-		}
-		if branch == nil || branch.ChatID != chatID {
-			p.reply(frame, nil, fmt.Errorf("branch was not found in the chat: %s", id))
-			return
-		}
-		if branch.archived() {
-			p.reply(frame, nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchArchived))
-			return
-		}
-		running, runErr := p.store.branchHasRunningTurn(id)
-		if runErr != nil {
-			p.reply(frame, nil, runErr)
-			return
-		}
-		if running {
-			p.reply(frame, nil, fmt.Errorf("分支「%s」%w", branch.Name, errBranchRunning))
-			return
-		}
-		p.mu.Lock()
-		busy, reason := p.lineBusyLocked(chatID, id)
-		p.mu.Unlock()
-		if busy {
-			p.reply(frame, nil, fmt.Errorf("分支「%s」%w: %s", branch.Name, errLineBusy, reason))
-			return
-		}
-		branch.ArchivedAt = &now
-		branch.State = branchStateArchived
-		branch.UpdatedAt = now
-		if saveErr := p.store.saveBranch(branch); saveErr != nil {
-			p.reply(frame, nil, saveErr)
-			return
-		}
-		p.publishBranch(branch, "archived")
-		archived = append(archived, branch.payload())
+	target := archiveBranchID(chatID)
+	result, mergeErr := p.mergeLines(chatID, branchIDs, target, nil, "", true)
+	if mergeErr != nil {
+		p.reply(frame, nil, mergeErr)
+		return
 	}
-	p.reply(frame, map[string]any{"archived": true, "branches": archived}, nil)
+	result["archived"] = true
+	result["archive_branch_id"] = target
+	p.reply(frame, result, nil)
 }

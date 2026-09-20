@@ -1025,15 +1025,12 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 	}
 	// Batch settlement: every touched line's head advances to its result
 	// (multi-role results收束 into one join node, so no finisher overwrites
-	// another's work). The "head" branch-feed frame announces the settled
-	// line — panes refresh their view counts off it (the per-turn
-	// completed frames fire BEFORE settlement, so they race the counts).
+	// another's work).
 	for branch, nodeIDs := range results {
 		if err := p.advanceBatch(chat.ID, branch, batches[branch], nodeIDs); err != nil {
 			slog.Error("chat line head advance failed", "chat_id", chat.ID, "branch", branch, "error", err)
 			continue
 		}
-		p.publish("chat:_:branch", map[string]any{"chat_id": chat.ID, "id": branch, "phase": "head"})
 	}
 }
 

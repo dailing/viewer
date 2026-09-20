@@ -519,19 +519,6 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 		result["messages"] = values
 		result["has_more"] = hasMore
 	}
-	// Per-line visible message counts (the pane's branch-tab badges),
-	// explicit opt-in: resolving every line's snapshot is worth it on view
-	// loads and branch mutations, not on every older-page fetch.
-	if request != nil && request["include_counts"] == true {
-		if chatID, _ := request["chat_id"].(string); chatID != "" {
-			counts, countsErr := p.lineMessageCounts(chatID)
-			if countsErr != nil {
-				p.reply(frame, nil, countsErr)
-				return
-			}
-			result["line_message_counts"] = counts
-		}
-	}
 	p.reply(frame, result, nil)
 }
 

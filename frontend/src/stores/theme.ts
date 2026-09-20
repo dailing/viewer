@@ -1,137 +1,97 @@
 /**
- * App theme system: named themes, each a complete set of the shell's
- * `--color-*` variables plus a light/dark base scheme. The active theme is
- * applied as inline custom properties on `.app-shell` (overriding the
- * styles.css defaults) and its scheme is mirrored to the `data-theme`
- * attribute, which drives the styles.css Markdown color fallback and
- * `color-scheme`. Themes are browser-local, persisted to localStorage
- * (viewer.themes.v1). Built-in Light/Dark themes ship by default: they can
- * be edited and reset, but not deleted; custom themes can be created
- * (duplicating the active theme), renamed, edited, and deleted.
+ * App theme system (v2, framework v0.80): a theme is four base colors
+ * (canvas / surface / text / accent) plus optional advanced overrides.
+ * Everything else — surface variants, muted text, borders, markdown and
+ * syntax colors — derives from the base colors through the color-mix()
+ * defaults declared on .app-shell in styles.css; scheme-dependent constants
+ * (semantic hues, syntax palette, hover direction) gate on the data-theme
+ * attribute, computed here from the canvas luminance. The store applies the
+ * active theme as inline custom properties on .app-shell (base vars plus
+ * overrides only) and persists themes to localStorage (viewer.themes.v2).
+ * Built-in Light/Dark themes ship by default: editable and resettable, not
+ * deletable; custom themes duplicate the active one and can be renamed and
+ * deleted. Legacy keys (viewer.themes.v1, viewer.markdownTheme.v1) are
+ * discarded on load.
  */
 import { defineStore } from "pinia";
 
-const STORAGE_KEY = "viewer.themes.v1";
+const STORAGE_KEY = "viewer.themes.v2";
+const LEGACY_KEYS = ["viewer.themes.v1", "viewer.markdownTheme.v1"];
 
 export type ThemeScheme = "light" | "dark";
 
-export interface ThemeVars {
+export interface BaseVars {
   canvas: string;
   surface: string;
-  surfaceRaised: string;
-  surfaceMuted: string;
-  surfaceHover: string;
-  surfaceSelected: string;
-  titlebar: string;
-  titlebarText: string;
   text: string;
-  textMuted: string;
-  textSubtle: string;
-  textInverse: string;
-  border: string;
-  borderStrong: string;
   accent: string;
-  accentHover: string;
-  accentSoft: string;
-  focus: string;
-  success: string;
-  warning: string;
-  danger: string;
-  info: string;
-  overlay: string;
 }
+
+export type OverrideKind = "color" | "px" | "number";
+
+export interface OverrideSpec {
+  cssVar: string;
+  kind: OverrideKind;
+}
+
+/** Advanced-override key -> the CSS custom property it drives. Keys not
+ *  present in a theme's overrides map follow the styles.css derivation. */
+export const OVERRIDE_VARS: Record<string, OverrideSpec> = {
+  surfaceRaised: { cssVar: "--color-surface-raised", kind: "color" },
+  surfaceMuted: { cssVar: "--color-surface-muted", kind: "color" },
+  surfaceHover: { cssVar: "--color-surface-hover", kind: "color" },
+  surfaceSelected: { cssVar: "--color-surface-selected", kind: "color" },
+  titlebar: { cssVar: "--color-titlebar", kind: "color" },
+  titlebarText: { cssVar: "--color-titlebar-text", kind: "color" },
+  textMuted: { cssVar: "--color-text-muted", kind: "color" },
+  textSubtle: { cssVar: "--color-text-subtle", kind: "color" },
+  textInverse: { cssVar: "--color-text-inverse", kind: "color" },
+  border: { cssVar: "--color-border", kind: "color" },
+  borderStrong: { cssVar: "--color-border-strong", kind: "color" },
+  accentHover: { cssVar: "--color-accent-hover", kind: "color" },
+  accentSoft: { cssVar: "--color-accent-soft", kind: "color" },
+  focus: { cssVar: "--color-focus", kind: "color" },
+  success: { cssVar: "--color-success", kind: "color" },
+  warning: { cssVar: "--color-warning", kind: "color" },
+  danger: { cssVar: "--color-danger", kind: "color" },
+  info: { cssVar: "--color-info", kind: "color" },
+  overlay: { cssVar: "--color-overlay", kind: "color" },
+  markdownBody: { cssVar: "--markdown-body-color", kind: "color" },
+  markdownStrong: { cssVar: "--markdown-strong-color", kind: "color" },
+  markdownLink: { cssVar: "--markdown-link-color", kind: "color" },
+  markdownCodeColor: { cssVar: "--markdown-code-color", kind: "color" },
+  markdownCodeBackground: { cssVar: "--markdown-code-background", kind: "color" },
+  markdownBorder: { cssVar: "--markdown-border-color", kind: "color" },
+  syntaxText: { cssVar: "--syntax-text", kind: "color" },
+  syntaxBackground: { cssVar: "--syntax-background", kind: "color" },
+  bodyFontSize: { cssVar: "--markdown-body-font-size", kind: "px" },
+  bodyLineHeight: { cssVar: "--markdown-body-line-height", kind: "number" },
+  codeFontSize: { cssVar: "--markdown-code-font-size", kind: "px" },
+};
+
+/** base var field -> CSS custom property it drives */
+export const BASE_VAR_NAMES: Record<keyof BaseVars, string> = {
+  canvas: "--color-canvas",
+  surface: "--color-surface",
+  text: "--color-text",
+  accent: "--color-accent",
+};
 
 export interface ThemeDef {
   id: string;
   name: string;
-  scheme: ThemeScheme;
   builtin: boolean;
-  vars: ThemeVars;
+  base: BaseVars;
+  overrides: Record<string, string>;
 }
 
-/** theme var field -> CSS custom property it drives */
-export const THEME_VAR_NAMES: Record<keyof ThemeVars, string> = {
-  canvas: "--color-canvas",
-  surface: "--color-surface",
-  surfaceRaised: "--color-surface-raised",
-  surfaceMuted: "--color-surface-muted",
-  surfaceHover: "--color-surface-hover",
-  surfaceSelected: "--color-surface-selected",
-  titlebar: "--color-titlebar",
-  titlebarText: "--color-titlebar-text",
-  text: "--color-text",
-  textMuted: "--color-text-muted",
-  textSubtle: "--color-text-subtle",
-  textInverse: "--color-text-inverse",
-  border: "--color-border",
-  borderStrong: "--color-border-strong",
-  accent: "--color-accent",
-  accentHover: "--color-accent-hover",
-  accentSoft: "--color-accent-soft",
-  focus: "--color-focus",
-  success: "--color-success",
-  warning: "--color-warning",
-  danger: "--color-danger",
-  info: "--color-info",
-  overlay: "--color-overlay",
-};
-
-const LIGHT_VARS: ThemeVars = {
-  canvas: "#ffffff",
-  surface: "#ffffff",
-  surfaceRaised: "#f5f5f5",
-  surfaceMuted: "#f5f5f5",
-  surfaceHover: "#eeeeee",
-  surfaceSelected: "#e9edf2",
-  titlebar: "#e7eaef",
-  titlebarText: "#5f666d",
-  text: "#34383d",
-  textMuted: "#747980",
-  textSubtle: "#969ba1",
-  textInverse: "#ffffff",
-  border: "#e3e4e6",
-  borderStrong: "#ced1d4",
-  accent: "#58749a",
-  accentHover: "#486487",
-  accentSoft: "#edf0f4",
-  focus: "#6b85a8",
-  success: "#4f765f",
-  warning: "#8a7047",
-  danger: "#a05b57",
-  info: "#557799",
-  overlay: "rgb(15 23 42 / 0.38)",
-};
-
-const DARK_VARS: ThemeVars = {
-  canvas: "#111720",
-  surface: "#111720",
-  surfaceRaised: "#171f2a",
-  surfaceMuted: "#171f2a",
-  surfaceHover: "#1d2937",
-  surfaceSelected: "#102a43",
-  titlebar: "#171f2a",
-  titlebarText: "#9aa7b6",
-  text: "#e6edf3",
-  textMuted: "#9aa7b6",
-  textSubtle: "#748094",
-  textInverse: "#07111f",
-  border: "#303a47",
-  borderStrong: "#4b596a",
-  accent: "#58a6ff",
-  accentHover: "#79c0ff",
-  accentSoft: "#102a43",
-  focus: "#58a6ff",
-  success: "#56d364",
-  warning: "#e3b341",
-  danger: "#ff7b72",
-  info: "#79c0ff",
-  overlay: "rgb(0 0 0 / 0.58)",
-};
+const LIGHT_BASE: BaseVars = { canvas: "#ffffff", surface: "#ffffff", text: "#34383d", accent: "#58749a" };
+const DARK_BASE: BaseVars = { canvas: "#111720", surface: "#111720", text: "#e6edf3", accent: "#58a6ff" };
 
 function builtinThemes(): ThemeDef[] {
   return [
-    { id: "light", name: "Light", scheme: "light", builtin: true, vars: { ...LIGHT_VARS } },
-    { id: "dark", name: "Dark", scheme: "dark", builtin: true, vars: { ...DARK_VARS } },
+    { id: "light", name: "Light", builtin: true, base: { ...LIGHT_BASE }, overrides: {} },
+    { id: "dark", name: "Dark", builtin: true, base: { ...DARK_BASE }, overrides: {} },
   ];
 }
 
@@ -139,30 +99,32 @@ function builtinById(id: string): ThemeDef | undefined {
   return builtinThemes().find((t) => t.id === id);
 }
 
-function baseForScheme(scheme: ThemeScheme): ThemeDef {
-  return scheme === "dark" ? builtinThemes()[1] : builtinThemes()[0];
-}
-
 /** Fill gaps / coerce a stored record into a valid ThemeDef. */
-function normalizeTheme(raw: unknown, base: ThemeDef): ThemeDef {
+function normalizeTheme(raw: unknown, fallbackBase: BaseVars, builtin: boolean): ThemeDef {
   const record = (raw && typeof raw === "object" ? raw : {}) as Partial<ThemeDef>;
-  const scheme: ThemeScheme = record.scheme === "dark" ? "dark" : record.scheme === "light" ? "light" : base.scheme;
-  const rawVars = (record.vars && typeof record.vars === "object" ? record.vars : {}) as Partial<ThemeVars>;
-  const vars = { ...base.vars };
-  for (const field of Object.keys(THEME_VAR_NAMES) as Array<keyof ThemeVars>) {
-    const value = rawVars[field];
-    if (typeof value === "string" && value !== "") vars[field] = value;
+  const rawBase = (record.base && typeof record.base === "object" ? record.base : {}) as Partial<BaseVars>;
+  const base = { ...fallbackBase };
+  for (const field of Object.keys(BASE_VAR_NAMES) as Array<keyof BaseVars>) {
+    const value = rawBase[field];
+    if (typeof value === "string" && value !== "") base[field] = value;
+  }
+  const overrides: Record<string, string> = {};
+  const rawOverrides = (record.overrides && typeof record.overrides === "object" ? record.overrides : {}) as Record<string, unknown>;
+  for (const key of Object.keys(OVERRIDE_VARS)) {
+    const value = rawOverrides[key];
+    if (typeof value === "string" && value !== "") overrides[key] = value;
   }
   return {
-    id: typeof record.id === "string" && record.id !== "" ? record.id : base.id,
-    name: typeof record.name === "string" && record.name !== "" ? record.name : base.name,
-    scheme,
-    builtin: base.builtin,
-    vars,
+    id: typeof record.id === "string" && record.id !== "" ? record.id : "custom",
+    name: typeof record.name === "string" && record.name !== "" ? record.name : "自定义主题",
+    builtin,
+    base,
+    overrides,
   };
 }
 
 function loadState(): { themes: ThemeDef[]; activeId: string } {
+  for (const key of LEGACY_KEYS) localStorage.removeItem(key);
   const defaults = builtinThemes();
   let stored: unknown[] = [];
   let storedActive = "";
@@ -181,14 +143,15 @@ function loadState(): { themes: ThemeDef[]; activeId: string } {
   // else in storage is a custom theme.
   const themes: ThemeDef[] = defaults.map((def) => {
     const found = stored.find((t) => (t as Partial<ThemeDef>)?.id === def.id);
-    return found ? normalizeTheme(found, def) : def;
+    return found ? { ...normalizeTheme(found, def.base, true), id: def.id } : def;
   });
   for (const t of stored) {
     const record = t as Partial<ThemeDef>;
     if (typeof record?.id !== "string" || record.id === "") continue;
     if (themes.some((x) => x.id === record.id)) continue;
-    const scheme: ThemeScheme = record.scheme === "dark" ? "dark" : "light";
-    themes.push(normalizeTheme(t, { ...baseForScheme(scheme), id: record.id, builtin: false }));
+    const theme = normalizeTheme(t, LIGHT_BASE, false);
+    theme.id = record.id;
+    themes.push(theme);
   }
   const activeId = themes.some((t) => t.id === storedActive) ? storedActive : "light";
   return { themes, activeId };
@@ -205,16 +168,33 @@ function hexToRgb(value: string): [number, number, number] | null {
   return [parseInt(match[1], 16), parseInt(match[2], 16), parseInt(match[3], 16)];
 }
 
+/** Scheme follows the canvas: a dark canvas gets the dark-scheme constants
+ *  (semantic hues, syntax palette, color-scheme) with no manual toggle. */
+export function schemeOf(base: BaseVars): ThemeScheme {
+  const rgb = hexToRgb(base.canvas);
+  if (!rgb) return "light";
+  const luminance = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+  return luminance < 0.5 ? "dark" : "light";
+}
+
 function applyTheme(theme: ThemeDef): void {
   const element = targetElement();
   if (!element) return;
-  element.setAttribute("data-theme", theme.scheme);
-  element.style.setProperty("color-scheme", theme.scheme);
-  for (const [field, cssVar] of Object.entries(THEME_VAR_NAMES) as Array<[keyof ThemeVars, string]>) {
-    element.style.setProperty(cssVar, theme.vars[field]);
+  const scheme = schemeOf(theme.base);
+  element.setAttribute("data-theme", scheme);
+  element.style.setProperty("color-scheme", scheme);
+  for (const [field, cssVar] of Object.entries(BASE_VAR_NAMES) as Array<[keyof BaseVars, string]>) {
+    element.style.setProperty(cssVar, theme.base[field]);
+  }
+  // Overrides: set the ones the theme defines, remove everything else so a
+  // theme switch never leaves stale inline values behind.
+  for (const [key, spec] of Object.entries(OVERRIDE_VARS)) {
+    const value = theme.overrides[key];
+    if (value === undefined) element.style.removeProperty(spec.cssVar);
+    else element.style.setProperty(spec.cssVar, spec.kind === "px" ? `${value}px` : value);
   }
   // Bootstrap's primary color is an RGB triplet; derive it from the accent.
-  const rgb = hexToRgb(theme.vars.accent);
+  const rgb = hexToRgb(theme.base.accent);
   if (rgb) element.style.setProperty("--bs-primary-rgb", `${rgb[0]}, ${rgb[1]}, ${rgb[2]}`);
 }
 
@@ -239,9 +219,9 @@ export const useThemeStore = defineStore("theme", {
       this.themes.push({
         id,
         name: name.trim() || "自定义主题",
-        scheme: source.scheme,
         builtin: false,
-        vars: { ...source.vars },
+        base: { ...source.base },
+        overrides: { ...source.overrides },
       });
       this.setActive(id);
       return id;
@@ -263,21 +243,23 @@ export const useThemeStore = defineStore("theme", {
       theme.name = trimmed;
       this.persist();
     },
-    setScheme(id: string, scheme: ThemeScheme): void {
-      const theme = this.themes.find((t) => t.id === id);
-      if (!theme) return;
-      theme.scheme = scheme;
-      this.persist();
-      if (id === this.activeId) applyTheme(theme);
-    },
-    setVar(id: string, field: keyof ThemeVars, value: string): void {
+    setBase(id: string, field: keyof BaseVars, value: string): void {
       const theme = this.themes.find((t) => t.id === id);
       if (!theme || value.trim() === "") return;
-      theme.vars[field] = value;
+      theme.base[field] = value;
       this.persist();
       if (id === this.activeId) applyTheme(theme);
     },
-    /** Restore a built-in theme to its shipped name/scheme/colors. */
+    /** Set (or clear, with undefined/"") an advanced override. */
+    setOverride(id: string, key: string, value: string | undefined): void {
+      const theme = this.themes.find((t) => t.id === id);
+      if (!theme || !(key in OVERRIDE_VARS)) return;
+      if (value === undefined || value.trim() === "") delete theme.overrides[key];
+      else theme.overrides[key] = value;
+      this.persist();
+      if (id === this.activeId) applyTheme(theme);
+    },
+    /** Restore a built-in theme to its shipped name and base colors. */
     resetTheme(id: string): void {
       const index = this.themes.findIndex((t) => t.id === id);
       const def = builtinById(id);
@@ -285,6 +267,14 @@ export const useThemeStore = defineStore("theme", {
       this.themes[index] = def;
       this.persist();
       if (id === this.activeId) applyTheme(def);
+    },
+    /** Drop all advanced overrides of a theme (base colors are kept). */
+    clearOverrides(id: string): void {
+      const theme = this.themes.find((t) => t.id === id);
+      if (!theme) return;
+      theme.overrides = {};
+      this.persist();
+      if (id === this.activeId) applyTheme(theme);
     },
     /** Apply the persisted active theme; call once at app startup. */
     init(): void {

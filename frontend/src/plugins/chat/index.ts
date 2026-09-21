@@ -2,7 +2,7 @@ import { defineAsyncComponent, reactive, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import type { DockInstance, DockProvider } from "../../shell/definePlugin";
 import { definePlugin } from "../../shell/definePlugin";
-import { useLayoutStore } from "../../stores/layout";
+import { contentUid, useLayoutStore } from "../../stores/layout";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { registerInputSessionSender, type InputSession } from "../../stores/inputSessions";
 import { dockStateFor, isErrorStopReason, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
@@ -13,6 +13,15 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   const chatSettings = useChatSettingsStore();
   const instances = reactive<DockInstance[]>([]);
   let chats: ChatList["chats"] = [];
+
+  /** A chat counts as open when ANY view of it is (multi-view, v0.82):
+   *  the primary view's uid is `chat:<id>`, extra views are `chat:<id>#…`. */
+  const isChatOpen = (chatId: string): boolean => {
+    if (layout.isUidOpen(`chat:${chatId}`)) return true;
+    const prefix = `chat:${chatId}#`;
+    return layout.panes.some((pane) => pane.content !== null && contentUid(pane.content).startsWith(prefix))
+      || layout.floating.some((pane) => contentUid(pane.content).startsWith(prefix));
+  };
 
   /** System notification on turn completion (framework v0.79): fires only
    *  while the viewer tab is hidden (an in-view completion is already
@@ -36,10 +45,10 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     // Opening a chat marks it read; clear its unread entry before mapping so
     // the dot disappears in the same rebuild.
     for (const chat of chats) {
-      if (layout.isUidOpen(`chat:${chat.id}`)) markChatRead(chat.id);
+      if (isChatOpen(chat.id)) markChatRead(chat.id);
     }
     instances.splice(0, instances.length, ...chats
-      .filter((chat) => chat.pinned || layout.isUidOpen(`chat:${chat.id}`))
+      .filter((chat) => chat.pinned || isChatOpen(chat.id))
       .map((chat) => ({ id: chat.id, label: `${chat.name} · ${chat.root}`, state: dockStateFor(chat.id), icon: "bi-chat-left-text" })));
   };
   const refresh = async (): Promise<void> => {
@@ -59,7 +68,7 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
       markTurnStarted(value.chat_id);
     } else if (value.phase === "completed") {
       const stopReason = typeof value.stop_reason === "string" ? value.stop_reason : "";
-      markTurnCompleted(value.chat_id, stopReason, layout.isUidOpen(`chat:${value.chat_id}`));
+      markTurnCompleted(value.chat_id, stopReason, isChatOpen(value.chat_id));
       notifyTurnCompleted(value.chat_id, value.role_name, stopReason);
     } else {
       return;
@@ -98,7 +107,7 @@ export default definePlugin({
     const unregister = registerInputSessionSender("chat", async (session: InputSession) => {
       const message = session.text.trim();
       if (!message) return false;
-      const payload: Record<string, unknown> = { chat_id: session.instanceId, message };
+      const payload: Record<string, unknown> = { chat_id: session.instanceId.split("#")[0], message };
       if (session.selectedRoleIds.length > 0) payload.role_ids = session.selectedRoleIds;
       if (session.forceNewSession) payload.force_new_session = true;
       if (session.parallel) payload.parallel_dispatch = true;

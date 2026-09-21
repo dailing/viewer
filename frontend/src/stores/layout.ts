@@ -142,8 +142,10 @@ export const useLayoutStore = defineStore("layout", {
      * Focus an open instance, reuse an empty pane, or place new content:
      * "new" mode splits without replacing content; "replace" mode swaps the
      * active pane's content in place (mobile-friendly single-pane flow).
+     * opts.newPane forces a fresh split off the active pane regardless of
+     * openMode and empty-tile reuse (explicit "open in a new panel" entries).
      */
-    openInstance(paneType: string, instanceId: string): void {
+    openInstance(paneType: string, instanceId: string, opts?: { newPane?: boolean }): void {
       const uid = `${paneType}:${instanceId}`;
       const floated = this.floating.find((pane) => contentUid(pane.content) === uid);
       if (floated !== undefined) {
@@ -159,16 +161,21 @@ export const useLayoutStore = defineStore("layout", {
       }
       let target = this.activePane;
       if (target.content !== null) {
-        const empty = this.panes.find((pane) => pane.content === null);
-        if (empty !== undefined) {
-          target = empty;
-        } else if (this.openMode !== "replace") {
-          // Algorithmic layouts have one stable placement rule: new tiles
-          // enter at the leaf end. Free mode keeps the focused-pane split
-          // behavior because its geometry is explicitly user-authored.
-          const splitTarget = this.mode === "free" ? target : this.panes[this.panes.length - 1];
-          this.splitPane(splitTarget.id, "vertical");
+        if (opts?.newPane === true) {
+          this.splitPane(target.id, "vertical");
           target = this.activePane;
+        } else {
+          const empty = this.panes.find((pane) => pane.content === null);
+          if (empty !== undefined) {
+            target = empty;
+          } else if (this.openMode !== "replace") {
+            // Algorithmic layouts have one stable placement rule: new tiles
+            // enter at the leaf end. Free mode keeps the focused-pane split
+            // behavior because its geometry is explicitly user-authored.
+            const splitTarget = this.mode === "free" ? target : this.panes[this.panes.length - 1];
+            this.splitPane(splitTarget.id, "vertical");
+            target = this.activePane;
+          }
         }
       }
       target.content = { paneType, instanceId };

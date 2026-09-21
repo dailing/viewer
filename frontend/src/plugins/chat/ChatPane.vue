@@ -13,6 +13,7 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
+import { useLayoutStore } from "../../stores/layout";
 import { registerInputSessionRuntime, useInputSessionsStore, type InputSession } from "../../stores/inputSessions";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
@@ -28,16 +29,24 @@ import { errorText } from "./types";
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("ChatPane requires PluginPaneHost");
 const ctx: PluginCtx = injectedCtx;
+/** Multi-view (framework v0.82): the pane instance id is the VIEW identity —
+ *  `chatId` for the primary view, `chatId#<suffix>` for extra views of the
+ *  same chat opened side by side. RPC/subscription addressing uses chatId;
+ *  per-pane state (branch tabs, message cache, input session) keys on
+ *  viewKey so two views of one chat never share view state. */
+const viewKey = ctx.instanceId;
+const chatId = viewKey.split("#")[0];
 const chatSettings = useChatSettingsStore();
+const layout = useLayoutStore();
 
 const messages = ref<ChatMessage[]>([]);
 const blocks = ref<ChatBlock[]>([]);
 const roles = ref<Role[]>([]);
 const workspace = ref<Workspace | null>(null);
 const chat = ref<Chat | null>(null);
-const inputSessionId = `chat:${ctx.instanceId}`;
+const inputSessionId = `chat:${viewKey}`;
 const inputs = useInputSessionsStore();
-inputs.ensure({ id: inputSessionId, pluginId: "chat", paneType: "chat", instanceId: ctx.instanceId, label: "Chat input" });
+inputs.ensure({ id: inputSessionId, pluginId: "chat", paneType: "chat", instanceId: viewKey, label: "Chat input" });
 const selected = computed({
   get: () => inputs.session(inputSessionId)?.selectedRoleIds ?? [],
   set: (value: string[]) => inputs.patch(inputSessionId, { selectedRoleIds: value }),
@@ -194,7 +203,7 @@ function viewRequest(): Record<string, unknown> {
 /** Session-cache key: one entry per chat × view — each view holds a
  *  different server-filtered message/block span. */
 function cacheKey(): string {
-  return `${ctx.instanceId}\x00${viewBranchIds()?.join("\x00") ?? "all"}`;
+  return `${viewKey}\x00${viewBranchIds()?.join("\x00") ?? "all"}`;
 }
 
 /** turn_id → owning line ("" = main) for live-frame attribution, fed by
@@ -259,17 +268,17 @@ function persistBranchTabs(): void {
     const parsed = raw === null ? {} : (JSON.parse(raw) as unknown);
     const map = (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {}) as Record<string, string[]>;
     // The default (主线 alone) is stored as absence to keep the map small.
-    if (activeTabs.value.length === 1 && activeTabs.value[0] === "main") delete map[ctx.instanceId];
-    else map[ctx.instanceId] = [...activeTabs.value];
+    if (activeTabs.value.length === 1 && activeTabs.value[0] === "main") delete map[viewKey];
+    else map[viewKey] = [...activeTabs.value];
     localStorage.setItem(BRANCH_TABS_STORAGE_KEY, JSON.stringify(map));
   } catch {
     // Quota/private-mode failures are non-fatal: tabs become session-local.
   }
 }
 
-const restoredTabs = loadBranchTabs(ctx.instanceId);
+const restoredTabs = loadBranchTabs(viewKey);
 if (restoredTabs.length > 0) activeTabs.value = restoredTabs;
-watch(activeTabs, persistBranchTabs);
+watch(activeTabs, () => { persistBranchTabs(); setChrome(); });
 // The view's message span is server-filtered per tab selection, so a tab
 // switch is a reload (per-view session cache hydrates instantly when warm),
 // landing on the live edge of the newly selected lines.
@@ -342,7 +351,7 @@ async function showLoopExecution(branchId: string, iteration?: LoopIteration): P
     await nextTick();
     if (!threadRef.value?.querySelector(selector) && iteration.ended_at) {
       const before = iteration.ended_at + 1;
-      const list = await ctx.bus.request("chat:_:chats:list", { chat_id: ctx.instanceId, include_messages: true, before, limit: PAGE_SIZE }) as ChatList;
+      const list = await ctx.bus.request("chat:_:chats:list", { chat_id: chatId, include_messages: true, before, limit: PAGE_SIZE }) as ChatList;
       const page = list.messages ?? [];
       if (page.length) {
         hasNewer.value = true;
@@ -392,7 +401,7 @@ async function submitFork(): Promise<void> {
   if (!fromTurnId) return;
   branchOpError.value = "";
   try {
-    const branch = await ctx.bus.request("chat:_:branches:create", { chat_id: ctx.instanceId, name: forkName.value.trim(), from_turn_id: fromTurnId }) as Branch;
+    const branch = await ctx.bus.request("chat:_:branches:create", { chat_id: chatId, name: forkName.value.trim(), from_turn_id: fromTurnId }) as Branch;
     upsertBranches([branch]);
     activeTabs.value = [branch.id];
     forkFromTurnId.value = "";
@@ -412,7 +421,7 @@ async function createFreshBranch(): Promise<void> {
   freshBranchBusy.value = true;
   branchOpError.value = "";
   try {
-    const branch = await ctx.bus.request("chat:_:branches:create", { chat_id: ctx.instanceId, name: "", from_turn_id: "" }) as Branch;
+    const branch = await ctx.bus.request("chat:_:branches:create", { chat_id: chatId, name: "", from_turn_id: "" }) as Branch;
     upsertBranches([branch]);
     activeTabs.value = [branch.id];
   } catch (cause) {
@@ -479,7 +488,7 @@ async function mergeSelected(): Promise<void> {
   branchOpError.value = "";
   try {
     await ctx.bus.request("chat:_:branches:merge", {
-      chat_id: ctx.instanceId,
+      chat_id: chatId,
       branch_ids: sources.map((branch) => branch.id),
       target_branch_id: target.id,
       idempotency_key: crypto.randomUUID(),
@@ -516,7 +525,7 @@ async function archiveSelected(): Promise<void> {
   archiveBusy.value = true;
   branchOpError.value = "";
   try {
-    await ctx.bus.request("chat:_:branches:archive", { chat_id: ctx.instanceId, branch_ids: targets.map((branch) => branch.id) });
+    await ctx.bus.request("chat:_:branches:archive", { chat_id: chatId, branch_ids: targets.map((branch) => branch.id) });
     activeTabs.value = ["main"];
   } catch (cause) {
     branchOpError.value = errorText(cause);
@@ -937,10 +946,32 @@ function hydrate(entry: ChatCacheEntry): void {
   setChrome();
 }
 
+/** Pane title: chat name, plus the branch name when this view pins
+ *  exactly one non-main branch — tells side-by-side views apart. */
+function viewTitle(): string {
+  const name = chat.value?.name ?? "Chat";
+  if (activeTabs.value.length === 1 && activeTabs.value[0] !== "main") {
+    const branch = branches.value.find((item) => item.id === activeTabs.value[0]);
+    if (branch !== undefined && branch.name !== "") return `${name} · ${branch.name}`;
+  }
+  return name;
+}
+
 function setChrome(): void {
   ctx.setChrome({
-    title: chat.value?.name ?? "Chat",
+    title: viewTitle(),
     actions: [
+      {
+        id: "new-view",
+        title: "在新面板打开此聊天（可并排查看不同分支）",
+        icon: "bi-columns-gap",
+        active: false,
+        run: () => {
+          layout.openInstance("chat", `${chatId}#${Math.random().toString(36).slice(2, 10)}`, {
+            newPane: true,
+          });
+        },
+      },
       {
         id: "loop",
         title: loopOpen.value ? "收起 Loop 面板" : "打开 Loop 面板",
@@ -1137,7 +1168,7 @@ async function fetchBlocks(after: number, before = 0): Promise<ChatBlock[]> {
   let cursor = after;
   for (;;) {
     const list = await (ctx.bus.request("chat:_:blocks:list", {
-      chat_id: ctx.instanceId, after: cursor, ...viewRequest(), ...(before > 0 ? { before } : {}),
+      chat_id: chatId, after: cursor, ...viewRequest(), ...(before > 0 ? { before } : {}),
     }) as Promise<ChatBlockList>);
     seedTurnTargets(list.turn_targets);
     seedTurnSessions(list.turn_sessions);
@@ -1198,7 +1229,7 @@ async function load(fresh = false): Promise<void> {
         blocks.value = [];
         hasOlder.value = false;
         olderCursor.value = null;
-        removeEntry(ctx.instanceId);
+        removeEntry(viewKey);
         return;
       }
       // Land on the message-end anchor once the delta has been folded in,
@@ -1207,9 +1238,9 @@ async function load(fresh = false): Promise<void> {
       return;
     }
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true, ...viewRequest(), limit: PAGE_SIZE,
+      chat_id: chatId, include_messages: true, ...viewRequest(), limit: PAGE_SIZE,
     }) as Promise<ChatList>);
-    chat.value = list.chats.find((item) => item.id === ctx.instanceId) ?? null;
+    chat.value = list.chats.find((item) => item.id === chatId) ?? null;
     seedRunningTurns(list);
     seedQueued(list.queued_messages);
     seedTurnTargets(list.turn_targets);
@@ -1263,7 +1294,7 @@ async function refreshDelta(): Promise<boolean> {
   const incremental = cursor !== null;
   for (let pageCount = 0; pageCount < 3; pageCount++) {
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true, ...viewRequest(),
+      chat_id: chatId, include_messages: true, ...viewRequest(),
       ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}),
       limit: PAGE_SIZE,
     }) as Promise<ChatList>);
@@ -1288,7 +1319,7 @@ async function refreshDelta(): Promise<boolean> {
     fetchBlocks(blockAfter || loadedLo.value),
     ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
   ]);
-  chat.value = chats.find((item) => item.id === ctx.instanceId) ?? null;
+  chat.value = chats.find((item) => item.id === chatId) ?? null;
   if (!chat.value) return false;
   const byId = new Map(messages.value.map((item) => [item.id, item] as const));
   for (const item of fetched) byId.set(item.id, item); // delta rows replace cached ones
@@ -1326,7 +1357,7 @@ async function refresh(): Promise<void> {
     blocks.value = [];
     hasOlder.value = false;
     olderCursor.value = null;
-    removeEntry(ctx.instanceId);
+    removeEntry(viewKey);
   }
   streamingMessageId = "";
 }
@@ -1343,7 +1374,7 @@ async function loadOlder(): Promise<void> {
   const previousScrollTop = thread?.scrollTop ?? 0;
   try {
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true, ...viewRequest(),
+      chat_id: chatId, include_messages: true, ...viewRequest(),
       before: olderCursor.value.ts, before_id: olderCursor.value.id, limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     const page = list.messages ?? [];
@@ -1384,7 +1415,7 @@ async function loadNewer(): Promise<void> {
     const newest = messages.value[messages.value.length - 1];
     const cursor = loadedHi.value ?? (newest ? { ts: newest.created_at, id: newest.id } : null);
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: ctx.instanceId, include_messages: true, ...viewRequest(),
+      chat_id: chatId, include_messages: true, ...viewRequest(),
       ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}), limit: PAGE_SIZE,
     }) as Promise<ChatList>);
     seedRunningTurns(list);
@@ -1476,7 +1507,7 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
   const editing = editingQueued.value;
   if (editing) {
     try {
-      await ctx.bus.request("chat:_:queued-update", { chat_id: ctx.instanceId, dispatch_id: editing.dispatchId, message });
+      await ctx.bus.request("chat:_:queued-update", { chat_id: chatId, dispatch_id: editing.dispatchId, message });
       editingQueued.value = null;
       return true;
     } catch (cause) {
@@ -1493,7 +1524,7 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
   pendingSends.value = [...pendingSends.value, { key, text: message, ts: Date.now(), sending: true, routed: "", failed: "" }];
   void nextTick(() => scrollThreadToMessageEnd());
   try {
-    const payload: Record<string, unknown> = { chat_id: ctx.instanceId, message };
+    const payload: Record<string, unknown> = { chat_id: chatId, message };
     const branch = sendBranch.value;
     // A branch send is a mainline send plus branch_id (framework v0.66):
     // role picks / LLM routing, new-session and send-now toggles all
@@ -1559,7 +1590,7 @@ const unregisterInputRuntime = registerInputSessionRuntime(inputSessionId, (sess
 
 async function stop(roleId?: string, turnId?: string): Promise<void> {
   try {
-    const payload: Record<string, unknown> = { chat_id: ctx.instanceId };
+    const payload: Record<string, unknown> = { chat_id: chatId };
     if (roleId) payload.role_id = roleId;
     if (turnId) payload.turn_id = turnId;
     await ctx.bus.request("chat:_:stop", payload);
@@ -1616,7 +1647,7 @@ function queuedTitle(box: TimelineBox): string {
 
 async function cancelQueued(dispatchId: string): Promise<void> {
   try {
-    await ctx.bus.request("chat:_:queued-cancel", { chat_id: ctx.instanceId, dispatch_id: dispatchId });
+    await ctx.bus.request("chat:_:queued-cancel", { chat_id: chatId, dispatch_id: dispatchId });
   } catch (cause) {
     error.value = errorText(cause);
   }
@@ -1649,7 +1680,7 @@ function cancelQueuedEdit(): void {
 
 onMounted(() => {
   const refreshNow = (): void => { void refresh().catch(() => undefined); };
-  ctx.bus.subscribe(`chat:${ctx.instanceId}:message`, (frame) => {
+  ctx.bus.subscribe(`chat:${chatId}:message`, (frame) => {
     const value = frame.value as ChatMessage;
     // Queued-cancel tombstone: the backend deleted the dispatch's user
     // message row; drop the box from the window (and any pending upsert).
@@ -1672,7 +1703,7 @@ onMounted(() => {
     // assistant streams ride the batch timer.
     if (value.role === "user") flushStream(); else scheduleStreamFlush();
   });
-  ctx.bus.subscribe(`chat:${ctx.instanceId}:block`, (frame) => {
+  ctx.bus.subscribe(`chat:${chatId}:block`, (frame) => {
     const value = frame.value as ChatBlock;
     if (!liveTurnVisible(value.turn_id)) return;
     if (beyondWindowEdge(value.occurred_at, value.id)) return;
@@ -1685,7 +1716,7 @@ onMounted(() => {
   // it also drives the running chips of parallel turns of the same role.
   ctx.bus.subscribe("chat:_:turn", (frame) => {
     const value = frame.value as { chat_id: string; turn_id: string; role_id: string; role_name?: string; phase: string; dispatch_id?: string; agent?: string; provider?: string; model?: string; session_id?: string; branch_id?: string };
-    if (value.chat_id !== ctx.instanceId || !value.turn_id) return;
+    if (value.chat_id !== chatId || !value.turn_id) return;
     // "session" phase stamps the turn's provider session — the pane's
     // per-turn records' live source (history seeds come from
     // chats:list/blocks:list); "started" already carries the branch
@@ -1721,27 +1752,27 @@ onMounted(() => {
     }
   });
   ctx.bus.subscribe("chat:_:active", (frame) => {
-    if (frame.value === ctx.instanceId) refreshNow();
+    if (frame.value === chatId) refreshNow();
   });
   // Queue feed: the backend publishes the chat's full queue snapshot on
   // every mutation (enqueue / dequeue / cancel / edit) — reseed wholesale.
   ctx.bus.subscribe("chat:_:queue", (frame) => {
     const value = frame.value as { chat_id: string; queued?: QueuedMessage[] };
-    if (value.chat_id !== ctx.instanceId) return;
+    if (value.chat_id !== chatId) return;
     seedQueued(value.queued);
   });
   // Branch feed: created / renamed / archived / merged records. A merge
   // changes the target line's membership retroactively (full fresh reload).
   ctx.bus.subscribe("chat:_:branch", (frame) => {
     const value = frame.value as Branch & { phase?: string };
-    if (value.chat_id !== ctx.instanceId) return;
+    if (value.chat_id !== chatId) return;
     if (!value.id) return;
     if (value.phase === "merged") {
       // A merge grafts the source's history onto the target line
       // retroactively: cached views and the current window may miss it —
       // evict every cached view of this chat and reload fresh.
       upsertBranches([value]);
-      removeEntry(ctx.instanceId);
+      removeEntry(viewKey);
       void load(true).catch((cause) => { error.value = errorText(cause); });
       return;
     }
@@ -1763,7 +1794,7 @@ onMounted(() => {
 
 <template>
   <section class="chat-pane d-flex flex-column h-100">
-    <LoopStatus v-if="loopOpen" :chat-id="ctx.instanceId" :roles="roles.filter((role) => chat?.member_role_ids.includes(role.id))" :branches="branches" :from-turn-id="loopForkTurn" @select="showLoopExecution" />
+    <LoopStatus v-if="loopOpen" :chat-id="chatId" :roles="roles.filter((role) => chat?.member_role_ids.includes(role.id))" :branches="branches" :from-turn-id="loopForkTurn" @select="showLoopExecution" />
     <div ref="threadRef" class="chat-thread flex-grow-1 overflow-auto p-2" aria-live="polite" @scroll.passive="handleThreadScroll">
       <div v-if="messages.length && (loadingOlder || !hasOlder)" class="chat-history-boundary small text-secondary">
         <span v-if="loadingOlder" class="spinner-border spinner-border-sm me-1" aria-hidden="true" />
@@ -2001,7 +2032,7 @@ onMounted(() => {
         ref="composerRef"
         v-model:selected-role-ids="selected"
         :roles="members"
-        :context-id="'chat:' + ctx.instanceId"
+        :context-id="'chat:' + viewKey"
       />
     </div>
     <button

@@ -37,6 +37,14 @@ const dir = ref("");
 const file = ref<string | null>(null);
 const mode = ref<PreviewMode>("render");
 const overlayOpen = ref(true);
+/** PDF margin crop per axis (0–100, 100 = trim to content). */
+const trimX = ref(100);
+const trimY = ref(100);
+/** Slider drafts: dragging must not re-render server-side, so the committed
+ * values update only on slider release (change event). */
+const draftTrimX = ref(100);
+const draftTrimY = ref(100);
+const trimOpen = ref(false);
 /** Bumped by the title-bar refresh action; FilePreview re-reads the file. */
 const reloadTick = ref(0);
 const pinned = computed(() => record.value?.pinned ?? false);
@@ -46,6 +54,13 @@ function adoptState(state: FilesViewState): void {
   file.value = state.file;
   mode.value = state.mode;
   overlayOpen.value = state.overlayOpen;
+  trimX.value = state.trimX;
+  trimY.value = state.trimY;
+}
+
+function commitTrim(): void {
+  trimX.value = draftTrimX.value;
+  trimY.value = draftTrimY.value;
 }
 
 let adopted = record.value !== undefined;
@@ -72,10 +87,17 @@ function openFile(entry: FileEntry): void {
   dir.value = dirname(entry.path);
 }
 
-watch([dir, file, mode, overlayOpen], () => {
+watch([dir, file, mode, overlayOpen, trimX, trimY], () => {
   updateState(
     instanceId,
-    { dir: dir.value, file: file.value, mode: mode.value, overlayOpen: overlayOpen.value },
+    {
+      dir: dir.value,
+      file: file.value,
+      mode: mode.value,
+      overlayOpen: overlayOpen.value,
+      trimX: trimX.value,
+      trimY: trimY.value,
+    },
     label.value,
   );
 });
@@ -99,6 +121,21 @@ watchEffect(() => {
       icon: "bi-arrow-clockwise",
       run: () => {
         reloadTick.value += 1;
+      },
+    });
+  }
+  if (previewKind.value === "pdf") {
+    actions.push({
+      id: "trim",
+      title: `页边距裁切（横向 ${trimX.value}% / 纵向 ${trimY.value}%）`,
+      icon: "bi-crop",
+      active: trimOpen.value,
+      run: () => {
+        trimOpen.value = !trimOpen.value;
+        if (trimOpen.value) {
+          draftTrimX.value = trimX.value;
+          draftTrimY.value = trimY.value;
+        }
       },
     });
   }
@@ -126,7 +163,19 @@ watchEffect(() => {
 
 <template>
   <div class="files-pane">
-    <FilePreview :path="file" :mode="mode" :reload-tick="reloadTick" />
+    <FilePreview :path="file" :mode="mode" :reload-tick="reloadTick" :trim-x="trimX" :trim-y="trimY" />
+    <div v-if="trimOpen && previewKind === 'pdf'" class="trim-panel">
+      <div class="trim-row">
+        <span>横向</span>
+        <input v-model.number="draftTrimX" type="range" min="0" max="100" step="1" @change="commitTrim" />
+        <span class="trim-value">{{ draftTrimX }}%</span>
+      </div>
+      <div class="trim-row">
+        <span>纵向</span>
+        <input v-model.number="draftTrimY" type="range" min="0" max="100" step="1" @change="commitTrim" />
+        <span class="trim-value">{{ draftTrimY }}%</span>
+      </div>
+    </div>
     <div v-if="overlayOpen" class="files-overlay">
       <FileBrowser
         :dir="dir"
@@ -146,6 +195,40 @@ watchEffect(() => {
   min-width: 0;
   overflow: hidden;
   position: relative;
+}
+
+.trim-panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  position: absolute;
+  right: 8px;
+  top: 4px;
+  width: 220px;
+  z-index: 6;
+}
+
+.trim-row {
+  align-items: center;
+  color: var(--color-text-subtle);
+  display: flex;
+  font-size: var(--font-size-ui-small);
+  gap: 8px;
+}
+
+.trim-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.trim-value {
+  min-width: 34px;
+  text-align: right;
 }
 
 .files-overlay {

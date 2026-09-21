@@ -15,15 +15,16 @@ const pdfScrollMemory = new Map<string, { page: number; ratio: number }>();
  * resolution tiers (low = instant, high = sharp, ultra = print) escalate
  * sequentially on visible pages, with adjacent-page low-tier prefetch; a
  * module-level LRU (blob object URLs, byte-budgeted) is shared across panes
- * so reopened pages are free. White margins are trimmed server-side; the
- * reported image dimensions correct each page's aspect placeholder.
+ * so reopened pages are free. White margins are cropped server-side down to
+ * the pane-chosen percentage per axis (100 = content box, 0 = full page);
+ * the reported image dimensions correct each page's aspect placeholder.
  */
 import { inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
 import type { PdfPageResult } from "./types";
 
-const props = defineProps<{ path: string }>();
+const props = defineProps<{ path: string; trimX: number; trimY: number }>();
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("PdfPreview must be mounted inside PluginPaneHost");
@@ -141,7 +142,7 @@ function restoreScroll(): void {
 }
 
 function cacheKey(page: number, scale: number): string {
-  return `${props.path}@${mtime.value === 0 ? "open" : mtime.value}:${page}:${scale}`;
+  return `${props.path}@${mtime.value === 0 ? "open" : mtime.value}:${page}:${scale}:${props.trimX}x${props.trimY}`;
 }
 
 function adoptMeta(result: PdfPageResult): void {
@@ -180,6 +181,8 @@ async function fetchPage(page: number, scale: number): Promise<string> {
       path: props.path,
       page,
       scale,
+      trim_x: props.trimX,
+      trim_y: props.trimY,
     })) as PdfPageResult;
     adoptMeta(result);
     const { url, bytes } = base64ToBlobUrl(result.content, result.mime);

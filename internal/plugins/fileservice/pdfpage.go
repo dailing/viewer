@@ -1,8 +1,9 @@
 // PDF page rasterization: the file:_:pdfpage RPC renders one page of a PDF to
 // a WebP image via mutool + ImageMagick, cached on disk under the data
-// directory. Uniform white margins are trimmed server-side; client-chosen
-// scales (progressive tiers) keep the wire payload well under the 1 MiB bus
-// frame cap.
+// directory. Uniform white margins are cropped server-side down to a
+// client-chosen percentage per axis (100 = trim to the content box, 0 = keep
+// the full page); client-chosen scales (progressive tiers) keep the wire
+// payload well under the 1 MiB bus frame cap.
 package fileservice
 
 import (
@@ -11,6 +12,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,11 +139,11 @@ func (r *pdfRenderer) docInfo(path string, info os.FileInfo) (*pdfDocInfo, error
 	return doc, nil
 }
 
-// cachePrefix is the stable identity of one (file generation, page, dpi)
-// render; the cached file name appends the pixel dimensions it produced, so
-// the reader learns the aspect ratio without decoding the image.
-func (r *pdfRenderer) cachePrefix(path string, info os.FileInfo, page, dpi int) string {
-	key := fmt.Sprintf("%s|%d|%d|%d|%d", path, info.Size(), info.ModTime().UnixNano(), page, dpi)
+// cachePrefix is the stable identity of one (file generation, page, dpi,
+// trim) render; the cached file name appends the pixel dimensions it
+// produced, so the reader learns the aspect ratio without decoding the image.
+func (r *pdfRenderer) cachePrefix(path string, info os.FileInfo, page, dpi, trimX, trimY int) string {
+	key := fmt.Sprintf("%s|%d|%d|%d|%d|%d|%d", path, info.Size(), info.ModTime().UnixNano(), page, dpi, trimX, trimY)
 	sum := sha256.Sum256([]byte(key))
 	return fmt.Sprintf("%x", sum[:16])
 }
@@ -166,8 +168,8 @@ func (r *pdfRenderer) lookupCache(prefix string) (path string, width, height int
 
 // render produces (or fetches) the cached WebP for one page, deduplicating
 // concurrent identical renders. Returns the WebP bytes and pixel dimensions.
-func (r *pdfRenderer) render(path string, info os.FileInfo, page, dpi int) ([]byte, int, int, error) {
-	prefix := r.cachePrefix(path, info, page, dpi)
+func (r *pdfRenderer) render(path string, info os.FileInfo, page, dpi, trimX, trimY int) ([]byte, int, int, error) {
+	prefix := r.cachePrefix(path, info, page, dpi, trimX, trimY)
 	if cached, width, height, ok := r.lookupCache(prefix); ok {
 		now := time.Now()
 		_ = os.Chtimes(cached, now, now) // refresh LRU clock
@@ -194,7 +196,7 @@ func (r *pdfRenderer) render(path string, info os.FileInfo, page, dpi int) ([]by
 	r.inflight[prefix] = call
 	r.mu.Unlock()
 
-	data, width, height, err := r.renderFresh(path, page, dpi, prefix)
+	data, width, height, err := r.renderFresh(path, page, dpi, trimX, trimY, prefix)
 
 	r.mu.Lock()
 	delete(r.inflight, prefix)
@@ -207,9 +209,10 @@ func (r *pdfRenderer) render(path string, info os.FileInfo, page, dpi int) ([]by
 	return data, width, height, nil
 }
 
-// renderFresh rasterizes one page, trims uniform white margins, re-encodes to
-// WebP under the payload cap, and atomically installs the cache entry.
-func (r *pdfRenderer) renderFresh(path string, page, dpi int, prefix string) ([]byte, int, int, error) {
+// renderFresh rasterizes one page, crops uniform white margins down to the
+// requested percentage per axis, re-encodes to WebP under the payload cap,
+// and atomically installs the cache entry.
+func (r *pdfRenderer) renderFresh(path string, page, dpi, trimX, trimY int, prefix string) ([]byte, int, int, error) {
 	if err := os.MkdirAll(r.dir, 0o700); err != nil {
 		return nil, 0, 0, err
 	}
@@ -230,37 +233,51 @@ func (r *pdfRenderer) renderFresh(path string, page, dpi int, prefix string) ([]
 		return nil, 0, 0, fmt.Errorf("mutool draw failed: %v: %s", drawErr, strings.TrimSpace(string(output)))
 	}
 
-	// Trim uniform white margins (flattening alpha first so transparent
-	// backgrounds count as white). A pathological trim — near-empty result —
-	// falls back to the full page so blank pages stay full-size.
-	trimmedPath := filepath.Join(tmp, "trimmed.png")
-	trim := exec.CommandContext(ctx, "convert", pngPath,
-		"-background", "white", "-alpha", "remove", "-alpha", "off",
-		"-fuzz", pdfTrimFuzz, "-trim", "+repage", trimmedPath)
-	if output, trimErr := trim.CombinedOutput(); trimErr != nil {
-		return nil, 0, 0, fmt.Errorf("trim failed: %v: %s", trimErr, strings.TrimSpace(string(output)))
-	}
-	identify := exec.CommandContext(ctx, "identify", "-format", "%w %h\n", pngPath, trimmedPath)
+	// Measure the page and the content bounding box (flattening alpha first
+	// so transparent backgrounds count as white). A pathological box —
+	// near-empty result — falls back to the full page so blank pages stay
+	// full-size.
+	identify := exec.CommandContext(ctx, "identify", "-format", "%w %h", pngPath)
 	identifyOutput, err := identify.Output()
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("identify failed: %w", err)
 	}
-	origW, origH, trimW, trimH, ok := scanDimensions(string(identifyOutput))
-	if !ok {
+	var origW, origH int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(identifyOutput)), "%d %d", &origW, &origH); err != nil || origW <= 0 || origH <= 0 {
 		return nil, 0, 0, fmt.Errorf("unexpected identify output: %q", strings.TrimSpace(string(identifyOutput)))
 	}
-	source := pngPath
-	width, height := origW, origH
-	if trimW >= pdfTrimMinDim && trimH >= pdfTrimMinDim &&
-		float64(trimW*trimH) >= pdfTrimMinArea*float64(origW*origH) {
-		source, width, height = trimmedPath, trimW, trimH
+	// `%@` is the bounding box a trim WOULD cut to; asking for it without
+	// applying -trim leaves the page intact for the percentage crop below.
+	trimProbe := exec.CommandContext(ctx, "convert", pngPath,
+		"-background", "white", "-alpha", "remove", "-alpha", "off",
+		"-fuzz", pdfTrimFuzz, "-format", "%@", "info:")
+	probeOutput, err := trimProbe.Output()
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("trim probe failed: %w", err)
 	}
+	box, ok := parseTrimBox(string(probeOutput))
+	if !ok {
+		return nil, 0, 0, fmt.Errorf("unexpected trim box: %q", strings.TrimSpace(string(probeOutput)))
+	}
+	if box.w < pdfTrimMinDim || box.h < pdfTrimMinDim ||
+		float64(box.w*box.h) < pdfTrimMinArea*float64(origW*origH) {
+		box = pdfRect{x: 0, y: 0, w: origW, h: origH}
+	}
+	crop := cropBox(origW, origH, box, trimX, trimY)
+	width, height := crop.w, crop.h
 
-	// Re-encode at lower quality if the payload would approach the frame cap.
+	// Flatten, crop (unless the whole page is kept), and re-encode at lower
+	// quality if the payload would approach the frame cap.
+	convertArgs := []string{pngPath, "-background", "white", "-alpha", "remove", "-alpha", "off"}
+	if crop.x != 0 || crop.y != 0 || crop.w != origW || crop.h != origH {
+		convertArgs = append(convertArgs, "-crop",
+			fmt.Sprintf("%dx%d+%d+%d", crop.w, crop.h, crop.x, crop.y), "+repage")
+	}
 	var data []byte
 	for _, quality := range []string{"80", "60", "40"} {
 		webpPath := filepath.Join(tmp, "page.webp")
-		convert := exec.CommandContext(ctx, "convert", source, "-strip", "-quality", quality, webpPath)
+		args := append(append([]string{}, convertArgs...), "-strip", "-quality", quality, webpPath)
+		convert := exec.CommandContext(ctx, "convert", args...)
 		if output, convertErr := convert.CombinedOutput(); convertErr != nil {
 			return nil, 0, 0, fmt.Errorf("webp conversion failed: %v: %s", convertErr, strings.TrimSpace(string(output)))
 		}
@@ -297,23 +314,52 @@ func (r *pdfRenderer) renderFresh(path string, page, dpi int, prefix string) ([]
 	return data, width, height, nil
 }
 
-// scanDimensions parses `identify -format "%w %h\n"` output for two images.
-func scanDimensions(output string) (w1, h1, w2, h2 int, ok bool) {
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(lines) != 2 {
-		return 0, 0, 0, 0, false
+// pdfRect is a pixel rectangle inside a rendered page.
+type pdfRect struct{ x, y, w, h int }
+
+var trimBoxPattern = regexp.MustCompile(`^([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+)$`)
+
+// parseTrimBox parses ImageMagick's `%@` trim bounding box ("WxH+X+Y"). A
+// blank page yields a degenerate zero-size box, which the caller's
+// pathological-trim guard turns into a full-page fallback.
+func parseTrimBox(output string) (pdfRect, bool) {
+	match := trimBoxPattern.FindStringSubmatch(strings.TrimSpace(output))
+	if match == nil {
+		return pdfRect{}, false
 	}
-	parse := func(line string) (int, int, bool) {
-		var width, height int
-		if _, err := fmt.Sscanf(strings.TrimSpace(line), "%d %d", &width, &height); err != nil || width <= 0 || height <= 0 {
-			return 0, 0, false
-		}
-		return width, height, true
+	w, _ := strconv.Atoi(match[1])
+	h, _ := strconv.Atoi(match[2])
+	x, _ := strconv.Atoi(match[3])
+	y, _ := strconv.Atoi(match[4])
+	return pdfRect{x: x, y: y, w: w, h: h}, true
+}
+
+// cropBox interpolates between the full page (trim percentage 0) and the
+// content bounding box (percentage 100) independently per axis: a percentage
+// cuts that fraction of each side's margin. Rounding may overshoot by a
+// pixel, so the result is clamped back inside the page.
+func cropBox(origW, origH int, box pdfRect, trimX, trimY int) pdfRect {
+	qx := float64(trimX) / 100
+	qy := float64(trimY) / 100
+	crop := pdfRect{
+		x: int(math.Round(float64(box.x) * qx)),
+		y: int(math.Round(float64(box.y) * qy)),
+		w: int(math.Round(float64(box.w) + float64(origW-box.w)*(1-qx))),
+		h: int(math.Round(float64(box.h) + float64(origH-box.h)*(1-qy))),
 	}
-	var ok1, ok2 bool
-	w1, h1, ok1 = parse(lines[0])
-	w2, h2, ok2 = parse(lines[1])
-	return w1, h1, w2, h2, ok1 && ok2
+	if crop.w > origW-crop.x {
+		crop.w = origW - crop.x
+	}
+	if crop.h > origH-crop.y {
+		crop.h = origH - crop.y
+	}
+	if crop.w < 1 {
+		crop.w = 1
+	}
+	if crop.h < 1 {
+		crop.h = 1
+	}
+	return crop
 }
 
 // evict keeps the cache under budget by deleting oldest-touch files.
@@ -385,6 +431,16 @@ func (p *Plugin) pdfpage(frame busclient.Frame) {
 			fmt.Sprintf("scale must be a number in [%.2f, %.2f]", pdfMinScale, pdfMaxScale))
 		return
 	}
+	trimX, ok := requestTrim(value, "trim_x")
+	if !ok {
+		p.replyError(frame, "invalid_request", "trim_x must be an integer in [0, 100]")
+		return
+	}
+	trimY, ok := requestTrim(value, "trim_y")
+	if !ok {
+		p.replyError(frame, "invalid_request", "trim_y must be an integer in [0, 100]")
+		return
+	}
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) || err == nil && !info.Mode().IsRegular() {
 		p.replyError(frame, "not_found", "no such file: "+path)
@@ -413,7 +469,7 @@ func (p *Plugin) pdfpage(frame busclient.Frame) {
 		return
 	}
 
-	data, width, height, err := p.pdf.render(path, info, page, dpi)
+	data, width, height, err := p.pdf.render(path, info, page, dpi, trimX, trimY)
 	if err != nil {
 		p.replyError(frame, "render_error", err.Error())
 		return
@@ -432,6 +488,19 @@ func (p *Plugin) pdfpage(frame busclient.Frame) {
 		"encoding":     "base64",
 		"content":      base64.StdEncoding.EncodeToString(data),
 	})
+}
+
+// requestTrim reads an optional margin-trim percentage: absent means 100
+// (trim to the content box), present must be an integer in [0, 100].
+func requestTrim(value map[string]any, field string) (int, bool) {
+	if _, exists := value[field]; !exists {
+		return 100, true
+	}
+	parsed, ok := requestInt(value, field)
+	if !ok || parsed < 0 || parsed > 100 {
+		return 0, false
+	}
+	return parsed, true
 }
 
 func requestInt(value map[string]any, field string) (int, bool) {

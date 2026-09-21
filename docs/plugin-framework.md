@@ -1,7 +1,10 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.81**（2026-09-20）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.84**（2026-09-21）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
 
+> v0.84 变更：**chat 多视图入口修正——点 chrome action 直接出新面板**——pane chrome「在新面板打开」action 改为在当前 pane 上强制 split 新 tile 并就地载入副本视图（`layout.openInstance` 新增可选 `opts.newPane`：跳过 openMode=replace 的原位替换与空 tile 复用，恒从 active pane 垂直 split）。此前 replace 打开模式下点该 action 会把当前 pane 内容顶替成副本视图，原聊天需手动重开。
+> v0.83 变更：**pdfpage 白边裁切百分比化（横/纵双轴独立）**——RPC `file:_:pdfpage` 新增可选 `trim_x`/`trim_y`（整数 0–100，缺省 100 = 切到内容包围盒，0 = 不切，中间按比例保留各侧白边；越界或非整数报 invalid_request）。渲染管线改为 convert `%@` 探测内容包围盒（不再实际 `-trim`；空白页得退化零尺寸盒，与病态盒一并以整页回退），再按百分比逐轴插值出裁剪矩形，裁剪与 alpha 压平、WebP 编码并成一次 convert；缓存 key 加入 trim 参数（旧条目自然 miss 后由 LRU 淘汰）。前端 files pane chrome 新增「页边距裁切」action（仅 PDF 预览时出现）弹出横向/纵向两条百分比滑杆：拖拽只动草稿值，松手（change）才提交——提交值入 FilesViewState 随实例持久化（旧记录缺省 100），PdfPreview 因 key 变化重挂、缓存 key 同步携带 trim。
+> v0.82 变更：**chat 多视图（同一聊天多 pane 并排）**——pane 身份拆分为**聊天身份/视图身份**：视图实例 id = `chatId`（主视图）或 `chatId#<随机后缀>`（副本，由 pane chrome「在新面板打开」action 创建）；RPC/订阅寻址用拆分出的 chatId，分支 tab 选择/消息缓存/输入会话按视图 id 各自独立（主视图的存储 key 与旧口径相同，既有 tab 选择无损）；dock「聊天开着」判定改前缀匹配（任一视图开着即视为开，已读/dock 过滤语义不变）；视图钉住单个非主线分支时 pane 标题追加分支名以区分并排视图；插件级 input-session sender 的 `chat_id` 同样拆后缀（pane 关闭后的投递路径）。两个视图可向不同分支并行发消息——后端 busy/queue 本就按 `(chat, branch)` 线键串行化，零后端改动。
 > v0.81 变更：**主题定义迁服务端（instance-store），活跃主题留浏览器**——主题定义（含内置主题的编辑与全部自定义主题）从 localStorage 迁至 instance-store 核心插件（plugin `shell` / instance `themes`，整值 `{themes:[...]}`，§7.2/C2 同一机制），新建/编辑/重命名/删除由此跨重启、跨浏览器、跨机器保留；`instance-store:shell:themes` mailbox 在打开的浏览器间实时同步，每次总线（重）连全量对账（server wins），本地变更乐观生效后 fire-and-forget 复制到服务端。**活跃主题 id 仍为浏览器本地**（`viewer.theme.active.v1`）——每台设备可默认不同主题，指向被他人删除的主题时回退 `light`。`viewer.themes.v2` 降级为启动缓存（启动即时应用、连上服务端即被替换）兼一次性种子源（服务端无记录且本机有缓存时由首个连接的浏览器上行播种）；无后端改动。
 > v0.80 变更：**主题系统 v2（基色派生模型）**——①主题 = 4 个基色（背景 `--color-canvas` / 面板 `--color-surface` / 文字 `--color-text` / 主题色 `--color-accent`）+ 高级覆盖表；其余全部 `--color-*`/`--markdown-*`/`--syntax-*` 默认值由基色经 `color-mix()` 在 `styles.css` 的 `.app-shell` 块上派生（custom property 的 `var()` 在声明处解析，故派生公式必须声明在 `.app-shell` 才能绑定内联基色）；明暗不再是主题属性——`data-theme` 由 canvas 亮度自动算出，仅门控语义色/语法色板/遮罩/accent-hover 方向等 scheme 常量。②消息样式（markdown/syntax 颜色）并入主题派生体系（正文/标题/代码文字 ← 文字色，加粗/链接 ← 主题色，代码底 ← 浮起面），**按主题各自独立**——修复 v0.30 起 markdownStyle 覆盖明暗共用且内联压掉深色默认值的缺陷；`stores/markdownStyle.ts` 与 `viewer.markdownTheme.v1`/`viewer.themes.v1` 两个旧 localStorage key 删除（不迁移）。③设置 UI 收成一个「外观」组：主题下拉 + 新建/重命名/删除 + 4 个基色 + 实时预览 + 「高级定制」折叠区（界面/语义色/消息三组，每项默认「自动」，点「定制」以当前计算值播种，× 恢复自动）；高级覆盖经 `theme.setOverride` 内联在 `.app-shell` 上，优先级高于派生默认。
 > v0.74 变更：**file-service 文件变更监听 + 打开文件自动/手动刷新**——①新增 RPC `file:_:watch {path, watcher}` / `file:_:unwatch`：watcher id 由调用方生成、按 path 引用计数，条目 TTL 120s（前端每 60s 重发 watch 续约），崩溃的浏览器不泄漏；watch 应答即当前基线 `{exists, sha256?, mtime?}`。②变更检测单一产线：fsnotify 监听**父目录**（覆盖编辑器原子保存 rename 与删除重建）→ 按 path 300ms 防抖 → 与 30s 全量巡检（覆盖 inotify 静默失效：队列溢出、网络盘）汇入同一 verify——stat → 缓存 hash → 摘要真变才广播 `file:_:changed {path, exists, sha256?, mtime?}`（touch 不触发）；事件驱动的 verify 先作废 hash 缓存（ext3 等粗 mtime 粒度下同尺寸重写 (size,mtime) 不变，巡检路径保留缓存作为权衡）。③`file:_:hash`/`resolve` 改用共享 (size,mtime)→sha256 缓存。④前端 files：FilePreview 打开即 watch + 订阅 `file:_:changed`（path 匹配才动），命中重读（text/markdown 保留滚动位置，PDF 重挂组件——页缓存 key 含 mtime 自动失效）；续约应答 digest 漂移即重载（后台 tab 节流/断连漏事件的闭环兜底）；删除事件显示「文件已被删除或移动」，重建后自动恢复；pane chrome 新增手动刷新 action（直接强制重读，不经事件）。范围：只监听打开的文件，不含目录树刷新。
@@ -413,7 +416,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 | C0 | viewer.supervisor | 拉起/心跳/重启/熔断/日志全部插件进程；插件管理 RPC（install/reload/enable）归属（§9） |
 | C1 | config-store | `config:_:get/set` 等 RPC channel；`plugins.<id>.*` namespace |
 | C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件；每实例变更发 `instance-store:<plugin>:<instance>` mailbox（v0.72 起前端 files 实例注册表接入） |
-| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边自动裁切（v0.71）+ 磁盘 LRU 缓存（v0.70）+ watch/unwatch：打开文件变更监听（TTL 续约、目录级 fsnotify + 巡检、digest 变更才广播 `file:_:changed`，v0.74） |
+| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边裁切（v0.71；v0.83 起横/纵百分比 `trim_x`/`trim_y`）+ 磁盘 LRU 缓存（v0.70）+ watch/unwatch：打开文件变更监听（TTL 续约、目录级 fsnotify + 巡检、digest 变更才广播 `file:_:changed`，v0.74） |
 | C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37）+ `POST /api/admin/schedule-restart`（后台 build 成功后武装、等空闲自重启，v0.43）+ `GET /api/admin/schedule-restart`（状态 none/building/armed/failed，v0.43）+ `DELETE /api/admin/schedule-restart`（取消/复位，v0.44） |
 | C6 | llm | 全局 LLM 转发层：`llm:_:complete` 纯转发 OpenAI 兼容端点；配置 `plugins.llm`（v0.48，§8.11） |
 | C7 | voice-control | 全局语音控制：`voice-catalog:_:*` 目录合并 + 连续语音对话（LLM 直答或派发条目）+ 会话上下文压缩 + `chat:_:turn` 主动播报（v0.49，§8.11）+ 交互日志/可配置 prompt 模板/prompt 预览（v0.50，§8.11） |
@@ -567,6 +570,11 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.84**（2026-09-21）：**chat 多视图入口修正**——「在新面板打开」action 强制 split 新 tile（`openInstance` 新增 `opts.newPane`），不再受 openMode=replace 影响原位顶替当前 pane。
+
+- **v0.83**（2026-09-21）：**pdfpage 白边裁切百分比化**——RPC 新增可选 `trim_x`/`trim_y`（0–100，缺省 100 = 全切，0 = 不切，逐轴独立）；管线改 `%@` 探测内容包围盒后按百分比插值裁剪（不再实际 `-trim`），缓存 key 带 trim；前端 files pane chrome 加「页边距裁切」滑杆面板（横/纵两条，松手提交），设置随实例持久化。
+
+- **v0.82**（2026-09-20）：**chat 多视图**——同一聊天可多 pane 并排（副本实例 id = `chatId#<后缀>`，pane chrome action 创建）；聊天身份/视图身份拆分，分支 tab/缓存/输入会话 per-view 独立，dock 打开判定前缀匹配；纯前端，后端按线键并行天然支持。详见头部 v0.82 变更条。
 - **v0.81**（2026-09-20）：**主题定义迁服务端**——主题定义（内置编辑 + 自定义主题）存 instance-store（`shell`/`themes`），跨浏览器/机器保留，mailbox 实时同步 + 重连对账（server wins）；活跃主题 id 留浏览器本地（每设备可不同）；`viewer.themes.v2` 降为启动缓存 + 一次性种子。纯前端改动（复用 C2 机制）。详见头部 v0.81 变更条。
 - **v0.80**（2026-09-20）：**主题系统 v2（基色派生模型）**——主题 = 4 基色（背景/面板/文字/主题色）+ 高级覆盖表，其余颜色默认值经 `styles.css` `.app-shell` 块的 `color-mix()` 派生；`data-theme` 由 canvas 亮度自动算出（scheme 不再是主题属性）；消息样式并入主题派生体系且按主题独立（修复 markdownStyle 覆盖明暗共用缺陷），`stores/markdownStyle.ts` 与两个旧 localStorage key 删除；设置 UI 收成单个「外观」组（主题下拉 + 4 基色 + 实时预览 + 高级定制折叠区）。详见头部 v0.80 变更条。
 - **v0.79**（2026-09-17）：**chat 轮次完成系统通知**——chat 插件的全局 `chat:_:turn` 订阅（dock 状态点同一挂点，与 pane 是否打开无关）在 turn `completed` 时发浏览器系统通知：仅当 viewer 页面不可见（`document.hidden`；页内未读已由 dock 点覆盖）且开关开启且通知权限已授予。开关在 设置 → 聊天（`chatSettings.turnNotifications`，localStorage，默认关），开启动作即 `Notification.requestPermission()` 的用户手势，被拒/不支持在开关旁明示。通知 title = 聊天名、body = 角色名 + 完成/失败原因，per-chat `tag` 去重（多角色批次合并为一条），点击通知 `window.focus()` 并打开对应聊天 pane。纯前端，无后端改动；页面关闭即收不到（Web Push 为明确的非目标）。
@@ -684,7 +692,7 @@ my-plugin/
 - **C0 viewer.supervisor**：`restart.py` 的进程管理逻辑 + `main.py` 的插件进程拉起职责 → 独立 core plugin；内核只保留 autostart 它一个进程的逻辑（§9）。
 - **C1 config-store**：`config.py` + `models.py`（AppConfig schema）；路由 `GET/PUT /api/config`、`GET/POST /api/config/llm-provider-states(/clear)` → RPC `config:_:get/set` 等。前端 `ConfigPanel.vue` 拆为设置壳 + per-plugin section 贡献点（F2）。
 - **C2 instance-store**：新建（§7.2 bindings、instance state 落点）；同时接管 `viewer.layout.v1` 的服务端持久化（若需要跨设备）——view state 仍走 F6 localStorage。
-- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切 + 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
+- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切（v0.83 百分比化）+ 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
 - **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。admin API：`POST /api/admin/restart`（v0.34 优雅自重启）、`POST /api/admin/build-restart`（v0.37 构建成功后自重启）、`POST /api/admin/schedule-restart`（v0.43：先后台构建、成功才武装等空闲自重启：watchdog 5s 轮询 `chat:_:chats:list` 无 running + `voice:_:sessions` 无活动才触发；构建失败落 `failed` 不武装；`GET` 同路径返回 none/building/armed/failed；`DELETE` 同路径取消/复位（v0.44，armed/building/failed→none，幂等）；状态纯内存）。
 
 ### A.4 viewer.terminal（Phase 2，链路首验）

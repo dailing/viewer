@@ -28,6 +28,20 @@ MINIMAL_PDF = (
     b"trailer<</Root 1 0 R>>\n"
 )
 
+# Centered 100x50pt black rectangle on a 200x100pt page: uniform white
+# margins for the trim-percentage cases to cut.
+MARGINAL_PDF = (
+    b"%PDF-1.4\n"
+    b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]"
+    b"/Contents 4 0 R/Resources<<>>>>endobj\n"
+    b"4 0 obj<</Length 27>>stream\n"
+    b"0 0 0 rg\n50 25 100 50 re f\n"
+    b"endstream\nendobj\n"
+    b"trailer<</Root 1 0 R>>\n"
+)
+
 
 def manifest(plugin_id: str) -> dict[str, Any]:
     return {"id": plugin_id, "version": "1.0.0", "slots": {}, "emits": {}}
@@ -312,6 +326,44 @@ async def run(args: argparse.Namespace) -> None:
                 )
                 assert cached["content"] == page["content"]
                 print("pdfpage render/webp/cache/errors: PASS")
+
+                pdf_path.write_bytes(MARGINAL_PDF)
+                await expect_error(
+                    client,
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 1, "scale": 1, "trim_x": 101},
+                    "invalid_request",
+                )
+                await expect_error(
+                    client,
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 1, "scale": 1, "trim_y": -1},
+                    "invalid_request",
+                )
+                # 100/100 trims to the ~100x50px content box at scale 1.
+                trimmed = await client.request(
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 1, "scale": 1},
+                    timeout=10,
+                )
+                assert 85 <= trimmed["image_width"] <= 115, trimmed["image_width"]
+                assert 40 <= trimmed["image_height"] <= 60, trimmed["image_height"]
+                # 0/0 keeps the full 200x100pt page (200x100px at scale 1).
+                full = await client.request(
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 1, "scale": 1, "trim_x": 0, "trim_y": 0},
+                    timeout=10,
+                )
+                assert full["image_width"] == 200 and full["image_height"] == 100
+                # 100/0 trims horizontally only.
+                horizontal = await client.request(
+                    "file:_:pdfpage",
+                    {"path": str(pdf_path), "page": 1, "scale": 1, "trim_x": 100, "trim_y": 0},
+                    timeout=10,
+                )
+                assert 90 <= horizontal["image_width"] <= 110, horizontal["image_width"]
+                assert horizontal["image_height"] == 100
+                print("pdfpage trim percentages: PASS")
             else:
                 print("pdfpage: SKIP (mutool/convert missing)")
         finally:

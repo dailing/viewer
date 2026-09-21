@@ -28,6 +28,9 @@ const props = defineProps<{
   mode: PreviewMode;
   /** Bumped by the pane's manual-refresh action; forces a re-read. */
   reloadTick: number;
+  /** PDF margin crop percentages (0–100 per axis); a change remounts PdfPreview. */
+  trimX: number;
+  trimY: number;
 }>();
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -64,7 +67,9 @@ const renderedRef = ref<HTMLElement | null>(null);
 const autoTick = ref(0);
 
 const kind = computed(() => (props.path === null ? null : kindForPath(props.path)));
-const pdfKey = computed(() => `${props.path ?? ""}:${props.reloadTick}:${autoTick.value}`);
+const pdfKey = computed(
+  () => `${props.path ?? ""}:${props.reloadTick}:${autoTick.value}:${props.trimX}x${props.trimY}`,
+);
 const rendered = computed(() =>
   kind.value === "markdown" && props.mode === "render" && status.value === "ready"
     ? renderMarkdown(text.value)
@@ -244,7 +249,13 @@ watch([rendered, renderedRef], () => {
       <div>{{ error }}</div>
     </div>
     <template v-else>
-      <PdfPreview v-if="kind === 'pdf' && path !== null" :key="pdfKey" :path="path" />
+      <PdfPreview
+        v-if="kind === 'pdf' && path !== null"
+        :key="pdfKey"
+        :path="path"
+        :trim-x="trimX"
+        :trim-y="trimY"
+      />
       <div v-else-if="kind === 'image'" class="preview-image">
         <img :src="imageUrl" :alt="path ?? ''" />
       </div>

@@ -29,6 +29,9 @@ export interface FilesViewState {
   mode: PreviewMode;
   /** Whether the in-panel file-list overlay is visible. */
   overlayOpen: boolean;
+  /** PDF margin crop per axis, 0–100 (100 = trim to content, 0 = full page). */
+  trimX: number;
+  trimY: number;
 }
 
 export interface FilesInstance {
@@ -43,7 +46,7 @@ const PLUGIN_ID = "files";
 const MAILBOX_PREFIX = "instance-store:files:";
 
 function defaultState(): FilesViewState {
-  return { dir: "", file: null, mode: "render", overlayOpen: true };
+  return { dir: "", file: null, mode: "render", overlayOpen: true, trimX: 100, trimY: 100 };
 }
 
 export const instances = reactive<FilesInstance[]>([]);

@@ -88,9 +88,10 @@ export function saveEntry(key: string, entry: ChatCacheEntry): void {
   touch(key);
 }
 
-/** Drop every cached view of a chat (deletion, membership-changing merge). */
-export function removeEntry(chatId: string): void {
+/** Drop one view's cached entries (deletion, membership-changing merge).
+ *  Every open view of the chat receives the same event and evicts its own. */
+export function removeEntry(viewKey: string): void {
   for (const key of [...entries.keys()]) {
-    if (key === chatId || key.startsWith(`${chatId}\x00`)) entries.delete(key);
+    if (key === viewKey || key.startsWith(`${viewKey}\x00`)) entries.delete(key);
   }
 }

@@ -76,7 +76,7 @@ func TestPDFRenderCachesAndDedupes(t *testing.T) {
 	}
 	renderer := newPDFRenderer(t.TempDir())
 
-	first, width, height, err := renderer.render(path, info, 1, 144)
+	first, width, height, err := renderer.render(path, info, 1, 144, 100, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestPDFRenderCachesAndDedupes(t *testing.T) {
 	if width != 400 || height != 200 {
 		t.Fatalf("blank page dims = %dx%d, want 400x200", width, height)
 	}
-	second, width2, height2, err := renderer.render(path, info, 1, 144)
+	second, width2, height2, err := renderer.render(path, info, 1, 144, 100, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestPDFRenderCachesAndDedupes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := renderer.render(path, changed, 1, 144); err != nil {
+	if _, _, _, err := renderer.render(path, changed, 1, 144, 100, 100); err != nil {
 		t.Fatal(err)
 	}
 	entries, err = os.ReadDir(renderer.dir)
@@ -129,7 +129,7 @@ func TestPDFTrimMargins(t *testing.T) {
 		t.Fatal(err)
 	}
 	renderer := newPDFRenderer(t.TempDir())
-	data, width, height, err := renderer.render(path, info, 1, 144)
+	data, width, height, err := renderer.render(path, info, 1, 144, 100, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,16 +142,97 @@ func TestPDFTrimMargins(t *testing.T) {
 	}
 }
 
-func TestScanDimensions(t *testing.T) {
-	w1, h1, w2, h2, ok := scanDimensions("400 200\n200 100\n")
-	if !ok || w1 != 400 || h1 != 200 || w2 != 200 || h2 != 100 {
-		t.Fatalf("scanDimensions = %d %d %d %d %v", w1, h1, w2, h2, ok)
+func TestPDFTrimPercentages(t *testing.T) {
+	requirePDFTools(t)
+	path := writePDF(t, marginalPDF)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, _, _, _, ok := scanDimensions("400 200\n"); ok {
-		t.Fatal("single line must be rejected")
+	renderer := newPDFRenderer(t.TempDir())
+
+	// 0/0 keeps the full 400x200px page.
+	_, width, height, err := renderer.render(path, info, 1, 144, 0, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, _, _, _, ok := scanDimensions("garbage\ngarbage\n"); ok {
-		t.Fatal("non-numeric lines must be rejected")
+	if width != 400 || height != 200 {
+		t.Fatalf("trim 0/0 dims = %dx%d, want 400x200", width, height)
+	}
+	// 100/0 trims only horizontally: ~200x200.
+	_, width, height, err = renderer.render(path, info, 1, 144, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if width < 180 || width > 220 || height != 200 {
+		t.Fatalf("trim 100/0 dims = %dx%d, want ~200x200", width, height)
+	}
+	// 50/50 cuts half of each margin: ~300x150.
+	_, width, height, err = renderer.render(path, info, 1, 144, 50, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if width < 280 || width > 320 || height < 135 || height > 165 {
+		t.Fatalf("trim 50/50 dims = %dx%d, want ~300x150", width, height)
+	}
+	// Distinct trim settings render under distinct cache entries.
+	entries, err := os.ReadDir(renderer.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("cache entries = %d, want 3", len(entries))
+	}
+}
+
+func TestParseTrimBox(t *testing.T) {
+	box, ok := parseTrimBox("200x100+50+25\n")
+	if !ok || box != (pdfRect{x: 50, y: 25, w: 200, h: 100}) {
+		t.Fatalf("parseTrimBox = %+v, %v", box, ok)
+	}
+	if _, ok := parseTrimBox("garbage"); ok {
+		t.Fatal("non-geometry output must be rejected")
+	}
+	// A blank page reports a degenerate box; the caller falls back to the
+	// full page, so parsing must accept it.
+	if box, ok := parseTrimBox("0x0+400+200"); !ok || box != (pdfRect{x: 400, y: 200}) {
+		t.Fatalf("degenerate box = %+v, %v", box, ok)
+	}
+}
+
+func TestCropBox(t *testing.T) {
+	box := pdfRect{x: 100, y: 50, w: 200, h: 100} // content box in a 400x200 page
+	if crop := cropBox(400, 200, box, 100, 100); crop != box {
+		t.Fatalf("trim 100 = %+v, want the content box", crop)
+	}
+	if crop := cropBox(400, 200, box, 0, 0); crop != (pdfRect{x: 0, y: 0, w: 400, h: 200}) {
+		t.Fatalf("trim 0 = %+v, want the full page", crop)
+	}
+	// Half the margins cut on each side: 50/25 kept per side.
+	if crop := cropBox(400, 200, box, 50, 50); crop != (pdfRect{x: 50, y: 25, w: 300, h: 150}) {
+		t.Fatalf("trim 50 = %+v, want {50 25 300 150}", crop)
+	}
+	// Per-axis independence: full horizontal trim, no vertical trim.
+	if crop := cropBox(400, 200, box, 100, 0); crop != (pdfRect{x: 100, y: 0, w: 200, h: 200}) {
+		t.Fatalf("trim 100/0 = %+v, want {100 0 200 200}", crop)
+	}
+}
+
+func TestRequestTrim(t *testing.T) {
+	if value, ok := requestTrim(map[string]any{}, "trim_x"); !ok || value != 100 {
+		t.Fatalf("absent trim = %d, %v, want 100", value, ok)
+	}
+	if value, ok := requestTrim(map[string]any{"trim_x": float64(60)}, "trim_x"); !ok || value != 60 {
+		t.Fatalf("trim 60 = %d, %v", value, ok)
+	}
+	if _, ok := requestTrim(map[string]any{"trim_x": float64(101)}, "trim_x"); ok {
+		t.Fatal("trim > 100 must be rejected")
+	}
+	if _, ok := requestTrim(map[string]any{"trim_x": float64(-1)}, "trim_x"); ok {
+		t.Fatal("negative trim must be rejected")
+	}
+	if _, ok := requestTrim(map[string]any{"trim_x": 1.5}, "trim_x"); ok {
+		t.Fatal("fractional trim must be rejected")
 	}
 }
 

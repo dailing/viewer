@@ -1,7 +1,8 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.84**（2026-09-21）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.85**（2026-09-22）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
 
+> v0.85 变更：**PDF 主题映射（纯前端表现层）**——files pane chrome 新增「跟随主题配色」开关 action（仅 PDF 预览时出现，`bi-circle-half`，缺省开，随实例持久化进 `FilesViewState.themeMap`）：PdfPreview 用隐藏的 SVG `feColorMatrix`（`color-interpolation-filters="sRGB"`）把页面亮度线性映射到活动主题的 canvas→text 线（白像素→`--color-canvas`、黑→`--color-text`，抗锯齿灰阶沿线插值），主题切换响应式重建矩阵。纯表现层：WebP 栅格、前后端两级缓存与服务端管线零改动，开关切换不重取不重挂（不进 `pdfKey`）；themed 页占位背景同步切 canvas 色避免暗主题白闪。已知边界：栅格化后文字与插图不可分，插图一并做双色调映射（图片多的 PDF 可逐 pane 关闭）；彩色文字去色到 bg↔fg 连线。
 > v0.84 变更：**chat 多视图入口修正——点 chrome action 直接出新面板**——pane chrome「在新面板打开」action 改为在当前 pane 上强制 split 新 tile 并就地载入副本视图（`layout.openInstance` 新增可选 `opts.newPane`：跳过 openMode=replace 的原位替换与空 tile 复用，恒从 active pane 垂直 split）。此前 replace 打开模式下点该 action 会把当前 pane 内容顶替成副本视图，原聊天需手动重开。
 > v0.83 变更：**pdfpage 白边裁切百分比化（横/纵双轴独立）**——RPC `file:_:pdfpage` 新增可选 `trim_x`/`trim_y`（整数 0–100，缺省 100 = 切到内容包围盒，0 = 不切，中间按比例保留各侧白边；越界或非整数报 invalid_request）。渲染管线改为 convert `%@` 探测内容包围盒（不再实际 `-trim`；空白页得退化零尺寸盒，与病态盒一并以整页回退），再按百分比逐轴插值出裁剪矩形，裁剪与 alpha 压平、WebP 编码并成一次 convert；缓存 key 加入 trim 参数（旧条目自然 miss 后由 LRU 淘汰）。前端 files pane chrome 新增「页边距裁切」action（仅 PDF 预览时出现）弹出横向/纵向两条百分比滑杆：拖拽只动草稿值，松手（change）才提交——提交值入 FilesViewState 随实例持久化（旧记录缺省 100），PdfPreview 因 key 变化重挂、缓存 key 同步携带 trim。
 > v0.82 变更：**chat 多视图（同一聊天多 pane 并排）**——pane 身份拆分为**聊天身份/视图身份**：视图实例 id = `chatId`（主视图）或 `chatId#<随机后缀>`（副本，由 pane chrome「在新面板打开」action 创建）；RPC/订阅寻址用拆分出的 chatId，分支 tab 选择/消息缓存/输入会话按视图 id 各自独立（主视图的存储 key 与旧口径相同，既有 tab 选择无损）；dock「聊天开着」判定改前缀匹配（任一视图开着即视为开，已读/dock 过滤语义不变）；视图钉住单个非主线分支时 pane 标题追加分支名以区分并排视图；插件级 input-session sender 的 `chat_id` 同样拆后缀（pane 关闭后的投递路径）。两个视图可向不同分支并行发消息——后端 busy/queue 本就按 `(chat, branch)` 线键串行化，零后端改动。
@@ -570,6 +571,7 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.85**（2026-09-22）：**PDF 主题映射**——files pane chrome 新增「跟随主题配色」开关（仅 PDF，缺省开，随实例持久化）：PdfPreview 以 SVG `feColorMatrix` 把页面亮度映射到主题 canvas/text 色（白→canvas、黑→text），纯前端表现层，栅格/两级缓存/服务端零改动、切换不重取；插图一并双色调化（栅格不可分），可逐 pane 关闭。
 - **v0.84**（2026-09-21）：**chat 多视图入口修正**——「在新面板打开」action 强制 split 新 tile（`openInstance` 新增 `opts.newPane`），不再受 openMode=replace 影响原位顶替当前 pane。
 
 - **v0.83**（2026-09-21）：**pdfpage 白边裁切百分比化**——RPC 新增可选 `trim_x`/`trim_y`（0–100，缺省 100 = 全切，0 = 不切，逐轴独立）；管线改 `%@` 探测内容包围盒后按百分比插值裁剪（不再实际 `-trim`），缓存 key 带 trim；前端 files pane chrome 加「页边距裁切」滑杆面板（横/纵两条，松手提交），设置随实例持久化。

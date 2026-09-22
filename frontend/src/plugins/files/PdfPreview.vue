@@ -7,6 +7,7 @@
  * remembered per path as (anchor page, fractional offset into the page), so
  * the restore survives page aspect corrections landing after it. */
 const pdfScrollMemory = new Map<string, { page: number; ratio: number }>();
+let pdfFilterSeq = 0;
 </script>
 
 <script setup lang="ts">
@@ -18,17 +19,62 @@ const pdfScrollMemory = new Map<string, { page: number; ratio: number }>();
  * so reopened pages are free. White margins are cropped server-side down to
  * the pane-chosen percentage per axis (100 = content box, 0 = full page);
  * the reported image dimensions correct each page's aspect placeholder.
+ * Theme mapping (pane-toggleable): an SVG feColorMatrix remaps each page's
+ * luminance onto the active theme's canvas->text line (white pixels become
+ * the canvas color, black the text color). Purely presentational — rasters,
+ * both cache layers and the server pipeline are untouched, so toggling or
+ * switching themes never refetches. Embedded figures get tone-mapped too
+ * (raster text and images are inseparable); the pane toggle exists for that.
  */
-import { inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
+import { useThemeStore } from "../../stores/theme";
 import type { PdfPageResult } from "./types";
 
-const props = defineProps<{ path: string; trimX: number; trimY: number }>();
+const props = defineProps<{ path: string; trimX: number; trimY: number; themeMap: boolean }>();
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("PdfPreview must be mounted inside PluginPaneHost");
 const ctx: PluginCtx = injectedCtx;
+
+/* Theme-mapped rendering: out = fg + (bg - fg) * luminance(pixel), an exact
+ * feColorMatrix (sRGB interpolation). White paper lands on the theme canvas,
+ * black text on the theme text color; anti-aliased grays interpolate along
+ * the line. One hidden <filter> per instance (ids must be unique across
+ * panes); the matrix recomputes reactively on theme switches. */
+const theme = useThemeStore();
+const filterId = `pdf-theme-map-${++pdfFilterSeq}`;
+
+const LUMA_R = 0.2126;
+const LUMA_G = 0.7152;
+const LUMA_B = 0.0722;
+
+function parseHexColor(value: string): [number, number, number] | null {
+  const match = /^#([0-9a-f]{6})$/i.exec(value.trim());
+  if (match === null) return null;
+  const packed = parseInt(match[1], 16);
+  return [(packed >> 16) & 0xff, (packed >> 8) & 0xff, packed & 0xff];
+}
+
+const themeMatrix = computed<string | null>(() => {
+  const bg = parseHexColor(theme.active.base.canvas);
+  const fg = parseHexColor(theme.active.base.text);
+  if (bg === null || fg === null) return null;
+  const rows: string[] = [];
+  for (let channel = 0; channel < 3; channel++) {
+    const delta = (bg[channel] - fg[channel]) / 255;
+    rows.push(
+      `${(delta * LUMA_R).toFixed(4)} ${(delta * LUMA_G).toFixed(4)} ${(delta * LUMA_B).toFixed(4)} 0 ${(fg[channel] / 255).toFixed(4)}`,
+    );
+  }
+  rows.push("0 0 0 1 0");
+  return rows.join(" ");
+});
+
+const themeFilter = computed(() =>
+  props.themeMap && themeMatrix.value !== null ? `url(#${filterId})` : null,
+);
 
 const LOW_SCALE = 1;
 const HIGH_SCALE = 2;
@@ -306,6 +352,11 @@ function ratioFor(state: PageState): string {
 
 <template>
   <div ref="scrollRef" class="pdf-preview">
+    <svg class="pdf-theme-defs" aria-hidden="true">
+      <filter :id="filterId" color-interpolation-filters="sRGB">
+        <feColorMatrix type="matrix" :values="themeMatrix ?? ''" />
+      </filter>
+    </svg>
     <div v-if="loading" class="preview-notice">
       <i class="bi bi-arrow-repeat"></i>
       <div>正在加载…</div>
@@ -319,6 +370,7 @@ function ratioFor(state: PageState): string {
         v-for="(state, index) in pageStates"
         :key="index"
         class="pdf-page"
+        :class="{ 'theme-mapped': themeFilter !== null }"
         :data-page="index + 1"
         :style="{ aspectRatio: ratioFor(state) }"
       >
@@ -326,6 +378,7 @@ function ratioFor(state: PageState): string {
           v-if="(state.ultra ?? state.high ?? state.low) !== null"
           :src="(state.ultra ?? state.high ?? state.low) as string"
           :class="{ upgrading: state.ultra === null }"
+          :style="themeFilter !== null ? { filter: themeFilter } : undefined"
           :alt="`第 ${index + 1} 页`"
         />
         <div v-else-if="state.error !== null" class="pdf-page-error">{{ state.error }}</div>
@@ -353,6 +406,12 @@ function ratioFor(state: PageState): string {
   justify-content: center;
 }
 
+.pdf-theme-defs {
+  height: 0;
+  position: absolute;
+  width: 0;
+}
+
 .pdf-page {
   background: #fff;
   box-shadow: 0 1px 4px rgb(0 0 0 / 25%);
@@ -361,6 +420,12 @@ function ratioFor(state: PageState): string {
   overflow: hidden;
   position: relative;
   width: 100%;
+}
+
+/* Themed pages swap the white placeholder for the canvas color so a dark
+ * theme never flashes white before the raster lands. */
+.pdf-page.theme-mapped {
+  background: var(--color-canvas);
 }
 
 .pdf-page img {

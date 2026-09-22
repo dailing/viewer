@@ -32,6 +32,8 @@ export interface FilesViewState {
   /** PDF margin crop per axis, 0–100 (100 = trim to content, 0 = full page). */
   trimX: number;
   trimY: number;
+  /** PDF theme mapping: remap page luminance onto canvas/text colors. */
+  themeMap: boolean;
 }
 
 export interface FilesInstance {
@@ -46,7 +48,7 @@ const PLUGIN_ID = "files";
 const MAILBOX_PREFIX = "instance-store:files:";
 
 function defaultState(): FilesViewState {
-  return { dir: "", file: null, mode: "render", overlayOpen: true, trimX: 100, trimY: 100 };
+  return { dir: "", file: null, mode: "render", overlayOpen: true, trimX: 100, trimY: 100, themeMap: true };
 }
 
 export const instances = reactive<FilesInstance[]>([]);

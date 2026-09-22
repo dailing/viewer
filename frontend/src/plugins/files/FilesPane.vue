@@ -40,6 +40,8 @@ const overlayOpen = ref(true);
 /** PDF margin crop per axis (0–100, 100 = trim to content). */
 const trimX = ref(100);
 const trimY = ref(100);
+/** PDF theme mapping: pages render in the theme's canvas/text colors. */
+const themeMap = ref(true);
 /** Slider drafts: dragging must not re-render server-side, so the committed
  * values update only on slider release (change event). */
 const draftTrimX = ref(100);
@@ -56,6 +58,7 @@ function adoptState(state: FilesViewState): void {
   overlayOpen.value = state.overlayOpen;
   trimX.value = state.trimX;
   trimY.value = state.trimY;
+  themeMap.value = state.themeMap;
 }
 
 function commitTrim(): void {
@@ -87,7 +90,7 @@ function openFile(entry: FileEntry): void {
   dir.value = dirname(entry.path);
 }
 
-watch([dir, file, mode, overlayOpen, trimX, trimY], () => {
+watch([dir, file, mode, overlayOpen, trimX, trimY, themeMap], () => {
   updateState(
     instanceId,
     {
@@ -97,6 +100,7 @@ watch([dir, file, mode, overlayOpen, trimX, trimY], () => {
       overlayOpen: overlayOpen.value,
       trimX: trimX.value,
       trimY: trimY.value,
+      themeMap: themeMap.value,
     },
     label.value,
   );
@@ -138,6 +142,15 @@ watchEffect(() => {
         }
       },
     });
+    actions.push({
+      id: "theme-map",
+      title: themeMap.value ? "跟随主题配色：开（页面随主题背景/文字色）" : "跟随主题配色：关（原始白底黑字）",
+      icon: "bi-circle-half",
+      active: themeMap.value,
+      run: () => {
+        themeMap.value = !themeMap.value;
+      },
+    });
   }
   if (previewKind.value === "markdown" || previewKind.value === "html") {
     actions.push({
@@ -163,7 +176,7 @@ watchEffect(() => {
 
 <template>
   <div class="files-pane">
-    <FilePreview :path="file" :mode="mode" :reload-tick="reloadTick" :trim-x="trimX" :trim-y="trimY" />
+    <FilePreview :path="file" :mode="mode" :reload-tick="reloadTick" :trim-x="trimX" :trim-y="trimY" :theme-map="themeMap" />
     <div v-if="trimOpen && previewKind === 'pdf'" class="trim-panel">
       <div class="trim-row">
         <span>横向</span>

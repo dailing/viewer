@@ -31,6 +31,8 @@ const props = defineProps<{
   /** PDF margin crop percentages (0–100 per axis); a change remounts PdfPreview. */
   trimX: number;
   trimY: number;
+  /** PDF theme mapping toggle; purely presentational, no refetch on change. */
+  themeMap: boolean;
 }>();
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -255,6 +257,7 @@ watch([rendered, renderedRef], () => {
         :path="path"
         :trim-x="trimX"
         :trim-y="trimY"
+        :theme-map="themeMap"
       />
       <div v-else-if="kind === 'image'" class="preview-image">
         <img :src="imageUrl" :alt="path ?? ''" />

@@ -12,6 +12,9 @@ const props = defineProps<{
   selectedRoleIds: string[];
   roles: Role[];
   contextId: string;
+  /** Line the next send lands on ("" = mainline): the draft binds to it —
+   *  per-line server rows keep drafts of different branches independent. */
+  draftBranchId: string;
 }>();
 
 const emit = defineEmits<{
@@ -105,20 +108,31 @@ onBeforeUnmount(() => voiceDictation.dispose());
 // Cross-device draft sync (framework: chat drafts). The server row in
 // chat.sqlite3 is the single source of truth: local edits push debounced
 // (every set overwrites the whole row — last write wins by arrival order),
-// and updates from other devices apply to the box live. `lastSynced` tracks
-// the value the server is known to hold, so own echoes (filtered by `source`
-// anyway) and remote-applied text never trigger a re-push loop.
-// Hoisted function declarations run before the undefined-check narrowing
-// applies to `injectedCtx`, so capture the bus once here.
+// and updates from other devices apply to the box live. Rows are scoped per
+// chat LINE (chat_id + branch_id, "" = mainline) and the box binds to the
+// send-target line, so switching the branch tab swaps the draft. `lastSynced`
+// tracks the value the server is known to hold for the CURRENT line, so own
+// echoes (filtered by `source` anyway) and remote-applied text never trigger
+// a re-push loop. Hoisted function declarations run before the
+// undefined-check narrowing applies to `injectedCtx`, so capture the bus once
+// here.
 const bus = injectedCtx.bus;
-const chatId = props.contextId.slice("chat:".length);
+// contextId is "chat:{viewKey}"; viewKey carries a "#suffix" on multi-view
+// copies, which RPC addressing must strip.
+const chatId = props.contextId.slice("chat:".length).split("#")[0];
 const draftSource = crypto.randomUUID();
 let lastSynced: string | null = null;
 let syncTimer: number | undefined;
+/** Unsent text stashed per line while the box shows another line — a switch
+ *  flushes the old line first, so entries only survive a failed/in-flight
+ *  flush and win over the server row when restored (latest keystrokes). */
+const localDrafts = new Map<string, string>();
 
 async function pullDraft(): Promise<void> {
+  const branchId = props.draftBranchId;
   try {
-    const result = await bus.request("chat:_:draft:get", { chat_id: chatId }) as { text?: string };
+    const result = await bus.request("chat:_:draft:get", { chat_id: chatId, branch_id: branchId }) as { text?: string };
+    if (props.draftBranchId !== branchId) return; // switched away mid-flight
     const text = result.text ?? "";
     lastSynced = text;
     if (text !== draft.value) draft.value = text;
@@ -130,21 +144,48 @@ async function pullDraft(): Promise<void> {
 async function flushDraft(): Promise<void> {
   const text = draft.value;
   if (text === lastSynced) return;
+  const branchId = props.draftBranchId;
   try {
-    await bus.request("chat:_:draft:set", { chat_id: chatId, text, source: draftSource });
-    lastSynced = text;
+    await bus.request("chat:_:draft:set", { chat_id: chatId, branch_id: branchId, text, source: draftSource });
+    if (props.draftBranchId === branchId) lastSynced = text;
   } catch {
     // Retried on the next edit.
   }
 }
 
 function onDraftSynced(frame: { value?: unknown }): void {
-  const value = frame.value as { chat_id?: string; text?: string; source?: string } | undefined;
-  if (value === undefined || value.chat_id !== chatId || value.source === draftSource) return;
+  const value = frame.value as { chat_id?: string; branch_id?: string; text?: string; source?: string } | undefined;
+  if (value === undefined || value.chat_id !== chatId || (value.branch_id ?? "") !== props.draftBranchId || value.source === draftSource) return;
   const text = value.text ?? "";
   lastSynced = text;
   if (text !== draft.value) draft.value = text;
 }
+
+// Line switch = draft swap: flush the old line's text (the stash keeps it
+// only if that flush fails), then show the new line's — stash first,
+// otherwise pull the server row. The pending debounce timer is dropped: it
+// would fire against the NEW line with stale text.
+watch(
+  () => props.draftBranchId,
+  (next, prev) => {
+    window.clearTimeout(syncTimer);
+    const prevText = draft.value;
+    const prevSynced = lastSynced;
+    lastSynced = null;
+    localDrafts.delete(prev);
+    if (prevText !== prevSynced) {
+      void bus.request("chat:_:draft:set", { chat_id: chatId, branch_id: prev, text: prevText, source: draftSource })
+        .catch(() => { if (prevText !== "") localDrafts.set(prev, prevText); });
+    }
+    const stashed = localDrafts.get(next);
+    if (stashed !== undefined) {
+      localDrafts.delete(next);
+      draft.value = stashed;
+    } else {
+      void pullDraft();
+    }
+  },
+);
 
 watch(draft, () => {
   window.clearTimeout(syncTimer);

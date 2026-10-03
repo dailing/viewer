@@ -243,18 +243,37 @@ function liveMessageVisible(value: ChatMessage): boolean {
 const activeTabs = ref<string[]>(["main"]);
 
 // Branch-tab persistence (browser-local, like dockStatus unread): the
-// selected lane set survives a pane remount / page refresh, keyed by chat
-// id — reopening a chat returns to the branches you were viewing instead
-// of always landing on 主线.
+// selected lane set survives a pane remount / page refresh. The map key is
+// window-scoped: same-profile windows share localStorage, so a bare viewKey
+// collides across windows (two windows viewing one chat overwrite each
+// other's selection, last writer wins) and an in-app refresh then restored
+// the OTHER window's tabs. sessionStorage is per-tab and survives F5/in-app
+// remounts, so prefixing with a per-window id gives each window its own
+// selection. Pre-windowing entries under the bare viewKey are read once as a
+// fallback.
 const BRANCH_TABS_STORAGE_KEY = "viewer.chatBranchTabs.v1";
+const WINDOW_ID_STORAGE_KEY = "viewer.windowId.v1";
+const windowId = ((): string => {
+  try {
+    let id = sessionStorage.getItem(WINDOW_ID_STORAGE_KEY);
+    if (id === null || id === "") {
+      id = crypto.randomUUID();
+      sessionStorage.setItem(WINDOW_ID_STORAGE_KEY, id);
+    }
+    return id;
+  } catch {
+    return ""; // storage unavailable: fall back to the bare viewKey
+  }
+})();
+const tabsKey = windowId === "" ? viewKey : `${windowId}:${viewKey}`;
 
-function loadBranchTabs(chatId: string): string[] {
+function loadBranchTabs(key: string): string[] {
   try {
     const raw = localStorage.getItem(BRANCH_TABS_STORAGE_KEY);
     if (raw === null) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
-    const tabs = (parsed as Record<string, unknown>)[chatId];
+    const tabs = (parsed as Record<string, unknown>)[key];
     if (!Array.isArray(tabs)) return [];
     return tabs.filter((tab): tab is string => typeof tab === "string" && tab !== "");
   } catch {
@@ -268,16 +287,21 @@ function persistBranchTabs(): void {
     const parsed = raw === null ? {} : (JSON.parse(raw) as unknown);
     const map = (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {}) as Record<string, string[]>;
     // The default (主线 alone) is stored as absence to keep the map small.
-    if (activeTabs.value.length === 1 && activeTabs.value[0] === "main") delete map[viewKey];
-    else map[viewKey] = [...activeTabs.value];
+    if (activeTabs.value.length === 1 && activeTabs.value[0] === "main") delete map[tabsKey];
+    else map[tabsKey] = [...activeTabs.value];
+    // Migrate away the pre-windowing entry on first persist so it does not
+    // linger as a permanent default for new windows.
+    if (tabsKey !== viewKey) delete map[viewKey];
     localStorage.setItem(BRANCH_TABS_STORAGE_KEY, JSON.stringify(map));
   } catch {
     // Quota/private-mode failures are non-fatal: tabs become session-local.
   }
 }
 
-const restoredTabs = loadBranchTabs(viewKey);
+const restoredTabs = loadBranchTabs(tabsKey);
+const legacyTabs = restoredTabs.length === 0 && tabsKey !== viewKey ? loadBranchTabs(viewKey) : [];
 if (restoredTabs.length > 0) activeTabs.value = restoredTabs;
+else if (legacyTabs.length > 0) activeTabs.value = legacyTabs;
 watch(activeTabs, () => { persistBranchTabs(); setChrome(); });
 // The view's message span is server-filtered per tab selection, so a tab
 // switch is a reload (per-view session cache hydrates instantly when warm),
@@ -2033,6 +2057,7 @@ onMounted(() => {
         v-model:selected-role-ids="selected"
         :roles="members"
         :context-id="'chat:' + viewKey"
+        :draft-branch-id="sendBranch?.id ?? ''"
       />
     </div>
     <button

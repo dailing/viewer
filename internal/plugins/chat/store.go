@@ -10,6 +10,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Chat struct {
@@ -55,13 +56,21 @@ type PluginState struct {
 	Value string
 }
 
-// Draft is the synced composer input of a chat: one row per chat, overwritten
-// whole on every update (last write wins), shared across all devices.
+// Draft is the synced composer input of one chat line: one row per
+// (chat, branch), overwritten whole on every update (last write wins),
+// shared across all devices viewing that line. BranchID "" = mainline;
+// the composer binds to the send-target line (全部/multi-select → mainline).
 type Draft struct {
 	ChatID    string `gorm:"primaryKey" json:"chat_id"`
+	BranchID  string `gorm:"primaryKey" json:"branch_id"`
 	Text      string `json:"text"`
 	UpdatedAt int64  `json:"updated_at"`
 }
+
+// TableName moves drafts to a fresh table: the pre-branch schema keyed the
+// row by chat alone and SQLite cannot re-key an existing table. Drafts are
+// ephemeral, so the legacy table is dropped (openStore) rather than migrated.
+func (Draft) TableName() string { return "chat_drafts" }
 
 type Message struct {
 	ID         string `gorm:"primaryKey"`
@@ -258,6 +267,12 @@ func openStore(dataDir string) (*store, error) {
 	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_message_blocks_chat_occurred ON message_blocks(chat_id, occurred_at)").Error; err != nil {
 		return nil, fmt.Errorf("index chat message blocks: %w", err)
 	}
+	// Legacy chat-keyed drafts table (pre branch-scoped drafts).
+	if db.Migrator().HasTable("drafts") {
+		if err := db.Migrator().DropTable("drafts"); err != nil {
+			return nil, fmt.Errorf("drop legacy drafts table: %w", err)
+		}
+	}
 	return &store{db: db}, nil
 }
 
@@ -283,9 +298,9 @@ func (s *store) chats() ([]Chat, error) {
 
 func (s *store) saveChat(value *Chat) error { return s.db.Save(value).Error }
 
-func (s *store) draft(chatID string) (*Draft, error) {
+func (s *store) draft(chatID, branchID string) (*Draft, error) {
 	var value Draft
-	result := s.db.Limit(1).Find(&value, "chat_id = ?", chatID)
+	result := s.db.Limit(1).Find(&value, "chat_id = ? AND branch_id = ?", chatID, branchID)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -295,11 +310,19 @@ func (s *store) draft(chatID string) (*Draft, error) {
 	return &value, nil
 }
 
-func (s *store) saveDraft(value *Draft) error { return s.db.Save(value).Error }
+// saveDraft is an explicit upsert: BranchID "" (mainline) is a zero value, so
+// Save would misread the composite key as unset and INSERT into the existing
+// row, violating the primary key.
+func (s *store) saveDraft(value *Draft) error {
+	return s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "chat_id"}, {Name: "branch_id"}},
+		UpdateAll: true,
+	}).Create(value).Error
+}
 
 // clearDraft reports whether a row existed so callers only broadcast real clears.
-func (s *store) clearDraft(chatID string) (bool, error) {
-	result := s.db.Delete(&Draft{}, "chat_id = ?", chatID)
+func (s *store) clearDraft(chatID, branchID string) (bool, error) {
+	result := s.db.Delete(&Draft{}, "chat_id = ? AND branch_id = ?", chatID, branchID)
 	return result.RowsAffected > 0, result.Error
 }
 

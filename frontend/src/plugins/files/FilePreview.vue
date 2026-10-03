@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
- * File preview area: routes by extension — image (data URL), markdown / html
+ * File preview area: routes by extension — image (ticket URL streamed by the
+ * gateway's by-reference data plane, framework §6.2), markdown / html
  * (rendered, with a source mode toggled from the pane chrome), otherwise
  * utf-8 text. Oversized reads come back as `too_large` and binary files as
  * base64; both get a plain notice instead of a preview.
@@ -21,7 +22,7 @@ import type { PluginCtx } from "../../shell/ctx";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import type { PreviewMode } from "./instanceStore";
 import PdfPreview from "./PdfPreview.vue";
-import { imageMimeFor, kindForPath } from "./types";
+import { kindForPath } from "./types";
 
 const props = defineProps<{
   path: string | null;
@@ -39,7 +40,6 @@ const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("FilePreview must be mounted inside PluginPaneHost");
 const ctx: PluginCtx = injectedCtx;
 
-const IMAGE_MAX_BYTES = 16 * 1024 * 1024;
 const TEXT_MAX_BYTES = 4 * 1024 * 1024;
 const WATCH_RENEW_MS = 60_000;
 
@@ -50,6 +50,10 @@ interface ReadResult {
   size: number;
   encoding: "utf-8" | "base64";
   content: string;
+}
+
+interface TicketReply {
+  url: string;
 }
 
 interface WatchReply {
@@ -100,25 +104,25 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
     status.value = "ready";
     return;
   }
-  const maxBytes = previewKind === "image" ? IMAGE_MAX_BYTES : TEXT_MAX_BYTES;
   try {
+    if (previewKind === "image") {
+      // By-reference data plane: the browser streams the bytes straight from
+      // the gateway — no base64 over the bus, no size cap, no RPC timeout on
+      // large images.
+      const ticket = (await ctx.bus.request("file:_:ticket", { path })) as TicketReply;
+      imageUrl.value = ticket.url;
+      status.value = "ready";
+      return;
+    }
     const result = (await ctx.bus.request("file:_:read", {
       path,
-      max_bytes: maxBytes,
+      max_bytes: TEXT_MAX_BYTES,
     })) as ReadResult;
-    if (previewKind === "image") {
-      const mime = imageMimeFor(path);
-      imageUrl.value =
-        result.encoding === "base64"
-          ? `data:${mime};base64,${result.content}`
-          : `data:${mime};charset=utf-8,${encodeURIComponent(result.content)}`;
-    } else {
-      if (result.encoding === "base64") {
-        status.value = "binary";
-        return;
-      }
-      text.value = result.content;
+    if (result.encoding === "base64") {
+      status.value = "binary";
+      return;
     }
+    text.value = result.content;
     status.value = "ready";
     if (previousTop > 0) {
       await nextTick();
@@ -127,7 +131,7 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
     }
   } catch (cause) {
     if (cause instanceof RpcError && cause.code === "too_large") {
-      limit.value = maxBytes;
+      limit.value = TEXT_MAX_BYTES;
       status.value = "too-large";
     } else {
       error.value = cause instanceof Error ? cause.message : "读取失败";

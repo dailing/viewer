@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,14 +19,19 @@ import (
 
 	"viewer/internal/plugins/pluginrpc"
 	"viewer/sdk/go/busclient"
+	"viewer/sdk/go/protocol"
 )
 
 const DefaultMaxReadBytes int64 = 1024 * 1024
+
+// maxInlineReplyBytes keeps reply payloads below the kernel frame cap with
+// slack for the reply envelope (channel, ids, trace).
+const maxInlineReplyBytes = protocol.DefaultFrameSize - 4096
 const showHiddenFiles = false
 
 var Manifest = busclient.Manifest{
 	ID: "file-service", Version: "0.1.0",
-	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "pdfpage": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{}},
+	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "pdfpage": map[string]any{}, "ticket": map[string]any{}, "ticket:resolve": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{}},
 	Emits: map[string]any{ChangedChannel: map[string]any{}},
 }
 
@@ -33,23 +39,26 @@ type Plugin struct {
 	client  *busclient.Client
 	pdf     *pdfRenderer
 	cache   *hashCache
+	tickets *ticketIssuer
 	watcher *fileWatcher
 }
 
 func New(dataDir string) *Plugin {
-	return &Plugin{pdf: newPDFRenderer(dataDir), cache: newHashCache()}
+	return &Plugin{pdf: newPDFRenderer(dataDir), cache: newHashCache(), tickets: newTicketIssuer()}
 }
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	client := busclient.New(kernelWS, Manifest, busclient.WithManaged(managed))
 	for pattern, handler := range map[string]func(busclient.Frame){
-		"file:_:resolve": p.resolve,
-		"file:_:read":    p.read,
-		"file:_:hash":    p.hash,
-		"file:_:list":    p.list,
-		"file:_:pdfpage": p.pdfpage,
-		"file:_:watch":   p.watch,
-		"file:_:unwatch": p.unwatch,
+		"file:_:resolve":        p.resolve,
+		"file:_:read":           p.read,
+		"file:_:hash":           p.hash,
+		"file:_:list":           p.list,
+		"file:_:pdfpage":        p.pdfpage,
+		"file:_:ticket":         p.ticket,
+		"file:_:ticket:resolve": p.ticketResolve,
+		"file:_:watch":          p.watch,
+		"file:_:unwatch":        p.unwatch,
 	} {
 		if _, err := client.Subscribe(pattern, handler); err != nil {
 			_ = client.Close()
@@ -166,9 +175,28 @@ func (p *Plugin) read(frame busclient.Frame) {
 		encoding = "base64"
 		content = base64.StdEncoding.EncodeToString(raw)
 	}
-	p.reply(frame, map[string]any{
+	result := map[string]any{
 		"path": path, "size": info.Size(), "encoding": encoding, "content": content,
-	})
+	}
+	// The kernel silently drains reply frames above the frame cap (the sender
+	// only gets a frame_too_large notice, the requester nothing) — guard here
+	// so oversized reads fail clean instead of surfacing as client timeouts.
+	if !fitsInlineReply(result) {
+		encoded, _ := json.Marshal(result)
+		p.replyError(frame, "too_large", fmt.Sprintf(
+			"%s encodes to %d bytes, above the %d-byte bus frame cap; use file:_:ticket + the gateway by-reference data plane",
+			path, len(encoded), protocol.DefaultFrameSize,
+		))
+		return
+	}
+	p.reply(frame, result)
+}
+
+// fitsInlineReply reports whether a reply value survives the kernel frame cap
+// once wrapped in the reply envelope (slack reserved for channel/ids/trace).
+func fitsInlineReply(result any) bool {
+	encoded, err := json.Marshal(result)
+	return err != nil || len(encoded) <= maxInlineReplyBytes
 }
 
 func (p *Plugin) hash(frame busclient.Frame) {

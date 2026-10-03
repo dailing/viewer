@@ -153,6 +153,25 @@ async def run(args: argparse.Namespace) -> None:
             assert adjustable["size"] == adjustable_path.stat().st_size
             print("file read utf-8/base64/limit/not-found/read-error: PASS")
 
+            await expect_error(client, "file:_:ticket", {}, "invalid_request")
+            await expect_error(client, "file:_:ticket", {"path": str(temp / "missing")}, "not_found")
+            await expect_error(client, "file:_:ticket", {"path": str(temp)}, "not_found")
+            ticket_reply = await client.request("file:_:ticket", {"path": str(text_path)})
+            assert ticket_reply["path"] == str(text_path.resolve())
+            assert ticket_reply["size"] == text_path.stat().st_size
+            assert ticket_reply["mime"] == ""
+            assert ticket_reply["url"].startswith("/api/files/raw?ticket=")
+            assert ticket_reply["expires_at"] > 0
+            await expect_error(client, "file:_:ticket:resolve", {}, "invalid_request")
+            await expect_error(client, "file:_:ticket:resolve", {"ticket": "garbage"}, "invalid_ticket")
+            tampered = ticket_reply["ticket"][:-1] + ("A" if ticket_reply["ticket"][-1] != "A" else "B")
+            await expect_error(client, "file:_:ticket:resolve", {"ticket": tampered}, "invalid_ticket")
+            resolved_ticket = await client.request("file:_:ticket:resolve", {"ticket": ticket_reply["ticket"]})
+            assert resolved_ticket["path"] == str(text_path.resolve())
+            assert resolved_ticket["size"] == text_path.stat().st_size
+            assert resolved_ticket["mtime"] == int(text_path.stat().st_mtime)
+            print("file ticket issue/resolve/tamper/not-found: PASS")
+
             await expect_error(client, "file:_:hash", {}, "invalid_request")
             await expect_error(client, "file:_:hash", {"path": str(temp / "missing")}, "not_found")
             await expect_error(client, "file:_:hash", {"path": str(temp)}, "not_found")

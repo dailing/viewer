@@ -212,10 +212,10 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 		return nil, nil, err
 	}
 	p.retainVisibleMessage(user, "", "")
-	// A human send supersedes the synced composer draft on every device;
-	// automatic (loop) dispatches leave it alone.
+	// A human send supersedes the synced composer draft of the target line
+	// on every device; automatic (loop) dispatches leave it alone.
 	if request.AutomationID == "" {
-		p.clearDraft(chat.ID)
+		p.clearDraft(chat.ID, line)
 	}
 	// Serialize on the work line: a busy line queues the whole batch (one
 	// entry per dispatch); a free line starts it immediately. Parallel

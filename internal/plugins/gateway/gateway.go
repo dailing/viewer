@@ -72,6 +72,10 @@ type Server struct {
 	assetsCtx   context.Context
 	assetsStop  context.CancelFunc
 
+	// /api/files/raw (fileraw.go): ticket resolver, stubbed by tests; nil
+	// means the live bus resolver resolveRawTicket.
+	rawResolver rawResolver
+
 	// Scheduled restart (schedrestart.go): one-shot deferred-restart flag.
 	sched schedRestartState
 }
@@ -155,6 +159,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveBrowser(w, r)
 	case strings.HasPrefix(r.URL.Path, "/plugins/"):
 		s.servePluginAsset(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/files/raw":
+		s.serveFileRaw(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/restart":
 		s.handleRestart(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/schedule-restart":

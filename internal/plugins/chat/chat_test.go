@@ -177,7 +177,7 @@ func TestComposerDraftSyncsAcrossClients(t *testing.T) {
 	}
 
 	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "text": "from laptop", "source": "a"})
-	if event := nextEvent(); event["text"] != "from laptop" || event["source"] != "a" || event["chat_id"] != chatID {
+	if event := nextEvent(); event["text"] != "from laptop" || event["source"] != "a" || event["chat_id"] != chatID || event["branch_id"] != "" {
 		t.Fatalf("event: %v", event)
 	}
 	// A later set from another device overwrites the whole row (last write wins).
@@ -190,16 +190,31 @@ func TestComposerDraftSyncsAcrossClients(t *testing.T) {
 	if draft["text"] != "merged on phone" || updatedAt <= 0 {
 		t.Fatalf("draft: %v", draft)
 	}
+	// Drafts are scoped per line: a branch draft neither leaks into the
+	// mainline row nor is touched by mainline edits/clears.
+	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "branch_id": "b1", "text": "branch draft", "source": "a"})
+	if event := nextEvent(); event["text"] != "branch draft" || event["branch_id"] != "b1" {
+		t.Fatalf("branch event: %v", event)
+	}
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "branch_id": "b1"}); draft["text"] != "branch draft" {
+		t.Fatalf("branch draft: %v", draft)
+	}
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID}); draft["text"] != "merged on phone" {
+		t.Fatalf("mainline draft after branch set: %v", draft)
+	}
 	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": chatID, "text": strings.Repeat("x", maxDraftBytes+1)}, 10*time.Second); err == nil {
 		t.Fatal("oversized draft accepted")
 	}
-	// The human-send clear broadcasts an empty draft to every device.
-	p.clearDraft(chatID)
-	if event := nextEvent(); event["text"] != "" {
+	// The human-send clear broadcasts an empty draft for the sent line only.
+	p.clearDraft(chatID, "")
+	if event := nextEvent(); event["text"] != "" || event["branch_id"] != "" {
 		t.Fatalf("clear event: %v", event)
 	}
 	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID}); draft["text"] != "" {
 		t.Fatalf("cleared draft: %v", draft)
+	}
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "branch_id": "b1"}); draft["text"] != "branch draft" {
+		t.Fatalf("branch draft after mainline clear: %v", draft)
 	}
 	// Unknown chats cannot hold drafts.
 	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": "no-such-chat", "text": "x"}, 10*time.Second); err == nil {

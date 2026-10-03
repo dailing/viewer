@@ -1,6 +1,10 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.85**（2026-09-22）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.87**（2026-09-23）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+
+> v0.87 变更：**§6.2 by-reference 数据面落地（文件图片预览）+ 总线帧上限守卫**——file-service 新增 RPC `file:_:ticket {path}`（签发 HMAC-SHA256 签名短效 ticket 绑定绝对路径，10 分钟有效期，密钥为每进程随机——重启即作废，ticket 按需签发即时消费，无持久化）与 `file:_:ticket:resolve {ticket}`（校验签名/有效期/文件仍在且为 regular，回 path/size/mtime/mime）；gateway 新增 `GET /api/files/raw?ticket=`：一条小 RPC 解析 ticket 后 `http.ServeContent` 流式吐字节（Range/条件请求内建；SVG 等 MIME 由签发方按扩展名显式映射，嗅探会错）。前端 files 图片预览从 `file:_:read` base64 data URL 切到 ticket URL（16 MB 内联上限随之删除）——此前大 PNG 的 base64 回复超过 1 MiB 内核帧上限被静默抽掉（只有 plugin 侧收到 frame_too_large），前端表现为 RPC 超时；JPG/PDF 无碍是因其载荷本就在上限内。`file:_:read` 增加硬守卫：编码后回复超帧上限（留 4 KiB 信封余量）即回 `too_large`，不再发注定被丢的帧。坑点记录：订阅前缀隐式全匹配意味着 `file:_:ticket` 同时收到 `file:_:ticket:resolve` 的帧——handler 须按精确 channel 分流。
+
+> v0.86 变更：**composer 草稿绑定发送目标线 + 分支 tab 选择按窗口隔离**——①草稿从「每 chat 一行」改为「每 (chat, branch) 一行」：新表 `chat_drafts` 复合主键 (chat_id, branch_id)（"" = 主线；旧 `drafts` 表直接丢弃——草稿是瞬态数据，不值得迁移；`saveDraft` 用显式 upsert，因 BranchID "" 零值会让 GORM `Save` 误判主键未设而重复 INSERT 撞唯一约束）。RPC `chat:_:draft:get/set` 增可选 `branch_id`（缺省主线），广播 payload 同步携带；human send 只清目标线的草稿行，其他线的草稿不受波及。前端 ComposerBox 新增 `draftBranchId` prop = 发送目标线（恰好单选一个分支 → 该分支；全部/多选/主线 → 主线，与 sendBranch 口径一致）：切线即换草稿——旧线文本立即 flush（组件内 stash 仅在 flush 失败时保留，切回时优先于服务端行），新线无 stash 则拉服务端；同线跨设备实时同步语义不变。②分支 tab 持久化 key 加 per-window 前缀（sessionStorage `viewer.windowId.v1`：同 tab 的 F5/应用内 remount 存活，跨窗口/标签页各异）——同 profile 多窗口共享 localStorage，裸 viewKey 下两窗口互相覆盖选择（last writer wins），pane chrome 的 refresh remount 会捡到另一窗口的 tab 选择；旧裸 key 条目作一次性回读迁移（首次 persist 时删除）。
 
 > v0.85 变更：**PDF 主题映射（纯前端表现层）**——files pane chrome 新增「跟随主题配色」开关 action（仅 PDF 预览时出现，`bi-circle-half`，缺省开，随实例持久化进 `FilesViewState.themeMap`）：PdfPreview 用隐藏的 SVG `feColorMatrix`（`color-interpolation-filters="sRGB"`）把页面亮度线性映射到活动主题的 canvas→text 线（白像素→`--color-canvas`、黑→`--color-text`，抗锯齿灰阶沿线插值），主题切换响应式重建矩阵。纯表现层：WebP 栅格、前后端两级缓存与服务端管线零改动，开关切换不重取不重挂（不进 `pdfKey`）；themed 页占位背景同步切 canvas 色避免暗主题白闪。已知边界：栅格化后文字与插图不可分，插图一并做双色调映射（图片多的 PDF 可逐 pane 关闭）；彩色文字去色到 bg↔fg 连线。
 > v0.84 变更：**chat 多视图入口修正——点 chrome action 直接出新面板**——pane chrome「在新面板打开」action 改为在当前 pane 上强制 split 新 tile 并就地载入副本视图（`layout.openInstance` 新增可选 `opts.newPane`：跳过 openMode=replace 的原位替换与空 tile 复用，恒从 active pane 垂直 split）。此前 replace 打开模式下点该 action 会把当前 pane 内容顶替成副本视图，原聊天需手动重开。
@@ -218,6 +222,8 @@ mailbox 只存**当前值**（无 ring、无历史）；`set` 语义为**整体�
 ### 6.2 控制面走消息，数据面走引用
 
 小 payload（delta、状态、事件）→ 总线；大字节（文件内容、PDF、图片、下载）→ 消息只带引用（path + token），gateway 用 HTTP 流式吐字节。禁止 base64 文件过总线。
+
+落地现状（v0.87）：文件图片预览——file-service 签 HMAC 短效 ticket（`file:_:ticket`/`file:_:ticket:resolve`），gateway `GET /api/files/raw` 解析后 `http.ServeContent` 流式吐字节；`file:_:read` 内联回复硬上限 = 内核帧上限（超限回 `too_large`）。
 
 **刻意例外：插件前端 bundle**。所有插件 hello 后经总线 RPC（`gateway:_:assets:push`）把 bundle 字节（base64，通常几 MB，每次注册一次）push 给 gateway——本地/远程统一一套机制（§14.3），这是该例外的全部理由。broker 对资产 RPC 放宽帧上限（如 64MB；注意 `websockets` 库默认 `max_size=1MB` 需调），普通流量保持小上限。
 
@@ -571,6 +577,8 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.87**（2026-09-23）：**文件图片预览走 §6.2 by-reference 数据面**——`file:_:ticket`/`file:_:ticket:resolve`（HMAC 短效 ticket，每进程随机密钥）+ gateway `GET /api/files/raw`（ServeContent 流式，Range/条件请求内建，MIME 按扩展名显式映射）；files 图片预览从 bus base64 切到 ticket URL，删除 16 MB 内联上限；`file:_:read` 加帧上限硬守卫（超限回 `too_large`，修复大 PNG 回复帧被内核静默抽掉表现为前端 RPC 超时）。坑点：前缀订阅下 `file:_:ticket` 会收到 `ticket:resolve` 帧，handler 按精确 channel 分流。
+- **v0.86**（2026-09-23）：**composer 草稿绑定发送目标线 + 分支 tab 选择按窗口隔离**——草稿服务端行从每 chat 改为每 (chat, branch)（新表 `chat_drafts`，RPC 带 `branch_id`，human send 只清目标线）；ComposerBox 绑定 sendBranch 口径的目标线，切线即换草稿，同线跨设备同步不变。分支 tab 的 localStorage key 加 sessionStorage windowId 前缀，多窗口不再互相覆盖选择（refresh 后 tab 跳变修复），旧 key 一次性迁移。
 - **v0.85**（2026-09-22）：**PDF 主题映射**——files pane chrome 新增「跟随主题配色」开关（仅 PDF，缺省开，随实例持久化）：PdfPreview 以 SVG `feColorMatrix` 把页面亮度映射到主题 canvas/text 色（白→canvas、黑→text），纯前端表现层，栅格/两级缓存/服务端零改动、切换不重取；插图一并双色调化（栅格不可分），可逐 pane 关闭。
 - **v0.84**（2026-09-21）：**chat 多视图入口修正**——「在新面板打开」action 强制 split 新 tile（`openInstance` 新增 `opts.newPane`），不再受 openMode=replace 影响原位顶替当前 pane。
 
@@ -694,7 +702,7 @@ my-plugin/
 - **C0 viewer.supervisor**：`restart.py` 的进程管理逻辑 + `main.py` 的插件进程拉起职责 → 独立 core plugin；内核只保留 autostart 它一个进程的逻辑（§9）。
 - **C1 config-store**：`config.py` + `models.py`（AppConfig schema）；路由 `GET/PUT /api/config`、`GET/POST /api/config/llm-provider-states(/clear)` → RPC `config:_:get/set` 等。前端 `ConfigPanel.vue` 拆为设置壳 + per-plugin section 贡献点（F2）。
 - **C2 instance-store**：新建（§7.2 bindings、instance state 落点）；同时接管 `viewer.layout.v1` 的服务端持久化（若需要跨设备）——view state 仍走 F6 localStorage。
-- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切（v0.83 百分比化）+ 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方。
+- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切（v0.83 百分比化）+ 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方（v0.87 落地：`file:_:ticket`/`ticket:resolve` + gateway `/api/files/raw`）。
 - **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。admin API：`POST /api/admin/restart`（v0.34 优雅自重启）、`POST /api/admin/build-restart`（v0.37 构建成功后自重启）、`POST /api/admin/schedule-restart`（v0.43：先后台构建、成功才武装等空闲自重启：watchdog 5s 轮询 `chat:_:chats:list` 无 running + `voice:_:sessions` 无活动才触发；构建失败落 `failed` 不武装；`GET` 同路径返回 none/building/armed/failed；`DELETE` 同路径取消/复位（v0.44，armed/building/failed→none，幂等）；状态纯内存）。
 
 ### A.4 viewer.terminal（Phase 2，链路首验）

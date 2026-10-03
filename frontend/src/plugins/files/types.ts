@@ -64,10 +64,6 @@ export function kindForPath(path: string): PreviewKind {
   return "text";
 }
 
-export function imageMimeFor(path: string): string {
-  return IMAGE_MIME_BY_EXT[extensionOf(path)] ?? "application/octet-stream";
-}
-
 /** Result of the file:_:pdfpage RPC — one rasterized PDF page as base64 WebP. */
 export interface PdfPageResult {
   path: string;

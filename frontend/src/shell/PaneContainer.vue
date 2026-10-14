@@ -72,6 +72,6 @@ const uid = () => (props.pane.content === null ? "" : contentUid(props.pane.cont
 }
 
 .pane-placeholder > i {
-  font-size: 20px;
+  font-size: calc(var(--font-size-ui) * 5 / 3);
 }
 </style>

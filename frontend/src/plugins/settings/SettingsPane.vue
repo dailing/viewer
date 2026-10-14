@@ -7,8 +7,9 @@
  * browser-local); the backend section drives the gateway admin API.
  * Sections: 布局 (open mode), 聊天 (virtual space), Dock (hover expand
  * delay), 外观 (theme list + 4 base colors + advanced overrides,
- * `stores/theme.ts`), 后端 (restart / build-restart / scheduled
- * restart toggle with live status). The chat
+ * `stores/theme.ts`), 字号 (browser-local UI/content base sizes + pinned
+ * detail sizes, `stores/typography.ts`, framework v0.88), 后端 (restart /
+ * build-restart / scheduled restart toggle with live status). The chat
  * dispatch/summary LLM lives in 聊天管理 → 模型 (chat-manager LLMPanel).
  */
 import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
@@ -19,6 +20,8 @@ import { useLayoutStore } from "../../stores/layout";
 import { useThemeStore } from "../../stores/theme";
 import type { BaseVars, OverrideKind } from "../../stores/theme";
 import { OVERRIDE_VARS } from "../../stores/theme";
+import { useTypographyStore } from "../../stores/typography";
+import { CONTENT_SIZE_RANGE, DETAIL_SIZE_RANGE, TYPO_DETAILS, UI_SIZE_RANGE } from "../../stores/typography";
 import ThemePreview from "./ThemePreview.vue";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -119,9 +122,7 @@ const ADVANCED_GROUPS: Array<{ title: string; fields: AdvancedField[] }> = [
   {
     title: "消息",
     fields: [
-      { key: "bodyFontSize", label: "正文字号", kind: "px", min: 10, max: 24, step: 1 },
       { key: "bodyLineHeight", label: "正文行高", kind: "number", min: 1.1, max: 2.4, step: 0.05 },
-      { key: "codeFontSize", label: "代码字号", kind: "px", min: 9, max: 20, step: 1 },
       { key: "markdownBody", label: "正文颜色", kind: "color" },
       { key: "markdownStrong", label: "加粗颜色", kind: "color" },
       { key: "markdownLink", label: "链接颜色", kind: "color" },
@@ -135,7 +136,7 @@ const ADVANCED_GROUPS: Array<{ title: string; fields: AdvancedField[] }> = [
 ];
 
 /** Seed values for the numeric overrides (mirror the styles.css constants). */
-const NUMBER_SEEDS: Record<string, string> = { bodyFontSize: "15", bodyLineHeight: "1.65", codeFontSize: "13" };
+const NUMBER_SEEDS: Record<string, string> = { bodyLineHeight: "1.65" };
 
 const overrideCount = computed(() => Object.keys(theme.active.overrides).length);
 
@@ -189,6 +190,26 @@ function renameActive(): void {
 function removeActive(): void {
   if (!window.confirm(`删除主题「${theme.active.name}」？此操作不可撤销。`)) return;
   theme.deleteTheme(theme.activeId);
+}
+
+/* ---- 字号 (browser-local typography: 2 bases + pinned details) ---- */
+
+const typography = useTypographyStore();
+
+const TYPO_DETAIL_FIELDS = Object.entries(TYPO_DETAILS).map(([key, spec]) => ({ key, label: spec.label }));
+
+/** Empty/invalid input restores the default (null); valid px are clamped
+ *  by the store. */
+function setUiSize(raw: string): void {
+  typography.setUi(raw === "" ? null : Number(raw));
+}
+
+function setContentSize(raw: string): void {
+  typography.setContent(raw === "" ? null : Number(raw));
+}
+
+function setDetailSize(key: string, raw: string): void {
+  typography.setDetail(key, raw === "" ? null : Number(raw));
 }
 
 /* ---- 后端 (gateway admin API) ---- */
@@ -641,6 +662,73 @@ function toggleScheduledRestart(): void {
     </div>
 
     <div class="settings-group">
+      <div class="settings-group-title">
+        <span><i class="bi bi-fonts"></i> 字号</span>
+        <span class="settings-choice">
+          <button
+            v-if="typography.customized"
+            type="button"
+            class="btn btn-sm btn-outline-secondary"
+            title="恢复全部字号为默认值（UI 12px / 内容 15px）"
+            @click="typography.resetAll()"
+          >恢复默认</button>
+        </span>
+      </div>
+      <label class="settings-field">
+        <span>UI 字号（界面与控件文字）</span>
+        <input
+          type="number"
+          :min="UI_SIZE_RANGE.min"
+          :max="UI_SIZE_RANGE.max"
+          step="1"
+          :value="typography.uiSize"
+          @change="setUiSize(($event.target as HTMLInputElement).value)"
+        >
+      </label>
+      <label class="settings-field">
+        <span>内容字号（消息与文档正文）</span>
+        <input
+          type="number"
+          :min="CONTENT_SIZE_RANGE.min"
+          :max="CONTENT_SIZE_RANGE.max"
+          step="1"
+          :value="typography.contentSize"
+          @change="setContentSize(($event.target as HTMLInputElement).value)"
+        >
+      </label>
+      <div class="settings-hint">标题、代码、小字等按基础字号自动等比计算；按浏览器本地保存，不影响其他浏览器与设备。</div>
+      <details class="settings-advanced">
+        <summary>
+          细节定制<span v-if="typography.detailCount > 0" class="advanced-count">（{{ typography.detailCount }} 项已定制）</span>
+        </summary>
+        <div class="settings-hint">以下各项默认按比例跟随基础字号；点「定制」单独固定为像素值，× 恢复自动。</div>
+        <div v-for="field in TYPO_DETAIL_FIELDS" :key="field.key" class="settings-field">
+          <span>{{ field.label }}</span>
+          <span v-if="typography.details[field.key] !== undefined" class="theme-color-inputs">
+            <input
+              type="number"
+              :min="DETAIL_SIZE_RANGE.min"
+              :max="DETAIL_SIZE_RANGE.max"
+              step="0.5"
+              :value="typography.details[field.key]"
+              @change="setDetailSize(field.key, ($event.target as HTMLInputElement).value)"
+            >
+            <button
+              type="button"
+              class="advanced-reset"
+              title="恢复自动（跟随基础字号按比例计算）"
+              @click="typography.setDetail(field.key, null)"
+            ><i class="bi bi-x-lg"></i></button>
+          </span>
+          <span v-else class="settings-choice">
+            <span class="advanced-auto">自动（{{ typography.detailSize(field.key) }}px）</span>
+            <button type="button" class="settings-choice-btn" @click="typography.pinDetail(field.key)">定制</button>
+          </span>
+        </div>
+      </details>
+    </div>
+
+    <div class="settings-group">
       <div class="settings-group-title"><i class="bi bi-hdd-network"></i> 后端</div>
       <div class="settings-field">
         <span>服务（viewerd）</span>
@@ -819,7 +907,7 @@ function toggleScheduledRestart(): void {
 
 .settings-hint {
   color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
 }
 
 .settings-choice {

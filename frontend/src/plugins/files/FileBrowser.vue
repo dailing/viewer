@@ -144,7 +144,7 @@ function icon(entry: FileEntry): string {
 .file-browser {
   background: var(--color-surface);
   color: var(--color-text);
-  font-size: 12px;
+  font-size: var(--font-size-ui);
   min-width: 0;
 }
 
@@ -166,7 +166,7 @@ function icon(entry: FileEntry): string {
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   max-width: 140px;
   overflow: hidden;
   padding: 1px 3px;
@@ -185,7 +185,7 @@ function icon(entry: FileEntry): string {
 .crumb-sep {
   color: var(--color-text-subtle);
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
 }
 
 .file-list {

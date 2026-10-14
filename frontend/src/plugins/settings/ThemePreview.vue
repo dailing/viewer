@@ -79,7 +79,7 @@
 
 .preview-caption {
   color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
 }
 
 .preview-window {
@@ -117,7 +117,7 @@
 
 .preview-chip {
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   padding: 2px 8px;
 }
 
@@ -168,7 +168,7 @@
 
 .preview-meta-detail {
   color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -176,7 +176,7 @@
 
 .preview-time {
   color: var(--color-text-muted);
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   margin-left: auto;
 }
 
@@ -190,7 +190,7 @@
 .preview-status {
   align-items: center;
   display: inline-flex;
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   gap: 3px;
 }
 

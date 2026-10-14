@@ -186,7 +186,7 @@ onBeforeUnmount(() => { alive = false; if (timer) clearInterval(timer); ctx.bus.
 </template>
 
 <style scoped>
-.loop-panel { flex: 0 0 auto; border-bottom: 1px solid var(--color-border, #8884); font-size: .85rem; }
+.loop-panel { flex: 0 0 auto; border-bottom: 1px solid var(--color-border, #8884); font-size: calc(var(--font-size-ui) * 17 / 15); }
 .loop-bar { display: flex; align-items: center; gap: .4rem; padding: .25rem .5rem; }
 .loop-bar > button { flex-shrink: 0; }
 .loop-goal { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }

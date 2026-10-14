@@ -266,6 +266,7 @@ ctx 提供（pane 级 scope = `<paneType>:<instanceId>`，插件级 instanceId �
 ### 3.4 样式约定
 
 - 用 shell 的 CSS 变量：`var(--color-surface)`、`var(--color-text)`、`var(--color-accent)`、`--font-size-ui` 等（见 `frontend/src/styles.css`/主题系统），自动适配用户主题（含亮暗切换）。**不要在自己的根元素上重新声明 `--color-*` 变量**——那会覆盖活动主题。
+- 字号同理（framework v0.88）：不要硬编码 px 字号——界面文字用 `var(--font-size-ui)` / `var(--font-size-ui-small)`，其他尺寸用 `calc(var(--font-size-ui) * N / 12)` 精确分数派生；markdown 内容自动跟随 `--markdown-*` 字号变量。两个基础字号由用户在设置→字号中按浏览器调整。
 - 通用元素直接用 shell 的样式 class（`.v-bg-surface` / `.v-fg-muted` / `.v-title` / `.v-panel` 等，完整清单见 plugin-framework §8.10）；状态色/徽标底色用 `color-mix(in srgb, var(--color-*) N%, transparent)` 派生，样式表里不写字面 hex 颜色。
 - 自建顶栏（tab bar 等）用 `var(--color-titlebar)` / `var(--color-titlebar-text)`，与 pane 抬头一致。
 - 组件用 SFC `scoped` 样式；构建时 `cssCodeSplit: false`，产物 `frontend.css` 由 shell 自动注入/移除。

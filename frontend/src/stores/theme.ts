@@ -46,7 +46,7 @@ export interface BaseVars {
   accent: string;
 }
 
-export type OverrideKind = "color" | "px" | "number";
+export type OverrideKind = "color" | "number";
 
 export interface OverrideSpec {
   cssVar: string;
@@ -83,9 +83,7 @@ export const OVERRIDE_VARS: Record<string, OverrideSpec> = {
   markdownBorder: { cssVar: "--markdown-border-color", kind: "color" },
   syntaxText: { cssVar: "--syntax-text", kind: "color" },
   syntaxBackground: { cssVar: "--syntax-background", kind: "color" },
-  bodyFontSize: { cssVar: "--markdown-body-font-size", kind: "px" },
   bodyLineHeight: { cssVar: "--markdown-body-line-height", kind: "number" },
-  codeFontSize: { cssVar: "--markdown-code-font-size", kind: "px" },
 };
 
 /** base var field -> CSS custom property it drives */
@@ -264,7 +262,7 @@ function applyTheme(theme: ThemeDef): void {
   for (const [key, spec] of Object.entries(OVERRIDE_VARS)) {
     const value = theme.overrides[key];
     if (value === undefined) element.style.removeProperty(spec.cssVar);
-    else element.style.setProperty(spec.cssVar, spec.kind === "px" ? `${value}px` : value);
+    else element.style.setProperty(spec.cssVar, value);
   }
   // Bootstrap's primary color is an RGB triplet; derive it from the accent.
   const rgb = hexToRgb(theme.base.accent);

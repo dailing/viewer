@@ -203,7 +203,7 @@ function openActiveInput(): void {
 .workspace-icon { font-size: var(--nav-icon-size); }
 .workspace-title { color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-title.empty, .workspace-status { color: var(--color-text-subtle); }
-.workspace-status { flex: 0 1 auto; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-status { flex: 0 1 auto; font-size: calc(var(--font-size-ui) * 5 / 6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-actions { align-items: center; display: flex; gap: 2px; margin-left: auto; min-width: 0; }
 .workspace-btn {
   align-items: center; background: transparent; border: 0; border-radius: var(--radius-sm); color: var(--color-text-muted);
@@ -213,18 +213,18 @@ function openActiveInput(): void {
 .workspace-btn:disabled { opacity: .3; }
 .workspace-btn.active { color: var(--color-text); }
 .workspace-btn.danger { color: var(--color-danger); }
-.workspace-btn.labeled { font-size: 10px; font-weight: 700; min-width: max-content; padding: 0 6px; width: auto; }
+.workspace-btn.labeled { font-size: calc(var(--font-size-ui) * 5 / 6); font-weight: 700; min-width: max-content; padding: 0 6px; width: auto; }
 .workspace-select { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text); font-size: var(--font-size-ui-small); height: var(--nav-button-size); }
 .mode-select { max-width: 104px; }
 .chrome-select { max-width: 120px; min-width: 54px; }
 .chrome-select.compact { max-width: 68px; }
 .workspace-chips { display: flex; gap: 2px; max-width: 180px; overflow: hidden; }
-.workspace-chips span { background: var(--color-surface); color: var(--color-text-muted); font-size: 10px; overflow: hidden; padding: 2px 5px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-chips span { background: var(--color-surface); color: var(--color-text-muted); font-size: calc(var(--font-size-ui) * 5 / 6); overflow: hidden; padding: 2px 5px; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-divider { border-left: 1px solid var(--color-border); height: 16px; margin: 0 2px; }
 .workspace-input-session { align-items: center; border-left: 1px solid var(--color-border); display: inline-flex; gap: 1px; margin-left: 2px; padding-left: 4px; }
-.workspace-input-label { align-items: center; background: transparent; border: 0; color: var(--color-text-muted); display: inline-flex; font-size: 10px; gap: 4px; height: var(--nav-button-size); max-width: 150px; padding: 0 4px; }
+.workspace-input-label { align-items: center; background: transparent; border: 0; color: var(--color-text-muted); display: inline-flex; font-size: calc(var(--font-size-ui) * 5 / 6); gap: 4px; height: var(--nav-button-size); max-width: 150px; padding: 0 4px; }
 .workspace-input-label span { max-width: 86px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-input-label small { color: var(--color-text-subtle); font-size: 9px; }
+.workspace-input-label small { color: var(--color-text-subtle); font-size: calc(var(--font-size-ui) * 3 / 4); }
 .workspace-input-label:hover { background: var(--color-surface-hover); color: var(--color-text); }
 .rotate-90 { transform: rotate(90deg); }
 

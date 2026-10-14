@@ -11,12 +11,13 @@
 
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import "@xterm/xterm/css/xterm.css";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { useLayoutStore } from "../../stores/layout";
+import { useTypographyStore } from "../../stores/typography";
 
 interface OutputEntry {
   seq: number;
@@ -38,6 +39,7 @@ const ctx: PluginCtx = injectedCtx;
 
 const termId = ctx.instanceId;
 const layout = useLayoutStore();
+const typography = useTypographyStore();
 
 /**
  * Terminate lives in the pane chrome (framework section 8.5): unlike files
@@ -102,7 +104,8 @@ onMounted(() => {
 
   term = new Terminal({
     cursorBlink: true,
-    fontSize: 13,
+    // Tracks the content base (framework v0.88): 13px at the default 15px.
+    fontSize: typography.terminalSize,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
     theme: { background: "#1a1b26" },
   });
@@ -110,6 +113,16 @@ onMounted(() => {
   term.loadAddon(fit);
   term.open(container);
   fit.fit();
+
+  // Live-follow 内容字号 changes (Settings → 字号).
+  watch(
+    () => typography.terminalSize,
+    (size) => {
+      if (term === null) return;
+      term.options.fontSize = size;
+      fit?.fit();
+    },
+  );
 
   // Keystrokes/paste -> PTY via the terminal plugin's write RPC.
   term.onData((data) => {

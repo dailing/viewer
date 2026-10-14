@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * File preview area: routes by extension — image (ticket URL streamed by the
- * gateway's by-reference data plane, framework §6.2), markdown / html
+ * gateway's by-reference data plane, framework §6.2), markdown / html / latex
  * (rendered, with a source mode toggled from the pane chrome), otherwise
  * utf-8 text. Oversized reads come back as `too_large` and binary files as
  * base64; both get a plain notice instead of a preview.
@@ -22,6 +22,7 @@ import type { PluginCtx } from "../../shell/ctx";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import type { PreviewMode } from "./instanceStore";
 import PdfPreview from "./PdfPreview.vue";
+import TexPreview from "./TexPreview.vue";
 import { kindForPath } from "./types";
 
 const props = defineProps<{
@@ -90,7 +91,7 @@ function formatBytes(bytes: number): string {
 
 async function load(path: string | null, preserveScroll = false): Promise<void> {
   const scroller = preserveScroll
-    ? rootRef.value?.querySelector<HTMLElement>(".preview-text, .preview-markdown")
+    ? rootRef.value?.querySelector<HTMLElement>(".preview-text, .preview-markdown, .preview-latex-wrap")
     : null;
   const previousTop = scroller?.scrollTop ?? 0;
   status.value = path === null ? "empty" : "loading";
@@ -126,7 +127,7 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
     status.value = "ready";
     if (previousTop > 0) {
       await nextTick();
-      const next = rootRef.value?.querySelector<HTMLElement>(".preview-text, .preview-markdown");
+      const next = rootRef.value?.querySelector<HTMLElement>(".preview-text, .preview-markdown, .preview-latex-wrap");
       if (next !== null && next !== undefined) next.scrollTop = previousTop;
     }
   } catch (cause) {
@@ -279,6 +280,11 @@ watch([rendered, renderedRef], () => {
         class="preview-markdown markdown-content"
         v-html="rendered"
       ></div>
+      <TexPreview
+        v-else-if="kind === 'latex' && mode === 'render' && path !== null"
+        :path="path"
+        :source="text"
+      />
       <pre v-else class="preview-text">{{ text }}</pre>
     </template>
   </div>
@@ -308,7 +314,7 @@ watch([rendered, renderedRef], () => {
 }
 
 .preview-notice > i {
-  font-size: 20px;
+  font-size: calc(var(--font-size-ui) * 5 / 3);
 }
 
 .preview-image {
@@ -341,7 +347,8 @@ watch([rendered, renderedRef], () => {
 
 .preview-text {
   font-family: var(--font-family-mono, monospace);
-  font-size: 12px;
+  /* Plain-text preview tracks the CONTENT base (12px at the default 15px). */
+  font-size: calc(var(--markdown-body-font-size) * 4 / 5);
   height: 100%;
   line-height: 1.5;
   margin: 0;

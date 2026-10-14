@@ -152,7 +152,7 @@ watchEffect(() => {
       },
     });
   }
-  if (previewKind.value === "markdown" || previewKind.value === "html") {
+  if (previewKind.value === "markdown" || previewKind.value === "html" || previewKind.value === "latex") {
     actions.push({
       id: "toggle-mode",
       title: mode.value === "render" ? "查看源码" : "查看渲染",

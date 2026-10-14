@@ -245,7 +245,7 @@ function startResize(event: PointerEvent): void {
 .pane-status {
   color: var(--color-text-subtle);
   flex: 0 1 auto;
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -286,7 +286,7 @@ function startResize(event: PointerEvent): void {
 }
 
 .pane-btn.has-label {
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
   font-weight: 700;
   min-width: max-content;
   padding: 0 6px;

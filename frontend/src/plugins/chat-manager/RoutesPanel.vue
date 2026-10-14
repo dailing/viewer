@@ -320,7 +320,7 @@ onMounted(() => void load().catch((cause) => { error.value = errorText(cause); }
   border-radius: 50%;
   color: var(--color-text-muted);
   display: flex;
-  font-size: 13px;
+  font-size: calc(var(--font-size-ui) * 13 / 12);
   height: 17px;
   justify-content: center;
   line-height: 1;

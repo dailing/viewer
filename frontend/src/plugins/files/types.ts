@@ -17,7 +17,7 @@ export interface DirectoryListing {
   entries: FileEntry[];
 }
 
-export type PreviewKind = "image" | "markdown" | "html" | "text" | "pdf";
+export type PreviewKind = "image" | "markdown" | "html" | "text" | "pdf" | "latex";
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
@@ -33,6 +33,7 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
 
 const MARKDOWN_EXTS = new Set(["md", "markdown", "mdown", "mkd"]);
 const HTML_EXTS = new Set(["html", "htm"]);
+const TEX_EXTS = new Set(["tex"]);
 
 export function extensionOf(path: string): string {
   const name = basename(path);
@@ -61,6 +62,7 @@ export function kindForPath(path: string): PreviewKind {
   if (ext === "pdf") return "pdf";
   if (MARKDOWN_EXTS.has(ext)) return "markdown";
   if (HTML_EXTS.has(ext)) return "html";
+  if (TEX_EXTS.has(ext)) return "latex";
   return "text";
 }
 

@@ -8,9 +8,10 @@
 :root {
   color-scheme: light;
   --font-family-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Typography bases (light fallbacks): stores/typography.ts sets both
+     inline on .app-shell (browser-local, framework v0.88); every derived
+     size is a calc() coefficient off these two, declared on .app-shell. */
   --font-size-ui: 12px;
-  --font-size-ui-small: 11px;
-  --font-size-content: 13px;
   /* Theme base colors (light fallback): the theme store sets these four
      inline on .app-shell for the active theme; every other color derives
      from them via the color-mix() defaults in the .app-shell block below. */
@@ -24,23 +25,19 @@
   --pane-titlebar-height: 28px;
   --nav-button-size: 22px;
   --nav-icon-size: 12px;
-  /* Markdown typography constants (colors derive from the theme below). */
+  /* Markdown typography constants (colors derive from the theme below;
+     font sizes derive from the content base in the .app-shell block). */
   --markdown-body-font-size: 15px;
   --markdown-body-line-height: 1.65;
-  --markdown-h1-font-size: 28px;
   --markdown-h1-font-weight: 700;
   --markdown-h1-line-height: 1.2;
-  --markdown-h2-font-size: 23px;
   --markdown-h2-font-weight: 700;
   --markdown-h2-line-height: 1.25;
-  --markdown-h3-font-size: 19px;
   --markdown-h3-font-weight: 700;
   --markdown-h3-line-height: 1.3;
-  --markdown-h4-font-size: 16px;
   --markdown-h4-font-weight: 700;
   --markdown-h4-line-height: 1.35;
   --markdown-strong-font-weight: 700;
-  --markdown-code-font-size: 13px;
   /* Syntax highlighting palette (light scheme constants). */
   --syntax-keyword: #8f5f63;
   --syntax-string: #55706b;
@@ -94,6 +91,25 @@ body {
   overscroll-behavior: none;
   overflow: hidden;
   width: 100%;
+}
+
+/**
+ * Derived font sizes (framework v0.88): two browser-local bases — UI
+ * (--font-size-ui) and content (--markdown-body-font-size) — are set inline
+ * on .app-shell by stores/typography.ts; every derived size is an exact
+ * calc() coefficient off a base (defaults reproduce the pre-v0.88 fixed px
+ * sizes: 11/28/23/19/16/13), and each derived var can be pinned to an
+ * explicit px inline by the 细节定制 settings, winning over these formulas.
+ * Declared on .app-shell (not :root) so the calc() binds the inline base,
+ * not the :root fallback — same rule as the derived colors below.
+ */
+.app-shell {
+  --font-size-ui-small: calc(var(--font-size-ui) * 11 / 12);
+  --markdown-h1-font-size: calc(var(--markdown-body-font-size) * 28 / 15);
+  --markdown-h2-font-size: calc(var(--markdown-body-font-size) * 23 / 15);
+  --markdown-h3-font-size: calc(var(--markdown-body-font-size) * 19 / 15);
+  --markdown-h4-font-size: calc(var(--markdown-body-font-size) * 16 / 15);
+  --markdown-code-font-size: calc(var(--markdown-body-font-size) * 13 / 15);
 }
 
 /**

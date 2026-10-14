@@ -10,6 +10,7 @@ import App from "./App.vue";
 import { connectBus } from "./shell/bus";
 import { loadExternalPlugins, loadPlugins } from "./shell/loader";
 import { useThemeStore } from "./stores/theme";
+import { useTypographyStore } from "./stores/typography";
 
 const app = createApp(App);
 app.use(createPinia());
@@ -17,6 +18,7 @@ loadPlugins();
 loadExternalPlugins();
 app.mount("#app");
 useThemeStore().init();
+useTypographyStore().init();
 
 // Bus connects after mount: panes render immediately and bind "connecting"
 // state themselves (framework section 8.6 rule 5).

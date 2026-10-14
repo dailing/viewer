@@ -2238,7 +2238,7 @@ onMounted(() => {
   align-items: center;
   color: var(--bs-primary);
   display: inline-flex;
-  font-size: 10.5px;
+  font-size: calc(var(--font-size-ui) * 7 / 8);
   gap: 4px;
 }
 
@@ -2272,7 +2272,7 @@ onMounted(() => {
 
 .chat-edit-queued {
   color: var(--color-text-muted);
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   line-height: 1;
   padding: 0;
   text-decoration: none;
@@ -2288,7 +2288,7 @@ onMounted(() => {
   align-items: center;
   color: var(--color-text-muted);
   display: flex;
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   gap: 6px;
   line-height: 1.3;
   min-height: 18px;
@@ -2301,7 +2301,7 @@ onMounted(() => {
   color: inherit;
   cursor: pointer;
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: var(--font-size-ui);
   line-height: 1;
   margin-left: auto;
   opacity: 0.7;
@@ -2314,13 +2314,13 @@ onMounted(() => {
 
 .chat-send-failed {
   color: var(--bs-danger);
-  font-size: 10.5px;
+  font-size: calc(var(--font-size-ui) * 7 / 8);
   line-height: 1.2;
 }
 
 .chat-stop-turn {
   color: var(--bs-danger);
-  font-size: 12px;
+  font-size: var(--font-size-ui);
   line-height: 1;
   padding: 0;
   text-decoration: none;
@@ -2333,7 +2333,7 @@ onMounted(() => {
 .chat-time {
   color: var(--color-text-muted);
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   line-height: 1.2;
 }
 
@@ -2342,7 +2342,7 @@ onMounted(() => {
 .chat-meta-detail {
   color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
   flex: 0 1 auto;
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
   line-height: 1.2;
   min-width: 0;
   overflow: hidden;
@@ -2410,16 +2410,18 @@ onMounted(() => {
   padding: 0 3px;
 }
 
-/* Compact markdown inside chat turns: sizes pin to the UI scale (colors and
-   anything not listed still follow the markdown theme variables). */
+/* Compact markdown inside chat turns: sizes track the CONTENT base via
+   exact coefficients (defaults: 12/20/17/15/14px at a 15px base — chained
+   off the --markdown-hN vars so 细节定制 pins scale into chat too); colors
+   and anything not listed still follow the markdown theme variables. */
 .chat-response-body {
-  --markdown-render-body-size: var(--font-size-ui);
-  --markdown-render-h1-size: 20px;
-  --markdown-render-h2-size: 17px;
-  --markdown-render-h3-size: 15px;
-  --markdown-render-h4-size: 14px;
+  --markdown-render-body-size: calc(var(--markdown-body-font-size) * 4 / 5);
+  --markdown-render-h1-size: calc(var(--markdown-h1-font-size) * 5 / 7);
+  --markdown-render-h2-size: calc(var(--markdown-h2-font-size) * 17 / 23);
+  --markdown-render-h3-size: calc(var(--markdown-h3-font-size) * 15 / 19);
+  --markdown-render-h4-size: calc(var(--markdown-h4-font-size) * 7 / 8);
   --markdown-render-paragraph-line-height: 1.48;
-  --markdown-render-paragraph-size: var(--font-size-ui);
+  --markdown-render-paragraph-size: calc(var(--markdown-body-font-size) * 4 / 5);
   --markdown-render-pre-padding: 8px;
   flex: 0 0 auto;
   max-width: 100%;
@@ -2437,7 +2439,7 @@ onMounted(() => {
   align-items: center;
   cursor: pointer;
   display: grid;
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
   gap: 4px;
   grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
   line-height: 1.3;
@@ -2471,7 +2473,7 @@ onMounted(() => {
 .chat-tool-group-count {
   border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
   border-radius: 999px;
-  font-size: 9px;
+  font-size: calc(var(--font-size-ui) * 3 / 4);
   font-weight: 600;
   line-height: 1.2;
   padding: 0 5px;
@@ -2479,7 +2481,7 @@ onMounted(() => {
 }
 
 .chat-tool-group-chevron {
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
   transition: transform 120ms ease;
 }
 

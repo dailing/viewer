@@ -392,7 +392,8 @@ defineExpose({ focus: () => textarea.value?.focus() });
   border-radius: var(--radius-sm, 2px);
   color: var(--bs-body-color);
   font-family: inherit;
-  font-size: var(--font-size-content, 13px);
+  /* Composer text tracks the CONTENT base (13px at the default 15px). */
+  font-size: calc(var(--markdown-body-font-size, 15px) * 13 / 15);
   line-height: 1.35;
   max-height: 50vh;
   min-height: 58px;
@@ -413,7 +414,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
   align-items: center;
   color: var(--bs-danger-text-emphasis, var(--bs-danger));
   display: flex;
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   gap: 6px;
   line-height: 1.3;
   min-height: 18px;
@@ -434,7 +435,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
   color: inherit;
   cursor: pointer;
   flex: 0 0 auto;
-  font-size: 13px;
+  font-size: calc(var(--font-size-ui) * 13 / 12);
   line-height: 1;
   opacity: 0.7;
   padding: 0 2px;
@@ -488,7 +489,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
 }
 
 .composer-actions :deep(.bi) {
-  font-size: 14px;
+  font-size: calc(var(--font-size-ui) * 7 / 6);
   line-height: 1;
 }
 
@@ -522,7 +523,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
 }
 
 .dispatch-label {
-  font-size: 11px;
+  font-size: var(--font-size-ui-small);
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -535,7 +536,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
   border-radius: 999px;
   color: var(--bs-secondary-color);
   display: inline-flex;
-  font-size: 9px;
+  font-size: calc(var(--font-size-ui) * 3 / 4);
   height: 14px;
   justify-content: center;
   line-height: 1;
@@ -571,7 +572,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
 .dispatch-option {
   align-items: center;
   display: flex;
-  font-size: 12px;
+  font-size: var(--font-size-ui);
   gap: 7px;
   min-width: 0;
   padding: 6px 7px;
@@ -592,7 +593,7 @@ defineExpose({ focus: () => textarea.value?.focus() });
 
 .dispatch-empty {
   color: var(--bs-secondary-color);
-  font-size: 12px;
+  font-size: var(--font-size-ui);
   padding: 7px;
 }
 </style>

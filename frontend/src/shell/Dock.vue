@@ -440,7 +440,7 @@ const buildTime = (() => {
   border-radius: var(--radius-md);
   color: var(--color-text-muted);
   display: inline-flex;
-  font-size: 14px;
+  font-size: calc(var(--font-size-ui) * 7 / 6);
   height: 28px;
   justify-content: center;
   padding: 0;
@@ -501,7 +501,7 @@ const buildTime = (() => {
   border-radius: 50%;
   color: var(--color-text-muted);
   display: none;
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
   height: 14px;
   justify-content: center;
   padding: 0;
@@ -646,7 +646,7 @@ const buildTime = (() => {
 .dock-build {
   color: var(--color-text-subtle);
   display: block;
-  font-size: 10px;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
   overflow: hidden;
   padding: 2px 8px 4px;
   text-overflow: ellipsis;

@@ -13,7 +13,7 @@
  * reconnect, a baseline mismatch triggers the same reload. The pane chrome's
  * refresh action bumps `reloadTick` for a manual re-read.
  */
-import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, inject, onUnmounted, ref, watch } from "vue";
 
 import { RpcError } from "@viewer/bus-sdk";
 import type { BusFrame } from "@viewer/bus-sdk";
@@ -68,6 +68,8 @@ const error = ref("");
 const limit = ref(0);
 const text = ref("");
 const imageUrl = ref("");
+/** Path whose content is on screen; same-path reloads keep the old render mounted. */
+let loadedPath: string | null = null;
 const rootRef = ref<HTMLElement | null>(null);
 const renderedRef = ref<HTMLElement | null>(null);
 /** Bumped by server change events; remounts PdfPreview (its cache re-keys on mtime). */
@@ -90,19 +92,27 @@ function formatBytes(bytes: number): string {
 }
 
 async function load(path: string | null, preserveScroll = false): Promise<void> {
-  const scroller = preserveScroll
-    ? rootRef.value?.querySelector<HTMLElement>(".preview-text, .preview-markdown, .preview-latex-wrap")
-    : null;
-  const previousTop = scroller?.scrollTop ?? 0;
-  status.value = path === null ? "empty" : "loading";
-  error.value = "";
-  text.value = "";
-  imageUrl.value = "";
-  if (path === null) return;
+  // Watch/refresh reload of the file already on screen: keep the old render
+  // mounted while fetching. Unmounting would destroy the scroll position —
+  // TexPreview renders async after remount, so no restore could ever stick —
+  // and flashing a loading state on every background change is noise.
+  const keepMounted =
+    preserveScroll && path !== null && path === loadedPath && status.value === "ready";
+  if (!keepMounted) {
+    status.value = path === null ? "empty" : "loading";
+    error.value = "";
+    text.value = "";
+    imageUrl.value = "";
+  }
+  if (path === null) {
+    loadedPath = null;
+    return;
+  }
   const previewKind = kindForPath(path);
   if (previewKind === "pdf") {
     // PdfPreview fetches its own pages; the whole-file read is skipped.
     status.value = "ready";
+    loadedPath = path;
     return;
   }
   try {
@@ -113,6 +123,7 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
       const ticket = (await ctx.bus.request("file:_:ticket", { path })) as TicketReply;
       imageUrl.value = ticket.url;
       status.value = "ready";
+      loadedPath = path;
       return;
     }
     const result = (await ctx.bus.request("file:_:read", {
@@ -125,11 +136,7 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
     }
     text.value = result.content;
     status.value = "ready";
-    if (previousTop > 0) {
-      await nextTick();
-      const next = rootRef.value?.querySelector<HTMLElement>(".preview-text, .preview-markdown, .preview-latex-wrap");
-      if (next !== null && next !== undefined) next.scrollTop = previousTop;
-    }
+    loadedPath = path;
   } catch (cause) {
     if (cause instanceof RpcError && cause.code === "too_large") {
       limit.value = TEXT_MAX_BYTES;

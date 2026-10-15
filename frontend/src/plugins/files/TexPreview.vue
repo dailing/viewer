@@ -134,6 +134,7 @@ function normalizeFrontmatter(source: string): string {
   return out;
 }
 
+const wrapRef = ref<HTMLElement | null>(null);
 const rootRef = ref<HTMLElement | null>(null);
 const html = ref("");
 /** Stale-render guard: bumped per render, awaited steps bail when it moved on. */
@@ -141,6 +142,118 @@ let renderToken = 0;
 let enginePromise: Promise<FlModule> | null = null;
 let cssInjected = false;
 const ticketCache = new Map<string, string>();
+
+/*
+ * Scroll preservation: re-renders replace the v-html tree wholesale, which
+ * clamps the wrap's scrollTop to 0. Before each render of the SAME file we
+ * capture an anchor (child-index path from the rendered root to the first
+ * element crossing the viewport top, plus its px offset), then re-apply it
+ * after the DOM swap, after image rewriting, and on late image loads — image
+ * heights settle asynchronously and would otherwise push the content. Once
+ * the user scrolls manually the anchor is locked off for that render cycle.
+ * Path switches render fresh from the top (no anchor).
+ */
+interface ScrollAnchor {
+  path: number[];
+  /** Text key of the anchored element: robust to sibling insertions above. */
+  tag: string;
+  text: string;
+  offset: number;
+  ratio: number;
+}
+
+let lastRenderedPath = "";
+let anchorLock = false;
+let ignoreScrollUntil = 0;
+
+function captureAnchor(): ScrollAnchor | null {
+  const wrap = wrapRef.value;
+  const root = rootRef.value;
+  if (wrap === null || root === null || wrap.scrollTop === 0) return null;
+  const top = wrap.getBoundingClientRect().top;
+  const path: number[] = [];
+  let current: Element = root;
+  for (let depth = 0; depth < 8; depth++) {
+    let next: Element | null = null;
+    let index = 0;
+    for (const child of Array.from(current.children)) {
+      if (child.getBoundingClientRect().bottom > top + 2) {
+        next = child;
+        break;
+      }
+      index++;
+    }
+    if (next === null) break;
+    path.push(index);
+    current = next;
+  }
+  if (path.length === 0) return null;
+  return {
+    path,
+    tag: current.tagName.toLowerCase(),
+    text: (current.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80),
+    offset: current.getBoundingClientRect().top - top,
+    ratio: wrap.scrollTop / Math.max(1, wrap.scrollHeight),
+  };
+}
+
+function setScroll(value: number): void {
+  const wrap = wrapRef.value;
+  if (wrap === null) return;
+  ignoreScrollUntil = performance.now() + 150;
+  wrap.scrollTop = value;
+}
+
+function restoreAnchor(anchor: ScrollAnchor): void {
+  const wrap = wrapRef.value;
+  const root = rootRef.value;
+  if (wrap === null || root === null) return;
+  // Text key first: child indices shift when content is inserted above.
+  if (anchor.text !== "") {
+    for (const el of Array.from(root.querySelectorAll(anchor.tag))) {
+      const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+      if (text.startsWith(anchor.text)) {
+        const delta =
+          el.getBoundingClientRect().top - wrap.getBoundingClientRect().top - anchor.offset;
+        setScroll(wrap.scrollTop + delta);
+        return;
+      }
+    }
+  }
+  let current: Element = root;
+  for (const index of anchor.path) {
+    const next = current.children.item(index);
+    if (next === null) {
+      setScroll(anchor.ratio * wrap.scrollHeight);
+      return;
+    }
+    current = next;
+  }
+  const delta = current.getBoundingClientRect().top - wrap.getBoundingClientRect().top - anchor.offset;
+  setScroll(wrap.scrollTop + delta);
+}
+
+function onUserScroll(): void {
+  if (performance.now() < ignoreScrollUntil) return;
+  anchorLock = true;
+}
+
+/** Re-apply the anchor as late-loading images change content height. */
+function armImageLoadReanchor(token: number, anchor: ScrollAnchor): void {
+  const imgs = rootRef.value?.querySelectorAll("img");
+  if (imgs === null || imgs === undefined) return;
+  for (const img of Array.from(imgs)) {
+    if (img.complete) continue;
+    img.addEventListener(
+      "load",
+      () => {
+        if (token !== renderToken || anchorLock) return;
+        restoreAnchor(anchor);
+      },
+      { once: true },
+    );
+  }
+}
 
 function engine(): Promise<FlModule> {
   enginePromise ??= (async () => {
@@ -374,6 +487,8 @@ function onCiteLeave(event: MouseEvent): void {
 
 async function renderNow(): Promise<void> {
   const token = ++renderToken;
+  anchorLock = false;
+  const anchor = props.path === lastRenderedPath ? captureAnchor() : null;
   try {
     const mod = await engine();
     injectArticleCss(mod.article_css());
@@ -384,8 +499,23 @@ async function renderNow(): Promise<void> {
     if (out.warnings.length > 0) console.debug("[tex] render warnings", out.warnings);
     await nextTick();
     if (token !== renderToken) return;
+    lastRenderedPath = props.path;
     fixTitleblockOrder();
-    void rewriteImages(token);
+    if (anchor !== null) restoreAnchor(anchor);
+    await rewriteImages(token);
+    if (token !== renderToken) return;
+    if (anchor !== null && !anchorLock) {
+      restoreAnchor(anchor);
+      armImageLoadReanchor(token, anchor);
+      // MathML webfonts (Latin Modern Math & friends) settle asynchronously
+      // after the DOM swap and shift equation heights — re-anchor once they do.
+      if (document.fonts.status === "loading") {
+        void document.fonts.ready.then(() => {
+          if (token !== renderToken || anchorLock) return;
+          restoreAnchor(anchor);
+        });
+      }
+    }
   } catch (cause) {
     if (token !== renderToken) return;
     console.warn("[tex] render failed", cause);
@@ -407,7 +537,13 @@ watch(
 </script>
 
 <template>
-  <div class="preview-latex-wrap" @mouseover="onCiteHover" @mouseout="onCiteLeave">
+  <div
+    ref="wrapRef"
+    class="preview-latex-wrap"
+    @mouseover="onCiteHover"
+    @mouseout="onCiteLeave"
+    @scroll.passive="onUserScroll"
+  >
     <div v-if="html === ''" class="preview-latex-loading">正在渲染 LaTeX…</div>
     <div v-else ref="rootRef" class="preview-latex" v-html="html"></div>
     <div

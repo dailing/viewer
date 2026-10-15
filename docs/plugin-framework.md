@@ -1,6 +1,8 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.90**（2026-10-13）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.91**（2026-10-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+
+> v0.91 变更：**LaTeX 预览滚动保持**——①`FilePreview` 同路径重载（watch 事件/手动刷新）不再卸载旧渲染：`load(preserveScroll)` 在内容已在屏时保持 status/text 不动、后台取新内容（原来 status→loading 会卸载 TexPreview，异步重渲后任何 scrollTop 恢复都不可能生效）；内容未变则完全不触发重渲。②`TexPreview` 重渲锚点：同文件重渲前捕获视口顶部最深处元素（标签+文本键+子索引路径+px 偏移），v-html 替换后恢复——文本键优先（上方插入内容导致兄弟索引漂移时仍精确），索引路径兜底，比例最后；图片改写完成后再恢复一次，未加载完的 img load 时继续重锚，`document.fonts` 仍在 loading 时 MathML 字体落地后再重锚一次（首次编辑时公式高度会随字体落地变化）；用户手动滚动即锁定本轮不再重锚。切换文件不锚定（新文件从顶部开始）。无后端改动。
 
 > v0.90 变更：**LaTeX 预览出版类前置元数据适配 + PDF 图内联 + 引用悬停**——①`TexPreview.vue` 新增前置预处理 `normalizeFrontmatter`（主源与 `\input` 伴随文件同套）：剥离 `\title[short]`/`\author[marks]` 可选参数（引擎会把标题渲成 `[`、作者正文丢失）、`\affil[n]{…}`→`\thanks{…}`、sn-jnl 命令式 `\abstract{…}`→环境式、删除 `\FloatBarrier`、解开 `\fnm/\sur/\orgdiv/\orgname/\orgaddress/\city/\postcode/\country` 等单参数命令（内层优先迭代）；替换不改行数，引擎警告行号保持准确。真实 sn-jnl 论文（9 作者 7 单位）验证：46 警告→0。②PDF 格式 `\includegraphics` 不再降级为链接片——经 `file:_:pdfpage`（page 1、scale 2、trim 0 全页）取 WebP 栅格转 blob URL 内联显示，复用 PdfPreview 的服务端管线与缓存；blob 随重渲/卸载回收。EPS 等其他不可显示格式仍为链接片。③引用悬停：悬停 `\cite` 链接（`#bib-KEY`）显示对应文献 `<dd>` 全文的浮动 tooltip（fixed 定位、viewport 右缘钳制、pointer-events 无），不跳转即可核对条目。④标题块顺序修正：前置元数据写在 `\maketitle` 前的类（sn-jnl）导致引擎把摘要排在标题前，渲染后 DOM 重排 titleblock→abstract。代价说明：作者↔单位的上标编号随 `\author[marks]` 剥离丢失（单位列表仍完整按序列出）。无后端改动。
 
@@ -583,6 +585,7 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.91**（2026-10-14）：**LaTeX 预览滚动保持**——FilePreview 同路径重载保持旧渲染挂载（消除卸载导致的滚动丢失与 loading 闪烁，内容未变零重渲）；TexPreview 重渲锚点恢复（文本键优先、索引路径兜底、比例最后；图片/字体异步落地后重锚；用户滚动即锁定；切文件不锚定）。
 - **v0.90**（2026-10-13）：**LaTeX 预览增强**——出版类前置元数据预处理（`\title[..]`/`\author[..]` 剥可选参数、`\affil`→`\thanks`、命令式 `\abstract`→环境式、解 `\fnm/\sur/\org*` 等，行数不变；真实 sn-jnl 论文 46 警告→0）；PDF 图经 `file:_:pdfpage` 栅格化内联（blob URL，随重渲回收），EPS 仍链接片；引用悬停显示文献条目全文 tooltip；titleblock/abstract DOM 重排修正。代价：作者↔单位上标编号丢失。
 - **v0.89**（2026-10-13）：**LaTeX 文件预览**——files 插件新增 `.tex` kind（`TexPreview.vue`）：faster-latex WASM 引擎（`@arena.ai/faster-latex`，懒加载 chunk）浏览器端整文档渲染，公式为原生 MathML；`\input/\include/.bib` 经 `file:_:read` 组成虚拟文件映射，`\includegraphics` 改写为 ticket URL（不可显示格式→链接片）；引擎 article 样式表注入 `<head>` + `--fl-*`/字体/标题字号桥接主题与字号系统；防抖 250ms，无后端改动。
 - **v0.88**（2026-10-07）：**字号系统（浏览器本地）**——UI 字号（`--font-size-ui`，默认 12）+ 内容字号（`--markdown-body-font-size`，默认 15）两个基础字号，存 localStorage（per-browser，不走服务端同步）；派生字号（ui-small/H1–H4/代码）改为 `.app-shell` 上的精确分数 `calc()` 系数，chat 紧凑渲染与终端字号挂内容基准；设置新增「字号」组（基础两项 + 细节钉值，同款自动/定制交互）；主题高级定制移除 bodyFontSize/codeFontSize（避免双系统抢同一变量）；默认值逐项等于旧固定字号，升级零视觉变化；约 50 处硬编码 px 清扫为 var/calc。纯前端，无后端改动。

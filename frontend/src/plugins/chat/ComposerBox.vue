@@ -3,6 +3,7 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } fr
 import type { PluginCtx } from "../../shell/ctx";
 import { useInputSessionsStore } from "../../stores/inputSessions";
 import { sendInputSession } from "../voice/inputSessionVoice";
+import { rawModeEnabled, setRawMode } from "./rawMode";
 import VoiceInputButton from "../voice/VoiceInputButton.vue";
 import { useVoiceStore } from "../voice/voiceStore";
 import type { Role } from "./types";
@@ -43,6 +44,7 @@ const sendNow = computed({
   get: () => session.value.parallel,
   set: (value: boolean) => inputs.patch(props.contextId, { parallel: value }),
 });
+
 
 const voice = useVoiceStore();
 const voiceError = computed(() => {
@@ -120,6 +122,15 @@ const bus = injectedCtx.bus;
 // contextId is "chat:{viewKey}"; viewKey carries a "#suffix" on multi-view
 // copies, which RPC addressing must strip.
 const chatId = props.contextId.slice("chat:".length).split("#")[0];
+
+// Persistent per-line raw toggle (framework v0.92): while armed, sends from
+// this chat line carry raw=true — zero viewer-side prompt injection, like
+// driving the agent from its own CLI. Keyed by chat + send-target branch
+// (draftBranchId), so each line remembers its own mode.
+const raw = computed({
+  get: () => rawModeEnabled(chatId, props.draftBranchId),
+  set: (value: boolean) => setRawMode(chatId, props.draftBranchId, value),
+});
 const draftSource = crypto.randomUUID();
 let lastSynced: string | null = null;
 let syncTimer: number | undefined;
@@ -350,6 +361,17 @@ defineExpose({ focus: () => textarea.value?.focus() });
           @click="sendNow = !sendNow"
         >
           <i class="bi" :class="sendNow ? 'bi-lightning-fill' : 'bi-lightning'" />
+        </button>
+        <button
+          class="btn btn-sm btn-outline-secondary action-button"
+          :class="{ active: raw }"
+          type="button"
+          :title="raw ? 'Raw 已开启：此线路的消息原样发送，不注入历史/memory/角色 prompt（状态按 chat+分支保持）' : 'Raw：此线路的消息不注入任何 viewer 上下文，像直接用 CLI 驱动 agent（按 chat+分支记忆，非一次性）'"
+          :aria-pressed="raw"
+          aria-label="Toggle raw mode for this chat line"
+          @click="raw = !raw"
+        >
+          <i class="bi bi-incognito" />
         </button>
         <button class="btn btn-sm btn-primary action-button" type="button" title="Dispatch (Ctrl+Enter)" aria-label="Dispatch message" @click="handleSend(false)">
           <i class="bi bi-send" />

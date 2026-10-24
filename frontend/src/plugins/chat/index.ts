@@ -5,7 +5,8 @@ import { definePlugin } from "../../shell/definePlugin";
 import { contentUid, useLayoutStore } from "../../stores/layout";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { registerInputSessionSender, type InputSession } from "../../stores/inputSessions";
-import { dockStateFor, isErrorStopReason, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
+import { dockStateFor, isErrorStopReason, markBackground, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
+import { rawModeEnabled } from "./rawMode";
 import type { ChatList } from "./types";
 
 function createDockProvider(ctx: PluginCtx): DockProvider {
@@ -75,6 +76,14 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     }
     sync();
   });
+  // Background-hold feed: a line whose turn ended with live background
+  // processes stays "running" until the watcher releases it.
+  ctx.bus.subscribe("chat:_:background", (frame) => {
+    const value = frame.value as { chat_id?: string; active?: boolean } | undefined;
+    if (value === undefined || typeof value.chat_id !== "string") return;
+    markBackground(value.chat_id, value.active === true);
+    sync();
+  });
   const handleChatsChanged = (): void => { void refresh(); };
   window.addEventListener("viewer:chats-changed", handleChatsChanged);
   ctx.onDispose(() => window.removeEventListener("viewer:chats-changed", handleChatsChanged));
@@ -107,10 +116,14 @@ export default definePlugin({
     const unregister = registerInputSessionSender("chat", async (session: InputSession) => {
       const message = session.text.trim();
       if (!message) return false;
-      const payload: Record<string, unknown> = { chat_id: session.instanceId.split("#")[0], message };
+      const chatId = session.instanceId.split("#")[0];
+      const payload: Record<string, unknown> = { chat_id: chatId, message };
       if (session.selectedRoleIds.length > 0) payload.role_ids = session.selectedRoleIds;
       if (session.forceNewSession) payload.force_new_session = true;
       if (session.parallel) payload.parallel_dispatch = true;
+      // The workspace-bar send has no branch selection: it lands on the
+      // mainline, so it honors the mainline's raw toggle (framework v0.92).
+      if (rawModeEnabled(chatId, "")) payload.raw = true;
       // Same as ChatPane.send: outwait LLM role routing (up to
       // llm.timeout_seconds, default 60s) instead of the bus's 30s default.
       await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 });

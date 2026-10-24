@@ -163,6 +163,11 @@ export function renderMarkdown(source: string): string {
   return md.render(source, {});
 }
 
+/** Standalone code block with line numbers, same structure as markdown fences. */
+export function renderCodeBlock(code: string, language: string): string {
+  return renderCodeFence(code, language.toLowerCase());
+}
+
 export async function renderMermaidIn(container: HTMLElement | null, idPrefix = "mermaid"): Promise<void> {
   await nextTick();
   if (!container) return;

@@ -1,6 +1,14 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.91**（2026-10-14）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v0.95**（2026-10-23）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+
+> v0.95 变更：**文件下载**——`/api/files/raw` 新增 `?download=1` 参数：gateway 回 `Content-Disposition: attachment; filename*=UTF-8''<PathEscape(base)>`，字节仍走 ServeContent 流式（不经前端内存，无大小上限）；files 面板 chrome 在有打开文件时新增下载按钮（`bi-download`，紧随刷新按钮）：取 ticket → URL 拼 `&download=1` → `<a download>` 点击，浏览器原生保存对话框。
+
+> v0.94 变更：**ipynb ANSI 完整渲染**——notebook 文本输出（stream/error traceback/text-plain/JSON）不再剥 ANSI，改经 `plugins/files/ansi.ts` 完整渲染为 span：SGR 16 色/256 色/真彩 + bold/dim/italic/underline/strikethrough/inverse，`\r` 真终端行覆盖语义（tqdm 进度条塌缩为终态）、`\b` 退格、CSI K 行擦除，其余转义（光标移动/OSC）丢弃；逐字符样式缓冲 + 同行同 CSS 合并 span；文本全部 HTML 转义，v-html 安全；调色板用 xterm 固定值（深色主题下黑色不可见为已知取舍，同 Jupyter）。截断先作用于原始文本再渲染，未闭合 SGR 容忍。
+
+> v0.93 变更：**ipynb 预览（纯前端）**——files 插件新增 `.ipynb` kind（`NotebookPreview.vue` + 纯解析模块 `notebookModel.ts`）：notebook JSON 走 `file:_:ticket` → `/api/files/raw` 数据面获取（绕过 bus read 1 MiB 上限，内嵌输出的真实 notebook 常超限），render/source 切换同 latex；markdown cell 走共享 markdown 管线（KaTeX/mermaid），code cell hljs 高亮 + 行号 + `execution_count` gutter；输出渲染：stream 文本（stderr 染色）、base64 栅格图、SVG 包 data-URL `<img>`（脚本不执行）、`text/html` 沙箱 iframe（无 JS，交互式输出只见静态回退）、JSON pretty-print、error traceback 剥 ANSI；单输出文本 cap 64K + 截断提示；同路径 reload 保持挂载并恢复滚动偏移（TexPreview 同款契约）。零后端改动。
+
+> v0.92 变更：**Raw 发送模式（composer 隐身开关）**——composer 在 ⚡ 旁新增持久 raw 开关（`bi-incognito`），状态浏览器本地按 chat+branch 记忆（`viewer.chatRaw.v1`，键 `chatId:branchId`，切分支 tab 即切状态）。raw 发送带 `raw: true`：prompt = @引用段 + 消息本体，跳过 workspace/chat 公共 prompt、role prompt、line context（summaries+tail+recall）与 "while you were away" 桥；session 语义完全不变（该 resume 就 resume——像直接用 CLI 驱动 agent，viewer 只显示）。写侧照常（turn summary、Hindsight retain 不关门），关掉 raw 后新 session 立即恢复完整注入。raw 标志随排队消息携带；后台任务完成的合成续跑继承该线路最后一次 dispatch 的 raw 状态（内存 `lineRaw`，重启归零=正常模式）。想开纯原生环境：新开 branch + 开 raw（branch 首条 turn 本来就是 fresh ephemeral session）。已有 session 里早先注入的 context 仍在 agent 侧——raw 只控制「这次发送注入什么」。workspace-bar 发送无分支选择，跟随主线 raw 状态。
 
 > v0.91 变更：**LaTeX 预览滚动保持**——①`FilePreview` 同路径重载（watch 事件/手动刷新）不再卸载旧渲染：`load(preserveScroll)` 在内容已在屏时保持 status/text 不动、后台取新内容（原来 status→loading 会卸载 TexPreview，异步重渲后任何 scrollTop 恢复都不可能生效）；内容未变则完全不触发重渲。②`TexPreview` 重渲锚点：同文件重渲前捕获视口顶部最深处元素（标签+文本键+子索引路径+px 偏移），v-html 替换后恢复——文本键优先（上方插入内容导致兄弟索引漂移时仍精确），索引路径兜底，比例最后；图片改写完成后再恢复一次，未加载完的 img load 时继续重锚，`document.fonts` 仍在 loading 时 MathML 字体落地后再重锚一次（首次编辑时公式高度会随字体落地变化）；用户手动滚动即锁定本轮不再重锚。切换文件不锚定（新文件从顶部开始）。无后端改动。
 
@@ -585,6 +593,10 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v0.95**（2026-10-23）：**文件下载**——`/api/files/raw?download=1` 回 `Content-Disposition: attachment`（UTF-8 filename*，ServeContent 流式不变）；files 面板 chrome 新增下载按钮（ticket URL 拼参数 + `<a download>`）。
+- **v0.94**（2026-10-23）：**ipynb ANSI 完整渲染**——notebook 文本输出经 `ansi.ts` 渲染为 span（SGR 16/256/真彩 + 样式，`\r` 行覆盖/`\b`/CSI K，其余丢弃），不再剥除；截断先于渲染；调色板 xterm 固定值。
+- **v0.93**（2026-10-23）：**ipynb 预览（纯前端）**——files 插件新增 `.ipynb` kind：notebook JSON 走 ticket/raw 数据面（绕 1 MiB bus 上限）；markdown cell 共享 markdown 管线，code cell hljs+行号+执行计数 gutter；输出：stream/stderr、栅格图、SVG data-URL（禁脚本）、html 沙箱 iframe（无 JS）、JSON pretty、traceback 剥 ANSI；64K 输出截断；reload 保持挂载恢复滚动。
+- **v0.92**（2026-10-23）：**Raw 发送模式**——composer 新增持久 per-line raw 开关（浏览器本地按 chat+branch 记忆）；raw 发送零注入（无公共/role prompt、无 line context、无桥），session 照常 resume，写侧（summary/retain）照常；排队消息与后台续跑继承 raw。
 - **v0.91**（2026-10-14）：**LaTeX 预览滚动保持**——FilePreview 同路径重载保持旧渲染挂载（消除卸载导致的滚动丢失与 loading 闪烁，内容未变零重渲）；TexPreview 重渲锚点恢复（文本键优先、索引路径兜底、比例最后；图片/字体异步落地后重锚；用户滚动即锁定；切文件不锚定）。
 - **v0.90**（2026-10-13）：**LaTeX 预览增强**——出版类前置元数据预处理（`\title[..]`/`\author[..]` 剥可选参数、`\affil`→`\thanks`、命令式 `\abstract`→环境式、解 `\fnm/\sur/\org*` 等，行数不变；真实 sn-jnl 论文 46 警告→0）；PDF 图经 `file:_:pdfpage` 栅格化内联（blob URL，随重渲回收），EPS 仍链接片；引用悬停显示文献条目全文 tooltip；titleblock/abstract DOM 重排修正。代价：作者↔单位上标编号丢失。
 - **v0.89**（2026-10-13）：**LaTeX 文件预览**——files 插件新增 `.tex` kind（`TexPreview.vue`）：faster-latex WASM 引擎（`@arena.ai/faster-latex`，懒加载 chunk）浏览器端整文档渲染，公式为原生 MathML；`\input/\include/.bib` 经 `file:_:read` 组成虚拟文件映射，`\includegraphics` 改写为 ticket URL（不可显示格式→链接片）；引擎 article 样式表注入 `<head>` + `--fl-*`/字体/标题字号桥接主题与字号系统；防抖 250ms，无后端改动。

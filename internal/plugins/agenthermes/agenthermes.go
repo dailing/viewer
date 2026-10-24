@@ -26,10 +26,10 @@ const (
 )
 
 var Manifest = busclient.Manifest{
-	ID: PluginID, Version: "0.2.0",
+	ID: PluginID, Version: "0.3.0",
 	Slots: map[string]any{
 		PluginID + ":_:start": map[string]any{}, PluginID + ":_:prompt": map[string]any{}, PluginID + ":_:cancel": map[string]any{},
-		PluginID + ":_:catalog-refresh": map[string]any{},
+		PluginID + ":_:catalog-refresh": map[string]any{}, PluginID + ":_:background": map[string]any{},
 	},
 	Emits: map[string]any{
 		PluginID + ":_:event": map[string]any{}, PluginID + ":_:turn-ended": map[string]any{}, PluginID + ":_:catalog": map[string]any{},
@@ -38,6 +38,7 @@ var Manifest = busclient.Manifest{
 
 type session struct {
 	client    *acp.Client
+	home      string // Hermes home of the session's profile (processes.json location)
 	seq       int
 	turnID    string
 	active    bool
@@ -66,7 +67,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed), busclient.WithInstanceID("_"))
 	for channel, handler := range map[string]func(busclient.Frame){
 		PluginID + ":_:start": p.handleStart, PluginID + ":_:prompt": p.handlePrompt, PluginID + ":_:cancel": p.handleCancel,
-		PluginID + ":_:catalog-refresh": p.handleCatalogRefresh,
+		PluginID + ":_:catalog-refresh": p.handleCatalogRefresh, PluginID + ":_:background": p.handleBackground,
 	} {
 		if _, err := p.client.Subscribe(channel, func(frame busclient.Frame) { go handler(frame) }); err != nil {
 			return err
@@ -145,7 +146,7 @@ func (p *Plugin) handleStart(frame busclient.Frame) {
 			return
 		}
 	}
-	current := &session{client: client}
+	current := &session{client: client, home: hermesHome(resolveProfile(request.Target))}
 	client.OnUpdate(func(update acp.Update) { p.handleUpdate(sessionID, current, update) })
 	p.mu.Lock()
 	if replaced := p.sessions[sessionID]; replaced != nil {
@@ -259,19 +260,24 @@ func acpModelID(target agentdriver.Target) string {
 	return provider + ":" + model
 }
 
+func resolveProfile(target agentdriver.Target) string {
+	profile := strings.TrimSpace(os.Getenv("VIEWER_HERMES_PROFILE"))
+	if profile == "" {
+		profile = "default"
+	}
+	if value, ok := target.Parameters["profile"].(string); ok && strings.TrimSpace(value) != "" {
+		profile = strings.TrimSpace(value)
+	}
+	return profile
+}
+
 func (p *Plugin) newClient(ctx context.Context, target agentdriver.Target) (*acp.Client, error) {
 	command := strings.TrimSpace(os.Getenv("VIEWER_HERMES_COMMAND"))
 	if command == "" {
 		command = "hermes"
 	}
-	profile := strings.TrimSpace(os.Getenv("VIEWER_HERMES_PROFILE"))
-	if profile == "" {
-		profile = "default"
-	}
+	profile := resolveProfile(target)
 	yolo := envBool("VIEWER_HERMES_YOLO", true)
-	if value, ok := target.Parameters["profile"].(string); ok && strings.TrimSpace(value) != "" {
-		profile = strings.TrimSpace(value)
-	}
 	if value, ok := target.Parameters["yolo"].(bool); ok {
 		yolo = value
 	}

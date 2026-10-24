@@ -47,6 +47,9 @@ function loadUnread(): Record<string, UnreadKind> {
 export const chatDockStatus = reactive({
   /** chat id → number of in-flight turns. */
   running: {} as Record<string, number>,
+  /** chat id → a background hold keeps the line busy after the turn ended
+   *  (its agent session's background processes still run). */
+  background: {} as Record<string, boolean>,
   /** chat id → unread kind; absence means read. Persisted. */
   unread: loadUnread(),
 });
@@ -72,6 +75,17 @@ export function setRunningChats(ids: string[]): void {
 export function markTurnStarted(chatID: string): void {
   if (chatID === "") return;
   chatDockStatus.running[chatID] = (chatDockStatus.running[chatID] ?? 0) + 1;
+}
+
+/** chat:_:background feed: a line held by live background processes keeps
+ *  the running dot after its turn's completed frame. */
+export function markBackground(chatID: string, active: boolean): void {
+  if (chatID === "") return;
+  if (active) {
+    chatDockStatus.background[chatID] = true;
+  } else {
+    delete chatDockStatus.background[chatID];
+  }
 }
 
 /**
@@ -103,12 +117,13 @@ export function markChatRead(chatID: string): void {
 /** Drop all state for a removed chat. */
 export function forgetChat(chatID: string): void {
   delete chatDockStatus.running[chatID];
+  delete chatDockStatus.background[chatID];
   markChatRead(chatID);
 }
 
 /** Dock dot state for one chat: running wins over unread, error over done. */
 export function dockStateFor(chatID: string): ChatDockState {
-  if ((chatDockStatus.running[chatID] ?? 0) > 0) return "running";
+  if ((chatDockStatus.running[chatID] ?? 0) > 0 || chatDockStatus.background[chatID]) return "running";
   const kind = chatDockStatus.unread[chatID];
   if (kind === "error") return "error";
   if (kind === "done") return "unread";

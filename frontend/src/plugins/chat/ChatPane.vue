@@ -15,6 +15,7 @@ import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { useLayoutStore } from "../../stores/layout";
 import { registerInputSessionRuntime, useInputSessionsStore, type InputSession } from "../../stores/inputSessions";
+import { rawModeEnabled } from "./rawMode";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
 import ToolActivity from "./ToolActivity.vue";
@@ -1558,6 +1559,9 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
     if (roleIds.length > 0) payload.role_ids = roleIds;
     if (forceNewSession) payload.force_new_session = true;
     if (parallel) payload.parallel_dispatch = true;
+    // Per-line raw mode (framework v0.92): zero viewer-side prompt injection
+    // for this send; the toggle state lives browser-side per chat+branch.
+    if (rawModeEnabled(chatId, branch?.id ?? "")) payload.raw = true;
     // Dispatch replies only after LLM role routing, which may take up to
     // llm.timeout_seconds (default 60s) under local-server queueing; the
     // bus's 30s default would report 发送失败 while the backend proceeds.

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
  * File preview area: routes by extension — image (ticket URL streamed by the
- * gateway's by-reference data plane, framework §6.2), markdown / html / latex
- * (rendered, with a source mode toggled from the pane chrome), otherwise
- * utf-8 text. Oversized reads come back as `too_large` and binary files as
- * base64; both get a plain notice instead of a preview.
+ * gateway's by-reference data plane, framework §6.2), markdown / html / latex /
+ * notebook (rendered, with a source mode toggled from the pane chrome),
+ * otherwise utf-8 text. Oversized reads come back as `too_large` and binary
+ * files as base64; both get a plain notice instead of a preview.
  *
  * Open files are watched server-side (file:_:watch, renewed on an interval;
  * the server entry expires if the browser dies): an external change pushes
@@ -21,6 +21,7 @@ import type { BusFrame } from "@viewer/bus-sdk";
 import type { PluginCtx } from "../../shell/ctx";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import type { PreviewMode } from "./instanceStore";
+import NotebookPreview from "./NotebookPreview.vue";
 import PdfPreview from "./PdfPreview.vue";
 import TexPreview from "./TexPreview.vue";
 import { kindForPath } from "./types";
@@ -109,8 +110,10 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
     return;
   }
   const previewKind = kindForPath(path);
-  if (previewKind === "pdf") {
-    // PdfPreview fetches its own pages; the whole-file read is skipped.
+  if (previewKind === "pdf" || previewKind === "notebook") {
+    // PdfPreview fetches its own pages; NotebookPreview streams the file via
+    // the ticket data plane (bus reads cap at 1 MiB, notebooks with embedded
+    // outputs routinely exceed it). The whole-file read is skipped.
     status.value = "ready";
     loadedPath = path;
     return;
@@ -291,6 +294,12 @@ watch([rendered, renderedRef], () => {
         v-else-if="kind === 'latex' && mode === 'render' && path !== null"
         :path="path"
         :source="text"
+      />
+      <NotebookPreview
+        v-else-if="kind === 'notebook' && path !== null"
+        :path="path"
+        :mode="mode"
+        :reload-tick="reloadTick + autoTick"
       />
       <pre v-else class="preview-text">{{ text }}</pre>
     </template>

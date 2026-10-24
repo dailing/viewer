@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -85,6 +86,10 @@ func (s *Server) serveFileRaw(w http.ResponseWriter, r *http.Request) {
 	if info.MIME != "" {
 		// Sniffing gets SVG wrong for <img>; trust the issuer's mapping.
 		w.Header().Set("Content-Type", info.MIME)
+	}
+	if r.URL.Query().Get("download") != "" {
+		// ?download=1: force the browser's save dialog instead of inline display.
+		w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(filepath.Base(info.Path)))
 	}
 	// ServeContent adds Range, If-Modified-Since and sniffing fallbacks.
 	http.ServeContent(w, r, filepath.Base(info.Path), stat.ModTime(), file)

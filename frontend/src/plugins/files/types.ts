@@ -17,7 +17,7 @@ export interface DirectoryListing {
   entries: FileEntry[];
 }
 
-export type PreviewKind = "image" | "markdown" | "html" | "text" | "pdf" | "latex";
+export type PreviewKind = "image" | "markdown" | "html" | "text" | "pdf" | "latex" | "notebook";
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
@@ -63,6 +63,7 @@ export function kindForPath(path: string): PreviewKind {
   if (MARKDOWN_EXTS.has(ext)) return "markdown";
   if (HTML_EXTS.has(ext)) return "html";
   if (TEX_EXTS.has(ext)) return "latex";
+  if (ext === "ipynb") return "notebook";
   return "text";
 }
 

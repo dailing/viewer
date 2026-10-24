@@ -21,7 +21,7 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "chat", Version: "0.4.0",
+	ID: "chat", Version: "0.5.0",
 	Slots: map[string]any{
 		"chat:_:workspace:get": map[string]any{}, "chat:_:workspace:patch": map[string]any{},
 		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},
@@ -39,6 +39,7 @@ var Manifest = busclient.Manifest{
 	Emits: map[string]any{
 		"chat:*:message": map[string]any{}, "chat:*:block": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
 		"chat:_:turn": map[string]any{}, "chat:_:queue": map[string]any{}, "chat:_:branch": map[string]any{}, "chat:_:draft:sync": map[string]any{},
+		"chat:_:background":    map[string]any{},
 		"voice-catalog:_:chat": map[string]any{},
 	},
 }
@@ -77,6 +78,7 @@ type Plugin struct {
 	runtimes      map[string]*runtime
 	busy          map[string]bool
 	queues        map[string][]queuedMessage
+	lineRaw       map[string]bool // lineKey → last dispatch's raw flag (background resumes inherit it)
 	agents        map[string]string
 	catalogs      map[string]agentdriver.Catalog
 	turnBranches  map[string]string                   // turnID → owning line, stamped at beginTurn (live frame attribution; deleted at turn end)
@@ -86,7 +88,17 @@ type Plugin struct {
 	activeChatID  string
 	closed        bool
 	patchedBanks  map[string]bool // chat Hindsight banks whose config was already patched this process
-	wg            sync.WaitGroup
+	// background holds one line busy after its relay ended while the turn's
+	// agent session still has live background processes (background.go).
+	background         map[string]*backgroundBlock
+	backgroundWatching bool
+	// agentSlots mirrors the kernel's plugins:_:list registry: plugin id →
+	// declared RPC slot channels. Background probes are gated on the slot's
+	// presence — a request to an undeclared channel never fast-fails
+	// (chat's own *:_ event subscription matches every agent channel, so
+	// the broker finds a "subscriber") and would hang to its timeout.
+	agentSlots map[string]map[string]bool
+	wg         sync.WaitGroup
 }
 
 var (
@@ -108,7 +120,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err := migrateHistoryGraph(database, dataDir); err != nil {
 		return nil, err
 	}
-	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, turnBranches: map[string]string{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, lineRaw: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, turnBranches: map[string]string{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, background: map[string]*backgroundBlock{}, agentSlots: map[string]map[string]bool{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -152,6 +164,9 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		}
 	}
 	if _, err := p.client.Subscribe("*:_", p.handleAgentBusFrame); err != nil {
+		return err
+	}
+	if _, err := p.client.Subscribe("plugins:_:list", p.trackAgentRegistry); err != nil {
 		return err
 	}
 	if err := p.client.Connect(ctx); err != nil {

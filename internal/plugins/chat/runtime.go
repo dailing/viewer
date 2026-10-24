@@ -41,6 +41,14 @@ type dispatchRequest struct {
 	// that turn's session. Contradicts force_new_session / parallel_dispatch
 	// (both are cleared when set).
 	ContinueTurnID string `json:"continue_turn_id"`
+	// Raw sends the message with zero viewer-side injection: no
+	// workspace/chat common prompt, no role prompt, no line context
+	// (summaries/tail/recall), no role-switch bridge — the prompt is the
+	// cited section plus the message itself, like driving the agent from
+	// its own CLI. Sessions resume as usual; only this dispatch's prompt
+	// assembly changes. Write side (turn summaries, memory retain) is
+	// unaffected, so later non-raw sessions still get full context.
+	Raw bool `json:"raw"`
 	// BranchID targets a named branch (framework v0.63+). Since v0.66 a
 	// branch is a pure CONTEXT partition — a separated corner of the
 	// chat's working group — not a role/session binding: dispatching on
@@ -69,6 +77,7 @@ type queuedMessage struct {
 	message  string
 	before   int64
 	forceNew bool
+	raw      bool
 	enqueued int64
 	// dispatchID of the dispatch that queued this batch, so the turns that
 	// eventually run it link back to the user message's turn_id.
@@ -196,6 +205,7 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 		// Queue-capacity pre-check: an over-full line queue fails the
 		// dispatch before the user message lands in the timeline.
 		p.mu.Lock()
+		p.lineRaw[key] = request.Raw
 		if p.busy[key] && len(p.queues[key]) >= maxQueuedPerLine {
 			p.mu.Unlock()
 			return nil, nil, errQueueFull
@@ -227,7 +237,7 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	if !parallel {
 		p.mu.Lock()
 		if p.busy[key] {
-			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, targets: targets, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, enqueued: nowMillis(), dispatchID: dispatchID, messageID: user.ID, branchID: line})
+			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, targets: targets, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, raw: request.Raw, enqueued: nowMillis(), dispatchID: dispatchID, messageID: user.ID, branchID: line})
 			p.mu.Unlock()
 			p.publishMessage(user, line)
 			p.publishQueue(chat.ID)
@@ -329,10 +339,10 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	go func() {
 		<-startGate
 		defer p.wg.Done()
+		sessions := p.runRelay(*chat, workspace, targets, request.Message, user.CreatedAt, request.ForceNewSession, parallel, request.Raw, dispatchID)
 		if !parallel {
-			defer p.releaseBusy(startedKeys)
+			p.releaseBusyOrHold(startedKeys, sessions)
 		}
-		p.runRelay(*chat, workspace, targets, request.Message, user.CreatedAt, request.ForceNewSession, parallel, dispatchID)
 	}()
 	close(startGate)
 	return reply, user, nil
@@ -591,8 +601,8 @@ func (p *Plugin) startQueued(key string) {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		defer p.releaseBusy([]string{key})
-		p.runRelay(*chat, workspace, targets, entry.message, entry.before, entry.forceNew || stale, false, entry.dispatchID)
+		sessions := p.runRelay(*chat, workspace, targets, entry.message, entry.before, entry.forceNew || stale, false, entry.raw, entry.dispatchID)
+		p.releaseBusyOrHold([]string{key}, sessions)
 	}()
 }
 
@@ -793,7 +803,7 @@ func (p *Plugin) handleQueuedUpdate(frame busclient.Frame) {
 	p.reply(frame, map[string]any{"updated": true}, nil)
 }
 
-func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget, message string, before int64, forceNew bool, parallel bool, dispatchID string) {
+func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget, message string, before int64, forceNew bool, parallel bool, raw bool, dispatchID string) []relaySession {
 	// Resolve @<message id> citations once per dispatch (cite.go): the
 	// section precedes the user query in every prompt mode below, while
 	// context builders keep the raw message as their recall query.
@@ -804,6 +814,9 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 	// for multi-role results).
 	results := map[string][]string{}
 	batches := map[string]string{}
+	// sessions collects the agent session each target's turn ran on; the
+	// caller probes them for live background work before releasing the line.
+	sessions := []relaySession{}
 	for _, target := range targets {
 		role := target.role
 		turnID := newID()
@@ -843,8 +856,10 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 		endErr := ""
 		attempts := []map[string]any{}
 		// laneSession records the session this turn ran on, for the
-		// end-of-turn lane-queue kick below.
+		// end-of-turn lane-queue kick below. lanePluginID is the plugin
+		// owning it (the candidate that actually ran the turn).
 		laneSession := ""
+		lanePluginID := ""
 		// resolvedTarget records the candidate that actually runs the turn:
 		// the planned first candidate at resolve time, replaced on failover.
 		// Persisted on the turn row and published on the turn feed so the
@@ -884,6 +899,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 				// feed: the pane's session lanes and lane continuations build
 				// from these records.
 				laneSession = current.sessionID
+				lanePluginID = candidate.pluginID
 				if laneSession != "" {
 					if sessionErr := p.store.setTurnSession(turnID, laneSession); sessionErr != nil {
 						slog.Warn("chat turn session persistence failed", "chat_id", chat.ID, "turn_id", turnID, "error", sessionErr)
@@ -905,13 +921,23 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 				}
 				prompt := routedMessage
 				contextBytes, promptMode := 0, "existing_session"
-				if fresh {
+				switch {
+				case raw:
+					// Raw dispatch (the composer's per-line raw toggle): the
+					// prompt is the cited section plus the message itself —
+					// no common prompt, no role prompt, no line context, no
+					// bridge. The session still resumes as usual, like
+					// driving the agent from its own CLI through the viewer.
+					promptMode = "raw"
+				case fresh:
 					contextBridge := p.buildLineContext(chat, target.inputNode, target.branch, message, before, dispatchID)
 					contextBytes, promptMode = len(contextBridge), "new_session"
 					prompt = initialPrompt(workspace, chat, role, contextBridge, routedMessage)
-				} else if bridge := p.buildLineBridge(chat, target.inputNode, target.branch, role.ID, message, before, dispatchID); bridge != "" {
-					contextBytes, promptMode = len(bridge), "role_switch"
-					prompt = bridge + "\n\nCurrent routed message follows:\n" + routedMessage
+				default:
+					if bridge := p.buildLineBridge(chat, target.inputNode, target.branch, role.ID, message, before, dispatchID); bridge != "" {
+						contextBytes, promptMode = len(bridge), "role_switch"
+						prompt = bridge + "\n\nCurrent routed message follows:\n" + routedMessage
+					}
 				}
 				slog.Info("agent prompt prepared",
 					"chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID,
@@ -1018,6 +1044,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 			// key for — kick its queue directly. (For a lane relay's own key
 			// this no-ops: the deferred releaseBusy drains it.)
 			p.startQueued(runtimeKey(chat.ID, role.ID) + "\x00lane\x00" + laneSession)
+			sessions = append(sessions, relaySession{pluginID: lanePluginID, sessionID: laneSession, branch: target.branch, role: role})
 		}
 		if err != nil || reason == "error" || reason == "cancelled" {
 			break
@@ -1032,6 +1059,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 			continue
 		}
 	}
+	return sessions
 }
 
 func shouldRetryFreshHermesSession(agent string, fresh bool, reason string, hadEvents, alreadyRetried bool) bool {
@@ -1169,6 +1197,11 @@ func (p *Plugin) handleStop(frame busclient.Frame) {
 	stopped := false
 	if err == nil {
 		stopped, err = p.stopTurn(chatID, roleID, turnID)
+	}
+	if err == nil && !stopped && turnID == "" {
+		// No in-flight turn matched: with a background hold the line is
+		// busy without a turn, so stop becomes the release escape hatch.
+		stopped = p.releaseBackgroundForChat(chatID) > 0
 	}
 	p.reply(frame, map[string]any{"stopped": stopped}, err)
 }

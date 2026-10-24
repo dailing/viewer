@@ -2326,3 +2326,158 @@ func TestBranchLifecycle(t *testing.T) {
 		t.Fatalf("branches:delete reply: %+v", deleted)
 	}
 }
+
+// Raw dispatch (framework v0.92, the composer's per-line raw toggle): the
+// prompt is the message itself — no role prompt, no common prompt, no line
+// context, no bridge — while sessions resume as usual and the write side
+// (turns, summaries) is untouched.
+func TestRawDispatchSkipsInjection(t *testing.T) {
+	config := kernel.DefaultConfig()
+	config.Host, config.Port = "127.0.0.1", 0
+	server := kernel.New(config)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	defer server.Shutdown(context.Background())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", server.Port())
+
+	configClient := busclient.New(url, busclient.Manifest{ID: "raw-config", Version: "0.1.0", Slots: map[string]any{"config:_:get": map[string]any{}}, Emits: map[string]any{}})
+	_, _ = configClient.Subscribe("config:_:get", func(frame busclient.Frame) {
+		_ = pluginrpc.Respond(configClient, frame, nil)
+	})
+	if err := configClient.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer configClient.Close()
+
+	type promptRecord struct{ sessionID, turnID, text string }
+	prompts := make(chan promptRecord, 16)
+	var mu sync.Mutex
+	starts := 0
+	agent := busclient.New(url, busclient.Manifest{
+		ID:      "viewer.agent-hermes",
+		Version: "0.1.0",
+		Slots:   map[string]any{"viewer.agent-hermes:_:start": map[string]any{}, "viewer.agent-hermes:_:prompt": map[string]any{}},
+		Emits:   map[string]any{"viewer.agent-hermes:_:catalog": map[string]any{}, "viewer.agent-hermes:_:event": map[string]any{}, "viewer.agent-hermes:_:turn-ended": map[string]any{}},
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:start", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		requested, _ := value["session_id"].(string)
+		mu.Lock()
+		starts++
+		sessionID := fmt.Sprintf("sess-%d", starts)
+		if requested != "" {
+			sessionID = requested
+		}
+		mu.Unlock()
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"session_id": sessionID, "resumed": requested != ""})
+	})
+	_, _ = agent.Subscribe("viewer.agent-hermes:_:prompt", func(frame busclient.Frame) {
+		value, _ := frame.Value.(map[string]any)
+		record := promptRecord{}
+		record.sessionID, _ = value["session_id"].(string)
+		record.turnID, _ = value["turn_id"].(string)
+		record.text, _ = value["text"].(string)
+		prompts <- record
+		_ = pluginrpc.Respond(agent, frame, map[string]any{"ok": true})
+	})
+	if err := agent.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	if err := agent.Set(ctx, "viewer.agent-hermes:_:catalog", agentdriver.Catalog{Agent: "hermes", Providers: []agentdriver.ProviderCatalog{{Provider: "default", Models: []string{"m"}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(ctx, url, false); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	role := SuperRole{ID: "role-r", Name: "R", Description: "raw test role", Prompt: "Always answer in hex.", RoutingPolicyID: "pol-r", CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	policy := RoutingPolicyConfig{ID: "pol-r", Name: "R policy", Enabled: true, Candidates: []RoutingCandidateConfig{{ID: "cand-r", AgentID: "hermes", ProviderID: "default", ModelID: "m", Enabled: true}}}
+	if err := p.store.importDomain([]SuperRole{role}, RoutingConfig{DefaultRoutingPolicyID: "pol-r", RoutingPolicies: []RoutingPolicyConfig{policy}}); err != nil {
+		t.Fatal(err)
+	}
+	chat := Chat{ID: "chat-r", Name: "R chat", Root: t.TempDir(), MemberRoleIDsJSON: `["role-r"]`, CreatedAt: nowMillis(), UpdatedAt: nowMillis()}
+	if err := p.store.saveChat(&chat); err != nil {
+		t.Fatal(err)
+	}
+
+	caller := busclient.New(url, busclient.Manifest{ID: "raw-caller", Version: "0.1.0", Slots: map[string]any{}, Emits: map[string]any{}})
+	if err := caller.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer caller.Close()
+	dispatch := func(payload map[string]any) {
+		t.Helper()
+		payload["chat_id"] = "chat-r"
+		payload["role_ids"] = []string{"role-r"}
+		if _, err := caller.Request(ctx, "chat:_:dispatch", payload, 10*time.Second); err != nil {
+			t.Fatalf("dispatch %v: %v", payload, err)
+		}
+	}
+	nextPrompt := func() promptRecord {
+		t.Helper()
+		select {
+		case record := <-prompts:
+			return record
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for agent prompt")
+			return promptRecord{}
+		}
+	}
+	endTurn := func(record promptRecord) {
+		t.Helper()
+		if err := agent.Publish(ctx, "viewer.agent-hermes:_:turn-ended", map[string]any{"session_id": record.sessionID, "turn_id": record.turnID, "stop_reason": "end_turn"}); err != nil {
+			t.Fatalf("end turn %s: %v", record.turnID, err)
+		}
+	}
+
+	// Control: a normal fresh session wraps the message with the role prompt.
+	dispatch(map[string]any{"message": "normal one"})
+	normal := nextPrompt()
+	if !strings.Contains(normal.text, "Super Workspace role") || !strings.Contains(normal.text, "Always answer in hex.") {
+		t.Fatalf("normal fresh prompt should carry the role prompt, got %q", normal.text)
+	}
+	if !strings.Contains(normal.text, "normal one") {
+		t.Fatalf("normal fresh prompt should contain the message, got %q", normal.text)
+	}
+	endTurn(normal)
+
+	// Raw on a fresh session: the prompt is exactly the message — no role
+	// prompt, no common prompt, no context sections.
+	dispatch(map[string]any{"message": "raw fresh", "raw": true, "force_new_session": true})
+	fresh := nextPrompt()
+	if fresh.text != "raw fresh" {
+		t.Fatalf("raw fresh prompt must be the bare message, got %q", fresh.text)
+	}
+	endTurn(fresh)
+
+	// Raw on a resumed session: no bridge either, and the stored session is
+	// reused (raw changes prompt assembly, not session semantics — the
+	// forced-fresh session became the canonical one, as usual).
+	dispatch(map[string]any{"message": "raw resume", "raw": true})
+	resumed := nextPrompt()
+	if resumed.text != "raw resume" {
+		t.Fatalf("raw resumed prompt must be the bare message, got %q", resumed.text)
+	}
+	if resumed.sessionID != fresh.sessionID {
+		t.Fatalf("raw resume should reuse the canonical session %s, got %s", fresh.sessionID, resumed.sessionID)
+	}
+	endTurn(resumed)
+
+	// Turning raw off again restores injection on the next fresh session.
+	dispatch(map[string]any{"message": "normal again", "force_new_session": true})
+	restored := nextPrompt()
+	if !strings.Contains(restored.text, "Super Workspace role") {
+		t.Fatalf("non-raw fresh prompt should carry the role prompt again, got %q", restored.text)
+	}
+	endTurn(restored)
+}

@@ -127,6 +127,23 @@ watchEffect(() => {
         reloadTick.value += 1;
       },
     });
+    actions.push({
+      id: "download",
+      title: "下载源文件",
+      icon: "bi-download",
+      run: async () => {
+        const path = file.value;
+        if (path === null) return;
+        // Ticket data plane streams the bytes; ?download=1 makes the gateway
+        // answer Content-Disposition: attachment so the browser saves instead
+        // of displaying inline.
+        const ticket = (await ctx.bus.request("file:_:ticket", { path })) as { url: string };
+        const anchor = document.createElement("a");
+        anchor.href = `${ticket.url}&download=1`;
+        anchor.download = basename(path);
+        anchor.click();
+      },
+    });
   }
   if (previewKind.value === "pdf") {
     actions.push({
@@ -152,7 +169,12 @@ watchEffect(() => {
       },
     });
   }
-  if (previewKind.value === "markdown" || previewKind.value === "html" || previewKind.value === "latex") {
+  if (
+    previewKind.value === "markdown" ||
+    previewKind.value === "html" ||
+    previewKind.value === "latex" ||
+    previewKind.value === "notebook"
+  ) {
     actions.push({
       id: "toggle-mode",
       title: mode.value === "render" ? "查看源码" : "查看渲染",

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,6 +56,34 @@ func TestServeFileRawStreamsContent(t *testing.T) {
 	}
 	if rec.Body.String() != string(content[:9]) {
 		t.Fatalf("range body = %q, want %q", rec.Body.String(), string(content[:9]))
+	}
+}
+
+func TestServeFileRawDownloadDisposition(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "笔记本 1.ipynb")
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := rawTestServer(t, func(context.Context, string) (rawFileInfo, error) {
+		return rawFileInfo{Path: path}, nil
+	})
+
+	rec := httptest.NewRecorder()
+	server.serveHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/files/raw?ticket=good&download=1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := "attachment; filename*=UTF-8''" + url.PathEscape("笔记本 1.ipynb")
+	if got := rec.Header().Get("Content-Disposition"); got != want {
+		t.Fatalf("Content-Disposition = %q, want %q", got, want)
+	}
+
+	// Without the flag the browser decides (inline display): no disposition header.
+	rec = httptest.NewRecorder()
+	server.serveHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/files/raw?ticket=good", nil))
+	if got := rec.Header().Get("Content-Disposition"); got != "" {
+		t.Fatalf("Content-Disposition = %q, want empty", got)
 	}
 }
 

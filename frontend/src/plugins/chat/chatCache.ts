@@ -40,6 +40,10 @@ export interface ChatCacheEntry {
   loadedLo: number;
   /** Max occurred_at among loaded blocks (delta fetch boundary). */
   blockHigh: number;
+  /** Detached-window upper boundary. A detached entry is never hydrated as
+   *  though it were at the live edge; load() replaces it with a fresh page. */
+  hasNewer: boolean;
+  loadedHi: MessageCursor | null;
   /** Per-turn routing labels (turn id → execution target) for the loaded span. */
   turnTargets: Record<string, TurnTargetEntry>;
 }

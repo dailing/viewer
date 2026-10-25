@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"viewer/internal/plugins/pluginrpc"
 	"viewer/sdk/go/busclient"
 )
 
@@ -30,6 +31,8 @@ var Manifest = busclient.Manifest{
 	Slots: map[string]any{"restart": map[string]any{}, "states": map[string]any{}, "list": map[string]any{}, "upsert": map[string]any{}, "delete": map[string]any{}, "start": map[string]any{}, "stop": map[string]any{}},
 	Emits: map[string]any{"states": map[string]any{}, "lifecycle": map[string]any{}},
 }
+
+var errPluginDisabled = errors.New("plugin is disabled")
 
 type Config struct {
 	KernelWS         string
@@ -68,6 +71,10 @@ type registryEntry struct {
 	Autostart *bool    `json:"autostart,omitempty"`
 }
 
+func (e registryEntry) enabled() bool {
+	return e.Enabled == nil || *e.Enabled
+}
+
 type managedPlugin struct {
 	opMu          sync.Mutex
 	id, path      string
@@ -93,9 +100,12 @@ type Plugin struct {
 	config Config
 	client *busclient.Client
 
-	mu       sync.Mutex
-	managed  map[string]*managedPlugin
-	stopping bool
+	// registryMu serializes manager read-modify-write transactions. mu guards
+	// the in-memory maps and process fields; registryMu is always acquired first.
+	registryMu sync.Mutex
+	mu         sync.Mutex
+	managed    map[string]*managedPlugin
+	stopping   bool
 
 	// registered holds every registry.json id (including disabled entries)
 	// so the orphan-assets sweep never collects a merely disabled plugin.
@@ -144,23 +154,16 @@ func New(config Config) (*Plugin, error) {
 	managed := make(map[string]*managedPlugin)
 	registered := make(map[string]bool, len(decoded.Plugins))
 	for _, entry := range decoded.Plugins {
-		if entry.ID != "" {
-			registered[entry.ID] = true
-		}
-		if entry.Enabled != nil && !*entry.Enabled {
-			continue
-		}
 		if entry.ID == "" || entry.Path == "" {
-			return nil, errors.New("enabled registry entries require id and path")
+			return nil, errors.New("registry entries require id and path")
 		}
-		if len(entry.Command) == 0 {
-			run := filepath.Join(entry.Path, "backend", "run")
-			info, statErr := os.Stat(run)
-			if statErr != nil || info.IsDir() {
-				slog.Error("plugin has no backend/run", "plugin", entry.ID, "path", run)
-				continue
-			}
+		if registered[entry.ID] {
+			return nil, fmt.Errorf("duplicate registry plugin id: %s", entry.ID)
 		}
+		registered[entry.ID] = true
+		// The manager owns every registry row, including disabled or currently
+		// broken installations. Launch eligibility is checked at spawn time;
+		// hiding those rows here would make them uneditable and drop them on save.
 		managed[entry.ID] = &managedPlugin{id: entry.ID, path: entry.Path, entry: entry, state: StateStopped}
 	}
 	return &Plugin{config: config, managed: managed, registered: registered}, nil
@@ -213,13 +216,16 @@ func (p *Plugin) StartWithManaged(ctx context.Context, managed bool) error {
 	p.mu.Lock()
 	plugins := make([]*managedPlugin, 0, len(p.managed))
 	for _, item := range p.managed {
-		if item.entry.Autostart != nil && *item.entry.Autostart {
+		if item.entry.enabled() && item.entry.Autostart != nil && *item.entry.Autostart {
 			plugins = append(plugins, item)
 		}
 	}
 	p.mu.Unlock()
 	for _, item := range plugins {
 		if err := p.spawn(item); err != nil {
+			if errors.Is(err, context.Canceled) {
+				continue
+			}
 			p.recordSpawnFailure(item, err)
 		}
 	}
@@ -237,13 +243,18 @@ func (p *Plugin) spawn(item *managedPlugin) error {
 
 func (p *Plugin) spawnLocked(item *managedPlugin) error {
 	p.mu.Lock()
-	if p.stopping {
+	if p.stopping || p.managed[item.id] != item {
 		p.mu.Unlock()
 		return context.Canceled
+	}
+	if !item.entry.enabled() {
+		p.mu.Unlock()
+		return errPluginDisabled
 	}
 	item.generation++
 	generation := item.generation
 	item.restartCancel = nil
+	entry, pluginPath := item.entry, item.path
 	p.mu.Unlock()
 
 	logPath := filepath.Join(p.config.LogDir, item.id+".log")
@@ -254,17 +265,17 @@ func (p *Plugin) spawnLocked(item *managedPlugin) error {
 	// Launch ABI: entry command or the default backend/run; the kernel
 	// address is always appended as the fixed --kernel-ws argument. Relative
 	// executables resolve against the plugin directory, not our cwd.
-	argv := item.entry.Command
+	argv := append([]string(nil), entry.Command...)
 	if len(argv) == 0 {
-		argv = []string{filepath.Join(item.path, "backend", "run")}
+		argv = []string{filepath.Join(pluginPath, "backend", "run")}
 	}
 	executable := argv[0]
 	if !filepath.IsAbs(executable) {
-		executable = filepath.Join(item.path, executable)
+		executable = filepath.Join(pluginPath, executable)
 	}
 	args := append(append([]string{}, argv[1:]...), "--kernel-ws", p.config.KernelWS)
 	cmd := exec.Command(executable, args...)
-	cmd.Dir = item.path
+	cmd.Dir = pluginPath
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.Env = append(os.Environ(), "VIEWER_MANAGED=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -274,7 +285,7 @@ func (p *Plugin) spawnLocked(item *managedPlugin) error {
 	}
 
 	p.mu.Lock()
-	if p.stopping || item.generation != generation {
+	if p.stopping || p.managed[item.id] != item || item.generation != generation {
 		p.mu.Unlock()
 		_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGTERM)
 		_ = cmd.Wait()
@@ -302,6 +313,7 @@ func (p *Plugin) waitProcess(item *managedPlugin, cmd *exec.Cmd, generation uint
 		p.mu.Unlock()
 		return
 	}
+	item.cmd, item.done = nil, nil
 	item.exitCode = &exitCode
 	now := time.Now()
 	// Retry counter: consecutive crashes only — a run that stayed up past
@@ -331,6 +343,10 @@ func (p *Plugin) recordSpawnFailure(item *managedPlugin, err error) {
 	slog.Error("plugin spawn failed", "plugin", item.id, "error", err)
 	now := time.Now()
 	p.mu.Lock()
+	if p.stopping || p.managed[item.id] != item {
+		p.mu.Unlock()
+		return
+	}
 	item.exitCode = nil
 	item.crashes = append(item.crashes, now)
 	item.state = StateCrashed
@@ -363,7 +379,7 @@ func backoff(base, cap time.Duration, attempt int) time.Duration {
 func (p *Plugin) scheduleRestart(item *managedPlugin, delay time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
-	if p.stopping || item.state == StateBroken {
+	if p.stopping || p.managed[item.id] != item || item.state == StateBroken || !item.entry.enabled() {
 		p.mu.Unlock()
 		cancel()
 		return
@@ -409,7 +425,9 @@ func (p *Plugin) trackRegistry(frame busclient.Frame) {
 	p.online = online
 	for id, item := range p.managed {
 		if item.state == StateStarting && online[id] {
-			item.state, item.crashes = StateRunning, nil
+			// A hello proves liveness, not stability. Consecutive-crash history
+			// resets only after BreakerWindow in waitProcess (or a manual start).
+			item.state = StateRunning
 			changed = true
 		}
 	}
@@ -495,8 +513,15 @@ func (p *Plugin) gcOrphanAssets(ctx context.Context) {
 }
 
 func (p *Plugin) restartRPC(frame busclient.Frame) {
-	value, _ := frame.Value.(map[string]any)
-	if value["_cancel"] == true {
+	p.startOrRestartRPC(frame, true)
+}
+
+// startOrRestartRPC serializes the stop/reset/spawn sequence per plugin and
+// rechecks registry membership after waiting for opMu. A start that was queued
+// before a delete must never resurrect the removed process.
+func (p *Plugin) startOrRestartRPC(frame busclient.Frame, restart bool) {
+	value, ok := managerObject(frame)
+	if !ok {
 		return
 	}
 	id, _ := value["id"].(string)
@@ -504,23 +529,36 @@ func (p *Plugin) restartRPC(frame busclient.Frame) {
 	item := p.managed[id]
 	p.mu.Unlock()
 	if item == nil {
-		p.respondError(value, "not_found", "no such managed plugin: "+id)
+		p.respondError(frame, "not_found", "no such managed plugin: "+id)
 		return
 	}
 	go func() {
 		item.opMu.Lock()
 		defer item.opMu.Unlock()
+		p.mu.Lock()
+		current := p.managed[id]
+		p.mu.Unlock()
+		if current != item {
+			p.respondError(frame, "not_found", "no such managed plugin: "+id)
+			return
+		}
 		p.stopOneLocked(item, false)
 		p.mu.Lock()
-		item.crashes = nil
+		item.crashes = nil // manual start/restart resets the retry counter
 		p.mu.Unlock()
 		if err := p.spawnLocked(item); err != nil {
-			p.respondError(value, "restart_failed", err.Error())
+			code := "start_failed"
+			if restart {
+				code = "restart_failed"
+			}
+			p.respondError(frame, code, err.Error())
 			return
 		}
 		pid := p.pid(item)
-		p.publishLifecycle(item.id, "restarted", map[string]any{"pid": pid})
-		p.respond(value, map[string]any{"id": item.id, "pid": pid})
+		if restart {
+			p.publishLifecycle(item.id, "restarted", map[string]any{"pid": pid})
+		}
+		p.respond(frame, map[string]any{"id": id, "pid": pid})
 	}()
 }
 
@@ -539,13 +577,16 @@ func (p *Plugin) stopOneLocked(item *managedPlugin, final bool) {
 	item.generation++
 	cmd, done := item.cmd, item.done
 	p.mu.Unlock()
-	if cmd != nil && cmd.Process != nil && cmd.ProcessState == nil {
-		_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGTERM)
+	if cmd != nil && cmd.Process != nil && done != nil {
 		select {
 		case <-done:
-		case <-time.After(p.config.TerminationGrace):
-			_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
-			if done != nil {
+			// Wait has completed; reading no Cmd fields avoids racing it.
+		default:
+			_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(p.config.TerminationGrace):
+				_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 				<-done
 			}
 		}
@@ -553,11 +594,14 @@ func (p *Plugin) stopOneLocked(item *managedPlugin, final bool) {
 		// its process group. Remove any such orphaned subtree before respawn.
 		_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 	}
-	if final {
-		p.mu.Lock()
-		item.state = StateStopped
-		p.mu.Unlock()
+	p.mu.Lock()
+	if item.cmd == cmd {
+		item.cmd, item.done = nil, nil
 	}
+	if final {
+		item.state = StateStopped
+	}
+	p.mu.Unlock()
 }
 
 func signalProcessGroup(pid int, signal syscall.Signal) error {
@@ -645,20 +689,10 @@ func (p *Plugin) publishLifecycle(id, state string, extra map[string]any) {
 	}
 }
 
-func (p *Plugin) respond(request map[string]any, result any) {
-	reply, replyOK := request["_reply_to"].(string)
-	corr, corrOK := request["_corr"].(string)
-	if !replyOK || !corrOK {
-		return
-	}
-	_ = p.client.Publish(context.Background(), reply, map[string]any{"_corr": corr, "ok": true, "result": result})
+func (p *Plugin) respond(frame busclient.Frame, result any) {
+	_ = pluginrpc.Respond(p.client, frame, result)
 }
 
-func (p *Plugin) respondError(request map[string]any, code, message string) {
-	reply, replyOK := request["_reply_to"].(string)
-	corr, corrOK := request["_corr"].(string)
-	if !replyOK || !corrOK {
-		return
-	}
-	_ = p.client.Publish(context.Background(), reply, map[string]any{"_corr": corr, "ok": false, "error": map[string]any{"code": code, "message": message}})
+func (p *Plugin) respondError(frame busclient.Frame, code, message string) {
+	_ = pluginrpc.RespondError(p.client, frame, code, message)
 }

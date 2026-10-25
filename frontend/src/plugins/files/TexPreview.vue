@@ -27,6 +27,8 @@
 import { inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
+import { base64ToBlob, BlobUrlOwner, fileTicketUrl, readFile, readPdfPage } from "./fileData";
+import { depNames, normalizeFrontmatter, normalizeJoin } from "./texModel";
 import { dirname } from "./types";
 
 const props = defineProps<{
@@ -59,89 +61,14 @@ interface FlModule {
   article_css: () => string;
 }
 
-interface ReadResult {
-  encoding: "utf-8" | "base64";
-  content: string;
-}
-
-interface TicketReply {
-  url: string;
-}
-
-/** Page 1 raster of a PDF figure, same RPC PdfPreview uses. */
-interface PdfPageResult {
-  mime: string;
-  encoding: "base64";
-  content: string;
-}
-
-/** Extract a brace-balanced group starting at `start` (index of '{'). */
-function readGroup(src: string, start: number): string | null {
-  let depth = 0;
-  for (let i = start; i < src.length; i++) {
-    const c = src[i];
-    if (c === "\\") {
-      i++;
-      continue;
-    }
-    if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) return src.slice(start + 1, i);
-    }
-  }
-  return null;
-}
-
-/**
- * Normalize publisher-class frontmatter the engine does not know. Confirmed
- * against the real paper (framework v0.90): \title[short]{…} renders as "["
- * with the long title lost, \author[marks]{…} loses the author body entirely,
- * \fnm/\sur/\affil/\orgdiv/… warn and leak literal text, sn-jnl's command-form
- * \abstract{…} is unknown (only the environment is). Replacements never add
- * or remove lines so engine warning line numbers stay accurate.
- */
-function normalizeFrontmatter(source: string): string {
-  let out = source;
-  // \title[short]{…} → \title{…}; \author*[marks]{…} / \author[marks]{…} → \author{…}
-  out = out.replace(/\\(author|title)\*?\s*\[[^\]]*\]/g, "\\$1");
-  // \affil[n]{…} → \thanks{…} (engine renders thanks entries in the title block)
-  out = out.replace(/\\affil\s*(?:\[[^\]]*\])?\s*\{/g, "\\thanks{");
-  // \abstract{…} command form (sn-jnl) → environment form
-  const absMatch = /\\abstract\s*\{/.exec(out);
-  if (absMatch !== null) {
-    const brace = out.indexOf("{", absMatch.index);
-    const body = readGroup(out, brace);
-    if (body !== null) {
-      out =
-        out.slice(0, absMatch.index) +
-        "\\begin{abstract}\n" +
-        body +
-        "\n\\end{abstract}" +
-        out.slice(brace + body.length + 2);
-    }
-  }
-  // placeins \FloatBarrier — layout hint, meaningless here
-  out = out.replace(/\\FloatBarrier\b/g, "");
-  // unwrap simple one-arg name/affiliation commands, innermost first
-  const unwrap =
-    /\\(?:fnm|sur|orgdiv|orgname|orgaddress|city|postcode|country|equalcontrib|correspondingauthor)\{([^{}]*)\}/g;
-  let prev: string;
-  do {
-    prev = out;
-    out = out.replace(unwrap, "$1");
-  } while (out !== prev);
-  return out;
-}
-
 const wrapRef = ref<HTMLElement | null>(null);
 const rootRef = ref<HTMLElement | null>(null);
 const html = ref("");
 /** Stale-render guard: bumped per render, awaited steps bail when it moved on. */
 let renderToken = 0;
 let enginePromise: Promise<FlModule> | null = null;
-let cssInjected = false;
-const ticketCache = new Map<string, string>();
+const TICKET_CACHE_MS = 8 * 60_000; // server tickets expire after 10 minutes
+const ticketCache = new Map<string, { url: string; expiresAt: number }>();
 
 /*
  * Scroll preservation: re-renders replace the v-html tree wholesale, which
@@ -255,71 +182,32 @@ function armImageLoadReanchor(token: number, anchor: ScrollAnchor): void {
   }
 }
 
-function engine(): Promise<FlModule> {
-  enginePromise ??= (async () => {
+async function engine(): Promise<FlModule> {
+  if (enginePromise !== null) return enginePromise;
+  const pending = (async () => {
     const mod = (await import("@arena.ai/faster-latex/web")) as unknown as FlModule;
     await mod.default(); // fetch + instantiate the wasm (URL resolved by Vite)
     return mod;
   })();
-  return enginePromise;
+  enginePromise = pending;
+  try {
+    return await pending;
+  } catch (cause) {
+    // A rejected promise is not a permanent engine state; the next render may
+    // retry after a transient WASM download/instantiation failure.
+    if (enginePromise === pending) enginePromise = null;
+    throw cause;
+  }
 }
 
 function injectArticleCss(css: string): void {
-  if (cssInjected) return;
-  cssInjected = true;
-  const el = document.createElement("style");
+  const existing = document.getElementById("fl-article-css");
+  if (existing?.dataset.flVersion === "0.3.1") return;
+  const el = existing ?? document.createElement("style");
   el.id = "fl-article-css";
   el.dataset.flVersion = "0.3.1";
   el.textContent = css;
-  document.head.appendChild(el);
-}
-
-/** Strip unescaped-% line comments so commented-out \input lines don't fetch. */
-function stripComments(source: string): string {
-  return source.replace(/(?<!\\)%.*/g, "");
-}
-
-/**
- * Companion-file names exactly as the engine will look them up: \input{a/b}
- * → "a/b.tex" (extension added when the name has none), \bibliography{a,b}
- * → ["a.bib", "b.bib"].
- */
-function depNames(source: string): string[] {
-  const clean = stripComments(source);
-  const out: string[] = [];
-  const re = /\\(?:input|include)\s*\{([^}]+)\}|\\(?:bibliography|addbibresource)\s*\{([^}]+)\}/g;
-  for (const match of clean.matchAll(re)) {
-    const input = match[1];
-    if (input !== undefined) {
-      const name = input.trim();
-      if (name !== "") out.push(/\.[^./]+$/.test(name) ? name : `${name}.tex`);
-      continue;
-    }
-    const bib = match[2];
-    if (bib !== undefined) {
-      for (const part of bib.split(",")) {
-        const name = part.trim();
-        if (name !== "") out.push(/\.[^./]+$/.test(name) ? name : `${name}.bib`);
-      }
-    }
-  }
-  return out;
-}
-
-/** Join a base directory with a project-relative name, resolving . and .. */
-function normalizeJoin(dir: string, rel: string): string {
-  const combined = rel.startsWith("/") || dir === "" ? rel : `${dir}/${rel}`;
-  const absolute = combined.startsWith("/");
-  const parts: string[] = [];
-  for (const segment of combined.split("/")) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") {
-      parts.pop();
-      continue;
-    }
-    parts.push(segment);
-  }
-  return (absolute ? "/" : "") + parts.join("/");
+  if (existing === null) document.head.appendChild(el);
 }
 
 /**
@@ -338,10 +226,7 @@ async function gatherFiles(source: string): Promise<Record<string, string>> {
     if (seen.has(name)) continue;
     seen.add(name);
     try {
-      const result = (await ctx.bus.request("file:_:read", {
-        path: normalizeJoin(base, name),
-        max_bytes: DEP_MAX_BYTES,
-      })) as ReadResult;
+      const result = await readFile(ctx.bus, normalizeJoin(base, name), DEP_MAX_BYTES);
       if (result.encoding !== "utf-8") continue;
       files[name] = name.endsWith(".tex") ? normalizeFrontmatter(result.content) : result.content;
       if (name.endsWith(".tex")) {
@@ -358,31 +243,23 @@ async function gatherFiles(source: string): Promise<Record<string, string>> {
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg"]);
 
-/** Blob URLs minted for the current render (PDF figure rasters); revoked wholesale on re-render/unmount. */
-let liveBlobs: string[] = [];
+/** Blob URLs minted for the current render (PDF figure rasters). */
+const blobUrls = new BlobUrlOwner();
 
 function base64ToBlobUrl(base64: string, mime: string): string {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
-  liveBlobs.push(url);
-  return url;
+  return blobUrls.mint(base64ToBlob(base64, mime));
 }
 
 function revokeBlobs(): void {
-  for (const url of liveBlobs) URL.revokeObjectURL(url);
-  liveBlobs = [];
+  blobUrls.revokeAll();
 }
-
-onBeforeUnmount(revokeBlobs);
 
 async function ticketUrl(absPath: string): Promise<string> {
   const cached = ticketCache.get(absPath);
-  if (cached !== undefined) return cached;
-  const ticket = (await ctx.bus.request("file:_:ticket", { path: absPath })) as TicketReply;
-  ticketCache.set(absPath, ticket.url);
-  return ticket.url;
+  if (cached !== undefined && cached.expiresAt > Date.now()) return cached.url;
+  const url = await fileTicketUrl(ctx.bus, absPath);
+  ticketCache.set(absPath, { url, expiresAt: Date.now() + TICKET_CACHE_MS });
+  return url;
 }
 
 function replaceGraphics(img: HTMLImageElement, node: HTMLElement): void {
@@ -406,14 +283,15 @@ function fixTitleblockOrder(): void {
 }
 
 /** Rasterize page 1 of a PDF figure via the fileservice pipeline (trim 0 = full page, scale 2 = sharp). */
-async function pdfFigureUrl(absPath: string): Promise<string> {
-  const result = (await ctx.bus.request("file:_:pdfpage", {
+async function pdfFigureUrl(absPath: string, token: number): Promise<string> {
+  const result = await readPdfPage(ctx.bus, {
     path: absPath,
     page: 1,
     scale: 2,
     trim_x: 0,
     trim_y: 0,
-  })) as PdfPageResult;
+  });
+  if (token !== renderToken) throw new Error("stale TeX render");
   return base64ToBlobUrl(result.content, result.mime);
 }
 
@@ -430,7 +308,7 @@ async function rewriteImages(token: number): Promise<void> {
     const ext = abs.includes(".") ? abs.slice(abs.lastIndexOf(".") + 1).toLowerCase() : "";
     try {
       if (ext === "pdf") {
-        const url = await pdfFigureUrl(abs);
+        const url = await pdfFigureUrl(abs, token);
         if (token !== renderToken) return;
         img.src = url;
         continue;
@@ -491,6 +369,7 @@ async function renderNow(): Promise<void> {
   const anchor = props.path === lastRenderedPath ? captureAnchor() : null;
   try {
     const mod = await engine();
+    if (token !== renderToken) return;
     injectArticleCss(mod.article_css());
     const files = await gatherFiles(props.source);
     if (token !== renderToken) return;
@@ -534,6 +413,16 @@ watch(
   },
   { immediate: true },
 );
+
+onBeforeUnmount(() => {
+  renderToken++;
+  if (debounceTimer !== null) {
+    window.clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  revokeBlobs();
+  ticketCache.clear();
+});
 </script>
 
 <template>

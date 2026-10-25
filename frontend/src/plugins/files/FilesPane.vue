@@ -12,6 +12,7 @@ import type { PluginCtx } from "../../shell/ctx";
 import type { PaneChromeAction } from "../../stores/paneChrome";
 import FileBrowser from "./FileBrowser.vue";
 import FilePreview from "./FilePreview.vue";
+import { fileTicketUrl } from "./fileData";
 import { getInstance, setPinned, updateState } from "./instanceStore";
 import type { FilesViewState, PreviewMode } from "./instanceStore";
 import { basename, dirname, kindForPath } from "./types";
@@ -137,9 +138,9 @@ watchEffect(() => {
         // Ticket data plane streams the bytes; ?download=1 makes the gateway
         // answer Content-Disposition: attachment so the browser saves instead
         // of displaying inline.
-        const ticket = (await ctx.bus.request("file:_:ticket", { path })) as { url: string };
+        const url = await fileTicketUrl(ctx.bus, path);
         const anchor = document.createElement("a");
-        anchor.href = `${ticket.url}&download=1`;
+        anchor.href = `${url}&download=1`;
         anchor.download = basename(path);
         anchor.click();
       },

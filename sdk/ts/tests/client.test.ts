@@ -187,12 +187,18 @@ describe("BusClient against the real kernel", () => {
   });
 
   it("RPC timeout rejects with RpcTimeoutError", async () => {
+    const responder = makeClient(port);
     const caller = makeClient(port);
+    await responder.connect();
     await caller.connect();
+    await responder.subscribe("slow:_:request", () => {
+      // Keep the route subscribed but deliberately never publish a reply.
+    });
     const failure = await caller
-      .request("nobody:_:listening", null, { timeout: 300 })
+      .request("slow:_:request", null, { timeout: 300 })
       .catch((error: Error) => error);
     expect(failure).toBeInstanceOf(RpcTimeoutError);
+    await responder.close();
     await caller.close();
   });
 

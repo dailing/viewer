@@ -23,6 +23,9 @@ import LoopStatus from "../loop/LoopStatus.vue";
 import type { LoopIteration } from "../loop/types";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
+import { beyondWindowEdge as isBeyondWindowEdge, collectDeltaPages, cursorOf, mergeMessages, trimWindow, type ChatWindow } from "./chatWindow";
+import { loadBranchTabs, writeBranchTabs, ensureWindowId } from "./branchTabs";
+import { optimisticLinesVisible, resolveOptimisticTurn, settleOptimisticSend } from "./optimistic";
 import { presentToolBlock } from "./toolPresentation";
 import type { Branch, Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, QueuedMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
@@ -61,7 +64,6 @@ const composerVisible = computed(() => Boolean(inputs.session(inputSessionId)?.p
 // keeps parallel send-now turns of the same role individually marked — and
 // individually stoppable.
 const runningTurns = ref(new Map<string, { roleId: string; branchId?: string }>());
-const runningRoleIds = computed(() => new Set([...runningTurns.value.values()].map((turn) => turn.roleId)));
 // Pending queue entries of this chat (dispatches waiting behind in-flight
 // turns), seeded from the chats:list queued_messages snapshot and reseeded
 // wholesale by the chat:_:queue feed on every backend queue mutation. The
@@ -81,11 +83,24 @@ const editingQueued = ref<{ dispatchId: string } | null>(null);
 // Optimistic per-role placeholder boxes: created the moment dispatch returns
 // so a response box appears immediately, and resolved when the turn's first
 // live message/block arrives (the real turn box takes over) or the turn ends.
-const pendingTurns = ref(new Map<string, { key: string; roleId: string; label: string; ts: number }>());
+interface PendingTurn { key: string; dispatchId: string; roleId: string; branchId: string; label: string; ts: number }
+const pendingTurns = ref(new Map<string, PendingTurn>());
+// A fast turn may produce its started frame before the dispatch RPC returns;
+// remember those dispatch × role pairs so the late reply cannot resurrect a
+// placeholder whose real turn is already running or complete.
+const observedTurnDispatches = new Set<string>();
+function noteObservedTurn(dispatchId: string | undefined, roleId: string): void {
+  if (!dispatchId) return;
+  observedTurnDispatches.add(`${dispatchId}\0${roleId}`);
+  if (observedTurnDispatches.size > 512) {
+    const oldest = observedTurnDispatches.values().next().value;
+    if (oldest !== undefined) observedTurnDispatches.delete(oldest);
+  }
+}
 // Optimistic user-send boxes: shown the moment the user hits send (with a
 // "sending" marker), annotated with the routed agent/provider when dispatch
 // returns, and replaced by the real user message once the bus delivers it.
-interface PendingSend { key: string; text: string; ts: number; sending: boolean; routed: string; failed: string }
+interface PendingSend { key: string; text: string; branchIds: string[]; ts: number; sending: boolean; routed: string; failed: string }
 const pendingSends = ref<PendingSend[]>([]);
 // Per-turn routing targets from the backend execution record (turns table):
 // chats:list / blocks:list replies seed the whole chat's targeted turns and
@@ -130,6 +145,9 @@ const olderCursor = ref<{ ts: number; id: string } | null>(null);
 const hasNewer = ref(false);
 const loadedHi = ref<MessageCursor | null>(null);
 let everLoaded = false;
+// Every full view load supersedes all older async loads. Paging captures this
+// generation and may mutate pane state only while it is still current.
+let viewGeneration = 0;
 let userScrolled = false; // manual scroll wins over the cache-hit auto-scroll
 let lastProgrammaticScrollAt = 0; // suppresses the scroll-event echo of scrollThreadTop
 let lastObservedScrollTop = 0; // direction tracking for live-edge detach
@@ -252,31 +270,18 @@ const activeTabs = ref<string[]>(["main"]);
 // remounts, so prefixing with a per-window id gives each window its own
 // selection. Pre-windowing entries under the bare viewKey are read once as a
 // fallback.
-const BRANCH_TABS_STORAGE_KEY = "viewer.chatBranchTabs.v1";
-const WINDOW_ID_STORAGE_KEY = "viewer.windowId.v1";
 const windowId = ((): string => {
   try {
-    let id = sessionStorage.getItem(WINDOW_ID_STORAGE_KEY);
-    if (id === null || id === "") {
-      id = crypto.randomUUID();
-      sessionStorage.setItem(WINDOW_ID_STORAGE_KEY, id);
-    }
-    return id;
+    return ensureWindowId(sessionStorage, () => crypto.randomUUID());
   } catch {
     return ""; // storage unavailable: fall back to the bare viewKey
   }
 })();
 const tabsKey = windowId === "" ? viewKey : `${windowId}:${viewKey}`;
 
-function loadBranchTabs(key: string): string[] {
+function readBranchTabs(key: string): string[] {
   try {
-    const raw = localStorage.getItem(BRANCH_TABS_STORAGE_KEY);
-    if (raw === null) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
-    const tabs = (parsed as Record<string, unknown>)[key];
-    if (!Array.isArray(tabs)) return [];
-    return tabs.filter((tab): tab is string => typeof tab === "string" && tab !== "");
+    return loadBranchTabs(localStorage, key);
   } catch {
     return [];
   }
@@ -284,23 +289,14 @@ function loadBranchTabs(key: string): string[] {
 
 function persistBranchTabs(): void {
   try {
-    const raw = localStorage.getItem(BRANCH_TABS_STORAGE_KEY);
-    const parsed = raw === null ? {} : (JSON.parse(raw) as unknown);
-    const map = (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {}) as Record<string, string[]>;
-    // The default (主线 alone) is stored as absence to keep the map small.
-    if (activeTabs.value.length === 1 && activeTabs.value[0] === "main") delete map[tabsKey];
-    else map[tabsKey] = [...activeTabs.value];
-    // Migrate away the pre-windowing entry on first persist so it does not
-    // linger as a permanent default for new windows.
-    if (tabsKey !== viewKey) delete map[viewKey];
-    localStorage.setItem(BRANCH_TABS_STORAGE_KEY, JSON.stringify(map));
+    writeBranchTabs(localStorage, tabsKey, viewKey, activeTabs.value);
   } catch {
-    // Quota/private-mode failures are non-fatal: tabs become session-local.
+    // Storage access itself may be denied in private/embedded contexts.
   }
 }
 
-const restoredTabs = loadBranchTabs(tabsKey);
-const legacyTabs = restoredTabs.length === 0 && tabsKey !== viewKey ? loadBranchTabs(viewKey) : [];
+const restoredTabs = readBranchTabs(tabsKey);
+const legacyTabs = restoredTabs.length === 0 && tabsKey !== viewKey ? readBranchTabs(viewKey) : [];
 if (restoredTabs.length > 0) activeTabs.value = restoredTabs;
 else if (legacyTabs.length > 0) activeTabs.value = legacyTabs;
 watch(activeTabs, () => { persistBranchTabs(); setChrome(); });
@@ -311,6 +307,9 @@ watch(activeTabs, (next, prev) => {
   if (next.length === prev.length && next.every((id, index) => id === prev[index])) return; // re-click of the same selection
   everLoaded = false;
   userScrolled = false;
+  editingQueued.value = null; // queue-edit mode belongs to the originating view
+  scrollOnNextUserMessage = false;
+  resetPendingStream();
   void load().catch((cause) => { error.value = errorText(cause); });
 });
 
@@ -625,10 +624,12 @@ const timeline = computed<TimelineBox[]>(() => {
   // Optimistic placeholders for just-dispatched roles ride the same timeline;
   // their ts (dispatch time) keeps them at the end until real events land.
   for (const pending of pendingTurns.value.values()) {
+    if (!optimisticLinesVisible([pending.branchId], viewBranchIds())) continue;
     boxes.push({ key: pending.key, kind: "role", label: pending.label, roleId: pending.roleId, turnId: "", ts: pending.ts, segments: [], pending: true });
   }
   // Optimistic user-send boxes ride the same timeline at the end.
   for (const sent of pendingSends.value) {
+    if (!optimisticLinesVisible(sent.branchIds, viewBranchIds())) continue;
     boxes.push({
       key: sent.key, kind: "user", label: "You", roleId: "", turnId: "", ts: sent.ts,
       segments: [{ id: sent.key, kind: "text", ts: sent.ts, text: sent.text }],
@@ -748,6 +749,7 @@ watch(timeline, () => {
 }, { flush: "post" });
 
 onBeforeUnmount(() => {
+  viewGeneration++; // invalidate every in-flight page/delta continuation
   if (mermaidRenderTimer !== null) {
     clearTimeout(mermaidRenderTimer);
     mermaidRenderTimer = null;
@@ -772,20 +774,18 @@ function formatTime(ms: number): string {
 /** Running state binds to the turn, not the role: each in-flight turn's
  *  box shows the indicator (parallel send-now turns of one role included),
  *  historical boxes never do. Optimistic placeholder boxes (no turn id yet)
- *  count as active while their role has a dispatched/running turn. */
+ *  exist only while their own dispatch is pending. */
 function turnActive(box: TimelineBox): boolean {
   if (box.roleId === "") return false;
   if (box.turnId !== "") return runningTurns.value.has(box.turnId);
-  return box.pending === true && (pendingTurns.value.has(box.roleId) || runningRoleIds.value.has(box.roleId));
+  return box.pending === true;
 }
 
-/** Drop a role's optimistic placeholder once its turn produces visible
- *  output (or ends) — the real turn box / final state takes over. */
-function resolvePendingTurn(roleId: string | undefined): void {
-  if (!roleId || !pendingTurns.value.has(roleId)) return;
-  const next = new Map(pendingTurns.value);
-  next.delete(roleId);
-  pendingTurns.value = next;
+/** Drop a role's optimistic placeholder once its own turn produces output
+ *  (or ends) — another branch running the same role must not clear it. */
+function resolvePendingTurn(roleId: string | undefined, branchId: string | undefined, dispatchId = ""): void {
+  const next = resolveOptimisticTurn(pendingTurns.value, roleId, branchId, dispatchId);
+  if (next !== pendingTurns.value) pendingTurns.value = next;
 }
 
 /** Role's configured execution target: agent / provider / model (first enabled candidate).
@@ -952,6 +952,8 @@ function writeBack(): void {
     olderCursor: olderCursor.value ? { ...olderCursor.value } : null,
     loadedLo: loadedLo.value,
     blockHigh,
+    hasNewer: hasNewer.value,
+    loadedHi: loadedHi.value ? { ...loadedHi.value } : null,
     turnTargets: Object.fromEntries(turnTargets.value),
   };
   saveEntry(cacheKey(), entry);
@@ -967,6 +969,8 @@ function hydrate(entry: ChatCacheEntry): void {
   hasOlder.value = entry.hasOlder;
   olderCursor.value = entry.olderCursor ? { ...entry.olderCursor } : null;
   loadedLo.value = entry.loadedLo;
+  hasNewer.value = entry.hasNewer;
+  loadedHi.value = entry.loadedHi ? { ...entry.loadedHi } : null;
   turnTargets.value = new Map(Object.entries(entry.turnTargets ?? {}));
   setChrome();
 }
@@ -1030,56 +1034,44 @@ function setChrome(): void {
 /** True when a live frame sits beyond the detached window's upper edge —
  *  such frames are skipped while detached (loadNewer/reattach fills them). */
 function beyondWindowEdge(ts: number, id: string): boolean {
-  const hi = loadedHi.value;
-  if (!hasNewer.value || hi === null) return false;
-  return ts > hi.ts || (ts === hi.ts && id > hi.id);
+  return isBeyondWindowEdge({ hasNewer: hasNewer.value, loadedHi: loadedHi.value }, ts, id);
 }
 
-/** Drop the oldest page from the window and compensate the scroll position
- *  by the removed height so the viewport content does not move. */
-function evictTopPage(): void {
+function windowSnapshot(): ChatWindow<ChatMessage> {
+  return {
+    messages: messages.value,
+    hasOlder: hasOlder.value,
+    olderCursor: olderCursor.value,
+    loadedLo: loadedLo.value,
+    hasNewer: hasNewer.value,
+    loadedHi: loadedHi.value,
+  };
+}
+
+/** Keep the resident window at or below WINDOW_MAX_MESSAGES, evicting the
+ * `prefer`red edge first. Pure cursor/eviction transitions live in chatWindow;
+ * this adapter only applies Vue refs, block bounds, and scroll compensation. */
+function enforceWindow(prefer: "top" | "bottom"): void {
+  if (loadingOlder.value || loadingNewer.value || messages.value.length <= WINDOW_MAX_MESSAGES) return;
+  const initial = windowSnapshot();
+  const next = trimWindow(initial, WINDOW_MAX_MESSAGES, PAGE_SIZE, prefer);
   const thread = threadRef.value;
   const beforeHeight = thread?.scrollHeight ?? 0;
   const beforeTop = thread?.scrollTop ?? 0;
-  messages.value.splice(0, Math.min(PAGE_SIZE, messages.value.length));
-  const oldest = messages.value[0];
-  loadedLo.value = oldest?.created_at ?? 0;
-  olderCursor.value = oldest ? { ts: oldest.created_at, id: oldest.id } : null;
-  hasOlder.value = true; // evicted pages are re-fetchable from the server
-  if (oldest) blocks.value = blocks.value.filter((block) => block.occurred_at >= oldest.created_at);
-  if (thread && beforeHeight > 0) {
+  const topChanged = next.messages[0]?.id !== initial.messages[0]?.id;
+  messages.value = next.messages;
+  hasOlder.value = next.hasOlder;
+  olderCursor.value = next.olderCursor;
+  loadedLo.value = next.loadedLo;
+  hasNewer.value = next.hasNewer;
+  loadedHi.value = next.loadedHi;
+  const upper = next.hasNewer ? next.loadedHi?.ts : undefined;
+  blocks.value = blocks.value.filter((block) => block.occurred_at >= next.loadedLo && (upper === undefined || block.occurred_at <= upper));
+  if (thread && topChanged && beforeHeight > 0) {
     void nextTick(() => {
       const removed = beforeHeight - thread.scrollHeight;
       if (removed !== 0) scrollThreadTop(Math.max(0, beforeTop - removed));
     });
-  }
-}
-
-/** Drop the newest page from the window (user is reading far above). The
- *  removed content is below the viewport, so no scroll compensation is
- *  needed; the bottom trigger re-fetches it on the way down. */
-function evictBottomPage(): void {
-  messages.value.splice(Math.max(0, messages.value.length - PAGE_SIZE));
-  const newest = messages.value[messages.value.length - 1];
-  loadedHi.value = newest ? { ts: newest.created_at, id: newest.id } : null;
-  hasNewer.value = true;
-  if (newest) blocks.value = blocks.value.filter((block) => block.occurred_at <= newest.created_at);
-}
-
-/** Keep the resident window at or below WINDOW_MAX_MESSAGES, evicting the
- *  `prefer`red edge first. The edge follows browse intent: streaming and
- *  downward catch-up shed the top, upward history reading sheds the bottom.
- *  Attached to the live edge the top is always the victim (the live tail is
- *  sacred). Everything loaded is visible (server-side view filtering), so
- *  eviction needs no visibility guard. */
-function enforceWindow(prefer: "top" | "bottom"): void {
-  if (loadingOlder.value || loadingNewer.value) return; // mid-flight page merge
-  while (messages.value.length > WINDOW_MAX_MESSAGES) {
-    if (!hasNewer.value || prefer === "top") {
-      evictTopPage();
-      continue;
-    }
-    evictBottomPage();
   }
 }
 
@@ -1092,6 +1084,20 @@ function enforceWindow(prefer: "top" | "bottom"): void {
 const pendingMessageUpserts = new Map<string, ChatMessage>();
 const pendingBlockUpserts = new Map<string, ChatBlock>();
 let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Delayed frames belong to the view that admitted them. Dropping them on a
+ * tab switch is safe: the new/old view's server delta is authoritative, while
+ * flushing the old queue into the new window would corrupt both its cache
+ * and cursor. */
+function resetPendingStream(): void {
+  if (streamFlushTimer !== null) {
+    clearTimeout(streamFlushTimer);
+    streamFlushTimer = null;
+  }
+  pendingMessageUpserts.clear();
+  pendingBlockUpserts.clear();
+  streamingMessageId = "";
+}
 
 function scheduleStreamFlush(): void {
   if (streamFlushTimer !== null) return;
@@ -1109,14 +1115,7 @@ function mergeMessage(value: ChatMessage): void {
   }
   const index = messages.value.findIndex((item) => item.id === value.id);
   if (index >= 0) messages.value.splice(index, 1, value); else messages.value.push(value);
-  if (value.role === "user") {
-    // The real user message supersedes its optimistic send box; the "→"
-    // routing label re-derives from the dispatch's turn records.
-    let sendIndex = pendingSends.value.findIndex((item) => item.text === value.text.trim());
-    if (sendIndex < 0) sendIndex = pendingSends.value.findIndex((item) => !item.sending && !item.failed);
-    if (sendIndex >= 0) pendingSends.value.splice(sendIndex, 1);
-  }
-  resolvePendingTurn(value.sender?.role_id);
+  resolvePendingTurn(value.sender?.role_id, liveTurnLines.get(value.turn_id));
   if (scrollOnNextUserMessage && value.role === "user") {
     scrollOnNextUserMessage = false;
     void nextTick(() => scrollThreadToMessageEnd());
@@ -1134,7 +1133,7 @@ function mergeBlock(value: ChatBlock): void {
   // id as their text grows — upsert by id, never append-if-absent.
   const index = blocks.value.findIndex((item) => item.id === value.id);
   if (index >= 0) blocks.value.splice(index, 1, value); else blocks.value.push(value);
-  resolvePendingTurn(value.role_id);
+  resolvePendingTurn(value.role_id, liveTurnLines.get(value.turn_id));
 }
 
 function flushStream(): void {
@@ -1188,13 +1187,16 @@ let scrollOnNextUserMessage = false;
  *  cursor (the backend caps one reply near the kernel's 1 MiB frame limit and
  *  reports truncated/next_after). Overlapping boundary blocks are upserted by
  *  id, so the result stays ordered with no duplicates. */
-async function fetchBlocks(after: number, before = 0): Promise<ChatBlock[]> {
+async function fetchBlocks(after: number, before = 0, generation = viewGeneration): Promise<ChatBlock[]> {
   const byId = new Map<string, ChatBlock>();
+  const request = viewRequest();
   let cursor = after;
   for (;;) {
+    if (generation !== viewGeneration) return [];
     const list = await (ctx.bus.request("chat:_:blocks:list", {
-      chat_id: chatId, after: cursor, ...viewRequest(), ...(before > 0 ? { before } : {}),
+      chat_id: chatId, after: cursor, ...request, ...(before > 0 ? { before } : {}),
     }) as Promise<ChatBlockList>);
+    if (generation !== viewGeneration) return [];
     seedTurnTargets(list.turn_targets);
     seedTurnSessions(list.turn_sessions);
     for (const block of list.blocks ?? []) byId.set(block.id, block);
@@ -1224,48 +1226,53 @@ function seedQueued(list: QueuedMessage[] | undefined): void {
 }
 
 async function load(fresh = false): Promise<void> {
+  const generation = ++viewGeneration;
+  const key = cacheKey();
+  const request = viewRequest();
   loadingInitial.value = true;
+  loadingOlder.value = false;
+  loadingNewer.value = false;
   streamingMessageId = "";
-  hasNewer.value = false; // a (re)load always lands on the live edge
-  loadedHi.value = null;
   // Replacing the message list shrinks the DOM and the browser clamps
   // scrollTop, echoing a scroll event that would otherwise look like a
   // manual far-up scroll and instantly re-detach the fresh window.
   lastProgrammaticScrollAt = Date.now();
   lastObservedScrollTop = 0;
   try {
-    // Session cache hit (v0.32): hydrate instantly, then merge only the
-    // delta; the pane renders before any network round-trip. A `fresh` load
-    // (jump-to-latest, detached refresh) skips the cache: the detached window
-    // can sit arbitrarily far from the live edge, beyond what the bounded
-    // delta refresh would close.
-    const cached = fresh ? undefined : loadEntry(cacheKey());
-    if (cached) {
+    // Only attached cache entries hydrate. A detached span is not a live-edge
+    // snapshot; treating it as one would make refreshDelta chase from history.
+    const cached = fresh ? undefined : loadEntry(key);
+    if (cached && !cached.hasNewer) {
       hydrate(cached);
       enforceWindow("top"); // trim over-cap cache before the first paint
       loadingInitial.value = false;
       everLoaded = true;
       await nextTick();
+      if (generation !== viewGeneration) return;
       scrollThreadToMessageEnd();
-      const exists = await refreshDelta();
-      if (!exists) {
-        // Chat was deleted while the pane was closed: clear and evict.
-        messages.value = [];
-        blocks.value = [];
-        hasOlder.value = false;
-        olderCursor.value = null;
-        removeEntry(viewKey);
+      const result = await refreshDelta(generation);
+      if (result === "stale") return;
+      if (result === "incomplete") {
+        await load(true);
         return;
       }
-      // Land on the message-end anchor once the delta has been folded in,
-      // unless the user already started reading during the delta window.
+      if (result === "missing") {
+        clearMissingChat();
+        return;
+      }
       if (!userScrolled) scrollThreadToMessageEnd();
       return;
     }
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: chatId, include_messages: true, ...viewRequest(), limit: PAGE_SIZE,
+      chat_id: chatId, include_messages: true, ...request, limit: PAGE_SIZE,
     }) as Promise<ChatList>);
-    chat.value = list.chats.find((item) => item.id === chatId) ?? null;
+    if (generation !== viewGeneration) return;
+    const nextChat = list.chats.find((item) => item.id === chatId) ?? null;
+    if (!nextChat) {
+      clearMissingChat();
+      return;
+    }
+    chat.value = nextChat;
     seedRunningTurns(list);
     seedQueued(list.queued_messages);
     seedTurnTargets(list.turn_targets);
@@ -1274,32 +1281,33 @@ async function load(fresh = false): Promise<void> {
     const page = list.messages ?? [];
     messages.value = page;
     hasOlder.value = list.has_more ?? false;
+    hasNewer.value = false;
+    loadedHi.value = null;
     if (page.length > 0) {
       loadedLo.value = page[0].created_at;
-      olderCursor.value = { ts: page[0].created_at, id: page[0].id };
+      olderCursor.value = cursorOf(page[0]);
     } else {
       loadedLo.value = 0;
       olderCursor.value = null;
     }
     const [fetchedBlocks, workspaceData] = await Promise.all([
-      fetchBlocks(loadedLo.value),
+      fetchBlocks(loadedLo.value, 0, generation),
       ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
     ]);
+    if (generation !== viewGeneration) return;
     blocks.value = fetchedBlocks;
     roles.value = workspaceData.roles;
     workspace.value = workspaceData;
     setChrome();
     writeBack();
-    // First open lands on the message-end anchor (old-viewer parity); a
-    // fresh jump-to-latest reload does the same; other reloads keep the
-    // user's scroll position.
     if (!everLoaded || fresh) {
       everLoaded = true;
       await nextTick();
+      if (generation !== viewGeneration) return;
       scrollThreadToMessageEnd();
     }
   } finally {
-    loadingInitial.value = false;
+    if (generation === viewGeneration) loadingInitial.value = false;
   }
 }
 
@@ -1309,55 +1317,51 @@ async function load(fresh = false): Promise<void> {
  *  newer than the cached max occurred_at. Used for activation / chat-list
  *  mutations; loaded older pages and the scroll position stay untouched.
  *  Returns false when the chat no longer exists. */
-async function refreshDelta(): Promise<boolean> {
+type DeltaRefreshResult = "ok" | "missing" | "incomplete" | "stale";
+
+async function refreshDelta(generation = viewGeneration): Promise<DeltaRefreshResult> {
   const top = messages.value.length > 0 ? messages.value[messages.value.length - 1] : null;
   const blockAfter = blocks.value.reduce((max, block) => Math.max(max, block.occurred_at), 0);
-  let chats: Chat[] = [];
-  let firstHasMore = false;
-  const fetched: ChatMessage[] = [];
-  let cursor: MessageCursor | null = top ? { ts: top.created_at, id: top.id } : null;
-  const incremental = cursor !== null;
-  for (let pageCount = 0; pageCount < 3; pageCount++) {
+  const initialCursor = cursorOf(top);
+  const request = viewRequest();
+  const lists: ChatList[] = [];
+  const { pages, incomplete } = await collectDeltaPages<ChatMessage>(initialCursor, async (cursor) => {
     const list = await (ctx.bus.request("chat:_:chats:list", {
-      chat_id: chatId, include_messages: true, ...viewRequest(),
+      chat_id: chatId, include_messages: true, ...request,
       ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}),
       limit: PAGE_SIZE,
     }) as Promise<ChatList>);
-    if (pageCount === 0) {
-      chats = list.chats;
-      firstHasMore = list.has_more ?? false;
+    lists.push(list);
+    return { messages: list.messages ?? [], hasMore: list.has_more ?? false };
+  });
+  if (generation !== viewGeneration) return "stale";
+  // Three full incremental pages only prove that we fetched 150 rows, not
+  // that the live edge was reached. Force a fresh latest-page load instead.
+  if (incomplete) return "incomplete";
+  const nextChat = (lists[0]?.chats ?? []).find((item) => item.id === chatId) ?? null;
+  if (!nextChat) return "missing";
+  const [deltaBlocks, workspaceData] = await Promise.all([
+    fetchBlocks(blockAfter || loadedLo.value, 0, generation),
+    ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
+  ]);
+  if (generation !== viewGeneration) return "stale";
+  chat.value = nextChat;
+  lists.forEach((list, index) => {
+    if (index === 0) {
       seedRunningTurns(list);
       seedQueued(list.queued_messages);
       upsertBranches(list.branches ?? []);
     }
     seedTurnTargets(list.turn_targets);
     seedTurnSessions(list.turn_sessions);
-    const page = list.messages ?? [];
-    fetched.push(...page);
-    // A no-cursor top page reports "older exist" as has_more — nothing newer
-    // to chase; the incremental cursor page reports "even newer exist".
-    if (!incremental || page.length === 0 || !(list.has_more ?? false)) break;
-    const last = page[page.length - 1];
-    cursor = { ts: last.created_at, id: last.id };
-  }
-  const [deltaBlocks, workspaceData] = await Promise.all([
-    fetchBlocks(blockAfter || loadedLo.value),
-    ctx.bus.request("chat:_:workspace:get", {}) as Promise<Workspace>,
-  ]);
-  chat.value = chats.find((item) => item.id === chatId) ?? null;
-  if (!chat.value) return false;
-  const byId = new Map(messages.value.map((item) => [item.id, item] as const));
-  for (const item of fetched) byId.set(item.id, item); // delta rows replace cached ones
-  messages.value = [...byId.values()].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
+  });
+  messages.value = mergeMessages(messages.value, pages.flat());
   if (loadedLo.value === 0 && messages.value.length > 0) {
-    // First load through the cache: adopt the pagination boundary from the page.
     loadedLo.value = messages.value[0].created_at;
-    olderCursor.value = { ts: messages.value[0].created_at, id: messages.value[0].id };
-    hasOlder.value = firstHasMore;
+    olderCursor.value = cursorOf(messages.value[0]);
+    hasOlder.value = lists[0]?.has_more ?? false;
   }
   const blockById = new Map(blocks.value.map((item) => [item.id, item] as const));
-  // Merged streaming blocks mutate in place (text grows under the same id), so
-  // delta rows must REPLACE cached ones, not dedupe-skip like immutable rows.
   for (const item of deltaBlocks) blockById.set(item.id, item);
   blocks.value = [...blockById.values()].sort((a, b) => a.occurred_at - b.occurred_at || a.id.localeCompare(b.id));
   roles.value = workspaceData.roles;
@@ -1365,7 +1369,18 @@ async function refreshDelta(): Promise<boolean> {
   setChrome();
   writeBack();
   enforceWindow("top");
-  return true;
+  return "ok";
+}
+
+function clearMissingChat(): void {
+  messages.value = [];
+  blocks.value = [];
+  hasOlder.value = false;
+  olderCursor.value = null;
+  loadedLo.value = 0;
+  hasNewer.value = false;
+  loadedHi.value = null;
+  removeEntry(viewKey);
 }
 
 /** Merge-refresh entry point for activation / chat-list mutations: evict the
@@ -1377,12 +1392,17 @@ async function refresh(): Promise<void> {
     await load(true); // detached: the delta cap may not reach the live edge
     return;
   }
-  if (!(await refreshDelta())) {
-    messages.value = [];
-    blocks.value = [];
-    hasOlder.value = false;
-    olderCursor.value = null;
-    removeEntry(viewKey);
+  const generation = ++viewGeneration;
+  loadingOlder.value = false;
+  loadingNewer.value = false;
+  const result = await refreshDelta(generation);
+  if (result === "incomplete") {
+    await load(true);
+    return;
+  }
+  if (generation !== viewGeneration) return;
+  if (result === "missing") {
+    clearMissingChat();
   }
   streamingMessageId = "";
 }
@@ -1393,6 +1413,8 @@ async function refresh(): Promise<void> {
  *  always returns the next VISIBLE page — no invisible-page hops. */
 async function loadOlder(): Promise<void> {
   if (loadingInitial.value || loadingOlder.value || !hasOlder.value || !olderCursor.value) return;
+  const generation = viewGeneration;
+  const cursor = olderCursor.value;
   loadingOlder.value = true;
   const thread = threadRef.value;
   const previousScrollHeight = thread?.scrollHeight ?? 0;
@@ -1400,14 +1422,16 @@ async function loadOlder(): Promise<void> {
   try {
     const list = await (ctx.bus.request("chat:_:chats:list", {
       chat_id: chatId, include_messages: true, ...viewRequest(),
-      before: olderCursor.value.ts, before_id: olderCursor.value.id, limit: PAGE_SIZE,
+      before: cursor.ts, before_id: cursor.id, limit: PAGE_SIZE,
     }) as Promise<ChatList>);
+    if (generation !== viewGeneration) return;
     const page = list.messages ?? [];
     if (page.length > 0) {
       seedTurnTargets(list.turn_targets);
       seedTurnSessions(list.turn_sessions);
       const newLo = page[0].created_at;
-      const spanBlocks = await fetchBlocks(newLo, loadedLo.value);
+      const spanBlocks = await fetchBlocks(newLo, loadedLo.value, generation);
+      if (generation !== viewGeneration) return;
       const known = new Set(messages.value.map((item) => item.id));
       messages.value = [...page.filter((item) => !known.has(item.id)), ...messages.value];
       for (const block of spanBlocks) {
@@ -1417,16 +1441,17 @@ async function loadOlder(): Promise<void> {
       loadedLo.value = newLo;
       writeBack();
       await nextTick();
+      if (generation !== viewGeneration) return;
       const threadNow = threadRef.value;
       if (threadNow) scrollThreadTop(threadNow.scrollHeight - previousScrollHeight + previousScrollTop);
     }
     hasOlder.value = page.length > 0 && (list.has_more ?? false);
   } catch (cause) {
-    error.value = errorText(cause);
+    if (generation === viewGeneration) error.value = errorText(cause);
   } finally {
-    loadingOlder.value = false;
+    if (generation === viewGeneration) loadingOlder.value = false;
   }
-  enforceWindow("bottom"); // deep reading sheds pages off the bottom edge
+  if (generation === viewGeneration) enforceWindow("bottom"); // deep reading sheds pages off the bottom edge
 }
 
 /** Load one newer page after the detached window's upper edge (reverse of
@@ -1435,6 +1460,7 @@ async function loadOlder(): Promise<void> {
  *  close the fetch/publish race with a delta refresh. */
 async function loadNewer(): Promise<void> {
   if (loadingInitial.value || loadingNewer.value || !hasNewer.value) return;
+  const generation = viewGeneration;
   loadingNewer.value = true;
   try {
     const newest = messages.value[messages.value.length - 1];
@@ -1443,33 +1469,43 @@ async function loadNewer(): Promise<void> {
       chat_id: chatId, include_messages: true, ...viewRequest(),
       ...(cursor ? { after: cursor.ts, after_id: cursor.id } : {}), limit: PAGE_SIZE,
     }) as Promise<ChatList>);
+    if (generation !== viewGeneration) return;
     seedRunningTurns(list);
     seedTurnTargets(list.turn_targets);
     const page = (list.messages ?? []).filter((item) => !messages.value.some((known) => known.id === item.id));
     if (page.length > 0) {
       const spanLo = cursor?.ts ?? loadedLo.value;
-      const gapBlocks = await fetchBlocks(spanLo);
-      messages.value = [...messages.value, ...page].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
+      const gapBlocks = await fetchBlocks(spanLo, 0, generation);
+      if (generation !== viewGeneration) return;
+      messages.value = mergeMessages(messages.value, page);
       const blockById = new Map(blocks.value.map((item) => [item.id, item] as const));
       for (const block of gapBlocks) blockById.set(block.id, block);
       blocks.value = [...blockById.values()].sort((a, b) => a.occurred_at - b.occurred_at || a.id.localeCompare(b.id));
     }
     hasNewer.value = list.has_more ?? false;
     const top = messages.value[messages.value.length - 1];
-    loadedHi.value = top ? { ts: top.created_at, id: top.id } : null;
-    writeBack();
+    loadedHi.value = cursorOf(top);
+    if (hasNewer.value) writeBack();
     if (!hasNewer.value) {
-      // Reattached: fold in anything published during the catch-up fetch,
-      // then land on the message end.
-      await refreshDelta();
+      // Reattached: fold in anything published during the catch-up fetch.
+      const result = await refreshDelta(generation);
+      if (result === "stale") return;
+      if (result === "incomplete") {
+        await load(true);
+        return;
+      }
+      if (result === "missing") {
+        clearMissingChat();
+        return;
+      }
       scrollThreadToMessageEnd();
     }
   } catch (cause) {
-    error.value = errorText(cause);
+    if (generation === viewGeneration) error.value = errorText(cause);
   } finally {
-    loadingNewer.value = false;
+    if (generation === viewGeneration) loadingNewer.value = false;
   }
-  enforceWindow("top");
+  if (generation === viewGeneration) enforceWindow("top");
 }
 
 /** Jump back to the live edge (bottom bar / send while detached): a fresh
@@ -1545,12 +1581,15 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
   if (hasNewer.value) jumpToLatest(); // a send always targets the live edge
   // Optimistic user box with a sending marker; dispatch latency (routing,
   // agent spawn) no longer leaves the thread looking idle.
+  // Capture the target before any await: a later tab switch must not retarget
+  // this dispatch or move its optimistic rows to another line.
+  const branch = sendBranch.value;
+  const originBranchIds = [branch?.id ?? ""];
   const key = `send:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-  pendingSends.value = [...pendingSends.value, { key, text: message, ts: Date.now(), sending: true, routed: "", failed: "" }];
+  pendingSends.value = [...pendingSends.value, { key, text: message, branchIds: originBranchIds, ts: Date.now(), sending: true, routed: "", failed: "" }];
   void nextTick(() => scrollThreadToMessageEnd());
   try {
     const payload: Record<string, unknown> = { chat_id: chatId, message };
-    const branch = sendBranch.value;
     // A branch send is a mainline send plus branch_id (framework v0.66):
     // role picks / LLM routing, new-session and send-now toggles all
     // apply; the backend only scopes context and session lanes per
@@ -1565,30 +1604,40 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
     // Dispatch replies only after LLM role routing, which may take up to
     // llm.timeout_seconds (default 60s) under local-server queueing; the
     // bus's 30s default would report 发送失败 while the backend proceeds.
-    const result = await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 }) as { role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[]; branches?: Branch[] };
-    // Parallel dispatch auto-creates one branch per started role; an
-    // explicit branch send returns the freshly role-stamped record. Adopt
-    // both into the bar; a parallel send lands the pane on its new branch.
-    if (result.branches && result.branches.length > 0) {
-      upsertBranches(result.branches);
-      if (parallel && !branch) activeTabs.value = [result.branches[0].id];
-    }
+    const result = await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 }) as { dispatch_id?: string; role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[]; branches?: Branch[] };
+    const returnedBranches = result.branches ?? [];
+    const dispatchBranchIds = parallel && returnedBranches.length > 0
+      ? returnedBranches.map((item) => item.id)
+      : originBranchIds;
+    const branchForRole = (roleId: string): string => {
+      if (!parallel) return branch?.id ?? "";
+      return returnedBranches.find((item) => item.role_id === roleId)?.id ?? branch?.id ?? "";
+    };
     // Busy roles come back in queued_role_ids: their message is held in the
     // per-role queue and starts when the in-flight turn ends, so no
     // optimistic response box yet — the user box carries the 排队中 label.
     const started = result.started_role_ids ?? result.role_ids;
     const queued = result.queued_role_ids ?? [];
-    patchPendingSend(key, { sending: false, routed: routedLabelFor(started, queued) });
-    // Show one optimistic response box per dispatched role immediately; each
-    // resolves when that turn's first live event arrives. The bus's
-    // chat:_:turn started frame marks the turn running shortly after.
+    patchPendingSend(key, { sending: false, branchIds: dispatchBranchIds, routed: routedLabelFor(started, queued) });
+    // One placeholder per dispatch × role, not per role: the same role may
+    // run concurrently on several branches and their events are independent.
     const now = Date.now();
     const pending = new Map(pendingTurns.value);
     for (const roleId of started) {
       const role = roles.value.find((item) => item.id === roleId);
-      pending.set(roleId, { key: `pending:${roleId}:${now}`, roleId, label: role?.name ?? "Agent", ts: now });
+      const dispatchId = result.dispatch_id ?? "";
+      const pendingKey = `${dispatchId}\0${roleId}`;
+      if (observedTurnDispatches.has(pendingKey)) continue;
+      pending.set(pendingKey, { key: `pending:${pendingKey}:${now}`, dispatchId, roleId, branchId: branchForRole(roleId), label: role?.name ?? "Agent", ts: now });
     }
     pendingTurns.value = pending;
+    // Parallel dispatch auto-creates one branch per started role; an
+    // explicit branch send returns the freshly role-stamped record. Adopt
+    // both into the bar; a parallel send lands the pane on its new branch.
+    if (returnedBranches.length > 0) {
+      upsertBranches(returnedBranches);
+      if (parallel && !branch) activeTabs.value = [returnedBranches[0].id];
+    }
     scrollOnNextUserMessage = true; // scroll the just-sent query into view when it lands
     return true;
   } catch (cause) {
@@ -1721,6 +1770,11 @@ onMounted(() => {
       }
       return;
     }
+    // Reconcile optimistic sends even when this echo belongs to a hidden
+    // branch; otherwise returning to that branch would duplicate the row.
+    if (value.role === "user") {
+      pendingSends.value = settleOptimisticSend(pendingSends.value, { text: value.text, branchIds: value.branch_ids });
+    }
     // Server-side view filtering's live half: merge only the selected
     // lines' frames (unattributed frames stay, anti-flicker).
     if (!liveMessageVisible(value)) return;
@@ -1750,6 +1804,7 @@ onMounted(() => {
     // chats:list/blocks:list); "started" already carries the branch
     // attribution, so branch tabs filter correctly from the first frame.
     noteTurnLine(value.turn_id, value.branch_id);
+    if (value.phase === "started" || value.phase === "completed") noteObservedTurn(value.dispatch_id, value.role_id);
     if (value.phase === "session") {
       if (value.session_id || value.branch_id) upsertTurnSession(value.turn_id, { sessionId: value.session_id ?? "", dispatchId: value.dispatch_id ?? "", roleId: value.role_id, roleName: value.role_name ?? "", startedAt: 0, branchId: value.branch_id ?? "" });
       return;
@@ -1770,7 +1825,7 @@ onMounted(() => {
     if (value.phase !== "completed") return;
     if (runningTurns.value.delete(value.turn_id)) runningTurns.value = new Map(runningTurns.value);
     clearConfirm(value.turn_id);
-    resolvePendingTurn(value.role_id);
+    resolvePendingTurn(value.role_id, value.branch_id ?? liveTurnLines.get(value.turn_id), value.dispatch_id ?? "");
     // View counts refresh off the post-settlement "head" branch-feed frame
     // — this completed frame fires before the batch settles, so refreshing
     // here would race and latch stale counts.
@@ -1814,6 +1869,7 @@ onMounted(() => {
   ctx.onDispose(() => {
     unregisterInputRuntime();
     window.removeEventListener("viewer:chats-changed", refreshNow);
+    resetPendingStream();
     writeBack();
   });
   void load().catch((cause) => { error.value = errorText(cause); });

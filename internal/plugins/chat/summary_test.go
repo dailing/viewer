@@ -78,6 +78,34 @@ func TestTurnSummaryBudgetBoundaries(t *testing.T) {
 	}
 }
 
+func TestTurnTranscriptUsesOwnDispatchQuery(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	turn := &Turn{ID: "turn-a", ChatID: "chat", BranchID: "branch-a", DispatchID: "dispatch-a", StartedAt: 200}
+	if err := p.store.beginTurn(turn); err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []*Message{
+		{ID: "query-a", ChatID: "chat", TurnID: "dispatch-a", Role: "user", Text: "branch A query", CreatedAt: 100},
+		{ID: "query-b", ChatID: "chat", TurnID: "dispatch-b", Role: "user", Text: "newer branch B query", CreatedAt: 190},
+		{ID: "answer-a", ChatID: "chat", TurnID: "turn-a", Role: "assistant", Text: "branch A answer", CreatedAt: 210},
+	} {
+		if err := p.store.addMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transcript, _, _, err := p.buildTurnTranscript(turn.ID, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(transcript, "branch A query") || strings.Contains(transcript, "newer branch B query") {
+		t.Fatalf("transcript used another dispatch's query: %q", transcript)
+	}
+}
+
 func TestHindsightRecallNormalTimeoutAndFiveXX(t *testing.T) {
 	base := HindsightConfig{BankPrefix: "test", TimeoutSeconds: 1, MaxTokens: 123, Limit: 2}
 	normal := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

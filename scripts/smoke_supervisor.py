@@ -162,7 +162,7 @@ async def main() -> int:
             crashed = await wait_state(states_queue, "fake-ok", "crashed")
             assert crashed["exit_code"] is not None and crashed["crashes"] == 1
             restarted = await wait_state(states_queue, "fake-ok", "running")
-            assert restarted["pid"] != first_pid and restarted["crashes"] == 0
+            assert restarted["pid"] != first_pid and restarted["crashes"] == 1
             print("PASS crashed -> automatic restart -> running")
 
             broken = await wait_state(states_queue, "crash-loop", "broken", timeout=25)

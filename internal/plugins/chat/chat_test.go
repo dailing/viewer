@@ -547,9 +547,14 @@ func TestLaneContinuation(t *testing.T) {
 	}
 	endTurn(branch)
 	assertTurnSession(branch.turnID, branch.sessionID)
+	branchTurn, err := p.store.turn(branch.turnID)
+	if err != nil || branchTurn == nil || branchTurn.BranchID == "" {
+		t.Fatalf("parallel turn should own a branch: %+v err=%v", branchTurn, err)
+	}
+	branchID := branchTurn.BranchID
 
-	// 3. Continuing the branch lane resumes its session; the stored
-	// canonical session stays untouched.
+	// 3. Continuing the branch lane resumes its session AND stays on the
+	// branch; the stored canonical session stays untouched.
 	reply := dispatch(map[string]any{"chat_id": "chat-l", "message": "lane follow-up", "continue_turn_id": branch.turnID})
 	if len(reply.Started) != 1 || len(reply.Queued) != 0 {
 		t.Fatalf("lane continuation should start immediately: %+v", reply)
@@ -562,6 +567,9 @@ func TestLaneContinuation(t *testing.T) {
 		t.Fatalf("lane prompt text %q should contain the message", lane.text)
 	}
 	assertTurnSession(lane.turnID, branch.sessionID)
+	if turn, turnErr := p.store.turn(lane.turnID); turnErr != nil || turn == nil || turn.BranchID != branchID {
+		t.Fatalf("branch continuation fell off its line: %+v err=%v", turn, turnErr)
+	}
 
 	// 4. A continuation dispatched while the lane's session is in flight
 	// queues and starts when the running turn ends.
@@ -578,6 +586,9 @@ func TestLaneContinuation(t *testing.T) {
 	laneQueued := nextPrompt()
 	if laneQueued.sessionID != branch.sessionID || !strings.Contains(laneQueued.text, "lane queued") {
 		t.Fatalf("queued continuation should resume %s with the queued message, got %+v", branch.sessionID, laneQueued)
+	}
+	if turn, turnErr := p.store.turn(laneQueued.turnID); turnErr != nil || turn == nil || turn.BranchID != branchID {
+		t.Fatalf("queued branch continuation fell off its line: %+v err=%v", turn, turnErr)
 	}
 	endTurn(laneQueued)
 

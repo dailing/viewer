@@ -158,13 +158,6 @@ func (s *Server) handleAssetsPush(frame busclient.Frame) {
 		_ = pluginrpc.Respond(s.client, frame, map[string]any{"upload_id": uploadID})
 	case "file":
 		uploadID, _ := value["upload_id"].(string)
-		s.assetsState.mu.Lock()
-		session := s.assetsState.uploads[uploadID]
-		s.assetsState.mu.Unlock()
-		if session == nil {
-			_ = pluginrpc.RespondError(s.client, frame, "not_found", "unknown or expired upload_id")
-			return
-		}
 		path, _ := value["path"].(string)
 		data, _ := value["data_b64"].(string)
 		decoded, err := decodeAssetFile(path, data)
@@ -172,25 +165,24 @@ func (s *Server) handleAssetsPush(frame busclient.Frame) {
 			_ = pluginrpc.RespondError(s.client, frame, "bad_request", err.Error())
 			return
 		}
-		total := len(decoded)
-		for _, existing := range session.files {
-			total += len(existing)
-		}
-		if total > assetMaxTotalBytes {
-			_ = pluginrpc.RespondError(s.client, frame, "too_large", "push exceeds the 64 MiB total cap")
+		appendChunk, _ := value["append"].(bool)
+		s.assetsState.mu.Lock()
+		session := s.assetsState.uploads[uploadID]
+		if session == nil {
+			s.assetsState.mu.Unlock()
+			_ = pluginrpc.RespondError(s.client, frame, "not_found", "unknown or expired upload_id")
 			return
 		}
-		s.assetsState.mu.Lock()
-		if appendChunk, _ := value["append"].(bool); appendChunk && session.files[path] != nil {
-			// Intra-file chunking: SDKs split files whose base64 would
-			// exceed one kernel frame into sequential file ops.
-			session.files[path] = append(session.files[path], decoded...)
-		} else {
-			session.files[path] = decoded
+		received, err := addAssetChunk(session, path, decoded, appendChunk)
+		if err == nil {
+			session.created = time.Now()
 		}
-		session.created = time.Now()
 		s.assetsState.mu.Unlock()
-		_ = pluginrpc.Respond(s.client, frame, map[string]any{"received": len(decoded)})
+		if err != nil {
+			_ = pluginrpc.RespondError(s.client, frame, "too_large", err.Error())
+			return
+		}
+		_ = pluginrpc.Respond(s.client, frame, map[string]any{"received": received})
 	case "commit":
 		uploadID, _ := value["upload_id"].(string)
 		s.assetsState.mu.Lock()
@@ -390,6 +382,42 @@ func (s *Server) expireUploads() {
 }
 
 // ---------- validation / decoding ----------
+
+// addAssetChunk applies one file operation while the caller holds assetsMu.
+// Caps apply to the resulting file and bundle, not merely to the current
+// chunk; replacing a path subtracts its previous size from the bundle total.
+func addAssetChunk(session *uploadSession, path string, decoded []byte, appendChunk bool) (int, error) {
+	existing := session.files[path]
+	fileBytes := len(decoded)
+	if appendChunk {
+		fileBytes += len(existing)
+	}
+	total := fileBytes
+	for otherPath, data := range session.files {
+		if otherPath != path {
+			total += len(data)
+		}
+	}
+	if err := validateAssetChunkSize(path, fileBytes, total); err != nil {
+		return 0, err
+	}
+	if appendChunk && existing != nil {
+		session.files[path] = append(existing, decoded...)
+	} else {
+		session.files[path] = decoded
+	}
+	return len(decoded), nil
+}
+
+func validateAssetChunkSize(path string, fileBytes, totalBytes int) error {
+	if fileBytes > assetMaxFileBytes {
+		return fmt.Errorf("asset %s exceeds the 32 MiB file cap", path)
+	}
+	if totalBytes > assetMaxTotalBytes {
+		return errors.New("push exceeds the 64 MiB total cap")
+	}
+	return nil
+}
 
 func decodeAssetFiles(raw any) (map[string][]byte, error) {
 	list, ok := raw.([]any)

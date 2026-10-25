@@ -20,21 +20,29 @@
 import { createCtx, type PluginCtx } from "./ctx";
 import { bus } from "./bus";
 import type { PluginModule } from "./definePlugin";
+import { ExternalPluginLoader, type ExternalAssetEntry } from "./externalLoader";
 import { registerComponent, registerDockActions, registerDockProvider, unregisterComponent, unregisterDockActions, unregisterDockProvider } from "./registries";
 
 /** Plugin ids the static stage-A build already registered. */
 const staticIds = new Set<string>();
 
-/** Live external plugins: id → loaded module handle. */
-const externalPlugins = new Map<string, { hash: string; module: PluginModule; ctx: PluginCtx; dockType?: string; actionIds?: string[]; styleEl?: HTMLLinkElement }>();
+interface ExternalHandle {
+  module: PluginModule;
+  ctx: PluginCtx;
+  dockType?: string;
+  actionIds?: string[];
+  styleEl?: HTMLLinkElement;
+}
 
-/** Failed import attempts: id → {hash, at}; retried after a cooldown. */
-const failedImports = new Map<string, { hash: string; at: number }>();
-const IMPORT_RETRY_MS = 30_000;
+interface ModuleRegistration {
+  dockType?: string;
+  actionIds?: string[];
+  activation?: Promise<void>;
+}
 
 /** Register one plugin module's contributions (shared by both stages). */
-function registerModule(plugin: PluginModule, ctx: PluginCtx): { dockType?: string; actionIds?: string[] } {
-  const result: { dockType?: string; actionIds?: string[] } = {};
+function registerModule(plugin: PluginModule, ctx: PluginCtx): ModuleRegistration {
+  const result: ModuleRegistration = {};
   for (const [type, component] of Object.entries(plugin.components ?? {})) {
     registerComponent(type, component);
   }
@@ -57,14 +65,18 @@ function registerModule(plugin: PluginModule, ctx: PluginCtx): { dockType?: stri
     }
   }
   if (plugin.activate !== undefined) {
-    Promise.resolve(plugin.activate(ctx)).catch((error: unknown) => {
-      console.error(`plugin ${plugin.id} activate failed`, error);
-    });
+    result.activation = Promise.resolve(plugin.activate(ctx));
   }
   return result;
 }
 
-function unregisterModule(handle: { module: PluginModule; ctx: PluginCtx; dockType?: string; actionIds?: string[]; styleEl?: HTMLLinkElement }): void {
+function reportActivationError(plugin: PluginModule, activation: Promise<void> | undefined): void {
+  activation?.catch((error: unknown) => {
+    console.error(`plugin ${plugin.id} activate failed`, error);
+  });
+}
+
+function unregisterModule(handle: ExternalHandle): void {
   try {
     handle.module.deactivate?.();
   } catch (error) {
@@ -90,17 +102,9 @@ export function loadPlugins(): void {
       continue;
     }
     staticIds.add(plugin.id);
-    registerModule(plugin, createCtx(plugin.id));
+    const { activation } = registerModule(plugin, createCtx(plugin.id));
+    reportActivationError(plugin, activation);
   }
-}
-
-/** Assets mailbox entry shape (gateway assets.go assetEntry). */
-interface AssetsMailboxEntry {
-  url: string;
-  entry: string;
-  hash: string;
-  files?: string[];
-  manifest?: { name?: string; icon?: string; description?: string };
 }
 
 /** Registry mailbox entry shape (kernel broker RegistryEntry). */
@@ -109,73 +113,38 @@ interface RegistryMailboxEntry {
   manifest?: { id?: string };
 }
 
-/** Latest mailbox snapshots; reconcileExternal derives the live set from
- *  their intersection. */
-let latestAssets: Record<string, AssetsMailboxEntry> = {};
-let connectedIds = new Set<string>();
-
-/** Reconciles are serialized: assets and list frames can arrive together
- *  and import() is async, so naive overlap could register one plugin twice. */
-let reconcileChain: Promise<void> = Promise.resolve();
-
-function scheduleReconcile(): void {
-  reconcileChain = reconcileChain.then(reconcileExternal).catch((error: unknown) => {
-    console.error("external plugin reconcile failed", error);
-  });
-}
+const externalLoader = new ExternalPluginLoader<ExternalHandle>({
+  isStatic: (id) => staticIds.has(id),
+  load: importExternal,
+  unload: (handle) => {
+    unregisterModule(handle);
+    console.info(`external plugin ${handle.module.id} unloaded`);
+  },
+  onError: (id, entry, error) => {
+    console.error(`external plugin ${id} failed to load from ${entry.url + entry.entry}`, error);
+  },
+});
 
 /** Subscribe the assets and registry mailboxes and reconcile external plugin
- *  loads. Called once at bootstrap; mailbox redelivery on reconnect
- *  re-reconciles, which is a no-op for already-loaded hashes. */
+ * loads. Called once at bootstrap; mailbox redelivery on reconnect
+ * re-reconciles, which is a no-op for already-loaded hashes. */
 export function loadExternalPlugins(): void {
   bus.subscribe("plugins:_:assets", (frame) => {
-    latestAssets = (frame.value as Record<string, AssetsMailboxEntry> | null) ?? {};
-    scheduleReconcile();
+    externalLoader.setAssets((frame.value as Record<string, ExternalAssetEntry> | null) ?? {});
   });
   bus.subscribe("plugins:_:list", (frame) => {
     const entries = Array.isArray(frame.value) ? (frame.value as RegistryMailboxEntry[]) : [];
-    connectedIds = new Set(
-      entries
-        .map((entry) => entry?.id ?? entry?.manifest?.id)
-        .filter((id): id is string => typeof id === "string" && id !== ""),
+    externalLoader.setConnected(
+      new Set(
+        entries
+          .map((entry) => entry?.id ?? entry?.manifest?.id)
+          .filter((id): id is string => typeof id === "string" && id !== ""),
+      ),
     );
-    scheduleReconcile();
   });
 }
 
-async function reconcileExternal(): Promise<void> {
-  // Unload: ids whose assets disappeared (manager delete / assets:remove)
-  // or whose backend disconnected (no entry point without a live backend).
-  for (const id of [...externalPlugins.keys()]) {
-    if (!(id in latestAssets) || !connectedIds.has(id)) {
-      const handle = externalPlugins.get(id);
-      externalPlugins.delete(id);
-      if (handle !== undefined) {
-        unregisterModule(handle);
-        console.info(`external plugin ${id} unloaded`);
-      }
-    }
-  }
-  for (const [id, entry] of Object.entries(latestAssets)) {
-    if (staticIds.has(id)) continue; // in-repo build wins; never double-register
-    if (!connectedIds.has(id)) continue; // offline: assets are not an entry point
-    const loaded = externalPlugins.get(id);
-    if (loaded !== undefined && loaded.hash === entry.hash) continue;
-    const failed = failedImports.get(id);
-    if (loaded === undefined && failed !== undefined && failed.hash === entry.hash && Date.now() - failed.at < IMPORT_RETRY_MS) {
-      continue; // same broken bundle: wait out the cooldown instead of import-looping
-    }
-    if (loaded !== undefined) {
-      // Hot reload (framework 8.6 rule 2): the content hash changed, so the
-      // URL differs and import() bypasses the module cache.
-      unregisterModule(loaded);
-      externalPlugins.delete(id);
-    }
-    await importExternal(id, entry);
-  }
-}
-
-async function importExternal(id: string, entry: AssetsMailboxEntry): Promise<void> {
+async function importExternal(id: string, entry: ExternalAssetEntry): Promise<ExternalHandle> {
   const url = entry.url + entry.entry;
   // Optional companion stylesheet: a Vite library build with
   // cssCodeSplit:false emits frontend.css next to the bundle.
@@ -194,13 +163,20 @@ async function importExternal(id: string, entry: AssetsMailboxEntry): Promise<vo
       throw new Error(`bundle ${url} has no definePlugin default export with id "${id}"`);
     }
     const ctx = createCtx(id);
-    const { dockType, actionIds } = registerModule(plugin, ctx);
-    externalPlugins.set(id, { hash: entry.hash, module: plugin, ctx, dockType, actionIds, styleEl });
-    failedImports.delete(id);
+    const { dockType, actionIds, activation } = registerModule(plugin, ctx);
+    const handle: ExternalHandle = { module: plugin, ctx, dockType, actionIds, styleEl };
+    try {
+      await activation;
+    } catch (error) {
+      // Activation is part of loading: roll back every partial contribution
+      // so the same hash can be retried instead of remaining half-registered.
+      unregisterModule(handle);
+      throw error;
+    }
     console.info(`external plugin ${id} loaded`, url);
+    return handle;
   } catch (error) {
     styleEl?.remove();
-    failedImports.set(id, { hash: entry.hash, at: Date.now() });
-    console.error(`external plugin ${id} failed to load from ${url}`, error);
+    throw error;
   }
 }

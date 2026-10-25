@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"viewer/sdk/go/busclient"
 )
 
 func TestBackoff(t *testing.T) {
@@ -34,7 +36,7 @@ func TestStaleAssetIDs(t *testing.T) {
 	}
 }
 
-func TestNewLoadsOnlyEnabledRunnablePlugins(t *testing.T) {
+func TestNewLoadsAndPreservesEveryRegistryEntry(t *testing.T) {
 	temp := t.TempDir()
 	enabled := filepath.Join(temp, "enabled")
 	disabled := filepath.Join(temp, "disabled")
@@ -63,7 +65,29 @@ func TestNewLoadsOnlyEnabledRunnablePlugins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plugin.managed) != 1 || plugin.managed["enabled"] == nil {
-		t.Fatalf("managed plugins = %#v", plugin.managed)
+	if len(plugin.managed) != 3 || plugin.managed["disabled"] == nil || plugin.managed["missing"] == nil {
+		t.Fatalf("managed plugins = %#v, want every registry row", plugin.managed)
+	}
+	if err := plugin.saveRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := New(Config{KernelWS: "ws://127.0.0.1:29399/ws", RegistryPath: registryPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.managed) != 3 || reloaded.managed["disabled"].entry.enabled() {
+		t.Fatalf("disabled/missing rows lost after save/reload: %#v", reloaded.managed)
+	}
+}
+
+func TestTrackRegistryKeepsConsecutiveCrashHistory(t *testing.T) {
+	item := &managedPlugin{id: "demo", state: StateStarting, crashes: []time.Time{time.Now()}}
+	plugin := &Plugin{managed: map[string]*managedPlugin{"demo": item}}
+	plugin.trackRegistry(busclient.Frame{Value: []any{map[string]any{"manifest": map[string]any{"id": "demo"}}}})
+	if item.state != StateRunning {
+		t.Fatalf("state=%q, want running", item.state)
+	}
+	if len(item.crashes) != 1 {
+		t.Fatalf("hello reset consecutive crash history: %#v", item.crashes)
 	}
 }

@@ -147,6 +147,35 @@ func TestAssetsPushServeAndReload(t *testing.T) {
 	}
 }
 
+func TestAssetChunkAccounting(t *testing.T) {
+	session := &uploadSession{files: map[string][]byte{
+		"frontend.js": []byte("head"),
+		"style.css":   []byte("body{}"),
+	}}
+	if _, err := addAssetChunk(session, "frontend.js", []byte("tail"), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(session.files["frontend.js"]); got != "headtail" {
+		t.Fatalf("appended file = %q", got)
+	}
+	if _, err := addAssetChunk(session, "frontend.js", []byte("new"), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(session.files["frontend.js"]); got != "new" {
+		t.Fatalf("replaced file = %q", got)
+	}
+
+	if err := validateAssetChunkSize("frontend.js", assetMaxFileBytes, assetMaxTotalBytes); err != nil {
+		t.Fatalf("caps should be inclusive: %v", err)
+	}
+	if err := validateAssetChunkSize("frontend.js", assetMaxFileBytes+1, assetMaxFileBytes+1); err == nil {
+		t.Fatal("accumulated file bytes must be capped, not just each chunk")
+	}
+	if err := validateAssetChunkSize("frontend.js", assetMaxFileBytes, assetMaxTotalBytes+1); err == nil {
+		t.Fatal("accumulated bundle bytes must be capped")
+	}
+}
+
 func TestAssetsPushChunkedAndValidation(t *testing.T) {
 	server, caller, _ := testAssetsServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

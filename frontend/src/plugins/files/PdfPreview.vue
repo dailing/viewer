@@ -1,11 +1,8 @@
 <script lang="ts">
 /* Module scope (runs once per app load, shared by every PdfPreview instance
  * — <script setup> top-level state would be PER-INSTANCE): scroll memory
- * across refresh remounts. FilePreview remounts this component on every
- * server change event / manual refresh (fresh rasters key off the new
- * mtime), which would reset the scroll position to the top. Positions are
- * remembered per path as (anchor page, fractional offset into the page), so
- * the restore survives page aspect corrections landing after it. */
+ * across in-place reloads and trim-change remounts. Positions are remembered
+ * per path as (anchor page, fractional offset into the page), so the restore survives page aspect corrections landing after it. */
 const pdfScrollMemory = new Map<string, { page: number; ratio: number }>();
 let pdfFilterSeq = 0;
 </script>
@@ -15,8 +12,8 @@ let pdfFilterSeq = 0;
  * PDF preview: per-page WebP rasters via the file:_:pdfpage RPC. Three
  * resolution tiers (low = instant, high = sharp, ultra = print) escalate
  * sequentially on visible pages, with adjacent-page low-tier prefetch; a
- * module-level LRU (blob object URLs, byte-budgeted) is shared across panes
- * so reopened pages are free. White margins are cropped server-side down to
+ * per-instance bounded LRU owns and disposes its blob object URLs, while the
+ * server-side disk LRU is shared across panes. White margins are cropped server-side down to
  * the pane-chosen percentage per axis (100 = content box, 0 = full page);
  * the reported image dimensions correct each page's aspect placeholder.
  * Theme mapping (pane-toggleable): an SVG feColorMatrix remaps each page's
@@ -30,9 +27,10 @@ import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { useThemeStore } from "../../stores/theme";
+import { base64ToBlob, readPdfPage } from "./fileData";
 import type { PdfPageResult } from "./types";
 
-const props = defineProps<{ path: string; trimX: number; trimY: number; themeMap: boolean }>();
+const props = defineProps<{ path: string; trimX: number; trimY: number; themeMap: boolean; reloadTick: number }>();
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("PdfPreview must be mounted inside PluginPaneHost");
@@ -134,12 +132,10 @@ function cacheSet(key: string, url: string, bytes: number): void {
   cacheBytes += bytes;
 }
 
-function base64ToBlobUrl(content: string, mime: string): { url: string; bytes: number } {
-  const binary = atob(content);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-  const blob = new Blob([bytes], { type: mime });
-  return { url: URL.createObjectURL(blob), bytes: blob.size };
+function clearPageCache(): void {
+  for (const entry of pageCache.values()) URL.revokeObjectURL(entry.url);
+  pageCache.clear();
+  cacheBytes = 0;
 }
 
 const loading = ref(true);
@@ -216,27 +212,36 @@ function adoptMeta(result: PdfPageResult): void {
   }
 }
 
-async function fetchPage(page: number, scale: number): Promise<string> {
+const staleRequest = new Error("stale PDF request");
+
+async function fetchPage(page: number, scale: number, gen: number): Promise<string> {
+  if (gen !== generation) throw staleRequest;
   const key = cacheKey(page, scale);
   const hit = cacheGet(key);
   if (hit !== null) return hit;
   const pending = inflight.get(key);
   if (pending !== undefined) return pending;
   const request = (async (): Promise<string> => {
-    const result = (await ctx.bus.request("file:_:pdfpage", {
+    const result = await readPdfPage(ctx.bus, {
       path: props.path,
       page,
       scale,
       trim_x: props.trimX,
       trim_y: props.trimY,
-    })) as PdfPageResult;
+    });
+    if (gen !== generation) throw staleRequest;
     adoptMeta(result);
-    const { url, bytes } = base64ToBlobUrl(result.content, result.mime);
-    cacheSet(key, url, bytes);
+    const blob = base64ToBlob(result.content, result.mime);
+    const url = URL.createObjectURL(blob);
+    cacheSet(key, url, blob.size);
     return url;
-  })().finally(() => inflight.delete(key));
+  })();
   inflight.set(key, request);
-  return request;
+  try {
+    return await request;
+  } finally {
+    if (inflight.get(key) === request) inflight.delete(key);
+  }
 }
 
 function tierField(scale: number): TierField {
@@ -255,7 +260,7 @@ async function ensureTier(page: number, scale: number, gen: number): Promise<voi
   if (state[field] !== null || state[flag]) return;
   state[flag] = true;
   try {
-    const url = await fetchPage(page, scale);
+    const url = await fetchPage(page, scale, gen);
     if (gen !== generation) return;
     const current = pageStates.value[page - 1];
     if (current !== undefined) current[field] = url;
@@ -301,14 +306,17 @@ function observePages(): void {
 // which lands in a later flush than the adoptMeta pages update.
 watch([pages, loading], () => void nextTick(observePages));
 
-async function load(path: string, gen: number): Promise<void> {
+async function load(gen: number): Promise<void> {
+  saveScroll();
+  clearPageCache();
+  inflight.clear(); // old RPCs may finish, but their generation cannot commit
   loading.value = true;
   loadError.value = "";
   pages.value = 0;
   mtime.value = 0;
   pageStates.value = [];
   try {
-    const url = await fetchPage(1, LOW_SCALE);
+    const url = await fetchPage(1, LOW_SCALE, gen);
     if (gen !== generation) return;
     const first = pageStates.value[0];
     if (first !== undefined) {
@@ -331,10 +339,10 @@ async function load(path: string, gen: number): Promise<void> {
 }
 
 watch(
-  () => props.path,
-  (path) => {
+  () => [props.path, props.reloadTick],
+  () => {
     const gen = ++generation;
-    void load(path, gen);
+    void load(gen);
   },
   { immediate: true },
 );
@@ -343,6 +351,8 @@ onBeforeUnmount(() => {
   saveScroll();
   generation++;
   observer?.disconnect();
+  clearPageCache();
+  inflight.clear();
 });
 
 function ratioFor(state: PageState): string {

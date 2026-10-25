@@ -115,7 +115,12 @@ func TestScheduleRestartCancel(t *testing.T) {
 
 	// Cancel mid-build: the finished build must not arm the watchdog.
 	release := make(chan struct{})
-	runReleaseBuild = func() error { <-release; return nil }
+	buildReturned := make(chan struct{})
+	runReleaseBuild = func() error {
+		<-release
+		close(buildReturned)
+		return nil
+	}
 	rec = httptest.NewRecorder()
 	server.serveHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/admin/schedule-restart", nil))
 	if rec.Code != http.StatusAccepted {
@@ -127,6 +132,7 @@ func TestScheduleRestartCancel(t *testing.T) {
 		t.Fatalf("cancel (building) body = %q", rec.Body.String())
 	}
 	close(release)
+	<-buildReturned // the goroutine must stop reading the global hook before the test restores it
 	// Give the build goroutine a chance to (wrongly) re-arm.
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {

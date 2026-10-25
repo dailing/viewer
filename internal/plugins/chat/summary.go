@@ -53,7 +53,13 @@ func (p *Plugin) buildTurnTranscript(turnID string, toolCharBudget int) (string,
 		return "", 0, 0, err
 	}
 	blocks := []string{}
-	query, err := p.store.latestUserMessage(turn.ChatID, turn.StartedAt)
+	var query *Message
+	if turn.DispatchID != "" {
+		query, err = p.store.dispatchUserMessage(turn.ChatID, turn.DispatchID)
+	} else {
+		// Pre-dispatch-id turns retain the legacy time-based fallback.
+		query, err = p.store.latestUserMessage(turn.ChatID, turn.StartedAt)
+	}
 	if err != nil {
 		return "", 0, 0, err
 	}

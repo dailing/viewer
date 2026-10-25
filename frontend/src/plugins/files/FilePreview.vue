@@ -24,6 +24,7 @@ import type { PreviewMode } from "./instanceStore";
 import NotebookPreview from "./NotebookPreview.vue";
 import PdfPreview from "./PdfPreview.vue";
 import TexPreview from "./TexPreview.vue";
+import { fileTicketUrl, readFile } from "./fileData";
 import { kindForPath } from "./types";
 
 const props = defineProps<{
@@ -47,17 +48,6 @@ const WATCH_RENEW_MS = 60_000;
 
 type Status = "empty" | "loading" | "ready" | "too-large" | "binary" | "deleted" | "error";
 
-interface ReadResult {
-  path: string;
-  size: number;
-  encoding: "utf-8" | "base64";
-  content: string;
-}
-
-interface TicketReply {
-  url: string;
-}
-
 interface WatchReply {
   path: string;
   exists: boolean;
@@ -71,15 +61,15 @@ const text = ref("");
 const imageUrl = ref("");
 /** Path whose content is on screen; same-path reloads keep the old render mounted. */
 let loadedPath: string | null = null;
+let loadGeneration = 0;
 const rootRef = ref<HTMLElement | null>(null);
 const renderedRef = ref<HTMLElement | null>(null);
-/** Bumped by server change events; remounts PdfPreview (its cache re-keys on mtime). */
+/** Bumped by server change events; PdfPreview reloads in place and disposes
+ * superseded rasters instead of being remounted. */
 const autoTick = ref(0);
 
 const kind = computed(() => (props.path === null ? null : kindForPath(props.path)));
-const pdfKey = computed(
-  () => `${props.path ?? ""}:${props.reloadTick}:${autoTick.value}:${props.trimX}x${props.trimY}`,
-);
+const pdfKey = computed(() => `${props.path ?? ""}:${props.trimX}x${props.trimY}`);
 const rendered = computed(() =>
   kind.value === "markdown" && props.mode === "render" && status.value === "ready"
     ? renderMarkdown(text.value)
@@ -93,6 +83,7 @@ function formatBytes(bytes: number): string {
 }
 
 async function load(path: string | null, preserveScroll = false): Promise<void> {
+  const generation = ++loadGeneration;
   // Watch/refresh reload of the file already on screen: keep the old render
   // mounted while fetching. Unmounting would destroy the scroll position —
   // TexPreview renders async after remount, so no restore could ever stick —
@@ -123,16 +114,15 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
       // By-reference data plane: the browser streams the bytes straight from
       // the gateway — no base64 over the bus, no size cap, no RPC timeout on
       // large images.
-      const ticket = (await ctx.bus.request("file:_:ticket", { path })) as TicketReply;
-      imageUrl.value = ticket.url;
+      const url = await fileTicketUrl(ctx.bus, path);
+      if (generation !== loadGeneration) return;
+      imageUrl.value = url;
       status.value = "ready";
       loadedPath = path;
       return;
     }
-    const result = (await ctx.bus.request("file:_:read", {
-      path,
-      max_bytes: TEXT_MAX_BYTES,
-    })) as ReadResult;
+    const result = await readFile(ctx.bus, path, TEXT_MAX_BYTES);
+    if (generation !== loadGeneration) return;
     if (result.encoding === "base64") {
       status.value = "binary";
       return;
@@ -141,6 +131,7 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
     status.value = "ready";
     loadedPath = path;
   } catch (cause) {
+    if (generation !== loadGeneration) return;
     if (cause instanceof RpcError && cause.code === "too_large") {
       limit.value = TEXT_MAX_BYTES;
       status.value = "too-large";
@@ -160,7 +151,10 @@ let renewTimer: ReturnType<typeof setInterval> | null = null;
 function onWatchReply(reply: WatchReply): void {
   if (reply.path !== props.path) return;
   if (!reply.exists) {
-    if (lastDigest !== null) status.value = "deleted";
+    if (lastDigest !== null) {
+      loadGeneration++;
+      status.value = "deleted";
+    }
     lastDigest = null;
     return;
   }
@@ -206,6 +200,7 @@ ctx.bus.subscribe("file:_:changed", (frame: BusFrame) => {
   const value = frame.value as { path?: string; exists?: boolean; sha256?: string } | null;
   if (value === null || value.path === undefined || value.path !== props.path) return;
   if (value.exists === false) {
+    loadGeneration++;
     status.value = "deleted";
     lastDigest = null;
     return;
@@ -231,7 +226,10 @@ watch(
   },
 );
 
-onUnmounted(unwatchFile);
+onUnmounted(() => {
+  loadGeneration++;
+  unwatchFile();
+});
 
 // Mermaid fences need a post-render pass once the v-html is in the DOM.
 watch([rendered, renderedRef], () => {
@@ -273,6 +271,7 @@ watch([rendered, renderedRef], () => {
         :trim-x="trimX"
         :trim-y="trimY"
         :theme-map="themeMap"
+        :reload-tick="reloadTick + autoTick"
       />
       <div v-else-if="kind === 'image'" class="preview-image">
         <img :src="imageUrl" :alt="path ?? ''" />

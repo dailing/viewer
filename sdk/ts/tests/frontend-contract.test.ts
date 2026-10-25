@@ -341,7 +341,7 @@ describe.sequential("frontend pane contracts against viewerd", () => {
     await client.connect();
 
     const current = (await client.request("file:_:list", { path: "" })) as DirectoryListing;
-    expect(current.path).toBe(REPO_DIR);
+    expect(current.path).toBe(homedir());
 
     const root = (await client.request("file:_:list", {
       path: filesFixture,
@@ -492,9 +492,20 @@ describe.sequential("frontend pane contracts against viewerd", () => {
     const longRun = (await client.request("chat:_:dispatch", { chat_id: chat.id, message: "long turn", role_ids: [first.id] })) as { dispatch_id: string };
     expect(longRun.dispatch_id).toBeTruthy();
     await waitFor(() => messages.slice(beforeLong).some((item) => item.chat_id === chat.id && item.sender && (item.sender as { role_id?: string }).role_id === first.id && String(item.text).includes("mock:")));
-    await expect(client.request("chat:_:dispatch", { chat_id: chat.id, message: "busy", role_ids: [first.id] })).rejects.toMatchObject({ code: "routing_target_busy" });
+    const busy = (await client.request("chat:_:dispatch", { chat_id: chat.id, message: "busy", role_ids: [first.id] })) as {
+      dispatch_id: string;
+      started_role_ids: string[];
+      queued_role_ids: string[];
+    };
+    expect(busy).toMatchObject({
+      started_role_ids: [],
+      queued_role_ids: [first.id],
+    });
+    await client.request("chat:_:queued-cancel", { chat_id: chat.id, dispatch_id: busy.dispatch_id });
     await client.request("chat:_:stop", { chat_id: chat.id, role_id: first.id });
     await waitFor(() => completed.some((item) => item.chat_id === chat.id && item.role_id === first.id && item.stop_reason === "cancelled"));
+    await client.request("chat:_:roles:patch", { id: first.id, description: "" });
+    await client.request("chat:_:roles:patch", { id: second.id, description: "" });
     await expect(client.request("chat:_:dispatch", { chat_id: chat.id, message: "auto" })).rejects.toMatchObject({ code: "chat_error" });
     await client.request("chat:_:chats:delete", { id: chat.id });
     await client.request("chat:_:roles:delete", { id: first.id });

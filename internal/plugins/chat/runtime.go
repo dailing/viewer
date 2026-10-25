@@ -158,26 +158,29 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	var selected []SuperRole
 	var rationale string
 	var branch *Branch
+	line := ""
 	var err error
-	if request.BranchID != "" {
-		branch, err = p.resolveBranch(*chat, request.BranchID)
-		if err != nil {
-			return nil, nil, err
-		}
-		selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else if request.ContinueTurnID != "" {
+	if request.ContinueTurnID != "" {
 		var laneRole SuperRole
-		resumeSession, laneRole, err = p.resolveContinuation(*chat, workspace, request.ContinueTurnID)
+		resumeSession, laneRole, line, err = p.resolveContinuation(*chat, workspace, request.ContinueTurnID)
 		if err != nil {
 			return nil, nil, err
 		}
 		selected = []SuperRole{laneRole}
 		rationale = "Continue the session of turn " + request.ContinueTurnID + "."
+		request.BranchID = line
 		request.ForceNewSession = false
 		request.ParallelDispatch = false
+	} else if request.BranchID != "" {
+		branch, err = p.resolveBranch(*chat, request.BranchID)
+		if err != nil {
+			return nil, nil, err
+		}
+		line = branch.ID
+		selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
+		if err != nil {
+			return nil, nil, err
+		}
 	} else {
 		selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
 		if err != nil {
@@ -185,20 +188,21 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 		}
 	}
 	parallel := request.ParallelDispatch
-	line := branchIDOf(branch)
-	// resumeFor computes the lane session a role's turn resumes. Branch
-	// turns resume the role's own latest session on the branch ("" — no
-	// prior branch session, or force_new_session — starts fresh with the
-	// branch's snapshot context); a mainline lane continuation resumes the
-	// referenced session; anything else rides the canonical session.
+	// resumeFor computes the lane session a role's turn resumes. An explicit
+	// continuation resumes the referenced session on the referenced turn's
+	// surviving line; an ordinary branch dispatch resumes the role's latest
+	// session on that branch; anything else rides the canonical session.
 	resumeFor := func(role SuperRole) string {
+		if request.ContinueTurnID != "" {
+			return resumeSession
+		}
 		if branch != nil {
 			if request.ForceNewSession {
 				return ""
 			}
 			return p.branchRoleSession(chat.ID, branch.ID, role.ID)
 		}
-		return resumeSession
+		return ""
 	}
 	key := lineKey(chat.ID, line)
 	if !parallel {
@@ -348,13 +352,6 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	return reply, user, nil
 }
 
-func branchIDOf(branch *Branch) string {
-	if branch == nil {
-		return ""
-	}
-	return branch.ID
-}
-
 // autoBranchName derives a branch name from the dispatching message (first
 // runes, so the tab is recognizable without a rename); multi-role parallel
 // dispatches suffix the role to tell the branches apart.
@@ -468,7 +465,7 @@ func (p *Plugin) selectRoles(request dispatchRequest, raw map[string]any, chat C
 		}
 		before = marker.CreatedAt
 	}
-	history, err := p.historyPrompt(chat.ID, before, budget)
+	history, err := p.historyPrompt(chat.ID, request.BranchID, before, budget)
 	if err != nil {
 		return nil, "", err
 	}
@@ -497,14 +494,16 @@ func roleIDs(roles []SuperRole) []string {
 // resolveContinuation validates a continue_turn_id dispatch: the turn must
 // belong to the chat and have a resumable session (stamped on the row once
 // its runtime starts, or visible on an in-flight runtime), and its role must
-// still exist in the workspace. Returns the session to resume and the role.
-func (p *Plugin) resolveContinuation(chat Chat, workspace Workspace, turnID string) (string, SuperRole, error) {
+// still exist in the workspace. It returns the session, role, and surviving
+// work line. A continuation of merged content follows the merge chain, just
+// like forking that turn; archive-only legacy lines remain read-only.
+func (p *Plugin) resolveContinuation(chat Chat, workspace Workspace, turnID string) (string, SuperRole, string, error) {
 	turn, err := p.store.turn(turnID)
 	if err != nil {
-		return "", SuperRole{}, err
+		return "", SuperRole{}, "", err
 	}
 	if turn == nil || turn.ChatID != chat.ID {
-		return "", SuperRole{}, errors.New("continue_turn_id was not found in the chat")
+		return "", SuperRole{}, "", errors.New("continue_turn_id was not found in the chat")
 	}
 	sessionID := turn.SessionID
 	if sessionID == "" {
@@ -513,14 +512,40 @@ func (p *Plugin) resolveContinuation(chat Chat, workspace Workspace, turnID stri
 		p.mu.Unlock()
 	}
 	if sessionID == "" {
-		return "", SuperRole{}, errors.New("that turn has no resumable session")
+		return "", SuperRole{}, "", errors.New("that turn has no resumable session")
 	}
-	for _, role := range workspace.Roles {
-		if role.ID == turn.RoleID {
-			return sessionID, role, nil
+	var role SuperRole
+	found := false
+	for _, candidate := range workspace.Roles {
+		if candidate.ID == turn.RoleID {
+			role, found = candidate, true
+			break
 		}
 	}
-	return "", SuperRole{}, errors.New("the turn's role no longer exists")
+	if !found {
+		return "", SuperRole{}, "", errors.New("the turn's role no longer exists")
+	}
+	line := turn.BranchID
+	for hops := 0; line != ""; hops++ {
+		if hops >= 16 {
+			return "", SuperRole{}, "", errors.New("the continued turn's merge chain does not terminate")
+		}
+		branch, branchErr := p.store.branch(line)
+		if branchErr != nil {
+			return "", SuperRole{}, "", branchErr
+		}
+		if branch == nil || branch.ChatID != chat.ID {
+			return "", SuperRole{}, "", errors.New("the continued turn's branch was not found in the chat")
+		}
+		if !branch.archived() {
+			break
+		}
+		if !branch.merged() {
+			return "", SuperRole{}, "", errBranchArchived
+		}
+		line = branch.MergedIntoBranchID
+	}
+	return sessionID, role, line, nil
 }
 
 // inflightTurnSessionLocked returns the session of a currently running turn
@@ -1178,8 +1203,12 @@ func fallback(value, fallbackValue string) string {
 	return value
 }
 
-func (p *Plugin) historyPrompt(chatID string, before int64, budget int) (string, error) {
-	messages, err := p.store.history(chatID, before, budget)
+func (p *Plugin) historyPrompt(chatID, branchID string, before int64, budget int) (string, error) {
+	view, err := p.viewLineKeys(chatID, []string{branchID})
+	if err != nil {
+		return "", err
+	}
+	messages, err := p.store.historyByKeys(chatID, view.messageKeys, before, budget)
 	if err != nil {
 		return "", err
 	}

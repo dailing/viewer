@@ -7,6 +7,7 @@ package chat
 // bus: everything runs against a real sqlite database.
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -213,6 +214,42 @@ func TestHistoryMigrationBuildsAuthoritativeGraph(t *testing.T) {
 	p.store.db.Model(&HistoryEdge{}).Count(&edgesAfter)
 	if nodesBefore != nodesAfter || edgesBefore != edgesAfter {
 		t.Fatalf("migration not idempotent: nodes %d→%d edges %d→%d", nodesBefore, nodesAfter, edgesBefore, edgesAfter)
+	}
+}
+
+func TestHistoryPromptUsesLineMembership(t *testing.T) {
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	chatID := "chat-router-history"
+	legacyFixture(t, p.store, chatID)
+	for _, message := range []*Message{
+		{ID: "answer-main", ChatID: chatID, TurnID: "m3", Role: "assistant", Text: "mainline only", CreatedAt: 701},
+		{ID: "answer-branch", ChatID: chatID, TurnID: "b1", Role: "assistant", Text: "branch only", CreatedAt: 301},
+		{ID: "answer-archived", ChatID: chatID, TurnID: "d1", Role: "assistant", Text: "archived only", CreatedAt: 601},
+	} {
+		if err := p.store.addMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.store.migrateChatGraph(chatID, &migrationReport{}); err != nil {
+		t.Fatal(err)
+	}
+	branchHistory, err := p.historyPrompt(chatID, "B", 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(branchHistory, "branch only") || strings.Contains(branchHistory, "mainline only") || strings.Contains(branchHistory, "archived only") {
+		t.Fatalf("branch router history crossed line membership: %q", branchHistory)
+	}
+	mainHistory, err := p.historyPrompt(chatID, "", 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mainHistory, "mainline only") || !strings.Contains(mainHistory, "branch only") || strings.Contains(mainHistory, "archived only") {
+		t.Fatalf("mainline router history has wrong merged membership: %q", mainHistory)
 	}
 }
 

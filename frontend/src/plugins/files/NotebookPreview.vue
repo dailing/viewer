@@ -13,10 +13,11 @@
  * mounted while fetching and restore the scroll offset after the swap —
  * the same contract as TexPreview.
  */
-import { inject, nextTick, ref, watch } from "vue";
+import { inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { renderCodeBlock, renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
+import { fetchFileText } from "./fileData";
 import type { PreviewMode } from "./instanceStore";
 import { parseNotebook } from "./notebookModel";
 import type { NotebookOutput } from "./notebookModel";
@@ -31,10 +32,6 @@ const props = defineProps<{
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("NotebookPreview must be mounted inside PluginPaneHost");
 const ctx: PluginCtx = injectedCtx;
-
-interface TicketReply {
-  url: string;
-}
 
 interface CellView {
   type: "markdown" | "code" | "raw";
@@ -57,9 +54,13 @@ const rootRef = ref<HTMLElement | null>(null);
 let loadedPath: string | null = null;
 /** Stale-fetch guard: bumped per load, awaited steps bail when it moved on. */
 let fetchToken = 0;
+let abortFetch: AbortController | null = null;
 
 async function load(): Promise<void> {
   const token = ++fetchToken;
+  abortFetch?.abort();
+  const controller = new AbortController();
+  abortFetch = controller;
   const keepMounted = props.path === loadedPath && status.value === "ready";
   if (!keepMounted) {
     status.value = "loading";
@@ -67,11 +68,7 @@ async function load(): Promise<void> {
   }
   const scrollTop = keepMounted && props.mode === "render" ? (wrapRef.value?.scrollTop ?? null) : null;
   try {
-    const ticket = (await ctx.bus.request("file:_:ticket", { path: props.path })) as TicketReply;
-    const response = await fetch(ticket.url);
-    if (token !== fetchToken) return;
-    if (!response.ok) throw new Error(`读取失败（HTTP ${response.status}）`);
-    const text = await response.text();
+    const text = await fetchFileText(ctx.bus, props.path, controller.signal);
     if (token !== fetchToken) return;
     rawText.value = text;
     const model = parseNotebook(text);
@@ -115,12 +112,19 @@ watch(
 // Mode toggles never refetch; the render-side mermaid pass re-runs on remount.
 watch(
   () => props.mode,
-  (mode) => {
-    if (mode === "render" && status.value === "ready") {
+  async (mode) => {
+    if (mode !== "render" || status.value !== "ready") return;
+    await nextTick(); // source <pre> must leave the DOM before querying cells
+    if (mode === props.mode && status.value === "ready") {
       void renderMermaidIn(rootRef.value, "files-notebook");
     }
   },
 );
+
+onBeforeUnmount(() => {
+  fetchToken++;
+  abortFetch?.abort();
+});
 </script>
 
 <template>

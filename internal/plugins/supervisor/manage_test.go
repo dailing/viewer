@@ -94,7 +94,6 @@ func waitForState(t *testing.T, caller *busclient.Client, id, want string) map[s
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return nil
 }
 
 func TestManagerLifecycleAndRetry(t *testing.T) {
@@ -147,8 +146,8 @@ func TestManagerLifecycleAndRetry(t *testing.T) {
 	}
 	waitForState(t, caller, "sleeper", "stopped")
 	time.Sleep(300 * time.Millisecond)
-	if entry = listEntry(t, caller, "sleeper"); entry["state"] != "stopped" {
-		t.Fatalf("stopped plugin must stay stopped: %#v", entry)
+	if entry = listEntry(t, caller, "sleeper"); entry["state"] != "stopped" || entry["pid"] != nil {
+		t.Fatalf("stopped plugin must stay stopped with no stale pid: %#v", entry)
 	}
 
 	// delete removes the entry and persists.
@@ -160,6 +159,30 @@ func TestManagerLifecycleAndRetry(t *testing.T) {
 	}
 	if data, err = os.ReadFile(registryPath); err != nil || containsAll(string(data), "sleeper") {
 		t.Fatalf("registry.json should drop sleeper: %s err=%v", data, err)
+	}
+}
+
+func TestManagerDisabledEntryRemainsManageable(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	caller := startTestManager(t, registryPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pluginPath := makePluginDir(t, "#!/bin/sh\nsleep 30\n")
+	if _, err := caller.Request(ctx, "supervisor:_:upsert", map[string]any{
+		"id": "disabled", "path": pluginPath, "enabled": false, "autostart": true,
+	}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	entry := listEntry(t, caller, "disabled")
+	if entry == nil || entry["enabled"] != false || entry["state"] != StateStopped {
+		t.Fatalf("disabled entry is not manageable: %#v", entry)
+	}
+	if _, err := caller.Request(ctx, "supervisor:_:start", map[string]any{"id": "disabled"}, 5*time.Second); err == nil {
+		t.Fatal("disabled plugin unexpectedly started")
+	}
+	data, err := os.ReadFile(registryPath)
+	if err != nil || !containsAll(string(data), "disabled") {
+		t.Fatalf("disabled entry not persisted: %s err=%v", data, err)
 	}
 }
 

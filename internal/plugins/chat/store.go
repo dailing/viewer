@@ -841,6 +841,18 @@ func (s *store) lineHasActivityBetween(chatID string, keys []string, after, befo
 	return count > 0, err
 }
 
+func (s *store) dispatchUserMessage(chatID, dispatchID string) (*Message, error) {
+	var value Message
+	result := s.db.Where("chat_id = ? AND turn_id = ? AND role = ?", chatID, dispatchID, "user").Order("created_at desc, id desc").Limit(1).Find(&value)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &value, nil
+}
+
 func (s *store) latestUserMessage(chatID string, before int64) (*Message, error) {
 	var value Message
 	result := s.db.Where("chat_id = ? AND role = ? AND created_at <= ?", chatID, "user", before).Order("created_at desc").Limit(1).Find(&value)
@@ -861,6 +873,44 @@ func (m MessageBlock) payload() map[string]any {
 }
 
 func (s *store) saveTurnSummary(value *TurnSummary) error { return s.db.Save(value).Error }
+
+// historyByKeys is the line-scoped counterpart of history. Membership comes
+// from the History DAG view, so routing cannot read another branch's recent
+// messages merely because they are newer in the shared chat table.
+func (s *store) historyByKeys(chatID string, keys map[string]bool, before int64, wordBudget int) ([]Message, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(keys))
+	for id := range keys {
+		ids = append(ids, id)
+	}
+	var values []Message
+	query := s.db.Where("chat_id = ? AND (turn_id IN ? OR id IN ?)", chatID, ids, ids)
+	if before > 0 {
+		query = query.Where("created_at < ?", before)
+	}
+	if err := query.Order("created_at desc, id desc").Limit(1000).Find(&values).Error; err != nil {
+		return nil, err
+	}
+	used, start := 0, len(values)
+	for i, value := range values {
+		words := len(splitWords(value.Text))
+		if wordBudget > 0 && used+words > wordBudget && start < len(values) {
+			break
+		}
+		used += words
+		start = i
+	}
+	if start == len(values) {
+		return nil, nil
+	}
+	selected := append([]Message(nil), values[:start+1]...)
+	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
+		selected[left], selected[right] = selected[right], selected[left]
+	}
+	return selected, nil
+}
 
 func (s *store) history(chatID string, before int64, wordBudget int) ([]Message, error) {
 	var values []Message

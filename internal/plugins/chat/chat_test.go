@@ -192,6 +192,9 @@ func TestComposerDraftSyncsAcrossClients(t *testing.T) {
 	}
 	// Drafts are scoped per line: a branch draft neither leaks into the
 	// mainline row nor is touched by mainline edits/clears.
+	if err := p.store.createBranch(&Branch{ID: "b1", ChatID: chatID, Name: "B1", State: branchStateOpen, CreatedAt: nowMillis(), UpdatedAt: nowMillis()}); err != nil {
+		t.Fatal(err)
+	}
 	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "branch_id": "b1", "text": "branch draft", "source": "a"})
 	if event := nextEvent(); event["text"] != "branch draft" || event["branch_id"] != "b1" {
 		t.Fatalf("branch event: %v", event)
@@ -1090,6 +1093,27 @@ func TestQueuedCancelAndUpdate(t *testing.T) {
 	}
 	if _, err := caller.Request(ctx, "chat:_:queued-update", map[string]any{"chat_id": "chat-qu", "dispatch_id": secondReply.ID, "message": "too late"}, 10*time.Second); err == nil {
 		t.Fatal("updating a started dispatch should fail")
+	}
+
+	// Admission rejection is side-effect free: an over-full line must not
+	// leak the rejected request's raw flag into its next continuation.
+	key := lineKey("chat-qu", "")
+	p.mu.Lock()
+	p.busy[key] = true
+	p.queues[key] = make([]queuedMessage, maxQueuedPerLine)
+	p.lineRaw[key] = true
+	p.mu.Unlock()
+	_, err = caller.Request(ctx, "chat:_:dispatch", map[string]any{"chat_id": "chat-qu", "message": "rejected raw change", "role_ids": []string{"role-qu"}, "raw": false}, 10*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "queue_full") {
+		t.Fatalf("full queue dispatch error = %v", err)
+	}
+	p.mu.Lock()
+	rawAfterReject := p.lineRaw[key]
+	p.busy[key] = false
+	p.queues[key] = nil
+	p.mu.Unlock()
+	if !rawAfterReject {
+		t.Fatal("queue_full dispatch changed the line's raw mode")
 	}
 }
 

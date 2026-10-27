@@ -1,22 +1,18 @@
 import { defineStore } from "pinia";
+import {
+  beginQueuedInputEdit,
+  cancelQueuedInputEdit,
+  clearInputSession,
+  completeInputSessionSend,
+  inputSessionIntent,
+  releaseQueuedInputEdit,
+  setInputSessionBranch,
+  setInputSessionText,
+  snapshotInputSession,
+} from "./inputSessionState";
+import type { InputSession, InputSessionIntent, InputSessionMode } from "./inputSessionState";
 
-export type InputSessionPhase = "idle" | "sending" | "error";
-
-export interface InputSession {
-  id: string;
-  pluginId: string;
-  paneType: string;
-  instanceId: string;
-  label: string;
-  text: string;
-  selectedRoleIds: string[];
-  forceNewSession: boolean;
-  parallel: boolean;
-  pinned: boolean;
-  phase: InputSessionPhase;
-  error: string;
-  updatedAt: number;
-}
+export type { InputSession, InputSessionIntent, InputSessionMode, InputSessionPhase } from "./inputSessionState";
 
 export interface InputSessionRegistration {
   id: string;
@@ -43,6 +39,11 @@ function loadSessions(): Record<string, InputSession> {
       instanceId: value.instanceId ?? "main",
       label: value.label ?? "Input",
       text: value.text ?? "",
+      branchId: value.branchId ?? "",
+      mode: value.mode === "queued-update" ? "queued-update" : "dispatch",
+      queuedDispatchId: value.queuedDispatchId ?? "",
+      draftBeforeQueueEdit: value.draftBeforeQueueEdit,
+      revision: typeof value.revision === "number" ? value.revision : 0,
       selectedRoleIds: Array.isArray(value.selectedRoleIds) ? value.selectedRoleIds.filter((item): item is string => typeof item === "string") : [],
       forceNewSession: value.forceNewSession === true,
       parallel: value.parallel === true,
@@ -87,12 +88,20 @@ export const useInputSessionsStore = defineStore("inputSessions", {
       const existing = this.sessions[registration.id];
       if (existing !== undefined) {
         Object.assign(existing, registration);
+        existing.branchId ??= "";
+        existing.mode ??= "dispatch";
+        existing.queuedDispatchId ??= "";
+        existing.revision ??= 0;
         this.save();
         return existing;
       }
       const session: InputSession = {
         ...registration,
         text: "",
+        branchId: "",
+        mode: "dispatch",
+        queuedDispatchId: "",
+        revision: 0,
         selectedRoleIds: [],
         forceNewSession: false,
         parallel: false,
@@ -117,16 +126,59 @@ export const useInputSessionsStore = defineStore("inputSessions", {
       Object.assign(session, patch, { updatedAt: Date.now() });
       this.save();
     },
-    setText(id: string, text: string): void { this.patch(id, { text }); },
+    setText(id: string, text: string): void {
+      const session = this.sessions[id];
+      if (session === undefined) return;
+      setInputSessionText(session, text);
+      this.save();
+    },
+    setBranch(id: string, branchId: string): void {
+      const session = this.sessions[id];
+      if (session === undefined) return;
+      setInputSessionBranch(session, branchId);
+      this.save();
+    },
+    intent(id: string): InputSessionIntent | undefined {
+      const session = this.sessions[id];
+      return session === undefined ? undefined : inputSessionIntent(session);
+    },
+    beginQueuedEdit(id: string, branchId: string, dispatchId: string, text: string): void {
+      const session = this.sessions[id];
+      if (session === undefined) return;
+      beginQueuedInputEdit(session, branchId, dispatchId, text);
+      this.save();
+    },
+    cancelQueuedEdit(id: string): void {
+      const session = this.sessions[id];
+      if (session === undefined) return;
+      cancelQueuedInputEdit(session);
+      this.save();
+    },
+    releaseQueuedEdit(id: string): void {
+      const session = this.sessions[id];
+      if (session === undefined) return;
+      releaseQueuedInputEdit(session);
+      this.save();
+    },
     setPinned(id: string, pinned: boolean): void { this.patch(id, { pinned }); },
     clear(id: string): void {
-      this.patch(id, { text: "", forceNewSession: false, parallel: false, phase: "idle", error: "" });
+      const session = this.sessions[id];
+      if (session === undefined) return;
+      clearInputSession(session);
+      this.save();
     },
-    async send(id: string, textOverride?: string): Promise<boolean> {
+    async send(id: string, textOverride?: string, intent?: InputSessionIntent): Promise<boolean> {
       const session = this.sessions[id];
       if (session === undefined) return false;
-      if (textOverride !== undefined) session.text = textOverride;
-      if (!session.text.trim() || session.phase === "sending") {
+      const currentIntent = inputSessionIntent(session);
+      const sameTarget = intent === undefined || (
+        currentIntent.branchId === intent.branchId
+        && currentIntent.mode === intent.mode
+        && currentIntent.queuedDispatchId === intent.queuedDispatchId
+      );
+      if (textOverride !== undefined && sameTarget) setInputSessionText(session, textOverride);
+      const snapshot = snapshotInputSession(session, textOverride ?? session.text, intent ?? currentIntent);
+      if (!snapshot.text.trim() || session.phase === "sending") {
         this.save();
         return false;
       }
@@ -135,12 +187,13 @@ export const useInputSessionsStore = defineStore("inputSessions", {
       try {
         const sender = runtimeSenders.get(id) ?? pluginSenders.get(session.pluginId);
         if (sender === undefined) throw new Error(`No input sender registered for ${session.pluginId}.`);
-        const sent = await sender({ ...session, selectedRoleIds: [...session.selectedRoleIds] });
+        const sent = await sender(snapshot);
         if (sent === false) {
           this.patch(id, { phase: "error", error: "Dispatch failed; draft was preserved." });
           return false;
         }
-        this.clear(id);
+        completeInputSessionSend(session, snapshot);
+        this.save();
         return true;
       } catch (cause) {
         this.patch(id, { phase: "error", error: cause instanceof Error ? cause.message : String(cause) });
@@ -149,4 +202,3 @@ export const useInputSessionsStore = defineStore("inputSessions", {
     },
   },
 });
-

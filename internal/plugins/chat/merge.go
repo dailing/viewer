@@ -270,7 +270,18 @@ func (p *Plugin) handleBranchesDelete(frame busclient.Frame) {
 		p.reply(frame, nil, errors.New("only an empty, unmerged branch can be deleted"))
 		return
 	}
-	err = p.store.db.Transaction(func(tx *gorm.DB) error {
+	err = p.deleteEmptyBranch(branch)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	p.publishBranch(branch, "deleted")
+	p.reply(frame, map[string]any{"deleted": true, "id": id}, nil)
+}
+
+func (p *Plugin) deleteEmptyBranch(branch *Branch) error {
+	id := branch.ID
+	return p.store.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Delete(&LineHead{}, "chat_id = ? AND branch_id = ?", branch.ChatID, id).Error; err != nil {
 			return err
 		}
@@ -280,14 +291,11 @@ func (p *Plugin) handleBranchesDelete(frame busclient.Frame) {
 		if err := tx.Delete(&HistoryNode{}, "id = ?", forkNodeID(id)).Error; err != nil {
 			return err
 		}
+		if err := tx.Where("chat_id = ? AND branch_id = ?", branch.ChatID, id).Delete(&Draft{}).Error; err != nil {
+			return err
+		}
 		return tx.Delete(&Branch{}, "id = ?", id).Error
 	})
-	if err != nil {
-		p.reply(frame, nil, err)
-		return
-	}
-	p.publishBranch(branch, "deleted")
-	p.reply(frame, map[string]any{"deleted": true, "id": id}, nil)
 }
 
 // archiveBranchName is the display name of the chat's archive line.
@@ -435,6 +443,15 @@ func (p *Plugin) mergeLines(chatID string, branchIDs []string, targetBranchID st
 				}
 			}
 			return nil, fmt.Errorf("%s %w", name, busyErr)
+		}
+	}
+	for _, source := range sources {
+		draft, draftErr := p.store.draft(chatID, source.ID)
+		if draftErr != nil {
+			return nil, draftErr
+		}
+		if draft != nil && draft.Text != "" {
+			return nil, fmt.Errorf("source line 「%s」 has an unsent draft", source.Name)
 		}
 	}
 	now := nowMillis()

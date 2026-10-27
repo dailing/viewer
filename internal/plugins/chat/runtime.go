@@ -209,12 +209,11 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 		// Queue-capacity pre-check: an over-full line queue fails the
 		// dispatch before the user message lands in the timeline.
 		p.mu.Lock()
-		p.lineRaw[key] = request.Raw
-		if p.busy[key] && len(p.queues[key]) >= maxQueuedPerLine {
-			p.mu.Unlock()
+		full := p.busy[key] && len(p.queues[key]) >= maxQueuedPerLine
+		p.mu.Unlock()
+		if full {
 			return nil, nil, errQueueFull
 		}
-		p.mu.Unlock()
 	}
 	dispatchID := newID()
 	if err := p.prepareDispatch(request, dispatchID); err != nil {
@@ -240,6 +239,9 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	}
 	if !parallel {
 		p.mu.Lock()
+		// Raw mode changes only once the dispatch has passed every rejection
+		// path and is entering the line's accepted queue/run state.
+		p.lineRaw[key] = request.Raw
 		if p.busy[key] {
 			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, targets: targets, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, raw: request.Raw, enqueued: nowMillis(), dispatchID: dispatchID, messageID: user.ID, branchID: line})
 			p.mu.Unlock()

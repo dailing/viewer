@@ -7,6 +7,7 @@ import { useChatSettingsStore } from "../../stores/chatSettings";
 import { registerInputSessionSender, type InputSession } from "../../stores/inputSessions";
 import { dockStateFor, isErrorStopReason, markBackground, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
 import { rawModeEnabled } from "./rawMode";
+import { chatInputRPC } from "./inputDispatch";
 import type { ChatList } from "./types";
 
 function createDockProvider(ctx: PluginCtx): DockProvider {
@@ -117,17 +118,12 @@ export default definePlugin({
       const message = session.text.trim();
       if (!message) return false;
       const chatId = session.instanceId.split("#")[0];
-      const payload: Record<string, unknown> = { chat_id: chatId, message };
-      if (session.selectedRoleIds.length > 0) payload.role_ids = session.selectedRoleIds;
-      if (session.forceNewSession) payload.force_new_session = true;
-      if (session.parallel) payload.parallel_dispatch = true;
-      // The workspace-bar send has no branch selection: it lands on the
-      // mainline, so it honors the mainline's raw toggle (framework v0.92).
-      if (rawModeEnabled(chatId, "")) payload.raw = true;
+      const branchId = session.branchId ?? "";
+      const request = chatInputRPC(session, rawModeEnabled(chatId, branchId));
       // Same as ChatPane.send: outwait LLM role routing (up to
       // llm.timeout_seconds, default 60s) instead of the bus's 30s default.
-      await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 });
-      return true;
+      const result = await ctx.bus.request(request.channel, request.payload, { timeout: 90_000 });
+      return (result as { status?: string } | undefined)?.status !== "not_queued";
     });
     ctx.onDispose(unregister);
   },

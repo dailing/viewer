@@ -15,12 +15,30 @@ import (
 // branches of one chat hold independent drafts.
 const maxDraftBytes = 64 * 1024
 
+func (p *Plugin) draftLine(chatID, branchID string) error {
+	chat, err := p.store.chat(chatID)
+	if err != nil {
+		return err
+	}
+	if chat == nil {
+		return errors.New("chat not found")
+	}
+	if branchID != "" {
+		_, err = p.resolveBranch(*chat, branchID)
+	}
+	return err
+}
+
 func (p *Plugin) handleDraftGet(frame busclient.Frame) {
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
 	branchID, _ := value["branch_id"].(string)
 	if err != nil || chatID == "" {
 		p.reply(frame, nil, errBadRequest)
+		return
+	}
+	if err := p.draftLine(chatID, branchID); err != nil {
+		p.reply(frame, nil, err)
 		return
 	}
 	draft, err := p.store.draft(chatID, branchID)
@@ -49,13 +67,8 @@ func (p *Plugin) handleDraftSet(frame busclient.Frame) {
 		p.reply(frame, nil, errors.New("draft exceeds 64 KiB"))
 		return
 	}
-	chat, err := p.store.chat(chatID)
-	if err != nil {
+	if err := p.draftLine(chatID, branchID); err != nil {
 		p.reply(frame, nil, err)
-		return
-	}
-	if chat == nil {
-		p.reply(frame, nil, errors.New("chat not found"))
 		return
 	}
 	draft := &Draft{ChatID: chatID, BranchID: branchID, Text: text, UpdatedAt: nowMillis()}

@@ -449,7 +449,7 @@ func (s *store) importDomain(roles []SuperRole, routing RoutingConfig) error {
 
 func (s *store) deleteChat(id string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}, &Branch{}, &HistoryNode{}, &LineHead{}, &DispatchSnapshot{}, &MergeReceipt{}, &ContextBuild{}} {
+		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}, &Branch{}, &HistoryNode{}, &LineHead{}, &DispatchSnapshot{}, &MergeReceipt{}, &ContextBuild{}, &Draft{}} {
 			if err := tx.Where("chat_id = ?", id).Delete(model).Error; err != nil {
 				return err
 			}

@@ -4,6 +4,7 @@ import type { PluginCtx } from "../../shell/ctx";
 import { useInputSessionsStore } from "../../stores/inputSessions";
 import { sendInputSession } from "../voice/inputSessionVoice";
 import { rawModeEnabled, setRawMode } from "./rawMode";
+import { draftRequestCurrent } from "./draftSync";
 import VoiceInputButton from "../voice/VoiceInputButton.vue";
 import { useVoiceStore } from "../voice/voiceStore";
 import type { Role } from "./types";
@@ -24,6 +25,7 @@ const emit = defineEmits<{
 
 const inputs = useInputSessionsStore();
 const session = computed(() => inputs.session(props.contextId)!);
+const queueEditing = computed(() => session.value.mode === "queued-update");
 const draft = computed({
   get: () => session.value.text,
   set: (text: string) => inputs.setText(props.contextId, text),
@@ -134,16 +136,36 @@ const raw = computed({
 const draftSource = crypto.randomUUID();
 let lastSynced: string | null = null;
 let syncTimer: number | undefined;
+let draftGeneration = 0;
 /** Unsent text stashed per line while the box shows another line — a switch
  *  flushes the old line first, so entries only survive a failed/in-flight
  *  flush and win over the server row when restored (latest keystrokes). */
 const localDrafts = new Map<string, string>();
+const pendingLineFlushes = new Map<string, Promise<void>>();
+
+function flushSwitchedLine(branchId: string, text: string): void {
+  const pending = bus.request("chat:_:draft:set", { chat_id: chatId, branch_id: branchId, text, source: draftSource })
+    .then(() => {})
+    .catch(() => { if (text !== "") localDrafts.set(branchId, text); })
+    .finally(() => {
+      if (pendingLineFlushes.get(branchId) === pending) pendingLineFlushes.delete(branchId);
+    });
+  pendingLineFlushes.set(branchId, pending);
+}
 
 async function pullDraft(): Promise<void> {
+  if (queueEditing.value) return;
   const branchId = props.draftBranchId;
+  const generation = draftGeneration;
+  const revision = session.value.revision;
   try {
     const result = await bus.request("chat:_:draft:get", { chat_id: chatId, branch_id: branchId }) as { text?: string };
-    if (props.draftBranchId !== branchId) return; // switched away mid-flight
+    const request = { branchId, generation, revision };
+    if (!draftRequestCurrent(request, {
+      branchId: props.draftBranchId,
+      generation: draftGeneration,
+      revision: session.value.revision,
+    }) || queueEditing.value) return;
     const text = result.text ?? "";
     lastSynced = text;
     if (text !== draft.value) draft.value = text;
@@ -153,12 +175,18 @@ async function pullDraft(): Promise<void> {
 }
 
 async function flushDraft(): Promise<void> {
+  if (queueEditing.value) return;
   const text = draft.value;
   if (text === lastSynced) return;
   const branchId = props.draftBranchId;
+  const generation = draftGeneration;
+  const revision = session.value.revision;
   try {
     await bus.request("chat:_:draft:set", { chat_id: chatId, branch_id: branchId, text, source: draftSource });
-    if (props.draftBranchId === branchId) lastSynced = text;
+    if (draftRequestCurrent(
+      { branchId, generation, revision },
+      { branchId: props.draftBranchId, generation: draftGeneration, revision: session.value.revision },
+    ) && !queueEditing.value) lastSynced = text;
   } catch {
     // Retried on the next edit.
   }
@@ -166,7 +194,8 @@ async function flushDraft(): Promise<void> {
 
 function onDraftSynced(frame: { value?: unknown }): void {
   const value = frame.value as { chat_id?: string; branch_id?: string; text?: string; source?: string } | undefined;
-  if (value === undefined || value.chat_id !== chatId || (value.branch_id ?? "") !== props.draftBranchId || value.source === draftSource) return;
+  if (value === undefined || value.chat_id !== chatId || (value.branch_id ?? "") !== props.draftBranchId
+    || value.source === draftSource || queueEditing.value) return;
   const text = value.text ?? "";
   lastSynced = text;
   if (text !== draft.value) draft.value = text;
@@ -180,14 +209,12 @@ watch(
   () => props.draftBranchId,
   (next, prev) => {
     window.clearTimeout(syncTimer);
+    draftGeneration += 1;
     const prevText = draft.value;
     const prevSynced = lastSynced;
     lastSynced = null;
     localDrafts.delete(prev);
-    if (prevText !== prevSynced) {
-      void bus.request("chat:_:draft:set", { chat_id: chatId, branch_id: prev, text: prevText, source: draftSource })
-        .catch(() => { if (prevText !== "") localDrafts.set(prev, prevText); });
-    }
+    if (prevText !== prevSynced) flushSwitchedLine(prev, prevText);
     const stashed = localDrafts.get(next);
     if (stashed !== undefined) {
       localDrafts.delete(next);
@@ -200,7 +227,27 @@ watch(
 
 watch(draft, () => {
   window.clearTimeout(syncTimer);
+  if (queueEditing.value) return;
   syncTimer = window.setTimeout(() => { void flushDraft(); }, 400);
+});
+
+watch(queueEditing, (editing) => {
+  window.clearTimeout(syncTimer);
+  draftGeneration += 1;
+  const previousSynced = lastSynced;
+  if (editing) {
+    const ordinaryDraft = session.value.draftBeforeQueueEdit ?? "";
+    if (ordinaryDraft !== previousSynced) {
+      void bus.request("chat:_:draft:set", {
+        chat_id: chatId,
+        branch_id: session.value.branchId,
+        text: ordinaryDraft,
+        source: draftSource,
+      }).catch(() => {});
+    }
+  }
+  lastSynced = null;
+  if (!editing) void flushDraft();
 });
 
 onMounted(() => {
@@ -269,7 +316,13 @@ function handlePickerFocusOut(event: FocusEvent): void {
   }, 0);
 }
 
-defineExpose({ focus: () => textarea.value?.focus() });
+async function flushAllDrafts(): Promise<void> {
+  window.clearTimeout(syncTimer);
+  await flushDraft();
+  await Promise.all([...pendingLineFlushes.values()]);
+}
+
+defineExpose({ focus: () => textarea.value?.focus(), flushAllDrafts });
 </script>
 
 <template>

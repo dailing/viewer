@@ -56,7 +56,7 @@ const selected = computed({
   set: (value: string[]) => inputs.patch(inputSessionId, { selectedRoleIds: value }),
 });
 const composerExpanded = ref(false);
-const composerRef = ref<{ focus: () => void } | null>(null);
+const composerRef = ref<{ focus: () => void; flushAllDrafts: () => Promise<void> } | null>(null);
 const composerVisible = computed(() => Boolean(inputs.session(inputSessionId)?.pinned) || composerExpanded.value);
 // In-flight turns of this chat, keyed by turn id. Seeded from the
 // chats:list running_turns snapshot (survives pane reloads/remounts) and
@@ -79,7 +79,11 @@ const queuedByDispatch = computed<Map<string, QueuedMessage[]>>(() => {
 // Queued-message edit mode: the pencil on a queued user box loads its text
 // into the composer; the next send updates the queue entry in place (queue
 // position kept) instead of dispatching a new message.
-const editingQueued = ref<{ dispatchId: string } | null>(null);
+const editingQueued = computed<{ dispatchId: string; branchId: string } | null>(() => {
+  const session = inputs.session(inputSessionId);
+  if (session?.mode !== "queued-update" || !session.queuedDispatchId) return null;
+  return { dispatchId: session.queuedDispatchId, branchId: session.branchId ?? "" };
+});
 // Optimistic per-role placeholder boxes: created the moment dispatch returns
 // so a response box appears immediately, and resolved when the turn's first
 // live message/block arrives (the real turn box takes over) or the turn ends.
@@ -307,7 +311,6 @@ watch(activeTabs, (next, prev) => {
   if (next.length === prev.length && next.every((id, index) => id === prev[index])) return; // re-click of the same selection
   everLoaded = false;
   userScrolled = false;
-  editingQueued.value = null; // queue-edit mode belongs to the originating view
   scrollOnNextUserMessage = false;
   resetPendingStream();
   void load().catch((cause) => { error.value = errorText(cause); });
@@ -352,6 +355,12 @@ const sendBranch = computed<Branch | null>(() => {
   if (tabActive("main")) return null;
   return viewingBranches.value.length === 1 ? viewingBranches.value[0] : null;
 });
+const composerBranchId = computed(() => inputs.session(inputSessionId)?.branchId ?? sendBranch.value?.id ?? "");
+watch(() => sendBranch.value?.id ?? "", (branchId) => {
+  // setBranch also cancels a queued edit first when its line really changes,
+  // restoring the ordinary draft before the composer swaps lines.
+  inputs.setBranch(inputSessionId, branchId);
+}, { immediate: true });
 
 /** Branches with an in-flight turn (tab spinner + merge-selection guard). */
 const runningBranchIds = computed<Set<string>>(() => {
@@ -400,6 +409,7 @@ async function showLoopExecution(branchId: string, iteration?: LoopIteration): P
  *  lands in the wrong line by accident. A branch send routes exactly like
  *  a mainline send (framework v0.66): picked roles or LLM auto-routing. */
 const sendTargetLabel = computed<string>(() => {
+  if (editingQueued.value) return "编辑排队消息";
   const branch = sendBranch.value;
   if (!branch) return "主线";
   const names = selected.value.map((id) => roles.value.find((role) => role.id === id)?.name ?? "").filter((name) => name !== "");
@@ -511,6 +521,9 @@ async function mergeSelected(): Promise<void> {
   mergeBusy.value = true;
   branchOpError.value = "";
   try {
+    // Make the server's unsent-draft guard see this pane's latest keystrokes
+    // (including a just-switched-away line) before the graph transaction.
+    await composerRef.value?.flushAllDrafts();
     await ctx.bus.request("chat:_:branches:merge", {
       chat_id: chatId,
       branch_ids: sources.map((branch) => branch.id),
@@ -549,6 +562,7 @@ async function archiveSelected(): Promise<void> {
   archiveBusy.value = true;
   branchOpError.value = "";
   try {
+    await composerRef.value?.flushAllDrafts();
     await ctx.bus.request("chat:_:branches:archive", { chat_id: chatId, branch_ids: targets.map((branch) => branch.id) });
     activeTabs.value = ["main"];
   } catch (cause) {
@@ -1222,7 +1236,12 @@ function seedRunningTurns(list: ChatList): void {
  *  chat:_:queue feed reseeds wholesale on every mutation. */
 function seedQueued(list: QueuedMessage[] | undefined): void {
   queuedEntries.value = list ?? [];
-  if (editingQueued.value && !queuedByDispatch.value.has(editingQueued.value.dispatchId)) editingQueued.value = null;
+  const editing = editingQueued.value;
+  if (editing && !queuedByDispatch.value.has(editing.dispatchId)) {
+    // The entry started or was cancelled elsewhere. Keep the edited text as
+    // an ordinary draft on its original line instead of silently erasing it.
+    inputs.releaseQueuedEdit(inputSessionId);
+  }
 }
 
 async function load(fresh = false): Promise<void> {
@@ -1559,59 +1578,78 @@ function routedLabelFor(startedIds: string[], queuedIds: string[]): string {
   return [...startedIds.map((id) => label(id, false)), ...queuedIds.map((id) => label(id, true))].join("  ·  ");
 }
 
-async function send(text: string, forceNewSession = false, parallel = false, roleIds = selected.value): Promise<boolean> {
-  const message = text.trim();
+async function reconcileSentDraft(session: InputSession): Promise<void> {
+  const branchId = session.branchId ?? "";
+  try {
+    const current = await ctx.bus.request("chat:_:draft:get", { chat_id: chatId, branch_id: branchId }) as { text?: string };
+    // A branch switch during dispatch may have flushed the old sent text
+    // after the backend's initial clear. Remove only that exact echo; a newer
+    // draft on the same line is not ours to erase.
+    if ((current.text ?? "") === session.text && session.text !== "") {
+      await ctx.bus.request("chat:_:draft:set", {
+        chat_id: chatId,
+        branch_id: branchId,
+        text: "",
+        source: `dispatch:${inputSessionId}`,
+      });
+    }
+  } catch {
+    // The dispatch is already authoritative; a later local edit will retry.
+  }
+}
+
+async function send(session: InputSession): Promise<boolean> {
+  const message = session.text.trim();
   if (message === "") return false;
   error.value = "";
-  // Queued-message edit mode: update the queue entry in place (its position
-  // is kept) instead of dispatching a new message.
-  const editing = editingQueued.value;
-  if (editing) {
+  // The immutable session snapshot carries both line and queue-edit intent;
+  // none of the awaits below re-read the pane's subsequently changed view.
+  if (session.mode === "queued-update" && session.queuedDispatchId) {
     try {
-      await ctx.bus.request("chat:_:queued-update", { chat_id: chatId, dispatch_id: editing.dispatchId, message });
-      editingQueued.value = null;
+      await ctx.bus.request("chat:_:queued-update", { chat_id: chatId, dispatch_id: session.queuedDispatchId, message });
+      window.setTimeout(() => {
+        if (inputs.session(inputSessionId)?.mode === "dispatch") {
+          inputs.setBranch(inputSessionId, sendBranch.value?.id ?? "");
+        }
+      }, 0);
       return true;
     } catch (cause) {
-      // Typically "not_queued": the turn already started. The queue feed
-      // clears the edit mode; surface the reason and keep the draft.
       error.value = errorText(cause);
       return false;
     }
   }
   if (hasNewer.value) jumpToLatest(); // a send always targets the live edge
+  const branchId = session.branchId ?? "";
   // Optimistic user box with a sending marker; dispatch latency (routing,
   // agent spawn) no longer leaves the thread looking idle.
-  // Capture the target before any await: a later tab switch must not retarget
-  // this dispatch or move its optimistic rows to another line.
-  const branch = sendBranch.value;
-  const originBranchIds = [branch?.id ?? ""];
+  const originBranchIds = [branchId];
   const key = `send:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
   pendingSends.value = [...pendingSends.value, { key, text: message, branchIds: originBranchIds, ts: Date.now(), sending: true, routed: "", failed: "" }];
   void nextTick(() => scrollThreadToMessageEnd());
   try {
-    const payload: Record<string, unknown> = { chat_id: chatId, message };
+    const payload: Record<string, unknown> = { chat_id: chatId, message, branch_id: branchId };
     // A branch send is a mainline send plus branch_id (framework v0.66):
     // role picks / LLM routing, new-session and send-now toggles all
     // apply; the backend only scopes context and session lanes per
     // role × branch.
-    if (branch) payload.branch_id = branch.id;
-    if (roleIds.length > 0) payload.role_ids = roleIds;
-    if (forceNewSession) payload.force_new_session = true;
-    if (parallel) payload.parallel_dispatch = true;
+    if (session.selectedRoleIds.length > 0) payload.role_ids = session.selectedRoleIds;
+    if (session.forceNewSession) payload.force_new_session = true;
+    if (session.parallel) payload.parallel_dispatch = true;
     // Per-line raw mode (framework v0.92): zero viewer-side prompt injection
     // for this send; the toggle state lives browser-side per chat+branch.
-    if (rawModeEnabled(chatId, branch?.id ?? "")) payload.raw = true;
+    if (rawModeEnabled(chatId, branchId)) payload.raw = true;
     // Dispatch replies only after LLM role routing, which may take up to
     // llm.timeout_seconds (default 60s) under local-server queueing; the
     // bus's 30s default would report 发送失败 while the backend proceeds.
     const result = await ctx.bus.request("chat:_:dispatch", payload, { timeout: 90_000 }) as { dispatch_id?: string; role_ids: string[]; started_role_ids?: string[]; queued_role_ids?: string[]; branches?: Branch[] };
+    await reconcileSentDraft(session);
     const returnedBranches = result.branches ?? [];
-    const dispatchBranchIds = parallel && returnedBranches.length > 0
+    const dispatchBranchIds = session.parallel && returnedBranches.length > 0
       ? returnedBranches.map((item) => item.id)
       : originBranchIds;
     const branchForRole = (roleId: string): string => {
-      if (!parallel) return branch?.id ?? "";
-      return returnedBranches.find((item) => item.role_id === roleId)?.id ?? branch?.id ?? "";
+      if (!session.parallel) return branchId;
+      return returnedBranches.find((item) => item.role_id === roleId)?.id ?? branchId;
     };
     // Busy roles come back in queued_role_ids: their message is held in the
     // per-role queue and starts when the in-flight turn ends, so no
@@ -1636,7 +1674,11 @@ async function send(text: string, forceNewSession = false, parallel = false, rol
     // both into the bar; a parallel send lands the pane on its new branch.
     if (returnedBranches.length > 0) {
       upsertBranches(returnedBranches);
-      if (parallel && !branch) activeTabs.value = [returnedBranches[0].id];
+      // Let the input store settle/clear the sent snapshot before the
+      // automatic tab switch re-binds the composer to the new branch.
+      if (session.parallel && branchId === "") {
+        window.setTimeout(() => { activeTabs.value = [returnedBranches[0].id]; }, 0);
+      }
     }
     scrollOnNextUserMessage = true; // scroll the just-sent query into view when it lands
     return true;
@@ -1662,8 +1704,7 @@ function openComposer(): void {
   void nextTick(() => composerRef.value?.focus());
 }
 
-const unregisterInputRuntime = registerInputSessionRuntime(inputSessionId, (session: InputSession) =>
-  send(session.text, session.forceNewSession, session.parallel, session.selectedRoleIds));
+const unregisterInputRuntime = registerInputSessionRuntime(inputSessionId, send);
 
 async function stop(roleId?: string, turnId?: string): Promise<void> {
   try {
@@ -1745,14 +1786,14 @@ function clickQueuedStatus(box: TimelineBox): void {
  *  the queue entry in place instead of dispatching anew. */
 function beginQueuedEdit(box: TimelineBox): void {
   const text = box.segments.find((segment) => segment.kind === "text")?.text ?? "";
-  editingQueued.value = { dispatchId: box.turnId };
-  inputs.setText(inputSessionId, text);
+  const entry = queuedByDispatch.value.get(box.turnId)?.[0];
+  inputs.beginQueuedEdit(inputSessionId, entry?.branch_id ?? "", box.turnId, text);
   openComposer();
 }
 
 function cancelQueuedEdit(): void {
-  editingQueued.value = null;
-  inputs.setText(inputSessionId, "");
+  inputs.cancelQueuedEdit(inputSessionId);
+  inputs.setBranch(inputSessionId, sendBranch.value?.id ?? "");
 }
 
 onMounted(() => {
@@ -2117,7 +2158,7 @@ onMounted(() => {
         v-model:selected-role-ids="selected"
         :roles="members"
         :context-id="'chat:' + viewKey"
-        :draft-branch-id="sendBranch?.id ?? ''"
+        :draft-branch-id="composerBranchId"
       />
     </div>
     <button

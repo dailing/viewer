@@ -24,6 +24,8 @@ import type { LoopIteration } from "../loop/types";
 import { loadEntry, removeEntry, saveEntry } from "./chatCache";
 import type { ChatCacheEntry, MessageCursor } from "./chatCache";
 import { beyondWindowEdge as isBeyondWindowEdge, collectDeltaPages, cursorOf, mergeMessages, trimWindow, type ChatWindow } from "./chatWindow";
+import { formatChatTime as formatTime } from "./chatTime";
+import { drainDeferredTurn, liveTurnVisibility, stampLiveTurnLine } from "./liveAttribution";
 import { loadBranchTabs, writeBranchTabs, ensureWindowId } from "./branchTabs";
 import { optimisticLinesVisible, resolveOptimisticTurn, settleOptimisticSend } from "./optimistic";
 import { presentToolBlock } from "./toolPresentation";
@@ -207,8 +209,8 @@ function upsertBranches(list: Branch[]): void {
  *  detach anchoring and window eviction stay aligned with the view by
  *  construction. The pane holds no closure state; live frames are filtered
  *  at ingress by their branch attribution (message frames carry
- *  branch_ids; turns resolve via liveTurnLines) and unattributed frames
- *  stay visible (anti-flicker). */
+ *  branch_ids; turns resolve via liveTurnLines). Turn-keyed frames with
+ *  unknown attribution wait in a deferred buffer instead of failing open. */
 
 /** The selected lines as backend branch ids (main = ""), sorted; null on
  *  the 全部 view = unfiltered. */
@@ -235,27 +237,22 @@ function cacheKey(): string {
 const liveTurnLines = new Map<string, string>();
 
 function noteTurnLine(turnId: string | undefined, branchId: string | undefined): void {
-  if (turnId) liveTurnLines.set(turnId, branchId ?? "");
+  if (!stampLiveTurnLine(liveTurnLines, turnId, branchId)) return;
+  if (turnId) reconcileTurnLine(turnId);
 }
 
 /** Live ingress filter for turn-keyed frames (assistant messages, blocks). */
-function liveTurnVisible(turnId: string): boolean {
-  const ids = viewBranchIds();
-  if (ids === null) return true;
-  const branch = liveTurnLines.get(turnId);
-  if (branch === undefined) return true; // unattributed: anti-flicker
-  return ids.includes(branch);
+function liveTurnLineVisibility(turnId: string) {
+  return liveTurnVisibility(liveTurnLines, turnId, viewBranchIds());
 }
 
-/** Live ingress filter for message frames: the backend stamps branch_ids
- *  on attributed publishes (dispatch user messages carry their target
- *  lines, assistant streams their turn's line); fall back to the turn map,
- *  then to visible. */
-function liveMessageVisible(value: ChatMessage): boolean {
+/** Live ingress filter for message frames: explicit branch_ids are
+ * authoritative; turn-keyed frames without them wait for attribution. */
+function liveMessageVisibility(value: ChatMessage) {
   const ids = viewBranchIds();
-  if (ids === null) return true;
-  if (Array.isArray(value.branch_ids)) return value.branch_ids.some((id) => ids.includes(id));
-  return liveTurnVisible(value.turn_id);
+  if (ids === null) return "visible" as const;
+  if (Array.isArray(value.branch_ids)) return value.branch_ids.some((id) => ids.includes(id)) ? "visible" as const : "hidden" as const;
+  return liveTurnLineVisibility(value.turn_id);
 }
 
 /** Branch bar tabs (framework v0.65): plain click SINGLE-selects a line
@@ -596,8 +593,8 @@ const timeline = computed<TimelineBox[]>(() => {
   const turns = new Map<string, TimelineBox>();
   const boxes: TimelineBox[] = [];
   // Branch filtering happens server-side (viewRequest on every load) and
-  // at live-frame ingress (liveMessageVisible/liveTurnVisible): every
-  // message/block resident here is visible on the selected lines.
+  // at live-frame ingress (liveMessageVisibility/liveTurnLineVisibility):
+  // every message/block resident here is visible on the selected lines.
   for (const message of messages.value) {
     if (message.role === "user") {
       boxes.push({
@@ -780,10 +777,6 @@ onBeforeUnmount(() => {
 });
 
 const members = computed(() => roles.value.filter((role) => chat.value?.member_role_ids.includes(role.id)));
-
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
 
 /** Running state binds to the turn, not the role: each in-flight turn's
  *  box shows the indicator (parallel send-now turns of one role included),
@@ -1097,6 +1090,11 @@ function enforceWindow(prefer: "top" | "bottom"): void {
 // ---------------------------------------------------------------------------
 const pendingMessageUpserts = new Map<string, ChatMessage>();
 const pendingBlockUpserts = new Map<string, ChatBlock>();
+// Filtered views hold turn-keyed frames here until started/session/completed
+// or a history snapshot supplies their line. They never fail open into every
+// branch merely because a block won the race against its attribution.
+const deferredMessages = new Map<string, ChatMessage>();
+const deferredBlocks = new Map<string, ChatBlock>();
 let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Delayed frames belong to the view that admitted them. Dropping them on a
@@ -1110,7 +1108,46 @@ function resetPendingStream(): void {
   }
   pendingMessageUpserts.clear();
   pendingBlockUpserts.clear();
+  deferredMessages.clear();
+  deferredBlocks.clear();
   streamingMessageId = "";
+}
+
+function queueLiveMessage(value: ChatMessage): void {
+  if (beyondWindowEdge(value.created_at, value.id)) return;
+  pendingMessageUpserts.set(value.id, value);
+  if (value.role === "user") flushStream(); else scheduleStreamFlush();
+}
+
+function queueLiveBlock(value: ChatBlock): void {
+  if (beyondWindowEdge(value.occurred_at, value.id)) return;
+  pendingBlockUpserts.set(value.id, value);
+  scheduleStreamFlush();
+}
+
+/** Resolve frames that arrived before their turn attribution, and evict any
+ * stale cache/window entries when a later snapshot proves they are off-view. */
+function reconcileTurnLine(turnId: string): void {
+  const visibility = liveTurnLineVisibility(turnId);
+  if (visibility === "deferred") return;
+
+  for (const value of drainDeferredTurn(deferredMessages, turnId, visibility === "visible")) queueLiveMessage(value);
+  for (const value of drainDeferredTurn(deferredBlocks, turnId, visibility === "visible")) queueLiveBlock(value);
+  if (visibility !== "hidden") return;
+
+  for (const [id, value] of pendingMessageUpserts) {
+    if (value.turn_id === turnId) pendingMessageUpserts.delete(id);
+  }
+  for (const [id, value] of pendingBlockUpserts) {
+    if (value.turn_id === turnId) pendingBlockUpserts.delete(id);
+  }
+  const nextMessages = messages.value.filter((value) => value.turn_id !== turnId);
+  const nextBlocks = blocks.value.filter((value) => value.turn_id !== turnId);
+  if (nextMessages.length === messages.value.length && nextBlocks.length === blocks.value.length) return;
+  if (streamingMessageId !== "" && !nextMessages.some((value) => value.id === streamingMessageId)) streamingMessageId = "";
+  messages.value = nextMessages;
+  blocks.value = nextBlocks;
+  writeBack();
 }
 
 function scheduleStreamFlush(): void {
@@ -1804,6 +1841,7 @@ onMounted(() => {
     // message row; drop the box from the window (and any pending upsert).
     if (value.deleted) {
       pendingMessageUpserts.delete(value.id);
+      deferredMessages.delete(value.id);
       const index = messages.value.findIndex((item) => item.id === value.id);
       if (index >= 0) {
         messages.value.splice(index, 1);
@@ -1816,22 +1854,25 @@ onMounted(() => {
     if (value.role === "user") {
       pendingSends.value = settleOptimisticSend(pendingSends.value, { text: value.text, branchIds: value.branch_ids });
     }
-    // Server-side view filtering's live half: merge only the selected
-    // lines' frames (unattributed frames stay, anti-flicker).
-    if (!liveMessageVisible(value)) return;
-    // Detached window: frames beyond the upper edge wait for loadNewer.
-    if (beyondWindowEdge(value.created_at, value.id)) return;
-    pendingMessageUpserts.set(value.id, value);
-    // The user's own send echo flushes immediately (snappy composer);
-    // assistant streams ride the batch timer.
-    if (value.role === "user") flushStream(); else scheduleStreamFlush();
+    // Server-side view filtering's live half: turn-keyed frames wait for
+    // attribution rather than failing open into every selected branch.
+    const visibility = liveMessageVisibility(value);
+    if (visibility === "hidden") return;
+    if (visibility === "deferred") {
+      deferredMessages.set(value.id, value);
+      return;
+    }
+    queueLiveMessage(value);
   });
   ctx.bus.subscribe(`chat:${chatId}:block`, (frame) => {
     const value = frame.value as ChatBlock;
-    if (!liveTurnVisible(value.turn_id)) return;
-    if (beyondWindowEdge(value.occurred_at, value.id)) return;
-    pendingBlockUpserts.set(value.id, value);
-    scheduleStreamFlush();
+    const visibility = liveTurnLineVisibility(value.turn_id);
+    if (visibility === "hidden") return;
+    if (visibility === "deferred") {
+      deferredBlocks.set(value.id, value);
+      return;
+    }
+    queueLiveBlock(value);
   });
   // Turn lifecycle feed: started/completed per turn, filtered to this chat.
   // A queued message starts its turn only when the in-flight turn ends, so

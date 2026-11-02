@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+(cd "$DIR" && go build -o "$DIR/viewer-browser" .)
+cd "$DIR/.."
+exec "$DIR/viewer-browser" "$@"

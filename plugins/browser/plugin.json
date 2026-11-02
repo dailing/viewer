@@ -1,0 +1,21 @@
+{
+  "id": "viewer.browser",
+  "version": "0.2.0",
+  "name": "Browser",
+  "icon": "bi-window-desktop",
+  "description": "Persistent managed Chrome pages with isolated page ids, live H.264 video and exclusive control leases.",
+  "slots": {
+    "state": {},
+    "create": {},
+    "close": {},
+    "release": {},
+    "watch": {},
+    "unwatch": {},
+    "control": {},
+    "input": {},
+    "navigate": {}
+  },
+  "emits": {
+    "state": {}
+  }
+}

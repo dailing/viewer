@@ -76,6 +76,9 @@ type Server struct {
 	// means the live bus resolver resolveRawTicket.
 	rawResolver rawResolver
 
+	// Generic H.264/WebRTC media relay (media.go). No browser concepts here.
+	media *mediaHub
+
 	// Scheduled restart (schedrestart.go): one-shot deferred-restart flag.
 	sched schedRestartState
 }
@@ -88,7 +91,7 @@ func New(config Config) *Server {
 	if config.PingInterval <= 0 {
 		config.PingInterval = defaults.PingInterval
 	}
-	return &Server{config: config, serveErr: make(chan error, 1), sockets: make(map[*websocket.Conn]struct{})}
+	return &Server{config: config, serveErr: make(chan error, 1), sockets: make(map[*websocket.Conn]struct{}), media: newMediaHub()}
 }
 
 func (s *Server) Addr() string {
@@ -134,6 +137,9 @@ func (s *Server) Start() error {
 func (s *Server) Wait() error { return <-s.serveErr }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.media != nil {
+		s.media.close()
+	}
 	if s.assetsStop != nil {
 		s.assetsStop()
 	}
@@ -161,6 +167,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.servePluginAsset(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/files/raw":
 		s.serveFileRaw(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/media/publish":
+		s.media.servePublish(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/media/ticket":
+		s.media.serveTicket(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/media/webrtc":
+		s.media.serveWebRTC(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/restart":
 		s.handleRestart(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/schedule-restart":

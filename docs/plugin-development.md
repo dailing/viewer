@@ -194,8 +194,12 @@ export default defineConfig({
   plugins: [vue()],
   build: {
     lib: { entry: "src/index.ts", formats: ["es"], fileName: () => "frontend.js" },
-    cssCodeSplit: false,          // 样式收进单个 frontend.css，shell 自动注入
-    rollupOptions: { external: ["vue", "pinia"] },  // 由 shell import map 提供
+    cssCodeSplit: false,
+    rollupOptions: {
+      external: ["vue", "pinia"],   // 由 shell import map 提供
+      // Vite 5 没有 lib.cssFileName；固定为 shell 识别的 frontend.css。
+      output: { assetFileNames: "frontend.[ext]" },
+    },
   },
 });
 ```

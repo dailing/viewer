@@ -7,6 +7,18 @@ import { markRaw, reactive, type Component } from "vue";
 
 import type { DockAction, DockProvider } from "./definePlugin";
 
+export interface PluginDescriptor {
+  id: string;
+  name: string;
+  builtin: boolean;
+}
+
+/** Plugins with a loaded frontend module; built-ins are always enabled. */
+export const pluginCatalog = reactive(new Map<string, PluginDescriptor>());
+
+/** Plugin-owned settings components rendered by the unified plugin manager. */
+export const settingsRegistry = reactive(new Map<string, Component>());
+
 /** instance.type → component. */
 export const componentRegistry = reactive(new Map<string, Component>());
 
@@ -22,6 +34,17 @@ export function registerComponent(type: string, component: Component): void {
 
 export function unregisterComponent(type: string): void {
   componentRegistry.delete(type);
+}
+
+export function registerPlugin(id: string, name: string, builtin: boolean, settings?: Component): void {
+  pluginCatalog.set(id, { id, name: name || id, builtin });
+  if (settings !== undefined) settingsRegistry.set(id, markRaw(settings));
+  else settingsRegistry.delete(id);
+}
+
+export function unregisterPlugin(id: string): void {
+  pluginCatalog.delete(id);
+  settingsRegistry.delete(id);
 }
 
 export function registerDockProvider(provider: DockProvider): void {

@@ -101,13 +101,12 @@ export interface DockProvider {
   icon: string;
   /** "+" menu entry label. */
   title: string;
-  /** Singleton providers have no backend-tracked instances; the Dock pins
-   *  their entry by default and lets users persistently unpin it. */
+  /** Singleton main instance opened from "+", with no permanent Dock entry. */
   singleton?: boolean;
   /** Reactive list of running instances, maintained by the provider. */
   instances: DockInstance[];
-  /** "+" menu action (create a new instance); absent = not user-creatable. */
-  create?: () => Promise<void> | void;
+  /** "+" menu action; returning an instance id opens its pane. */
+  create?: () => Promise<string | void> | string | void;
   /** Dock hover action to remove a running instance (e.g. kill a terminal). */
   remove?: (id: string) => Promise<void> | void;
 }
@@ -129,9 +128,13 @@ export interface DockAction {
 /** The bundle's default-exported module shape. */
 export interface PluginModule {
   id: string;
+  /** Display name used by the unified plugin manager. */
+  name?: string;
   /** instance.type → component (lazy via defineAsyncComponent). Components
    *  receive the pane ctx via inject("pluginCtx"). */
   components?: Record<string, PluginComponent>;
+  /** Optional plugin-owned settings surface rendered inside 插件管理. */
+  settings?: PluginComponent;
   /** Build the Dock contribution; called once at load with plugin ctx. */
   createDockProvider?: (ctx: PluginCtx) => DockProvider;
   /** Build global Dock-foot action buttons; called once at load. */

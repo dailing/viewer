@@ -11,6 +11,7 @@ import (
 	"viewer/internal/plugins/chat"
 	"viewer/internal/plugins/configstore"
 	"viewer/internal/plugins/fileservice"
+	"viewer/internal/plugins/frontendlog"
 	"viewer/internal/plugins/gateway"
 	"viewer/internal/plugins/inspector"
 	"viewer/internal/plugins/instancestore"
@@ -26,6 +27,7 @@ import (
 // observe as much of the remaining boot traffic as possible.
 var Registry = []Entry{
 	{ID: inspector.Manifest.ID, Factory: newInspector},
+	{ID: frontendlog.Manifest.ID, Factory: newFrontendLog},
 	{ID: configstore.Manifest.ID, Factory: newConfigStore},
 	{ID: llm.Manifest.ID, Factory: newLLM},
 	{ID: agenthermes.Manifest.ID, Factory: newAgentHermes},
@@ -109,6 +111,14 @@ func (a lifecycleAdapter) Close(ctx context.Context) error { return a.close(ctx)
 func waitContext(ctx context.Context) error {
 	<-ctx.Done()
 	return nil
+}
+
+func newFrontendLog(config RuntimeConfig) (Plugin, error) {
+	plugin := frontendlog.New()
+	return lifecycleAdapter{
+		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
+		wait:  waitContext, close: func(context.Context) error { return plugin.Close() },
+	}, nil
 }
 
 func newInspector(config RuntimeConfig) (Plugin, error) {

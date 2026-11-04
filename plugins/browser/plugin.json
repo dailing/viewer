@@ -13,7 +13,9 @@
     "unwatch": {},
     "control": {},
     "input": {},
-    "navigate": {}
+    "navigate": {},
+    "mcp_status": {},
+    "mcp_configure": {}
   },
   "emits": {
     "state": {}

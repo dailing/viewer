@@ -216,10 +216,14 @@ import { definePlugin } from "@viewer/bus-sdk"; // sdk/ts
 
 export default definePlugin({
   id: "my-plugin",   // 必须与后端 hello manifest 的 id 一致（加载时校验）
+  name: "My Plugin", // 插件管理中的显示名
   components: {
     // pane type → 组件；component 经 inject("pluginCtx") 拿 pane ctx
     "my-plugin": defineAsyncComponent(() => import("./MainPane.vue")),
   },
+  // 可选：插件自有设置，统一显示在「插件管理」选中条目的运行状态下方。
+  // 组件同样经 inject("pluginCtx") 使用总线/config-store，无需独立 Dock 面板。
+  settings: defineAsyncComponent(() => import("./SettingsPanel.vue")),
   createDockProvider: (ctx) => ({
     type: "my-plugin",        // 与 components 的 key 对应
     icon: "bi-puzzle",
@@ -240,7 +244,9 @@ export default definePlugin({
 });
 ```
 
-shell 对你的模块是**结构化（鸭子类型）校验**：字段名对上即可。加载顺序：components → createDockProvider → createDockActions → activate（所以后三者若共享状态要懒初始化，见 voice-control 的 `ensure()`）。
+shell 对你的模块是**结构化（鸭子类型）校验**：字段名对上即可。加载顺序：插件目录/settings → components → createDockProvider → createDockActions → activate（所以后三者若共享状态要懒初始化，见 voice-control 的 `ensure()`）。
+
+`settings` 是插件自有配置的唯一统一入口：内置插件和外部插件都显示在「插件管理」；内置插件标记为“内置 · 默认启用”，外部插件保留原有进程配置与启停控制。设置组件挂载时获得独立的 `<plugin>:settings` ctx，切换选中插件会自动退订；语言模型、语音控制和 Browser MCP 均使用此机制，操作型按钮（如语音耳机开关）仍留在 Dock。
 
 ### 3.3 组件与 ctx
 
@@ -265,7 +271,7 @@ ctx 提供（pane 级 scope = `<paneType>:<instanceId>`，插件级 instanceId �
 | `ctx.setChrome({title, status, statusClass, actions, controls})` | 往 shell 标题栏注册内容（按钮/下拉/chips），插件不自绘标题栏 |
 | `ctx.onDispose(fn)` | 注册清理回调（pane 关闭 / 插件卸载时调用） |
 
-多实例插件（如 terminal）：`instances` 是**响应式数组**（`ref`/`reactive`），你的 activate 里维护它（订阅后端 mailbox 增量更新）；`create()` 是 Dock "+" 动作。DockInstance 的 `state`（`"running" | "unread" | "error" | "dead"`）驱动状态点颜色。Dock 条目上没有动作按钮——实例的终止/删除走 pane chrome action（`ctx.setChrome`，如 terminal 的终止按钮）或 pin + 关闭剪枝语义（如 files）。
+多实例插件：`instances` 是**响应式数组**（`ref`/`reactive`），你的 activate 里维护它（订阅后端 mailbox 增量更新）；`create()` 是 Dock "+" 动作。Dock 不再为 singleton 生成常驻入口；文件、Bus Inspector、插件管理等 singleton 只出现在 "+" 列表。`create()` 可返回新实例 id，shell 随即打开对应 pane；若创建逻辑自行打开 pane 则返回 void。DockInstance 的 `state`（`"running" | "unread" | "error" | "dead"`）驱动状态点颜色。Dock 条目上没有动作按钮——实例的终止/删除走 pane chrome action（`ctx.setChrome`，如 terminal 的终止按钮）或 pin + 关闭剪枝语义（如 files）。
 
 ### 3.4 样式约定
 

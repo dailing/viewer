@@ -29,7 +29,7 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     instances.splice(
       0,
       instances.length,
-      ...registry.map((entry) => ({
+      ...registry.filter((entry) => entry.pinned).map((entry) => ({
         id: entry.id,
         label: entry.label,
         icon: entry.state.file !== null ? "bi-file-earmark-text" : "bi-folder2",
@@ -55,8 +55,7 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     type: "files",
     icon: "bi-files",
     title: "文件",
-    // The root entry is a launcher: clicking it opens a fresh instance pane;
-    // `files:root` itself never opens.
+    // "+" acts as a launcher; no permanent files root entry is docked.
     singleton: true,
     clickCreates: true,
     instances,
@@ -80,6 +79,7 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
 
 export default definePlugin({
   id: "files",
+  name: "文件",
   components: {
     files: defineAsyncComponent(() => import("./FilesPane.vue")),
   },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BRANCH_TABS_STORAGE_KEY, WINDOW_ID_STORAGE_KEY, ensureWindowId, loadBranchTabs, writeBranchTabs, type KeyValueStorage } from "./branchTabs";
+import { BRANCH_TABS_STORAGE_KEY, WINDOW_ID_STORAGE_KEY, collectRunningBranchIds, ensureWindowId, loadBranchTabs, writeBranchTabs, type KeyValueStorage } from "./branchTabs";
 
 function storage(): KeyValueStorage & { data: Map<string, string> } {
   const data = new Map<string, string>();
@@ -31,5 +31,15 @@ describe("branch tab storage", () => {
     writeBranchTabs(store, "window:view", "view", ["main"]);
     expect(loadBranchTabs(store, "window:view")).toEqual([]);
     expect(loadBranchTabs(store, "view")).toEqual([]);
+  });
+});
+
+describe("branch running state", () => {
+  it("uses direct turn branch ids and includes post-turn background holds", () => {
+    const running = collectRunningBranchIds(
+      [{ branchId: "branch-a" }, { branchId: "" }, {}, { branchId: "branch-b" }],
+      new Set(["branch-b", "branch-c"]),
+    );
+    expect([...running].sort()).toEqual(["branch-a", "branch-b", "branch-c"]);
   });
 });

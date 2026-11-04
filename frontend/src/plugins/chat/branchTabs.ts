@@ -47,3 +47,20 @@ export function writeBranchTabs(storage: KeyValueStorage, key: string, legacyKey
     // Quota/private-mode failures are non-fatal: tabs become session-local.
   }
 }
+
+/** Union the ordinary in-flight turns and post-turn background holds that
+ *  should show a branch-tab spinner. Running turns carry branch_id directly;
+ *  no session-lane lookup is needed (it can be absent during early start). */
+export function collectRunningBranchIds(
+  turns: Iterable<{ branchId?: string }>,
+  backgroundBranchIds: Iterable<string>,
+): Set<string> {
+  const result = new Set<string>();
+  for (const turn of turns) {
+    if (turn.branchId) result.add(turn.branchId);
+  }
+  for (const branchId of backgroundBranchIds) {
+    if (branchId) result.add(branchId);
+  }
+  return result;
+}

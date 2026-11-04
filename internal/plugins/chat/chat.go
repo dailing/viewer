@@ -452,6 +452,7 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 	if request != nil {
 		if chatID, _ := request["chat_id"].(string); chatID != "" {
 			result["running_turns"] = p.runningTurns(chatID)
+			result["background_branch_ids"] = p.backgroundBranchIDs(chatID)
 			// Per-turn routing targets (the execution record behind the
 			// pane's agent/provider/model labels): the whole chat's targeted
 			// turns, so cached windows and delta refreshes both reseed fully.

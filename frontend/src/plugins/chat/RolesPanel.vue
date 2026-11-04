@@ -2,9 +2,9 @@
 import { computed, inject, onMounted, reactive, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import type { AgentCatalog, Role, RoutingConfig } from "../chat/types";
-import { errorText } from "../chat/types";
-import MasterDetail from "./MasterDetail.vue";
+import type { AgentCatalog, Role, RoutingConfig } from "./types";
+import { errorText } from "./types";
+import MasterDetail from "../../shell/MasterDetail.vue";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("RolesPanel requires PluginPaneHost");

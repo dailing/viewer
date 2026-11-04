@@ -1,15 +1,15 @@
 <script setup lang="ts">
 /**
- * The Dock (framework section 8.5): every running instance across all dock
- * providers, macOS-style. "+" creates a new instance and the bottom gear
- * opens the unified settings pane (`settings:main`). There is deliberately
- * no other chrome.
+ * The Dock (framework section 8.5) lists only provider-contributed persistent
+ * or open items. "+" opens tools and creates instances; the bottom gear opens
+ * the unified settings pane (`settings:main`).
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { useDockSettingsStore, clampDockWidth } from "../stores/dockSettings";
 import { useLayoutStore } from "../stores/layout";
-import type { DockInstance, DockProvider } from "./definePlugin";
+import type { DockProvider } from "./definePlugin";
+import { collectDockEntries, openProvider, type DockEntry } from "./dockModel";
 import { dockActions, dockProviders } from "./registries";
 
 const layout = useLayoutStore();
@@ -109,70 +109,13 @@ onBeforeUnmount(() => {
   if (schedRestartTimer !== null) clearInterval(schedRestartTimer);
 });
 
-interface DockEntry {
-  key: string;
-  uid: string;
-  icon: string;
-  label: string;
-  displayLabel: string;
-  state?: string;
-  provider: DockProvider;
-  instance?: DockInstance;
-}
-
-function chatDisplayLabel(label: string): string {
-  const separator = " · ";
-  const separatorIndex = label.lastIndexOf(separator);
-  if (separatorIndex < 0) return label;
-
-  const root = label.slice(separatorIndex + separator.length);
-  const withoutTrailingSeparators = root.replace(/[\\/]+$/, "");
-  const basename = withoutTrailingSeparators.split(/[\\/]/).pop() || root;
-  return `${label.slice(0, separatorIndex)}${separator}${basename}`;
-}
-
-function instanceDisplayLabel(provider: DockProvider, instance: DockInstance): string {
-  return provider.type === "chat" ? chatDisplayLabel(instance.label) : instance.label;
-}
+const entries = computed<DockEntry[]>(() => collectDockEntries(dockProviders));
 
 /** Status-dot class for an instance state word; unknown words fall back to the neutral dot. */
 function dockDotClass(state: string): string {
   if (state === "running" || state === "error" || state === "unread") return state;
   return "dead";
 }
-
-const entries = computed<DockEntry[]>(() => {
-  const result: DockEntry[] = [];
-  for (const provider of dockProviders) {
-    if (provider.singleton === true) {
-      const uid = `${provider.type}:main`;
-      result.push({
-        key: uid,
-        uid,
-        icon: provider.icon,
-        label: provider.title,
-        displayLabel: provider.title,
-        provider,
-      });
-      // Singleton providers may still list instances (files root launcher).
-      if (provider.instances.length === 0) continue;
-    }
-    for (const instance of provider.instances) {
-      const uid = `${provider.type}:${instance.id}`;
-      result.push({
-        key: uid,
-        uid,
-        icon: instance.icon ?? provider.icon,
-        label: instance.label,
-        displayLabel: instanceDisplayLabel(provider, instance),
-        state: instance.state,
-        provider,
-        instance,
-      });
-    }
-  }
-  return result;
-});
 
 const activeUid = computed(() => {
   const content = layout.activePane.content;
@@ -202,11 +145,7 @@ function removeEntry(entry: DockEntry): void {
 
 async function createFrom(provider: DockProvider): Promise<void> {
   menuOpen.value = false;
-  if (provider.singleton === true && provider.clickCreates !== true) {
-    layout.openInstance(provider.type, "main");
-    return;
-  }
-  await provider.create?.();
+  await openProvider(provider, layout);
 }
 
 function openSettings(): void {

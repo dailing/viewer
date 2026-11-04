@@ -1,14 +1,13 @@
 /**
  * voice-control frontend (framework: voice actions, slice 3): the global
- * hands-free loop plus a singleton debug pane (interaction log, prompt
- * templates, sniffed capability catalog). The loader calls
- * createDockActions before activate, so the controller is built lazily from
- * whichever runs first.
+ * hands-free loop plus plugin-owned settings (interaction log, prompt
+ * templates, sniffed capability catalog). The Dock-foot headphone remains a
+ * one-click operational toggle; configuration lives in 插件管理.
  */
 import { defineAsyncComponent } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import type { DockAction, DockProvider } from "../../shell/definePlugin";
+import type { DockAction } from "../../shell/definePlugin";
 import { definePlugin } from "../../shell/definePlugin";
 import {
   disposeController,
@@ -18,16 +17,8 @@ import {
 
 export default definePlugin({
   id: "voice-control",
-  components: {
-    "voice-control": defineAsyncComponent(() => import("./VoiceControlPane.vue")),
-  },
-  createDockProvider: (): DockProvider => ({
-    type: "voice-control",
-    icon: "bi-mic",
-    title: "语音控制",
-    singleton: true,
-    instances: [],
-  }),
+  name: "语音控制",
+  settings: defineAsyncComponent(() => import("./VoiceControlPane.vue")),
   createDockActions: (ctx: PluginCtx): DockAction[] => [voiceControlDockAction(ensureController(ctx))],
   activate: (ctx: PluginCtx) => {
     ensureController(ctx);

@@ -10,7 +10,7 @@
  * `stores/theme.ts`), 字号 (browser-local UI/content base sizes + pinned
  * detail sizes, `stores/typography.ts`, framework v0.88), 后端 (restart /
  * build-restart / scheduled restart toggle with live status). The chat
- * dispatch/summary LLM lives in 聊天管理 → 模型 (chat-manager LLMPanel).
+ * Model profiles and the shared HTTP facade live in 插件管理 → 语言模型.
  */
 import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
 import type { PluginCtx } from "../../shell/ctx";

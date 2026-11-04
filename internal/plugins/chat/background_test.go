@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -299,4 +300,17 @@ func TestBackgroundNoProcessesNoHold(t *testing.T) {
 	}
 	second := f.nextPrompt(t)
 	f.endTurn(t, second)
+}
+
+func TestBackgroundBranchIDs(t *testing.T) {
+	p := &Plugin{background: map[string]*backgroundBlock{
+		"chat-a\x00line\x00branch-b": {chatID: "chat-a", branchID: "branch-b"},
+		"chat-a\x00line\x00branch-a": {chatID: "chat-a", branchID: "branch-a"},
+		"chat-a\x00line\x00":         {chatID: "chat-a", branchID: ""},
+		"chat-b\x00line\x00branch-c": {chatID: "chat-b", branchID: "branch-c"},
+	}}
+	want := []string{"branch-a", "branch-b"}
+	if got := p.backgroundBranchIDs("chat-a"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("backgroundBranchIDs() = %v, want %v", got, want)
+	}
 }

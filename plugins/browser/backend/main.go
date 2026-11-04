@@ -5,10 +5,11 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
-	"net/http"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -22,13 +23,14 @@ var manifest = busclient.Manifest{
 		"state": map[string]any{}, "create": map[string]any{}, "close": map[string]any{},
 		"release": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{},
 		"control": map[string]any{}, "input": map[string]any{}, "navigate": map[string]any{},
+		"mcp_status": map[string]any{}, "mcp_configure": map[string]any{},
 	},
 	Emits: map[string]any{"state": map[string]any{}},
 }
 
 func main() {
 	kernelWS := flag.String("kernel-ws", "ws://127.0.0.1:8765/ws", "Viewer kernel WebSocket")
-	mcpListen := flag.String("mcp-listen", "127.0.0.1:18732", "loopback MCP listen address")
+	mcpListen := flag.String("mcp-listen", "", "optional loopback MCP listen override (host:port); default uses config-store")
 	stateFile := flag.String("state-file", defaultDataPath("browser-pages.json"), "managed-page state file")
 	profileDir := flag.String("profile-dir", defaultDataPath("browser-profile"), "persistent Chrome user-data-dir")
 	gatewayURL := flag.String("gateway-url", "http://127.0.0.1:18100", "Viewer gateway base URL for the generic media plane")
@@ -55,16 +57,23 @@ func main() {
 		os.Exit(1)
 	}
 	defer service.Close()
+	mcp := newMCPServer(service)
+	defer mcp.Close()
 
 	for pattern := range map[string]any{
 		"viewer.browser:_:state": nil, "viewer.browser:_:create": nil, "viewer.browser:_:close": nil,
 		"viewer.browser:_:release": nil, "viewer.browser:_:watch": nil, "viewer.browser:_:unwatch": nil,
 		"viewer.browser:_:control": nil, "viewer.browser:_:input": nil, "viewer.browser:_:navigate": nil,
+		"viewer.browser:_:mcp_status": nil, "viewer.browser:_:mcp_configure": nil,
 	} {
-		if _, err := client.Subscribe(pattern, func(frame busclient.Frame) { handleRPC(client, service, frame) }); err != nil {
+		if _, err := client.Subscribe(pattern, func(frame busclient.Frame) { handleRPC(client, service, mcp, frame) }); err != nil {
 			slog.Error("browser subscription failed", "pattern", pattern, "error", err)
 			os.Exit(1)
 		}
+	}
+	if _, err := client.Subscribe("config:plugins.viewer.browser:config", func(frame busclient.Frame) { handleMCPConfigChange(mcp, frame) }); err != nil {
+		slog.Error("browser config subscription failed", "error", err)
+		os.Exit(1)
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	err = client.Connect(connectCtx)
@@ -75,6 +84,26 @@ func main() {
 	}
 	defer client.Close()
 
+	configCtx, configCancel := context.WithTimeout(ctx, mcpRPCBudget)
+	mcpConfig, configErr := loadMCPConfig(configCtx, client)
+	configCancel()
+	if configErr != nil {
+		slog.Error("load browser MCP config; using defaults", "error", configErr)
+		mcpConfig = defaultMCPConfig()
+	}
+	if *mcpListen != "" {
+		host, portText, parseErr := net.SplitHostPort(*mcpListen)
+		port, portErr := strconv.Atoi(portText)
+		if parseErr != nil || portErr != nil || host != "127.0.0.1" {
+			slog.Error("invalid --mcp-listen; expected 127.0.0.1:port", "value", *mcpListen)
+			os.Exit(1)
+		}
+		mcpConfig = MCPConfig{Enabled: true, Port: port}
+	}
+	if err := mcp.Apply(mcpConfig); err != nil {
+		slog.Error("start browser MCP server", "error", err)
+	}
+
 	assetCtx, assetCancel := context.WithTimeout(ctx, 45*time.Second)
 	if _, err := busclient.PushAssets(assetCtx, client, *frontendDir, map[string]any{"name": "Browser", "icon": "bi-window-desktop", "description": manifest.Description}); err != nil {
 		slog.Error("browser frontend asset push failed", "error", err)
@@ -83,13 +112,6 @@ func main() {
 	service.publishState()
 	go service.Restore(ctx)
 
-	httpServer := &http.Server{Addr: *mcpListen, Handler: &MCPHandler{service: service}, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
-	go func() {
-		slog.Info("browser MCP listening", "address", *mcpListen, "endpoint", "http://"+*mcpListen+"/mcp")
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("browser MCP server failed", "error", err)
-		}
-	}()
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -104,12 +126,9 @@ func main() {
 	}()
 	slog.Info("viewer.browser managed Chrome backend started", "state_file", *stateFile, "profile_dir", *profileDir)
 	<-ctx.Done()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = httpServer.Shutdown(shutdownCtx)
-	shutdownCancel()
 }
 
-func handleRPC(client *busclient.Client, service *Service, frame busclient.Frame) {
+func handleRPC(client *busclient.Client, service *Service, mcp *mcpServer, frame busclient.Frame) {
 	value, ok := busclient.Object(frame)
 	if !ok && !busclient.Cancelled(frame) {
 		value = make(map[string]any)
@@ -141,6 +160,10 @@ func handleRPC(client *busclient.Client, service *Service, frame busclient.Frame
 		err = service.Input(context.Background(), stringField(value, "page_id"), stringField(value, "viewer_id"), event)
 	case "viewer.browser:_:navigate":
 		result, err = service.HumanNavigate(context.Background(), stringField(value, "page_id"), stringField(value, "viewer_id"), stringField(value, "url"))
+	case "viewer.browser:_:mcp_status":
+		result = mcp.Status()
+	case "viewer.browser:_:mcp_configure":
+		result, err = configureMCP(client, mcp, value)
 	default:
 		err = errorf("invalid_request", "unknown browser RPC %q", channel)
 	}

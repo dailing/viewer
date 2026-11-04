@@ -16,6 +16,7 @@ import { useChatSettingsStore } from "../../stores/chatSettings";
 import { useLayoutStore } from "../../stores/layout";
 import { registerInputSessionRuntime, useInputSessionsStore, type InputSession } from "../../stores/inputSessions";
 import { rawModeEnabled } from "./rawMode";
+import { chatInputRPC } from "./inputDispatch";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
 import ToolActivity from "./ToolActivity.vue";
@@ -26,7 +27,7 @@ import type { ChatCacheEntry, MessageCursor } from "./chatCache";
 import { beyondWindowEdge as isBeyondWindowEdge, collectDeltaPages, cursorOf, mergeMessages, trimWindow, type ChatWindow } from "./chatWindow";
 import { formatChatTime as formatTime } from "./chatTime";
 import { drainDeferredTurn, liveTurnVisibility, stampLiveTurnLine } from "./liveAttribution";
-import { loadBranchTabs, writeBranchTabs, ensureWindowId } from "./branchTabs";
+import { loadBranchTabs, writeBranchTabs, ensureWindowId, collectRunningBranchIds } from "./branchTabs";
 import { optimisticLinesVisible, resolveOptimisticTurn, settleOptimisticSend } from "./optimistic";
 import { presentToolBlock } from "./toolPresentation";
 import type { Branch, Chat, ChatBlock, ChatBlockList, ChatList, ChatMessage, QueuedMessage, Role, TurnSession, TurnTarget, TurnTargetEntry, Workspace } from "./types";
@@ -66,6 +67,8 @@ const composerVisible = computed(() => Boolean(inputs.session(inputSessionId)?.p
 // keeps parallel send-now turns of the same role individually marked — and
 // individually stoppable.
 const runningTurns = ref(new Map<string, { roleId: string; branchId?: string }>());
+// Lines still held by background processes after their originating turn ended.
+const backgroundBranchIds = ref(new Set<string>());
 // Pending queue entries of this chat (dispatches waiting behind in-flight
 // turns), seeded from the chats:list queued_messages snapshot and reseeded
 // wholesale by the chat:_:queue feed on every backend queue mutation. The
@@ -359,15 +362,10 @@ watch(() => sendBranch.value?.id ?? "", (branchId) => {
   inputs.setBranch(inputSessionId, branchId);
 }, { immediate: true });
 
-/** Branches with an in-flight turn (tab spinner + merge-selection guard). */
-const runningBranchIds = computed<Set<string>>(() => {
-  const set = new Set<string>();
-  for (const turnId of runningTurns.value.keys()) {
-    const branchId = turnSessions.value.get(turnId)?.branchId;
-    if (branchId) set.add(branchId);
-  }
-  return set;
-});
+/** Branches with an in-flight turn or background hold (tab spinner + merge guard). */
+const runningBranchIds = computed<Set<string>>(() =>
+  collectRunningBranchIds(runningTurns.value.values(), backgroundBranchIds.value),
+);
 
 const loopForkTurn = computed(() => [...turnSessions.value.entries()]
   .filter(([, t]) => t.branchId === (sendBranch.value?.id ?? ""))
@@ -777,6 +775,17 @@ onBeforeUnmount(() => {
 });
 
 const members = computed(() => roles.value.filter((role) => chat.value?.member_role_ids.includes(role.id)));
+
+// Role membership is editable independently of the browser-persisted input
+// session. Drop hidden non-member ids instead of letting an apparently Auto
+// composer keep dispatching an explicit stale role selection.
+watch(() => chat.value?.member_role_ids, (memberRoleIds) => {
+  if (memberRoleIds === undefined) return;
+  const session = inputs.session(inputSessionId);
+  if (session === undefined || session.selectedRoleIds.length === 0) return;
+  const kept = session.selectedRoleIds.filter((id) => memberRoleIds.includes(id));
+  if (kept.length !== session.selectedRoleIds.length) inputs.patch(inputSessionId, { selectedRoleIds: kept });
+}, { immediate: true });
 
 /** Running state binds to the turn, not the role: each in-flight turn's
  *  box shows the indicator (parallel send-now turns of one role included),
@@ -1267,6 +1276,7 @@ function seedRunningTurns(list: ChatList): void {
     noteTurnLine(turn.turn_id, turn.branch_id);
   }
   runningTurns.value = next;
+  backgroundBranchIds.value = new Set(list.background_branch_ids ?? []);
 }
 
 /** Adopt the backend's queue snapshot (chats:list queued_messages); the live
@@ -1652,7 +1662,7 @@ async function send(session: InputSession): Promise<boolean> {
       return true;
     } catch (cause) {
       error.value = errorText(cause);
-      return false;
+      throw cause;
     }
   }
   if (hasNewer.value) jumpToLatest(); // a send always targets the live edge
@@ -1664,17 +1674,7 @@ async function send(session: InputSession): Promise<boolean> {
   pendingSends.value = [...pendingSends.value, { key, text: message, branchIds: originBranchIds, ts: Date.now(), sending: true, routed: "", failed: "" }];
   void nextTick(() => scrollThreadToMessageEnd());
   try {
-    const payload: Record<string, unknown> = { chat_id: chatId, message, branch_id: branchId };
-    // A branch send is a mainline send plus branch_id (framework v0.66):
-    // role picks / LLM routing, new-session and send-now toggles all
-    // apply; the backend only scopes context and session lanes per
-    // role × branch.
-    if (session.selectedRoleIds.length > 0) payload.role_ids = session.selectedRoleIds;
-    if (session.forceNewSession) payload.force_new_session = true;
-    if (session.parallel) payload.parallel_dispatch = true;
-    // Per-line raw mode (framework v0.92): zero viewer-side prompt injection
-    // for this send; the toggle state lives browser-side per chat+branch.
-    if (rawModeEnabled(chatId, branchId)) payload.raw = true;
+    const { payload } = chatInputRPC(session, rawModeEnabled(chatId, branchId), chat.value?.member_role_ids);
     // Dispatch replies only after LLM role routing, which may take up to
     // llm.timeout_seconds (default 60s) under local-server queueing; the
     // bus's 30s default would report 发送失败 while the backend proceeds.
@@ -1721,7 +1721,7 @@ async function send(session: InputSession): Promise<boolean> {
     return true;
   } catch (cause) {
     patchPendingSend(key, { sending: false, failed: errorText(cause) });
-    return false;
+    throw cause;
   }
 }
 
@@ -1915,6 +1915,16 @@ onMounted(() => {
       streamingMessageId = "";
       renderMermaidAtBoundary();
     }
+  });
+  // A background hold begins after the turn's completed frame. Keep the
+  // branch spinner (and merge/archive guard) active until the watcher releases it.
+  ctx.bus.subscribe("chat:_:background", (frame) => {
+    const value = frame.value as { chat_id?: string; branch_id?: string; active?: boolean };
+    if (value.chat_id !== chatId || !value.branch_id) return;
+    const next = new Set(backgroundBranchIds.value);
+    if (value.active === true) next.add(value.branch_id);
+    else next.delete(value.branch_id);
+    backgroundBranchIds.value = next;
   });
   ctx.bus.subscribe("chat:_:active", (frame) => {
     if (frame.value === chatId) refreshNow();
@@ -2552,16 +2562,12 @@ onMounted(() => {
   padding: 0 3px;
 }
 
-/* Compact markdown inside chat turns: sizes track the CONTENT base via
-   exact coefficients (defaults: 12/20/17/15/14px at a 15px base — chained
-   off the --markdown-hN vars so 细节定制 pins scale into chat too); colors
-   and anything not listed still follow the markdown theme variables. */
+/* Compact markdown inside chat turns: body text tracks the CONTENT base
+   (12px at the default 15px base); headings share the theme's shallow
+   16.5/15.75/15/14px scale so 细节定制 pins apply here too. Colors and
+   anything not listed still follow the markdown theme variables. */
 .chat-response-body {
   --markdown-render-body-size: calc(var(--markdown-body-font-size) * 4 / 5);
-  --markdown-render-h1-size: calc(var(--markdown-h1-font-size) * 5 / 7);
-  --markdown-render-h2-size: calc(var(--markdown-h2-font-size) * 17 / 23);
-  --markdown-render-h3-size: calc(var(--markdown-h3-font-size) * 15 / 19);
-  --markdown-render-h4-size: calc(var(--markdown-h4-font-size) * 7 / 8);
   --markdown-render-paragraph-line-height: 1.48;
   --markdown-render-paragraph-size: calc(var(--markdown-body-font-size) * 4 / 5);
   --markdown-render-pre-padding: 8px;

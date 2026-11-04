@@ -15,12 +15,23 @@ const tabs: Array<{ id: Tab; label: string; icon: string }> = [
 </script>
 
 <template>
-  <section class="d-flex flex-column h-100">
-    <nav class="nav nav-tabs px-2 pt-2" aria-label="聊天管理">
-      <button v-for="tab in tabs" :key="tab.id" type="button" class="nav-link" :class="{ active: activeTab === tab.id }" @click="activeTab = tab.id">
-        <i class="bi me-1" :class="tab.icon"></i>{{ tab.label }}
-      </button>
-    </nav>
+  <section class="d-flex flex-column h-100 v-bg-surface">
+    <div class="px-3 py-2 border-bottom">
+      <div class="btn-group btn-group-sm" role="tablist" aria-label="聊天设置">
+        <button
+          v-for="tab in tabs"
+          :key="tab.id"
+          type="button"
+          class="btn"
+          :class="activeTab === tab.id ? 'btn-primary' : 'btn-outline-secondary'"
+          role="tab"
+          :aria-selected="activeTab === tab.id"
+          @click="activeTab = tab.id"
+        >
+          <i class="bi me-1" :class="tab.icon"></i>{{ tab.label }}
+        </button>
+      </div>
+    </div>
     <div class="flex-grow-1 min-h-0">
       <ChatsPanel v-if="activeTab === 'chats'" />
       <RolesPanel v-else-if="activeTab === 'roles'" />

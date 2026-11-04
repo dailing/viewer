@@ -39,14 +39,12 @@ export interface DockProvider {
   /** "+" menu entry label. */
   title: string;
   /**
-   * Singleton providers (bus-inspector) have no backend-tracked instances;
-   * their entry is always listed in the Dock. A singleton provider may still
-   * carry `instances` (files): the Dock lists them below its root entry.
+   * One main instance opened from "+". Singleton tools never create a
+   * permanent Dock entry; their `instances` can still list explicit items.
    */
   singleton?: boolean;
   /**
-   * Singleton root entry acts as a launcher: clicking it calls `create()`
-   * instead of opening `type:main` (files — the root entry never opens).
+   * "+" calls `create()` instead of opening `type:main` (files launcher).
    */
   clickCreates?: boolean;
   /** Reactive list of running instances, maintained by the provider. */
@@ -54,9 +52,10 @@ export interface DockProvider {
   /**
    * "+" menu action (create a new instance); absent = not user-creatable.
    * Receives the source instance id when invoked from a launcher entry
-   * (`DockInstance.clickCreates`).
+   * (`DockInstance.clickCreates`). Returning an id opens the created pane;
+   * return void when creation already handles opening.
    */
-  create?: (fromInstanceId?: string) => Promise<void> | void;
+  create?: (fromInstanceId?: string) => Promise<string | void> | string | void;
   /** Remove a launcher instance (Dock hover ×); absent = not removable. */
   remove?: (instanceId: string) => Promise<void> | void;
 }
@@ -77,8 +76,12 @@ export interface DockAction {
 
 export interface PluginModule {
   id: string;
+  /** Display name used by the unified plugin manager. */
+  name?: string;
   /** instance.type → component (lazy via defineAsyncComponent). */
   components?: Record<string, Component>;
+  /** Optional plugin-owned settings surface rendered inside 插件管理. */
+  settings?: Component;
   /** Build the Dock contribution; called once at bootstrap with plugin ctx. */
   createDockProvider?: (ctx: PluginCtx) => DockProvider;
   /** Build global Dock-foot action buttons; called once at bootstrap. */

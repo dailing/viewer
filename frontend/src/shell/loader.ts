@@ -21,7 +21,7 @@ import { createCtx, type PluginCtx } from "./ctx";
 import { bus } from "./bus";
 import type { PluginModule } from "./definePlugin";
 import { ExternalPluginLoader, type ExternalAssetEntry } from "./externalLoader";
-import { registerComponent, registerDockActions, registerDockProvider, unregisterComponent, unregisterDockActions, unregisterDockProvider } from "./registries";
+import { registerComponent, registerDockActions, registerDockProvider, registerPlugin, unregisterComponent, unregisterDockActions, unregisterDockProvider, unregisterPlugin } from "./registries";
 
 /** Plugin ids the static stage-A build already registered. */
 const staticIds = new Set<string>();
@@ -41,8 +41,9 @@ interface ModuleRegistration {
 }
 
 /** Register one plugin module's contributions (shared by both stages). */
-function registerModule(plugin: PluginModule, ctx: PluginCtx): ModuleRegistration {
+function registerModule(plugin: PluginModule, ctx: PluginCtx, builtin = false): ModuleRegistration {
   const result: ModuleRegistration = {};
+  registerPlugin(plugin.id, plugin.name ?? plugin.id, builtin, plugin.settings);
   for (const [type, component] of Object.entries(plugin.components ?? {})) {
     registerComponent(type, component);
   }
@@ -83,6 +84,7 @@ function unregisterModule(handle: ExternalHandle): void {
     console.error(`plugin ${handle.module.id} deactivate failed`, error);
   }
   handle.ctx.dispose();
+  unregisterPlugin(handle.module.id);
   for (const type of Object.keys(handle.module.components ?? {})) {
     unregisterComponent(type);
   }
@@ -102,7 +104,7 @@ export function loadPlugins(): void {
       continue;
     }
     staticIds.add(plugin.id);
-    const { activation } = registerModule(plugin, createCtx(plugin.id));
+    const { activation } = registerModule(plugin, createCtx(plugin.id), true);
     reportActivationError(plugin, activation);
   }
 }

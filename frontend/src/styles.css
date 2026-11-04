@@ -97,18 +97,17 @@ body {
  * Derived font sizes (framework v0.88): two browser-local bases — UI
  * (--font-size-ui) and content (--markdown-body-font-size) — are set inline
  * on .app-shell by stores/typography.ts; every derived size is an exact
- * calc() coefficient off a base (defaults reproduce the pre-v0.88 fixed px
- * sizes: 11/28/23/19/16/13), and each derived var can be pinned to an
+ * calc() coefficient off a base, and each derived var can be pinned to an
  * explicit px inline by the 细节定制 settings, winning over these formulas.
  * Declared on .app-shell (not :root) so the calc() binds the inline base,
  * not the :root fallback — same rule as the derived colors below.
  */
 .app-shell {
   --font-size-ui-small: calc(var(--font-size-ui) * 11 / 12);
-  --markdown-h1-font-size: calc(var(--markdown-body-font-size) * 28 / 15);
-  --markdown-h2-font-size: calc(var(--markdown-body-font-size) * 23 / 15);
-  --markdown-h3-font-size: calc(var(--markdown-body-font-size) * 19 / 15);
-  --markdown-h4-font-size: calc(var(--markdown-body-font-size) * 16 / 15);
+  --markdown-h1-font-size: calc(var(--markdown-body-font-size) * 11 / 10);
+  --markdown-h2-font-size: calc(var(--markdown-body-font-size) * 21 / 20);
+  --markdown-h3-font-size: var(--markdown-body-font-size);
+  --markdown-h4-font-size: calc(var(--markdown-body-font-size) * 14 / 15);
   --markdown-code-font-size: calc(var(--markdown-body-font-size) * 13 / 15);
 }
 

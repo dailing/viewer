@@ -3,9 +3,9 @@ import { computed, inject, onMounted, ref } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { useLayoutStore } from "../../stores/layout";
-import type { Chat, ChatList, Role, RoutingConfig } from "../chat/types";
-import { errorText } from "../chat/types";
-import MasterDetail from "./MasterDetail.vue";
+import type { Chat, ChatList, Role, RoutingConfig } from "./types";
+import { errorText } from "./types";
+import MasterDetail from "../../shell/MasterDetail.vue";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("ChatsPanel requires PluginPaneHost");

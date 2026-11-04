@@ -50,7 +50,7 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
       if (isChatOpen(chat.id)) markChatRead(chat.id);
     }
     instances.splice(0, instances.length, ...chats
-      .filter((chat) => chat.pinned || isChatOpen(chat.id))
+      .filter((chat) => chat.pinned)
       .map((chat) => ({ id: chat.id, label: `${chat.name} · ${chat.root}`, state: dockStateFor(chat.id), icon: "bi-chat-left-text" })));
   };
   const refresh = async (): Promise<void> => {
@@ -109,9 +109,11 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
 
 export default definePlugin({
   id: "chat",
+  name: "聊天",
   components: {
     chat: defineAsyncComponent(() => import("./ChatPane.vue")),
   },
+  settings: defineAsyncComponent(() => import("./ChatSettings.vue")),
   createDockProvider,
   activate(ctx) {
     const unregister = registerInputSessionSender("chat", async (session: InputSession) => {
@@ -119,7 +121,12 @@ export default definePlugin({
       if (!message) return false;
       const chatId = session.instanceId.split("#")[0];
       const branchId = session.branchId ?? "";
-      const request = chatInputRPC(session, rawModeEnabled(chatId, branchId));
+      let memberRoleIds: string[] | undefined;
+      if (session.selectedRoleIds.length > 0) {
+        const chats = (await ctx.bus.request("chat:_:chats:list", {})) as ChatList;
+        memberRoleIds = chats.chats.find((chat) => chat.id === chatId)?.member_role_ids;
+      }
+      const request = chatInputRPC(session, rawModeEnabled(chatId, branchId), memberRoleIds);
       // Same as ChatPane.send: outwait LLM role routing (up to
       // llm.timeout_seconds, default 60s) instead of the bus's 30s default.
       const result = await ctx.bus.request(request.channel, request.payload, { timeout: 90_000 });

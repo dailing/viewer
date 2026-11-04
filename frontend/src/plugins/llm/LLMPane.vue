@@ -29,7 +29,7 @@
 import { computed, inject, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import MasterDetail from "../chat-manager/MasterDetail.vue";
+import MasterDetail from "../../shell/MasterDetail.vue";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("LLMPane requires PluginPaneHost");

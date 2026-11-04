@@ -13,9 +13,9 @@
  * machine — so the whole record lives in localStorage
  * (viewer.typography.v1) and nothing replicates.
  *
- * Defaults reproduce the pre-v0.88 fixed sizes exactly (12/15 bases; exact
- * fractions such as 11/12 and 28/15 as coefficients), so an upgraded
- * browser renders identically until the user changes a value.
+ * Defaults use 12/15 bases and a deliberately shallow heading scale
+ * (H1–H4 = ×11/10, 21/20, 1, 14/15); bold weight carries most of the
+ * hierarchy. Explicit detail pins continue to override these coefficients.
  */
 import { defineStore } from "pinia";
 
@@ -43,10 +43,10 @@ export interface TypoDetailSpec {
 /** 细节定制 key -> the derived CSS custom property it pins. */
 export const TYPO_DETAILS: Record<string, TypoDetailSpec> = {
   uiSmall: { cssVar: "--font-size-ui-small", label: "界面小字", base: "ui", ratio: 11 / 12 },
-  h1: { cssVar: "--markdown-h1-font-size", label: "标题 H1", base: "content", ratio: 28 / 15 },
-  h2: { cssVar: "--markdown-h2-font-size", label: "标题 H2", base: "content", ratio: 23 / 15 },
-  h3: { cssVar: "--markdown-h3-font-size", label: "标题 H3", base: "content", ratio: 19 / 15 },
-  h4: { cssVar: "--markdown-h4-font-size", label: "标题 H4", base: "content", ratio: 16 / 15 },
+  h1: { cssVar: "--markdown-h1-font-size", label: "标题 H1", base: "content", ratio: 11 / 10 },
+  h2: { cssVar: "--markdown-h2-font-size", label: "标题 H2", base: "content", ratio: 21 / 20 },
+  h3: { cssVar: "--markdown-h3-font-size", label: "标题 H3", base: "content", ratio: 1 },
+  h4: { cssVar: "--markdown-h4-font-size", label: "标题 H4", base: "content", ratio: 14 / 15 },
   code: { cssVar: "--markdown-code-font-size", label: "代码字号", base: "content", ratio: 13 / 15 },
 };
 

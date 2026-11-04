@@ -1,6 +1,12 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v0.99**（2026-11-02）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v1.05**（2026-11-03）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v1.05 变更：**进一步收敛标题字号**——H1/H2 默认派生系数由 ×6/5、11/10 调整为 ×11/10、21/20（即 1.1×、1.05×）；默认内容字号 15px 时为 16.5/15.75px，H3/H4 与 700 字重不变，细节定制钉值仍优先生效。
+> v1.04 变更：**前端诊断日志经共用总线进入后端日志**——shell 通用 helper 以普通 publish 发送 `frontend:_:log {level,component,message,context,ts}`（level 仅 debug/info/warn/error，ts 为浏览器毫秒时间戳），fire-and-forget 且断线失败不影响原操作；新 core plugin `frontend-log` 订阅该事件并按后端 `slog` JSON 格式写入 `viewerd.log`，保留原 message/context 并补充 `source=frontend`、component、客户端时间与 browser origin。chat dispatch 的非成员角色过滤 warning 同时保留浏览器 Console 副本和此后端副本。
+> v1.03 变更：**分支后台运行指示补齐**——`chats:list`（带 chat_id）新增 `background_branch_ids` 快照；`chat:_:background` 的 active/inactive 帧均携带 `branch_id`。分支 tab spinner 与 merge/archive busy guard 统一合并普通 running turn 和 post-turn background hold，pane 刷新后可恢复；running turn 直接消费自身 `branch_id`，不再依赖可能尚未建立的 session 映射。
+> v1.02 变更：**弱化标题字号层级**——H1–H4 默认系数从 ×28/15、23/15、19/15、16/15 调整为 ×6/5、11/10、1、14/15；默认内容字号下为 18/16.5/15/14px，保留 700 字重。聊天紧凑正文不再二次缩小标题，细节定制钉值仍优先生效。
+> v1.01 变更：**Dock 去常驻工具入口 + 聊天管理并入聊天设置**——①singleton 工具不再自动生成 Dock 项；文件、Bus Inspector、插件管理和终端只从「＋」打开，`create()` 返回实例 id 时 shell 直接打开新 pane。②Dock 只列置顶聊天、置顶文件和有 watcher 的已打开 Browser Page；未置顶聊天/文件及运行中终端不占位。③聊天管理独立插件删除，聊天/Roles/路由完整迁入聊天插件 `settings`，共享 MasterDetail 移至 shell。
+> v1.00 变更：**统一插件目录与插件自有设置**——①前端 `definePlugin` 新增 `name` 与可选 `settings` 组件；静态和外部 loader 均注册插件目录及设置，热卸载同步移除。②「插件管理」合并显示内置插件（默认启用、无外部进程控制）与 supervisor 外部插件，并在运行状态下方以独立 `<plugin>:settings` ctx 动态挂载设置组件；语言模型、语音控制迁入此处并移除独立 Dock 面板，语音耳机操作按钮保留。③Browser MCP 配置 `plugins.viewer.browser.mcp {enabled,port}` 默认启用 18732，插件设置可热启停/换 loopback listener，不重启 Chrome 或视频流。
 > v0.99 变更：**chat 实时帧 branch 归属与消息时间**——①筛选视图中未知 turn 归属的实时 message/block 先暂存，不得 fail-open 进入所有 branch；turn feed 或历史 seed 补齐后仅接纳当前线的暂存帧，丢弃其他线帧，并清除窗口/session cache 中该 turn 的误入项。`target` 等不带 `branch_id` 的 phase 不覆盖已有归属；「全部」视图不做归属延迟。②消息时间当天只显示时分，更早显示日期+时间，按浏览器本地自然日判断。
 > v0.98 变更：**InputSession 发送意图与 queue/draft 生命周期**——①InputSession 持久化 `branchId + mode + queuedDispatchId + revision`，语音等待前冻结文本、目标线、角色和一次性选项；面板关闭后的插件 sender 仍发原 branch/raw，queued-edit 仍调用 `queued-update`。发送完成只清同一目标且未再编辑的快照。②queued-edit 与普通 per-line 草稿分层，进入编辑保存普通草稿并暂停 draft sync，取消/成功恢复，切线不得把排队文本 flush 成普通草稿；条目已消失时保留编辑文本为原线普通草稿。③`draft:get/set` 校验 chat 与活跃 branch，旧响应须通过 line+generation+revision 守卫；删除 branch/chat 清理 Draft，源线有非空草稿时拒绝 merge/archive，前端合并前 flush 当前及切线待写草稿。④`queue_full` 等拒绝路径不得修改 `lineRaw`。
 > v0.97 变更：**chat branch 数据归属与视图瞬态隔离**——①`continue_turn_id` 同时继承源 turn 的 role、session 与存活工作线；新 turn、busy/queue、草稿清理和 History DAG 均落在该线，已合并内容沿 merge 链续到目标线，legacy archive-only 线仍只读。②自动角色路由的 recent history 改从目标线的 DAG 成员集合读取，不再读取整 chat 最近消息；turn summary 的 user query 通过 `turn.dispatch_id` 关联本批次输入，禁止跨线按时间猜测。③branch tab 切换丢弃旧视图尚未 flush 的 message/block 缓冲（随后由服务端 delta 补齐）并退出 queued-edit；optimistic 用户发送绑定目标 branch 集合，等待回复绑定 `dispatch × role × branch`，真实回声按同一归属对账，同 role 的其他 branch 不再串显或误清除。
@@ -348,30 +354,31 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 3b. **入口 = 资产 ∩ 在线**（v0.55）：loader 同时订阅 `plugins:_:assets` 与 `plugins:_:list`，仅对两 mailbox 交集中的 id 提供 Dock 入口/加载 bundle；资产在而插件断线 = 无入口（资产持久化不代表存活，§14.3），插件重连后入口自动恢复。
 4. **未知 type 的 pane**：插件未加载时 `PluginPaneHost` 显示 placeholder 并排队，插件注册后自动补挂。
 5. **时序**：前端模块加载不等待后端 hello 完成；组件照常挂载，RPC 失败由 ctx 统一重试/"connecting"态；插件状态本身是 mailbox 数据，UI 直接绑定。
+6. **插件自有设置统一入插件管理（v1.00）**：`definePlugin({name, settings})` 注册目录显示名和可选设置组件。内置插件在插件管理中默认启用但不套用外部进程控制；外部插件沿用 supervisor 生命周期。设置组件由 `PluginSettingsHost` 以 `<plugin>:settings` 独立 ctx 挂载，切换选择即 dispose；不得为单个插件在管理器中写设置特判。
 
 静态与动态汇于一处：registries 只有一套，in-repo core plugins bootstrap 静态注册（build-time chunk），external plugins 走本节动态流程，插件作者无感知。
 
-### 8.7 Dock 与 pane 打开语义（v0.56 修订）
+### 8.7 Dock 与 pane 打开语义（v1.01 修订）
 
 - **`openInstance` 打开语义**：目标 instance 已开 → 聚焦所在 pane；当前 active pane 为空 → 用之；存在其他空 pane → 用第一个空 pane；都没有 → 自适应主次/横向等宽/纵向等高模式追加一个叶端 pane，自由模式对 active pane 自动 split（默认垂直即左右分）并放入。`openMode=replace` 仍显式允许替换 active 内容；默认 new 模式下任何已占用 pane 的内容不被静默替换。
 - **浮动放回语义（v0.59）**：`dockFloating` 不顶替任何已占用 pane——平铺三模式在叶端追加一个新 tile 放入（末位 tile 为空则直接用之）；自由模式替换 active pane 的内容（geometry 由用户手工管理）。
 - **四种 tiling mode**：`cascade` 每层根据该层实际矩形长边二等分（宽高相等时上下切），first pane 占根一半、其余在 second 区递归；`columns` 横向等宽；`rows` 纵向等高；`free` 直接渲染 binary split tree 并开放横/纵 split + ratio drag。模式选择存 `viewer.layout.mode.v1`。前三种只显示通用「新增 pane」，不允许手改由算法确定的 geometry。
 - **移动语义**：共享抬头的「向树根/向叶端」将 active pane 内容与 DFS tile 顺序的前/后相邻项交换，并把 active 跟随到新位置；连续操作即可置首/置末，四模式与模式切换保持同一顺序语义。
-- **Dock singleton 条目常驻**：singleton provider（bus-inspector、chat-manager 等）的条目无条件常驻 dock，点击 = 打开或聚焦。（v0.24 引入的 pin/unpin 切换在 v0.42 随 dock hover 按钮一并移除。）
+- **Dock 无 singleton 常驻项（v1.01）**：singleton provider（Bus Inspector、插件管理等）只出现在「＋」列表，点击打开或聚焦 `type:main`。文件也从「＋」新建；`create()` 返回新实例 id 时由 shell 直接打开对应 pane（Browser、终端），自行打开时返回 void。
 - **Dock 条目无动作按钮（v0.42；v0.73 修订）**：dock 条目上不放任何按钮；实例的终止/删除动作归 pane chrome（§8.8）——terminal 的终止是 chrome danger action（杀 PTY + 关 pane，plain close 只摘 pane、实例保留可回看 scrollback），files 是 pin + 关闭剪枝。唯一例外是 **launcher 实例**（v0.73）：`DockInstance.clickCreates` 标记的条目点击 = `provider.create(instanceId)` 新开实例而非聚焦自己，且 provider 实现 `remove(instanceId)` 时条目 hover 显示 × 删除该入口（files 的文件夹 pin 即 launcher：pinned 且无打开文件的实例，点击新开一个以 pin 时刻目录为初始 dir 的实例，同一文件夹可重复开多个；launcher 自身 pane 永不打开）。普通实例的 `remove` 契约仍然不存在。
-- **Dock 分区契约不变**：一个前端插件贡献一个 DockProvider（一个 dock 分区 + instances 列表）；一个插件可注册任意数量 pane 组件类型。需要第二个 dock 分区时拆第二个前端插件（如 chat / chat-manager），shell 契约零改动。
+- **Dock 分区契约不变**：一个前端插件贡献一个 DockProvider（一个 dock 分区 + instances 列表）；一个插件可注册任意数量 pane 组件类型。需要第二个 dock 分区时由对应前端插件单独贡献，shell 契约零改动。
 
 ### 8.8 Pane chrome 注册（v0.56 修订）
 
 - **workspace 单一 title bar**：所有 tiled panes 共用 shell 顶部一条抬头（active pane 的图标 + 标题 + 状态 + 插件 actions/controls + layout selector + move/refresh/add-or-split/float/close）；tile 内不再重复占用标题高度，以 accent border 标 active。浮动 pane 因需 drag handle 而保留自己的标题栏。**插件禁止自渲染标题栏**；插件自定义标题/按钮一律走注册，注册 API 不变。
 - **注册 API**：`ctx.setChrome({title?, status?, statusClass?, actions?, controls?})`，按 instance uid（`paneType:instanceId`）键控；ctx dispose 时自动清除。actions = `{id, title, icon?, label?, active?, variant?, run()}`；controls = `select`（options + onChange）或 `chips`（只读条目）——类型移植自老版 `stores/paneToolbar.ts`，语义不变。
 - **标题回退**：未注册时 shell 沿用自动标题（provider title + instance 标识）。
-- **dock 实例过滤**：instance 型 DockProvider 的 dock 列表 = **pinned ∪ 当前已开**（与 singleton unpin 后"开着才显示"同一条语义）；完整列表永远在管理界面（chat → chat-manager 聊天 tab）。
+- **dock 实例过滤（v1.01）**：只显示**置顶聊天、置顶文件、有 watcher 的已打开 Browser Page**；未置顶聊天/文件和运行中终端不占位。完整聊天列表在 插件管理 → 聊天 的插件设置中，Browser Page 关闭 pane 后仍由后端持久保存但不占 Dock。
 - **dock 自动展开（v0.26 引入，v0.27 修订）**：dock 默认纯图标窄条；hover 持续超过阈值自动展开，每个条目显示名字（图标 + 文本）；指针移出即收回。**v0.27 修订两点**：①展开改 **overlay**——展开面板覆盖在 workspace 之上，dock 的 flex 占位不变，右侧 pane 布局不因展开/收回而 reflow；②悬停延迟**可配**（默认 500ms，0 = 立即），入口为 dock 底部设置按钮，值持久化于 localStorage（view state，F6）。
 
 ### 8.9 管理面板版式约定（v0.27 定稿）
 
-- **统一 master-detail**：管理型面板（chat-manager 三个 tab 为首例）一律**左窄 list + 右 configuration** 两栏，各 tab 共用同一套版式与视觉风格。list 条目**只显示名字**——无图标/星标前缀、无路径、无摘要行；list 顶部或底部固定一个"新建"按钮。
+- **统一 master-detail**：管理型面板（聊天设置的聊天/Roles/路由三个 tab、插件管理等）一律**左窄 list + 右 configuration** 两栏，各 tab 共用同一套版式与视觉风格。list 条目**只显示名字**——无图标/星标前缀、无路径、无摘要行；list 顶部或底部固定一个"新建"按钮。
 - **动作归右栏**：list 条目上不放任何按钮；删除、pin 等破坏性或有副作用的动作一律在右栏 configuration 区（与保存并列）。
 - **dock 底部 = 设置入口**：总线连接状态指示从 dock 移除，原位为设置按钮（齿轮）；设置项含"悬停展开延迟（ms）"，持久化于 localStorage（view state，F6）。
 - **路由编辑器**：policy 的 candidates 每候选一行；agent/provider/model 渲染为"浅色小 label + 可点击文本"（不使用 select 下拉箭头样式），点击文本弹出选项菜单；相邻候选间的分割线轻微高亮、中央置小"+"按钮 = 在该位置插入新候选（列表末尾同样有一条"+"分割线用于追加）；候选排序用**拖拽**（drag & drop），不设上下移按钮；候选行不再内嵌 parameters JSON 框——右栏最底部用一个等宽框展示当前 policy 的完整 JSON 预览（只读，随可视化编辑实时更新）。
@@ -392,7 +399,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 ### 8.11 语音控制：Voice Actions（v0.49 对话化）
 
 - **目标形态**：免手免屏盲操——Dock 底部耳机按钮 / Ctrl+Shift+M 开启**全局连续 loop**：听一句 → LLM 回复或执行并语音回读 → 自动回到听，直到说「退出语音」/「关闭语音」或再点按钮。控制权在 shell 全局层（voice-control 前端插件，随 shell activate 存活），pane 切换不丢控制权——v0.47 的 pane 级命令控制器废弃。
-- **LLM 转发层**：core plugin `llm`（§10.2 C6）——RPC `llm:_:complete {messages, json_mode?, timeout_seconds?, extra_body?} → {content, model}` 纯转发到 OpenAI 兼容端点；调用方插件不感知模型/端点/密钥。`extra_body`（v0.49）原样并入出站请求体，用于端点特定开关（如 `chat_template_kwargs.enable_thinking=false`）；严格端点可能拒为 400，由调用方按 `llm_error` 呈现。配置 = config-store `plugins.llm`（`active` 当前配置 `{endpoint, key, model, timeout_seconds, extra_body?}` + `profiles` 前端管理配置库，逐调用重读、改即生效；超时优先级：请求参数 > 配置 > 默认 60s；`active.extra_body`（v0.54）为该模型的默认请求字段，并入每次出站调用、调用方逐 key 覆盖）；设置 UI = llm 插件自己的 singleton Dock pane（自 chat-manager 模型 tab 迁出）。启动时**一次性迁移** `plugins.viewer-chat.llm`→`plugins.llm.active`、`llm_profiles`→`profiles`（仅当目标为空）；chat 的 dispatch router / turn summary / voice speakable 全部改走此 RPC，`plugins.viewer-chat.llm*` 废弃。未配置时回 RPC error code `not_configured`，调用方据此给出口语化提示。HTTP facade 配置为 `plugins.llm.http {enabled,port,expose}`，由设置 pane 经 `llm:_:http:configure` 热更新，`llm:_:http:status` 返回 enabled/running/base_url/expose/last_error；`expose=false` 监听 `127.0.0.1`，true 监听 `0.0.0.0`，开放 `POST /v1/chat/completions`（透明转发并强制覆盖为 active model，支持 streaming）、`GET /v1/models` 与 `GET /health`。每个 completion 带 request ID 并结构化记录原始请求、实际转发、响应与耗时（返回记录限 4 MiB、Key 排除），供外部应用共享 active 切换与适配调试。
+- **LLM 转发层**：core plugin `llm`（§10.2 C6）——RPC `llm:_:complete {messages, json_mode?, timeout_seconds?, extra_body?} → {content, model}` 纯转发到 OpenAI 兼容端点；调用方插件不感知模型/端点/密钥。`extra_body`（v0.49）原样并入出站请求体，用于端点特定开关（如 `chat_template_kwargs.enable_thinking=false`）；严格端点可能拒为 400，由调用方按 `llm_error` 呈现。配置 = config-store `plugins.llm`（`active` 当前配置 `{endpoint, key, model, timeout_seconds, extra_body?}` + `profiles` 前端管理配置库，逐调用重读、改即生效；超时优先级：请求参数 > 配置 > 默认 60s；`active.extra_body`（v0.54）为该模型的默认请求字段，并入每次出站调用、调用方逐 key 覆盖）；设置 UI = 插件管理中的 llm 插件 `settings` 组件（v1.00 起，不再使用 singleton Dock pane）。启动时**一次性迁移** `plugins.viewer-chat.llm`→`plugins.llm.active`、`llm_profiles`→`profiles`（仅当目标为空）；chat 的 dispatch router / turn summary / voice speakable 全部改走此 RPC，`plugins.viewer-chat.llm*` 废弃。未配置时回 RPC error code `not_configured`，调用方据此给出口语化提示。HTTP facade 配置为 `plugins.llm.http {enabled,port,expose}`，由设置 pane 经 `llm:_:http:configure` 热更新，`llm:_:http:status` 返回 enabled/running/base_url/expose/last_error；`expose=false` 监听 `127.0.0.1`，true 监听 `0.0.0.0`，开放 `POST /v1/chat/completions`（透明转发并强制覆盖为 active model，支持 streaming）、`GET /v1/models` 与 `GET /health`。每个 completion 带 request ID 并结构化记录原始请求、实际转发、响应与耗时（返回记录限 4 MiB、Key 排除），供外部应用共享 active 切换与适配调试。
 - **条目发现 = retained mailbox**：支持语音的插件 `Set("voice-catalog:_:<plugin>", {entries})`——mailbox 常驻最后值、新订阅者立即拿到全量，catalog 变化（聊天增删改）重发即推送；voice-control 订阅 `voice-catalog:_:*` 合并全局目录。相比「广播-应答」省掉 announce 协议与启动时序窗口，单一机制无特判。（v0.49 修复：两段名 `voice-catalog:<plugin>` 被 kernel `invalid_channel` 异步拒绝。）
 - **条目形状**：`{id, plugin, kind: open_instance|action, title, keywords[], description, pane_type?, instance_id?, channel}`。`open_instance` 每实例一条（如每聊天 `open-chat:<id>`，keywords 含聊天名与 root basename），`action` 是实例内操作；`channel` 是该插件的执行入口 RPC。
 - **对话链路（v0.49 重写）**：转写文本 → `voice-control:_:command {text}` → prompt = 系统规则 + 合并 catalog + 对话摘要 + 最近轮次 + 当前转写，调 `llm:_:complete`（json_mode + `extra_body` 关 thinking）→ 模型输出 `{"say","entry_id"}`（按语义容错转写噪声/中英混说，entry_id 校验回 catalog）：`entry_id=none` = 直接回答/闲聊，朗读 `say`；命中条目 → RPC 调 `entry.channel {entry_id, instance_id, text}` → 插件返回 `{ok, say, effects[]}`，朗读执行结果的 `say`；`kind=open_instance` 时 voice-control 自动追加 `open_instance` effect（插件不管前端）。**所有结果——含失败——都带 `say` 口语行由客户端朗读**，仅 payload 非法走 RPC 错误。
@@ -455,7 +462,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 |---|---|
 | F0 | Bus client（单 WS 上的 subscribe/request/set） |
 | F1 | Registry: 组件（instance.type → component） |
-| F2 | Registry: sidebar tools / commands / 设置页 sections |
+| F2 | Registry: 插件目录 / Dock providers/actions / 插件自有 `settings` 组件（统一由插件管理挂载） |
 | F3 | Layout 插件 API（openPane/split/close；layout 自身可替换） |
 | F4 | Input service（VoiceTextarea + voice 封装） |
 | F5 | Render service（markdown/highlight/KaTeX/Mermaid） |
@@ -481,8 +488,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
     "components":   [{ "type": "file-tree", "component": "FilesPanel" }],
     "sidebarTools": [{ "id": "files", "icon": "bi-folder", "title": "Files" }],
     "commands":     [{ "id": "files.refresh", "title": "Files: Refresh" }],
-    "fileTypes":    [{ "extensions": [".md"], "preview": "markdown" }],
-    "configSection": { "title": "Files", "schema": {} }
+    "fileTypes":    [{ "extensions": [".md"], "preview": "markdown" }]
   },
   "dependencies": []
 }
@@ -597,6 +603,12 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v1.05**（2026-11-03）：**进一步收敛标题字号**——H1/H2 默认派生系数改为 ×11/10、21/20（1.1×、1.05×），默认内容字号 15px 时为 16.5/15.75px；H3/H4、粗体与细节定制钉值优先级不变。
+- **v1.03**（2026-11-02）：**分支后台运行指示补齐**——`chats:list` 新增 `background_branch_ids`，background feed 的结束帧也携带 `branch_id`；分支 spinner 与 merge/archive guard 同时覆盖 running turn 和 background hold，并支持重载快照恢复。
+- **v1.02**（2026-11-02）：**弱化标题字号层级**——H1–H4 默认派生系数改为 ×6/5、11/10、1、14/15（默认 18/16.5/15/14px），保留粗体；聊天标题直接使用同一组主题字号变量，取消旧的二次缩放系数。
+- **v1.01**（2026-11-02）：**Dock 去常驻工具入口 + 聊天管理并入聊天设置**——singleton 只保留「＋」入口，创建返回 id 可直接开 pane；Dock 仅显示置顶聊天/文件与有 watcher 的 Browser Page，终端不占位。聊天管理独立插件删除，聊天/Roles/路由成为聊天插件设置，MasterDetail 归 shell。
+- **v1.00**（2026-11-02）：**统一插件目录与插件自有设置**——`definePlugin` 增加 `name/settings`，loader 统一注册并在热卸载时清理；插件管理合并内置（默认启用）与外部插件，以独立 settings ctx 挂载插件组件。语言模型、语音控制迁入，独立 Dock 面板移除；Browser MCP 支持持久化启停与 loopback 端口热切换。
+- **v0.99**（2026-11-02）：**chat 实时帧 branch 归属与消息时间**——筛选视图对未知归属实时帧先 deferred，归属补齐后仅接纳当前线并清理其他线误入项；无 `branch_id` 的 phase 不擦除映射。消息时间按本地自然日显示时分或日期+时分。
 - **v0.98**（2026-10-25）：**InputSession 发送意图与 queue/draft 生命周期**——输入会话绑定 branch、queued-update 模式和本地 revision，语音/面板关闭/发送完成均使用冻结快照，不清除后续输入；queued-edit 与普通草稿分离并可跨面板关闭保留语义。Draft 校验活跃线并在删除时级联清理，源线有草稿禁止 merge/archive；queue 拒绝路径不再污染 raw 状态。
 - **v0.97**（2026-10-25）：**chat branch 数据归属与视图瞬态隔离**——续接继承源 turn 的存活工作线，merged 线沿合并链解析；router history 使用目标线 DAG 成员，summary query 按 dispatch id 关联。前端切线清理旧流式缓冲并退出 queued-edit；optimistic send/turn 分别绑定 branch 与 dispatch×role，按归属显示和对账。
 - **v0.96**（2026-10-24）：**异步生命周期与可靠性收口**——supervisor 保留 disabled registry 行、管理写事务串行化/失败回滚、per-plugin 操作排序且删除后禁止排队 start 复活；崩溃计数仅稳定窗口或手动启动清零。外部 loader 失败 hash 定时重试，`activate()` 异步失败完整回滚；资产按累计文件/总字节实施上限。chat 分页与 delta 统一 generation 防旧回写，增量三页未闭合即最新页重载，detached 缓存不冒充 live edge；PDF/TeX/Notebook 补齐刷新、取消和 Blob/定时器清理，文件 RPC 归一到 `fileData.ts`。
@@ -769,6 +781,7 @@ my-plugin/
 - slots：`send-message`（v0.37 起支持一次性 `force_new_session: true`——跳过 runtime 复用与 `role_sessions` 恢复，所有选中 role 强制新建 agent session；v0.60 起支持 `continue_turn_id` lane 续接——跳过路由、resume 指定 turn 的 session，lane 级 busy/queue，详见 v0.60 条目；v0.63 起支持 `branch_id` 分支路由 + `parallel_dispatch` 自动建分支，详见 v0.63 条目）、`stop`、`queued-cancel`/`queued-update`（v0.61 排队消息管理，详见 v0.61 条目）、`branches:create`/`branches:patch`/`branches:delete`/`branches:merge`/`branches:merge-confirm`/`branches:archive`（v0.63 命名分支与合并、v0.66 手动归档，详见 v0.63/v0.66 条目）、`blocks:list`（`{chat_id, after?, before?}` → `{blocks[]}` 按 `occurred_at` 排序，`after`/`before` 限定时间窗 [after, before) ms，缺省全量；**v0.31 起时间线按已加载消息跨度分窗取块**）；`chats:list` include_messages 分页（v0.31/v0.32）：`{chat_id, include_messages: true, before?, before_id?, after?, after_id?, limit?}` → `{chats, messages[], has_more}`，游标 = 复合 `(created_at, id)`：`before` 严格小于（v0.31 上翻页），`after` **含边界**（v0.32 增量拉取：重拉边界行本身 + 全部更新行，升序返回，`has_more` 表示还有更新行——前端循环取完；边界行重拉以便用最终文本替换可能仍在流式的缓存副本），消息升序返回；emits：`chat:{id}:turn-completed`、`chat:{id}:message`、`chat:{id}:block`（块落库即推，v0.30）、`chat:_:active`（mailbox，CWD 联动的 source）。
 - **消息渲染（v0.30，v0.57 工具层升级，v0.59 折叠口径）**：一 turn 一盒（user 消息独立盒；role turn 一盒），盒顶 info 条 = 角色图标+名 + 时间（+活跃态 spinner）；盒内 segments 严格按 `occurred_at` 交错——`messages` 文本段走 markdown 渲染；连续 ≥3 条小灰行活动（tool_call/tool_result/file_change/command/thinking/error）收成 `Tools ×N` 第一层（仅正文文本打断），展开后每项仍是可展开第二层。单项外层以图标+语义类型+命令/路径摘要+状态+时间显示，摘要 220 字符封顶；内层按 Command/Path/Locations/Input/Arguments/Output/Result/Changes 分区，总展示预算 9000 字符并显式标注省略，不直接渲染裸 payload JSON。markdown 管线 = markdown-it + texmath(KaTeX) + hljs（行号）+ mermaid（对齐生产版 `markdownRender.ts`）；样式 = `--markdown-*`/`--syntax-*` CSS 变量主题（亮/暗内置默认随 app theme，自定义存 localStorage `viewer.markdownTheme.v1`）。
 - **Branch 数据边界（v0.97）**：`continue_turn_id` 除 role/session 外还继承源 turn 的存活工作线（merged 线沿合并链解析），新 turn、队列与 DAG 都归属该线。自动路由的历史与 agent context 一样受目标线 DAG 成员约束；turn summary 的 query 由 `turn.dispatch_id` 精确关联本批次用户消息。前端延迟流式缓冲属于 admitting view，切线即丢弃并由服务端 delta 补齐；optimistic 用户消息按 branch 集合、等待回复按 dispatch×role×branch 隔离与对账。
+- **分支运行状态（v1.03）**：`chats:list`（带 chat_id）返回 `background_branch_ids`，`chat:_:background` 的 active/inactive 帧均携带 `branch_id`。分支 tab spinner 与 merge/archive busy guard 合并普通 running turn 和 post-turn background hold；运行 turn 的 `branch_id` 是直接数据源，不依赖 session 映射。
 - **实时帧归属（v0.99）**：筛选视图中未知 turn 归属的实时 message/block 先进入 deferred buffer；`started/session/completed` 或历史 `turn_sessions/running_turns` 补齐后，仅当前线的帧进入正常批刷队列，其他线帧丢弃，同时清除窗口与 session cache 中该 turn 的误入项。`target` 等缺少 `branch_id` 的 phase 不覆盖已有映射；「全部」视图仍即时接纳。
 - **InputSession 与 Draft 生命周期（v0.98）**：输入记录持有目标 `branchId`、`dispatch/queued-update` 模式、排队 dispatch id 和本地 revision；语音 await 前冻结完整发送意图，runtime/plugin sender 共用该快照，成功仅清原目标上未变化的文本。queued-edit 保存并暂停同步普通草稿，取消/成功恢复，条目消失则保留编辑文本。`draft:get/set` 只接受本 chat 的活跃线；删除 branch/chat 级联删除 Draft，源线有非空草稿时 merge/archive 拒绝，前端先 flush 待写草稿。queue admission 失败不改变 `lineRaw`。
 - 存储：`agent-history.sqlite3` → **插件自管 DB**（chat_id 行级作用域，既有决策；per-chat 子进程只写自己 chat 的行，原子 insert 无竞争；WAL 支持并发读）；turn summaries 同库；Hindsight = 外部服务经 bus 消费。**数据面三层（v0.22 定稿）**：`turn_events`（append-only，driver 每条 session update 的完整原文 `raw_json` + per-turn `seq`，任何过滤之前落库，落库失败只记日志不阻断 turn）→ `message_blocks`（从 raw 同步派生的归一化解析块，单独存，`event_id` 回指 raw 行，拿不准的 method 进 `other` 不丢）→ `messages`（用户可见文本视图，行为不变）；删 chat 级联三层。roles/routing policies 同库（**v0.24 从 C1 迁入**：GORM 表对齐生产版 `super_workspace_roles` 与 routing policy 模型——role = id/name/description/prompt/cwd/routing_policy_id/session_policy/context 回收阈值；policy = 有序 candidates（agent/provider/model/parameters/enabled）+ auto_failover；启动时一次性迁移 C1 遗留数据，C1 收缩为插件级配置）。

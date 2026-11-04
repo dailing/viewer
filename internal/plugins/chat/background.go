@@ -352,7 +352,11 @@ func (p *Plugin) publishBackground(key string) {
 	block := p.background[key]
 	p.mu.Unlock()
 	chatID := strings.SplitN(key, "\x00", 2)[0]
-	payload := map[string]any{"chat_id": chatID, "active": false}
+	branchID := ""
+	if parts := strings.SplitN(key, "\x00", 3); len(parts) == 3 {
+		branchID = parts[2]
+	}
+	payload := map[string]any{"chat_id": chatID, "branch_id": branchID, "active": false}
 	if block != nil {
 		processes := make([]map[string]any, 0, len(block.processes))
 		for _, process := range block.processes {
@@ -361,6 +365,25 @@ func (p *Plugin) publishBackground(key string) {
 		payload = map[string]any{"chat_id": chatID, "active": true, "branch_id": block.branchID, "session_id": block.sessionID, "role_id": block.role.ID, "role_name": block.role.Name, "processes": processes, "since": block.since}
 	}
 	p.publish("chat:_:background", payload)
+}
+
+// backgroundBranchIDs returns the named lines currently held by live
+// background processes. chats:list exposes this snapshot so branch-tab
+// spinners survive a pane reload after the originating turn has ended.
+func (p *Plugin) backgroundBranchIDs(chatID string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seen := map[string]bool{}
+	result := []string{}
+	for _, block := range p.background {
+		if block.chatID != chatID || block.branchID == "" || seen[block.branchID] {
+			continue
+		}
+		seen[block.branchID] = true
+		result = append(result, block.branchID)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // backgroundChatIDs returns the deduplicated, sorted ids of chats holding a

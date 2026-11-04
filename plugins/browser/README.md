@@ -5,7 +5,7 @@
 ## 目录
 
 - `backend/`：Go 后端；Chrome/Xvfb 生命周期、CDP、页面注册表、lease、FFmpeg 采集编码、Viewer RPC 和 loopback MCP。
-- `frontend/`：Browser Dock 与视频 pane；地址栏、人工输入和四组独立 viewport/视频参数。
+- `frontend/`：Browser Dock 与视频 pane；Dock 只列出当前有 watcher 的已打开 Page，“＋”新建并打开 Page；地址栏、人工输入和四组独立 viewport/视频参数。
 - `plugin.json`：插件 manifest。
 
 ## 页面与视频
@@ -38,7 +38,7 @@ video_height        = even(viewport_css_height × render_scale)
 
 ## Agent MCP
 
-MCP 默认监听 `http://127.0.0.1:18732/mcp`，仅绑定 loopback。工具为：
+MCP 默认启用并监听 `http://127.0.0.1:18732/mcp`，仅绑定 loopback。Viewer「插件管理 → Browser → 插件设置」可启停 MCP 或修改端口；配置持久化在 `plugins.viewer.browser.mcp`，listener 热切换，不重启 Browser、Chrome 或视频流。工具为：
 
 - `browser_status`
 - `browser_require` / `browser_release`
@@ -82,7 +82,7 @@ go build -o /tmp/viewer-browser ./plugins/browser/backend
 plugins/browser/backend/run --kernel-ws ws://127.0.0.1:8765/ws
 ```
 
-默认状态位于 Viewer 数据目录的 `browser-pages.json` 和 `browser-profile/`。MCP 健康检查为 `http://127.0.0.1:18732/health`。
+默认状态位于 Viewer 数据目录的 `browser-pages.json` 和 `browser-profile/`。默认 MCP 健康检查为 `http://127.0.0.1:18732/health`；改端口后以插件设置中显示的运行地址为准。
 
 ## 验证
 

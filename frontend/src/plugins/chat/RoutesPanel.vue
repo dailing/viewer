@@ -2,9 +2,9 @@
 import { computed, inject, onMounted, reactive, ref } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import type { AgentCatalog, RoutingCandidate, RoutingConfig, RoutingPolicy } from "../chat/types";
-import { errorText } from "../chat/types";
-import MasterDetail from "./MasterDetail.vue";
+import type { AgentCatalog, RoutingCandidate, RoutingConfig, RoutingPolicy } from "./types";
+import { errorText } from "./types";
+import MasterDetail from "../../shell/MasterDetail.vue";
 import TextSelect from "./TextSelect.vue";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");

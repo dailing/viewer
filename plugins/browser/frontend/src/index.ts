@@ -7,6 +7,7 @@ interface BrowserPage {
   url: string;
   online: boolean;
   busy: boolean;
+  watchers: number;
   control_owner: string;
 }
 
@@ -18,7 +19,7 @@ interface BrowserState {
 function createDockProvider(ctx: PluginCtx) {
   const instances = reactive<DockInstance[]>([]);
   function sync(state: BrowserState): void {
-    instances.splice(0, instances.length, ...(state.pages ?? []).map((page) => ({
+    instances.splice(0, instances.length, ...(state.pages ?? []).filter((page) => page.watchers > 0).map((page) => ({
       id: page.page_id,
       label: `${page.title || page.url || "Browser"} · ${page.page_id}`,
       state: !page.online ? "error" : page.control_owner === "agent" ? "running" : "idle",
@@ -33,7 +34,8 @@ function createDockProvider(ctx: PluginCtx) {
     title: "Browser",
     instances,
     create: async () => {
-      await ctx.bus.request("viewer.browser:_:create", { url: "about:blank" });
+      const page = await ctx.bus.request<{ page_id: string }>("viewer.browser:_:create", { url: "about:blank" });
+      return page.page_id;
     },
     remove: async (pageID: string) => {
       await ctx.bus.request("viewer.browser:_:close", { page_id: pageID });
@@ -43,8 +45,10 @@ function createDockProvider(ctx: PluginCtx) {
 
 export default definePlugin({
   id: "viewer.browser",
+  name: "Browser",
   components: {
     browser: defineAsyncComponent(() => import("./BrowserPane.vue")),
   },
+  settings: defineAsyncComponent(() => import("./BrowserSettings.vue")),
   createDockProvider,
 });

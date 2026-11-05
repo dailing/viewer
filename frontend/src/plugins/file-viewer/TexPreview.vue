@@ -27,9 +27,9 @@
 import { inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import { base64ToBlob, BlobUrlOwner, fileTicketUrl, readFile, readPdfPage } from "./fileData";
+import { base64ToBlob, BlobUrlOwner, fileTicketUrl, readFile, readPdfPage } from "../../services/fileData";
 import { depNames, normalizeFrontmatter, normalizeJoin } from "./texModel";
-import { dirname } from "./types";
+import { dirname } from "../../services/fileTypes";
 
 const props = defineProps<{
   path: string;

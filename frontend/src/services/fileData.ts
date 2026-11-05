@@ -1,4 +1,4 @@
-import type { PdfPageResult } from "./types";
+import type { PdfPageResult } from "./fileTypes";
 
 /** Shared files-plugin data-plane helpers. No Vue component state. */
 export interface FileReadResult {

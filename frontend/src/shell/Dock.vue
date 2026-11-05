@@ -10,6 +10,7 @@ import { useDockSettingsStore, clampDockWidth } from "../stores/dockSettings";
 import { useLayoutStore } from "../stores/layout";
 import type { DockProvider } from "./definePlugin";
 import { collectDockEntries, openProvider, type DockEntry } from "./dockModel";
+import { openShellInstance } from "./instances";
 import { dockActions, dockProviders } from "./registries";
 
 const layout = useLayoutStore();
@@ -125,17 +126,7 @@ const activeUid = computed(() => {
 const creatable = computed(() => dockProviders);
 
 function openEntry(entry: DockEntry): void {
-  if (entry.instance === undefined && entry.provider.clickCreates === true) {
-    void entry.provider.create?.();
-    return;
-  }
-  if (entry.instance?.clickCreates === true) {
-    // Launcher instance: spawn a fresh instance seeded from this one instead
-    // of focusing it (files pinned folders open the same folder repeatedly).
-    void entry.provider.create?.(entry.instance.id);
-    return;
-  }
-  layout.openInstance(entry.provider.type, entry.instance?.id ?? "main");
+  void openShellInstance({ paneType: entry.provider.type, instanceId: entry.instance?.id ?? "main" });
 }
 
 function removeEntry(entry: DockEntry): void {
@@ -145,12 +136,12 @@ function removeEntry(entry: DockEntry): void {
 
 async function createFrom(provider: DockProvider): Promise<void> {
   menuOpen.value = false;
-  await openProvider(provider, layout);
+  await openProvider(provider, { open: openShellInstance });
 }
 
 function openSettings(): void {
   menuOpen.value = false;
-  layout.openInstance("settings", "main");
+  void openShellInstance({ paneType: "settings", instanceId: "main" });
 }
 
 /**
@@ -247,7 +238,7 @@ const buildTime = (() => {
             <span v-if="isExpanded" class="dock-label">{{ entry.displayLabel }}</span>
           </button>
           <button
-            v-if="entry.instance?.clickCreates === true && entry.provider.remove !== undefined"
+            v-if="entry.instance !== undefined && entry.provider.remove !== undefined"
             type="button"
             class="dock-item-remove"
             title="移除此固定入口"

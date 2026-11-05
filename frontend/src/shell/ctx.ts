@@ -11,6 +11,25 @@ import type { FrameHandler } from "@viewer/bus-sdk";
 import { usePaneChromeStore } from "../stores/paneChrome";
 import type { PaneChrome } from "../stores/paneChrome";
 import { bus } from "./bus";
+import type { InstanceOpenRequest, OpenedInstance } from "./definePlugin";
+import { openShellInstance } from "./instances";
+import {
+  closeShellPane,
+  focusShellPane,
+  listShellPanes,
+  moveShellPane,
+  type ShellPaneInfo,
+} from "./panes";
+
+export interface PluginShellApi {
+  open<P = unknown>(request: InstanceOpenRequest<P>): Promise<OpenedInstance>;
+  panes: {
+    list(): ShellPaneInfo[];
+    close(paneId: string): void;
+    focus(paneId: string): void;
+    move(paneId: string, delta: -1 | 1): void;
+  };
+}
 
 export interface CtxStorage {
   get<T>(key: string, fallback: T): T;
@@ -33,6 +52,8 @@ export interface PluginCtx {
   };
   /** F6: namespaced localStorage. */
   readonly storage: CtxStorage;
+  /** Browser-local instance opening and pane control. */
+  readonly shell: PluginShellApi;
   /** Register this instance's shell-rendered title-bar content. */
   setChrome(chrome: PaneChrome): void;
   onDispose(callback: () => void): void;
@@ -88,6 +109,15 @@ export function createCtx(scope: string, instanceId = "_"): PluginCtx {
       cancel: bus.cancel.bind(bus),
     },
     storage: createStorage(scope),
+    shell: {
+      open: openShellInstance,
+      panes: {
+        list: listShellPanes,
+        close: closeShellPane,
+        focus: focusShellPane,
+        move: moveShellPane,
+      },
+    },
     setChrome(chrome: PaneChrome): void {
       if (disposed) return;
       paneChrome.setChrome(scope, chrome);

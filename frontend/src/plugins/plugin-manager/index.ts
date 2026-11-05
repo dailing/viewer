@@ -13,7 +13,6 @@ export default definePlugin({
     type: "plugin-manager",
     icon: "bi-puzzle",
     title: "插件管理",
-    singleton: true,
     instances: [],
   }),
 });

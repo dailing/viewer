@@ -14,15 +14,13 @@ function provider(values: Partial<DockProvider> = {}): DockProvider {
 }
 
 describe("Dock model", () => {
-  it("does not create permanent entries for singleton tools", () => {
-    const singleton = provider({ singleton: true });
-    expect(collectDockEntries([singleton])).toEqual([]);
+  it("does not create permanent entries without explicit instances", () => {
+    expect(collectDockEntries([provider()])).toEqual([]);
   });
 
-  it("docks only explicit instances, including those of a singleton provider", () => {
+  it("docks explicit instances", () => {
     const files = provider({
       type: "files",
-      singleton: true,
       instances: [{ id: "pinned", label: "Pinned file", icon: "bi-file-earmark" }],
     });
     const entries = collectDockEntries([files]);
@@ -30,16 +28,16 @@ describe("Dock model", () => {
     expect(entries[0]).toMatchObject({ uid: "files:pinned", icon: "bi-file-earmark" });
   });
 
-  it("opens a singleton main pane from the plus menu", async () => {
-    const opener = { openInstance: vi.fn() };
-    await openProvider(provider({ type: "plugin-manager", singleton: true }), opener);
-    expect(opener.openInstance).toHaveBeenCalledWith("plugin-manager", "main");
+  it("opens singleton main through the unified opener", async () => {
+    const opener = { open: vi.fn() };
+    await openProvider(provider({ type: "plugin-manager" }), opener);
+    expect(opener.open).toHaveBeenCalledWith({ paneType: "plugin-manager", instanceId: "main" });
   });
 
   it("opens the instance id returned by create", async () => {
-    const opener = { openInstance: vi.fn() };
+    const opener = { open: vi.fn() };
     const browser = provider({ type: "browser", create: () => Promise.resolve("pg_123") });
     await openProvider(browser, opener);
-    expect(opener.openInstance).toHaveBeenCalledWith("browser", "pg_123");
+    expect(opener.open).toHaveBeenCalledWith({ paneType: "browser", instanceId: "pg_123" });
   });
 });

@@ -49,7 +49,7 @@ func TestDraftLineValidationAndDeleteCleanup(t *testing.T) {
 	if err := p.store.saveBranch(branch); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.store.saveDraft(&Draft{ChatID: "chat-draft", BranchID: branch.ID, Text: "unsent", UpdatedAt: now}); err != nil {
+	if err := p.store.saveDraft(&Draft{InputInstanceID: "view-test", ChatID: "chat-draft", BranchID: branch.ID, Text: "unsent", UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.deleteEmptyBranch(branch); err != nil {
@@ -63,7 +63,7 @@ func TestDraftLineValidationAndDeleteCleanup(t *testing.T) {
 		t.Fatalf("deleted branch retained %d drafts", count)
 	}
 
-	if err := p.store.saveDraft(&Draft{ChatID: "chat-other", BranchID: "", Text: "orphan", UpdatedAt: now}); err != nil {
+	if err := p.store.saveDraft(&Draft{InputInstanceID: "view-test", ChatID: "chat-other", BranchID: "", Text: "orphan", UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.store.deleteChat("chat-other"); err != nil {
@@ -92,7 +92,7 @@ func TestMergeRejectsUnsentSourceDraft(t *testing.T) {
 	if err := p.store.createBranch(branch); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.store.saveDraft(&Draft{ChatID: chat.ID, BranchID: branch.ID, Text: "do not strand me", UpdatedAt: now}); err != nil {
+	if err := p.store.saveDraft(&Draft{InputInstanceID: "view-test", ChatID: chat.ID, BranchID: branch.ID, Text: "do not strand me", UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = p.mergeLines(chat.ID, []string{branch.ID}, "", nil, "", false)

@@ -13,6 +13,45 @@
 
 import type { FrameHandler } from "./client.js";
 
+export type PluginCardinality = "singleton" | "multi";
+
+export interface InstanceOpenRequest<P = unknown> {
+  paneType: string;
+  instanceId?: string;
+  /** JSON-serializable plugin-specific opening parameters. */
+  params?: P;
+  newPane?: boolean;
+}
+
+export interface OpenedInstance {
+  paneId: string;
+  instanceId: string;
+}
+
+export interface PluginInstanceAdapter {
+  type: string;
+  cardinality: PluginCardinality;
+  open(request: InstanceOpenRequest): string | Promise<string>;
+}
+
+export interface ShellPaneInfo {
+  paneId: string;
+  paneType: string;
+  instanceId: string;
+  location: "tiled" | "floating";
+  active: boolean;
+}
+
+export interface PluginShellApi {
+  open<P = unknown>(request: InstanceOpenRequest<P>): Promise<OpenedInstance>;
+  panes: {
+    list(): ShellPaneInfo[];
+    close(paneId: string): void;
+    focus(paneId: string): void;
+    move(paneId: string, delta: -1 | 1): void;
+  };
+}
+
 /** Structural stand-in for a Vue component (avoid depending on vue types). */
 export type PluginComponent = unknown;
 
@@ -48,6 +87,8 @@ export interface PluginCtx {
   readonly instanceId: string;
   readonly bus: CtxBus;
   readonly storage: CtxStorage;
+  /** Browser-local instance opening and pane control. */
+  readonly shell: PluginShellApi;
   /** Register this scope's shell-rendered title-bar content. */
   setChrome(chrome: PaneChrome): void;
   /** Register a cleanup run on dispose (pane closed, plugin deactivated). */
@@ -101,8 +142,6 @@ export interface DockProvider {
   icon: string;
   /** "+" menu entry label. */
   title: string;
-  /** Singleton main instance opened from "+", with no permanent Dock entry. */
-  singleton?: boolean;
   /** Reactive list of running instances, maintained by the provider. */
   instances: DockInstance[];
   /** "+" menu action; returning an instance id opens its pane. */
@@ -135,6 +174,8 @@ export interface PluginModule {
   components?: Record<string, PluginComponent>;
   /** Optional plugin-owned settings surface rendered inside 插件管理. */
   settings?: PluginComponent;
+  /** Build instance factories/restorers for this plugin's pane types. */
+  createInstanceAdapters?: (ctx: PluginCtx) => PluginInstanceAdapter[];
   /** Build the Dock contribution; called once at load with plugin ctx. */
   createDockProvider?: (ctx: PluginCtx) => DockProvider;
   /** Build global Dock-foot action buttons; called once at load. */

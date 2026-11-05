@@ -145,19 +145,19 @@ export const useLayoutStore = defineStore("layout", {
      * opts.newPane forces a fresh split off the active pane regardless of
      * openMode and empty-tile reuse (explicit "open in a new panel" entries).
      */
-    openInstance(paneType: string, instanceId: string, opts?: { newPane?: boolean }): void {
+    openInstance(paneType: string, instanceId: string, opts?: { newPane?: boolean }): string {
       const uid = `${paneType}:${instanceId}`;
       const floated = this.floating.find((pane) => contentUid(pane.content) === uid);
       if (floated !== undefined) {
         this.raiseFloating(floated.id);
-        return;
+        return floated.id;
       }
       const existing = this.panes.find(
         (pane) => pane.content !== null && contentUid(pane.content) === uid,
       );
       if (existing !== undefined) {
         this.activePaneId = existing.id;
-        return;
+        return existing.id;
       }
       let target = this.activePane;
       if (target.content !== null) {
@@ -180,6 +180,7 @@ export const useLayoutStore = defineStore("layout", {
       }
       target.content = { paneType, instanceId };
       this.activePaneId = target.id;
+      return target.id;
     },
     setOpenMode(mode: OpenMode): void {
       this.openMode = mode;

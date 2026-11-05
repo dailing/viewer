@@ -2,7 +2,7 @@
 import { computed, inject, onMounted, ref } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import { useLayoutStore } from "../../stores/layout";
+import { ensureDefaultChatView, removeChatViews } from "./viewInstances";
 import type { Chat, ChatList, Role, RoutingConfig } from "./types";
 import { errorText } from "./types";
 import MasterDetail from "../../shell/MasterDetail.vue";
@@ -10,7 +10,6 @@ import MasterDetail from "../../shell/MasterDetail.vue";
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("ChatsPanel requires PluginPaneHost");
 const ctx = injectedCtx;
-const layout = useLayoutStore();
 const chats = ref<Chat[]>([]);
 const roles = ref<Role[]>([]);
 const routing = ref<RoutingConfig>({ default_routing_policy_id: "", routing_policies: [] });
@@ -107,13 +106,14 @@ async function saveSelected(): Promise<void> {
 async function activate(chat: Chat): Promise<void> {
   await ctx.bus.request("chat:_:chats:activate", { id: chat.id });
   active.value = chat.id;
-  layout.openInstance("chat", chat.id);
+  await ctx.shell.open({ paneType: "chat", instanceId: ensureDefaultChatView(chat.id) });
 }
 
 async function remove(chat: Chat): Promise<void> {
   if (!confirm(`Delete ${chat.name}?`)) return;
   try {
     await ctx.bus.request("chat:_:chats:delete", { id: chat.id });
+    removeChatViews(chat.id);
     await load();
     notifyChatsChanged();
   } catch (cause) {

@@ -5,7 +5,7 @@
 
 import { markRaw, reactive, type Component } from "vue";
 
-import type { DockAction, DockProvider } from "./definePlugin";
+import type { DockAction, DockProvider, PluginInstanceAdapter } from "./definePlugin";
 
 export interface PluginDescriptor {
   id: string;
@@ -22,6 +22,9 @@ export const settingsRegistry = reactive(new Map<string, Component>());
 /** instance.type → component. */
 export const componentRegistry = reactive(new Map<string, Component>());
 
+/** instance.type → plugin-owned create/reopen adapter. */
+export const instanceRegistry = reactive(new Map<string, PluginInstanceAdapter>());
+
 /** Dock providers in registration order. */
 export const dockProviders = reactive<DockProvider[]>([]);
 
@@ -34,6 +37,14 @@ export function registerComponent(type: string, component: Component): void {
 
 export function unregisterComponent(type: string): void {
   componentRegistry.delete(type);
+}
+
+export function registerInstanceAdapter(adapter: PluginInstanceAdapter): void {
+  instanceRegistry.set(adapter.type, adapter);
+}
+
+export function unregisterInstanceAdapter(type: string): void {
+  instanceRegistry.delete(type);
 }
 
 export function registerPlugin(id: string, name: string, builtin: boolean, settings?: Component): void {

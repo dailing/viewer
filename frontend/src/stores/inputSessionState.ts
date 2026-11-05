@@ -8,6 +8,8 @@ export interface InputSession {
   pluginId: string;
   paneType: string;
   instanceId: string;
+  /** Opaque plugin target params, e.g. {chatId} for a Chat view. */
+  params?: unknown;
   label: string;
   text: string;
   branchId: string;
@@ -18,6 +20,9 @@ export interface InputSession {
   selectedRoleIds: string[];
   forceNewSession: boolean;
   parallel: boolean;
+  /** Raw state for the currently bound branch, mirrored in rawByBranch. */
+  raw: boolean;
+  rawByBranch: Record<string, boolean>;
   pinned: boolean;
   phase: InputSessionPhase;
   error: string;
@@ -32,6 +37,7 @@ export interface InputSessionIntent {
   selectedRoleIds: string[];
   forceNewSession: boolean;
   parallel: boolean;
+  raw: boolean;
 }
 
 function bump(session: InputSession): void {
@@ -48,6 +54,7 @@ export function inputSessionIntent(session: InputSession): InputSessionIntent {
     selectedRoleIds: [...session.selectedRoleIds],
     forceNewSession: session.forceNewSession,
     parallel: session.parallel,
+    raw: session.rawByBranch?.[session.branchId ?? ""] === true || session.raw === true,
   };
 }
 
@@ -76,6 +83,15 @@ export function setInputSessionBranch(session: InputSession, branchId: string): 
   // change. Restore the ordinary draft before re-binding the input.
   if (session.mode === "queued-update") cancelQueuedInputEdit(session);
   session.branchId = branchId;
+  session.raw = session.rawByBranch?.[branchId] === true;
+  bump(session);
+}
+
+export function setInputSessionRaw(session: InputSession, branchId: string, raw: boolean): void {
+  session.rawByBranch ??= {};
+  if (raw) session.rawByBranch[branchId] = true;
+  else delete session.rawByBranch[branchId];
+  if ((session.branchId ?? "") === branchId) session.raw = raw;
   bump(session);
 }
 
@@ -87,6 +103,7 @@ export function beginQueuedInputEdit(
 ): void {
   if (session.mode !== "queued-update") session.draftBeforeQueueEdit = session.text;
   session.branchId = branchId;
+  session.raw = session.rawByBranch?.[branchId] === true;
   session.mode = "queued-update";
   session.queuedDispatchId = dispatchId;
   session.text = text;
@@ -132,7 +149,8 @@ export function clearInputSession(session: InputSession): void {
 function sameUnchangedIntent(session: InputSession, sent: InputSession): boolean {
   const sameTarget = (session.branchId ?? "") === (sent.branchId ?? "")
     && (session.mode ?? "dispatch") === (sent.mode ?? "dispatch")
-    && (session.queuedDispatchId ?? "") === (sent.queuedDispatchId ?? "");
+    && (session.queuedDispatchId ?? "") === (sent.queuedDispatchId ?? "")
+    && (session.raw === true) === (sent.raw === true);
   if (!sameTarget) return false;
   // The backend's draft:sync empty frame may acknowledge the send before its
   // RPC returns. That is still the sent snapshot being cleared, not new work.

@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v1.05**（2026-11-03）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v1.06**（2026-11-04）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v1.06 变更：**文件管理器与文件预览器拆分 + 目录大小与原始流上传**——①独立 `file-manager` / `file-viewer` 多实例，分别持久化 `{dir,viewerId}` 与 `{path,mode,trim…}`；管理器默认更新并聚焦配对预览器，显式动作才新建面板，未固定实例清理同时统计平铺和浮动面板。②`file:_:du {path}` 提供按需可取消、不跟随 directory symlink 的递归统计，返回 size/files/directories/errors/complete；浅层目录列表不自动递归。③`file:_:upload:ticket {dir,name,overwrite}` 签发绑定绝对目标与覆盖策略的独立短效票据，`POST /api/files/upload?ticket=` 直接流式上传原始字节；同目录临时文件完成后原子发布，无覆盖通过 `renameat2(RENAME_NOREPLACE)` 防最终竞态，冲突返回 409，UI 仅在用户确认后申请 overwrite=true 票据。
 > v1.05 变更：**进一步收敛标题字号**——H1/H2 默认派生系数由 ×6/5、11/10 调整为 ×11/10、21/20（即 1.1×、1.05×）；默认内容字号 15px 时为 16.5/15.75px，H3/H4 与 700 字重不变，细节定制钉值仍优先生效。
 > v1.04 变更：**前端诊断日志经共用总线进入后端日志**——shell 通用 helper 以普通 publish 发送 `frontend:_:log {level,component,message,context,ts}`（level 仅 debug/info/warn/error，ts 为浏览器毫秒时间戳），fire-and-forget 且断线失败不影响原操作；新 core plugin `frontend-log` 订阅该事件并按后端 `slog` JSON 格式写入 `viewerd.log`，保留原 message/context 并补充 `source=frontend`、component、客户端时间与 browser origin。chat dispatch 的非成员角色过滤 warning 同时保留浏览器 Console 副本和此后端副本。
 > v1.03 变更：**分支后台运行指示补齐**——`chats:list`（带 chat_id）新增 `background_branch_ids` 快照；`chat:_:background` 的 active/inactive 帧均携带 `branch_id`。分支 tab spinner 与 merge/archive busy guard 统一合并普通 running turn 和 post-turn background hold，pane 刷新后可恢复；running turn 直接消费自身 `branch_id`，不再依赖可能尚未建立的 session 映射。
@@ -250,6 +251,8 @@ mailbox 只存**当前值**（无 ring、无历史）；`set` 语义为**整体�
 小 payload（delta、状态、事件）→ 总线；大字节（文件内容、PDF、图片、下载）→ 消息只带引用（path + token），gateway 用 HTTP 流式吐字节。禁止 base64 文件过总线。
 
 落地现状（v0.87）：文件图片预览——file-service 签 HMAC 短效 ticket（`file:_:ticket`/`file:_:ticket:resolve`），gateway `GET /api/files/raw` 解析后 `http.ServeContent` 流式吐字节；`file:_:read` 内联回复硬上限 = 内核帧上限（超限回 `too_large`）。
+
+上传数据面（v1.06）：控制面 `file:_:upload:ticket {dir,name,overwrite}` 只签发独立 upload ticket，文件内容不经过总线；浏览器以原始 `File` body `POST /api/files/upload?ticket=`。ticket 绑定绝对目标路径和 overwrite policy，与 read ticket 使用不同密钥和 resolve RPC。网关流式写同目录临时文件，成功 close/sync 后原子发布；无覆盖使用 `renameat2(RENAME_NOREPLACE)`，显式覆盖才允许 `os.Rename`。申请时的冲突检查只用于提前反馈，最终发布仍须防竞态；所有失败路径删除临时文件，不留 partial target。
 
 **刻意例外：插件前端 bundle**。所有插件 hello 后经总线 RPC（`gateway:_:assets:push`）把 bundle 字节（base64，通常几 MB，每次注册一次）push 给 gateway——本地/远程统一一套机制（§14.3），这是该例外的全部理由。broker 对资产 RPC 放宽帧上限（如 64MB；注意 `websockets` 库默认 `max_size=1MB` 需调），普通流量保持小上限。
 
@@ -603,6 +606,7 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v1.06**（2026-11-04）：**文件管理/预览拆分、目录统计与流式上传**——独立 `file-manager` / `file-viewer` 实例和配对打开语义；`file:_:du` 按需可取消统计且不跟随 directory symlink；独立 upload ticket + `/api/files/upload` 原始字节数据面，同目录临时文件原子发布，无覆盖 `RENAME_NOREPLACE` 防竞态，确认覆盖前不签 overwrite ticket。
 - **v1.05**（2026-11-03）：**进一步收敛标题字号**——H1/H2 默认派生系数改为 ×11/10、21/20（1.1×、1.05×），默认内容字号 15px 时为 16.5/15.75px；H3/H4、粗体与细节定制钉值优先级不变。
 - **v1.03**（2026-11-02）：**分支后台运行指示补齐**——`chats:list` 新增 `background_branch_ids`，background feed 的结束帧也携带 `branch_id`；分支 spinner 与 merge/archive guard 同时覆盖 running turn 和 background hold，并支持重载快照恢复。
 - **v1.02**（2026-11-02）：**弱化标题字号层级**——H1–H4 默认派生系数改为 ×6/5、11/10、1、14/15（默认 18/16.5/15/14px），保留粗体；聊天标题直接使用同一组主题字号变量，取消旧的二次缩放系数。

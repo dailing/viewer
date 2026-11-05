@@ -7,6 +7,7 @@ import {
   inputSessionIntent,
   releaseQueuedInputEdit,
   setInputSessionBranch,
+  setInputSessionRaw,
   setInputSessionText,
   snapshotInputSession,
 } from "./inputSessionState";
@@ -19,6 +20,7 @@ export interface InputSessionRegistration {
   pluginId: string;
   paneType: string;
   instanceId: string;
+  params?: unknown;
   label: string;
 }
 
@@ -37,6 +39,7 @@ function loadSessions(): Record<string, InputSession> {
       pluginId: value.pluginId ?? id.split(":", 1)[0] ?? "",
       paneType: value.paneType ?? value.pluginId ?? "",
       instanceId: value.instanceId ?? "main",
+      params: value.params,
       label: value.label ?? "Input",
       text: value.text ?? "",
       branchId: value.branchId ?? "",
@@ -47,6 +50,8 @@ function loadSessions(): Record<string, InputSession> {
       selectedRoleIds: Array.isArray(value.selectedRoleIds) ? value.selectedRoleIds.filter((item): item is string => typeof item === "string") : [],
       forceNewSession: value.forceNewSession === true,
       parallel: value.parallel === true,
+      raw: value.rawByBranch?.[value.branchId ?? ""] === true || value.raw === true,
+      rawByBranch: { ...(value.rawByBranch ?? {}) },
       pinned: value.pinned !== false,
       phase: value.phase === "error" ? "error" : "idle",
       error: value.phase === "error" ? value.error ?? "" : "",
@@ -92,6 +97,8 @@ export const useInputSessionsStore = defineStore("inputSessions", {
         existing.mode ??= "dispatch";
         existing.queuedDispatchId ??= "";
         existing.revision ??= 0;
+        existing.rawByBranch ??= {};
+        existing.raw = existing.rawByBranch[existing.branchId ?? ""] === true;
         this.save();
         return existing;
       }
@@ -105,6 +112,8 @@ export const useInputSessionsStore = defineStore("inputSessions", {
         selectedRoleIds: [],
         forceNewSession: false,
         parallel: false,
+        raw: false,
+        rawByBranch: {},
         pinned: true,
         phase: "idle",
         error: "",
@@ -136,6 +145,12 @@ export const useInputSessionsStore = defineStore("inputSessions", {
       const session = this.sessions[id];
       if (session === undefined) return;
       setInputSessionBranch(session, branchId);
+      this.save();
+    },
+    setRaw(id: string, branchId: string, raw: boolean): void {
+      const session = this.sessions[id];
+      if (session === undefined) return;
+      setInputSessionRaw(session, branchId, raw);
       this.save();
     },
     intent(id: string): InputSessionIntent | undefined {

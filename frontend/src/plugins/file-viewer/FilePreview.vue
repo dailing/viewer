@@ -24,8 +24,9 @@ import type { PreviewMode } from "./instanceStore";
 import NotebookPreview from "./NotebookPreview.vue";
 import PdfPreview from "./PdfPreview.vue";
 import TexPreview from "./TexPreview.vue";
-import { fileTicketUrl, readFile } from "./fileData";
-import { kindForPath } from "./types";
+import { fileTicketUrl, readFile } from "../../services/fileData";
+import { formatBytes } from "../../services/formatBytes";
+import { kindForPath } from "../../services/fileTypes";
 
 const props = defineProps<{
   path: string | null;
@@ -75,12 +76,6 @@ const rendered = computed(() =>
     ? renderMarkdown(text.value)
     : "",
 );
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} B`;
-}
 
 async function load(path: string | null, preserveScroll = false): Promise<void> {
   const generation = ++loadGeneration;

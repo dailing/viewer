@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -19,7 +20,7 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from sdk import BusClient  # noqa: E402
+from sdk import BusClient, RpcError  # noqa: E402
 
 
 CORE_IDS = {
@@ -57,6 +58,17 @@ async def wait_for(probe: Callable[[], Any], timeout: float = 10.0) -> Any:
             return value
         await asyncio.sleep(0.03)
     raise TimeoutError("condition not met within timeout")
+
+
+def http_bytes(url: str, body: bytes | None = None) -> tuple[int, bytes, Any]:
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST" if body is not None else "GET",
+        headers={"Content-Type": "application/octet-stream"} if body is not None else {},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.status, response.read(), response.headers
 
 
 class Viewerd:
@@ -176,6 +188,60 @@ async def run(args: argparse.Namespace) -> None:
                 "instance:_:get", {"plugin": "m4-smoke", "instance": "one"}
             ) == {"count": 4}
             print("PASS instance set/get")
+
+            upload_dir = temp / "uploads"
+            upload_dir.mkdir()
+            upload_content = bytes(range(256)) * 8192 + b"large-upload-tail"
+            upload_ticket = await gateway.request(
+                "file:_:upload:ticket",
+                {"dir": str(upload_dir), "name": "large.bin", "overwrite": False},
+            )
+            assert upload_ticket["url"].startswith("/api/files/upload?ticket=")
+            upload_url = f"http://127.0.0.1:{gateway_port}{upload_ticket['url']}"
+            status, response_body, _ = await asyncio.to_thread(http_bytes, upload_url, upload_content)
+            assert status == 201 and json.loads(response_body)["size"] == len(upload_content)
+            assert (upload_dir / "large.bin").read_bytes() == upload_content
+            listing = await gateway.request("file:_:list", {"path": str(upload_dir)})
+            assert [(entry["name"], entry["size"]) for entry in listing["entries"]] == [
+                ("large.bin", len(upload_content))
+            ]
+            sized = await gateway.request("file:_:du", {"path": str(upload_dir)}, timeout=10)
+            assert sized["size"] == len(upload_content) and sized["files"] == 1
+            assert sized["directories"] == 1 and sized["complete"] is True
+            read_ticket = await gateway.request("file:_:ticket", {"path": str(upload_dir / "large.bin")})
+            download_url = f"http://127.0.0.1:{gateway_port}{read_ticket['url']}&download=1"
+            status, downloaded, headers = await asyncio.to_thread(http_bytes, download_url)
+            assert status == 200 and downloaded == upload_content
+            assert "attachment" in headers.get("Content-Disposition", "")
+            try:
+                await gateway.request(
+                    "file:_:upload:ticket",
+                    {"dir": str(upload_dir), "name": "large.bin", "overwrite": False},
+                )
+            except RpcError as exc:
+                assert exc.code == "already_exists"
+            else:
+                raise AssertionError("existing upload target did not conflict")
+            for channel, ticket in (
+                ("file:_:upload:resolve", read_ticket["ticket"]),
+                ("file:_:ticket:resolve", upload_ticket["ticket"]),
+            ):
+                try:
+                    await gateway.request(channel, {"ticket": ticket})
+                except RpcError as exc:
+                    assert exc.code == "invalid_ticket"
+                else:
+                    raise AssertionError(f"cross-use ticket accepted by {channel}")
+            overwrite_ticket = await gateway.request(
+                "file:_:upload:ticket",
+                {"dir": str(upload_dir), "name": "large.bin", "overwrite": True},
+            )
+            replacement = b"confirmed-overwrite\x00\xff"
+            overwrite_url = f"http://127.0.0.1:{gateway_port}{overwrite_ticket['url']}"
+            status, _, _ = await asyncio.to_thread(http_bytes, overwrite_url, replacement)
+            assert status == 201 and (upload_dir / "large.bin").read_bytes() == replacement
+            assert not list(upload_dir.glob("*.upload-*"))
+            print("PASS file upload/list/du/download/conflict/ticket-separation/overwrite")
 
             outputs: dict[str, list[str]] = {}
 

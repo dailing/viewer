@@ -1,4 +1,4 @@
-import type { DockInstance, DockProvider } from "./definePlugin";
+import type { DockInstance, DockProvider, InstanceOpenRequest } from "./definePlugin";
 
 export interface DockEntry {
   key: string;
@@ -48,17 +48,11 @@ export function collectDockEntries(providers: readonly DockProvider[]): DockEntr
 }
 
 export interface DockOpener {
-  openInstance(type: string, instanceId: string): void;
+  open(request: InstanceOpenRequest): Promise<unknown> | unknown;
 }
 
-/** Open a singleton, or open the id returned by a newly created instance. */
+/** Create when the provider has a factory; otherwise restore singleton main. */
 export async function openProvider(provider: DockProvider, opener: DockOpener): Promise<void> {
-  if (provider.singleton === true && provider.clickCreates !== true) {
-    opener.openInstance(provider.type, "main");
-    return;
-  }
   const createdId = await provider.create?.();
-  if (typeof createdId === "string" && createdId !== "") {
-    opener.openInstance(provider.type, createdId);
-  }
+  await opener.open({ paneType: provider.type, instanceId: createdId ?? "main" });
 }

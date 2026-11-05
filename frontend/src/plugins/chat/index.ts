@@ -2,13 +2,18 @@ import { defineAsyncComponent, reactive, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import type { DockInstance, DockProvider } from "../../shell/definePlugin";
 import { definePlugin } from "../../shell/definePlugin";
-import { contentUid, useLayoutStore } from "../../stores/layout";
+import { useLayoutStore } from "../../stores/layout";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { registerInputSessionSender, type InputSession } from "../../stores/inputSessions";
 import { dockStateFor, isErrorStopReason, markBackground, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
-import { rawModeEnabled } from "./rawMode";
 import { chatInputRPC } from "./inputDispatch";
+import { chatIdForView, createAdditionalChatView, ensureDefaultChatView, restoreChatView, type ChatViewParams } from "./viewInstances";
 import type { ChatList } from "./types";
+
+function sessionChatId(session: InputSession): string {
+  const params = session.params as ChatViewParams | undefined;
+  return typeof params?.chatId === "string" && params.chatId !== "" ? params.chatId : session.instanceId;
+}
 
 function createDockProvider(ctx: PluginCtx): DockProvider {
   const layout = useLayoutStore();
@@ -16,20 +21,12 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   const instances = reactive<DockInstance[]>([]);
   let chats: ChatList["chats"] = [];
 
-  /** A chat counts as open when ANY view of it is (multi-view, v0.82):
-   *  the primary view's uid is `chat:<id>`, extra views are `chat:<id>#…`. */
   const isChatOpen = (chatId: string): boolean => {
-    if (layout.isUidOpen(`chat:${chatId}`)) return true;
-    const prefix = `chat:${chatId}#`;
-    return layout.panes.some((pane) => pane.content !== null && contentUid(pane.content).startsWith(prefix))
-      || layout.floating.some((pane) => contentUid(pane.content).startsWith(prefix));
+    const matches = (content: { paneType: string; instanceId: string } | null): boolean =>
+      content?.paneType === "chat" && chatIdForView(content.instanceId) === chatId;
+    return layout.panes.some((pane) => matches(pane.content)) || layout.floating.some((pane) => matches(pane.content));
   };
 
-  /** System notification on turn completion (framework v0.79): fires only
-   *  while the viewer tab is hidden (an in-view completion is already
-   *  covered by the dock dot) and only with the setting on + permission
-   *  granted. The per-chat tag coalesces a multi-role batch into one
-   *  notification; clicking focuses the window and opens the chat. */
   const notifyTurnCompleted = (chatId: string, roleName: string | undefined, stopReason: string): void => {
     if (!chatSettings.turnNotifications) return;
     if (!("Notification" in window) || Notification.permission !== "granted") return;
@@ -40,18 +37,21 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     const notification = new Notification(chat?.name ?? "聊天", { body, tag: `chat-turn:${chatId}` });
     notification.onclick = () => {
       window.focus();
-      layout.openInstance("chat", chatId);
+      void ctx.shell.open({ paneType: "chat", instanceId: ensureDefaultChatView(chatId) });
     };
   };
   const sync = (): void => {
-    // Opening a chat marks it read; clear its unread entry before mapping so
-    // the dot disappears in the same rebuild.
     for (const chat of chats) {
       if (isChatOpen(chat.id)) markChatRead(chat.id);
     }
     instances.splice(0, instances.length, ...chats
       .filter((chat) => chat.pinned)
-      .map((chat) => ({ id: chat.id, label: `${chat.name} · ${chat.root}`, state: dockStateFor(chat.id), icon: "bi-chat-left-text" })));
+      .map((chat) => ({
+        id: ensureDefaultChatView(chat.id),
+        label: `${chat.name} · ${chat.root}`,
+        state: dockStateFor(chat.id),
+        icon: "bi-chat-left-text",
+      })));
   };
   const refresh = async (): Promise<void> => {
     const result = (await ctx.bus.request("chat:_:chats:list", {})) as ChatList;
@@ -59,10 +59,14 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     setRunningChats(result.running_chat_ids ?? []);
     sync();
   };
-  watch(() => layout.panes.map((pane) => pane.content === null ? "" : `${pane.content.paneType}:${pane.content.instanceId}`), sync);
+  watch(
+    () => [
+      ...layout.panes.map((pane) => pane.content === null ? "" : `${pane.content.paneType}:${pane.content.instanceId}`),
+      ...layout.floating.map((pane) => `${pane.content.paneType}:${pane.content.instanceId}`),
+    ],
+    sync,
+  );
   ctx.bus.subscribe("chat:_:active", () => { void refresh(); });
-  // Global turn lifecycle feed: green dot while a turn runs; on completion
-  // an amber (unread) or red (failed) dot until the chat is opened.
   ctx.bus.subscribe("chat:_:turn", (frame) => {
     const value = frame.value as { chat_id?: string; phase?: string; stop_reason?: string; role_name?: string } | undefined;
     if (value === undefined || typeof value.chat_id !== "string") return;
@@ -77,8 +81,6 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     }
     sync();
   });
-  // Background-hold feed: a line whose turn ended with live background
-  // processes stays "running" until the watcher releases it.
   ctx.bus.subscribe("chat:_:background", (frame) => {
     const value = frame.value as { chat_id?: string; active?: boolean } | undefined;
     if (value === undefined || typeof value.chat_id !== "string") return;
@@ -102,7 +104,7 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
         member_role_ids: [],
       })) as { id: string };
       await refresh();
-      layout.openInstance("chat", chat.id);
+      return ensureDefaultChatView(chat.id);
     },
   };
 }
@@ -115,20 +117,29 @@ export default definePlugin({
   },
   settings: defineAsyncComponent(() => import("./ChatSettings.vue")),
   createDockProvider,
+  createInstanceAdapters: () => [{
+    type: "chat",
+    cardinality: "multi",
+    open(request) {
+      if (request.instanceId !== undefined) return restoreChatView(request.instanceId);
+      const params = request.params as ChatViewParams | undefined;
+      if (typeof params?.chatId !== "string" || params.chatId === "") throw new Error("chatId is required");
+      return request.newPane === true
+        ? createAdditionalChatView(params)
+        : ensureDefaultChatView(params.chatId);
+    },
+  }],
   activate(ctx) {
     const unregister = registerInputSessionSender("chat", async (session: InputSession) => {
       const message = session.text.trim();
       if (!message) return false;
-      const chatId = session.instanceId.split("#")[0];
-      const branchId = session.branchId ?? "";
+      const chatId = sessionChatId(session);
       let memberRoleIds: string[] | undefined;
       if (session.selectedRoleIds.length > 0) {
         const chats = (await ctx.bus.request("chat:_:chats:list", {})) as ChatList;
         memberRoleIds = chats.chats.find((chat) => chat.id === chatId)?.member_role_ids;
       }
-      const request = chatInputRPC(session, rawModeEnabled(chatId, branchId), memberRoleIds);
-      // Same as ChatPane.send: outwait LLM role routing (up to
-      // llm.timeout_seconds, default 60s) instead of the bus's 30s default.
+      const request = chatInputRPC(session, memberRoleIds);
       const result = await ctx.bus.request(request.channel, request.payload, { timeout: 90_000 });
       return (result as { status?: string } | undefined)?.status !== "not_queued";
     });

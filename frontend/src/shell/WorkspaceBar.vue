@@ -9,6 +9,7 @@ import { sendInputSession } from "../plugins/voice/inputSessionVoice";
 import { useVoiceStore } from "../plugins/voice/voiceStore";
 import type { PaneChromeAction, PaneChromeControl } from "../stores/paneChrome";
 import { dockProviders } from "./registries";
+import { openShellInstance } from "./instances";
 
 const layout = useLayoutStore();
 const paneChrome = usePaneChromeStore();
@@ -82,7 +83,7 @@ async function stopActiveInput(): Promise<void> {
 function openActiveInput(): void {
   const session = activeInput.value;
   if (!session) return;
-  layout.openInstance(session.paneType, session.instanceId);
+  void openShellInstance({ paneType: session.paneType, instanceId: session.instanceId });
 }
 </script>
 

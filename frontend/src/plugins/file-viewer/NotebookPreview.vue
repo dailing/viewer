@@ -17,7 +17,7 @@ import { inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { renderCodeBlock, renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
-import { fetchFileText } from "./fileData";
+import { fetchFileText } from "../../services/fileData";
 import type { PreviewMode } from "./instanceStore";
 import { parseNotebook } from "./notebookModel";
 import type { NotebookOutput } from "./notebookModel";

@@ -13,7 +13,6 @@ export default definePlugin({
     type: "bus-inspector",
     icon: "bi-activity",
     title: "Bus Inspector",
-    singleton: true,
     instances: [],
   }),
 });

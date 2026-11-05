@@ -7,7 +7,9 @@
 import { computed, inject, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import type { DirectoryListing, FileEntry } from "./types";
+import { formatBytes } from "../../services/formatBytes";
+import type { DirectoryListing, FileEntry } from "../../services/fileTypes";
+import { directorySizes } from "./directorySizes";
 
 const props = defineProps<{ dir: string }>();
 const emit = defineEmits<{
@@ -15,6 +17,7 @@ const emit = defineEmits<{
   open: [entry: FileEntry];
   /** The server's resolved absolute path for the requested dir ("" → cwd). */
   resolved: [path: string];
+  download: [entry: FileEntry];
 }>();
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
@@ -75,6 +78,12 @@ async function load(path: string): Promise<void> {
   }
 }
 
+function reload(): void {
+  loadedFor = null;
+  void load(props.dir);
+}
+defineExpose({ reload });
+
 watch(() => props.dir, (dir) => void load(dir), { immediate: true });
 
 function activate(entry: FileEntry): void {
@@ -87,6 +96,22 @@ function icon(entry: FileEntry): string {
   if (entry.is_dir) return "bi-folder2";
   if (entry.type === "file") return "bi-file-earmark";
   return "bi-question-square";
+}
+
+function directorySize(path: string) {
+  return directorySizes.state(path);
+}
+function directorySizeTitle(path: string): string {
+  const state = directorySizes.state(path);
+  if (state.status === "error") return `${state.error ?? "计算失败"}；点击重试`;
+  if (state.status === "ready" && state.result !== undefined) {
+    const result = state.result;
+    return `${result.files} 个文件，${result.directories} 个目录${result.complete ? "" : `，${result.errors} 项读取失败（结果不完整）`}；点击重新计算`;
+  }
+  return state.status === "loading" ? "正在计算目录大小" : "计算目录大小（不会跟随符号链接）";
+}
+function calculateDirectory(path: string): void {
+  void directorySizes.calculate(ctx.bus, path);
 }
 </script>
 
@@ -123,18 +148,45 @@ function icon(entry: FileEntry): string {
           <span class="text-truncate">..</span>
         </button>
         <div v-if="entries.length === 0" class="small text-muted px-3 py-2">目录为空</div>
-        <button
-          v-for="entry in entries"
-          :key="entry.path"
-          type="button"
-          class="file-row"
-          :title="entry.path"
-          role="listitem"
-          @click="activate(entry)"
-        >
-          <i class="bi entry-icon" :class="icon(entry)"></i>
-          <span class="text-truncate">{{ entry.name }}</span>
-        </button>
+        <div v-for="entry in entries" :key="entry.path" class="file-entry-row">
+          <button
+            type="button"
+            class="file-row"
+            :title="entry.path"
+            role="listitem"
+            @click="activate(entry)"
+          >
+            <i class="bi entry-icon" :class="icon(entry)"></i>
+            <span class="file-name">{{ entry.name }}</span>
+            <span v-if="!entry.is_dir && entry.size !== null" class="file-size">{{ formatBytes(entry.size) }}</span>
+          </button>
+          <button
+            v-if="!entry.is_dir"
+            type="button"
+            class="file-download"
+            :title="`下载 ${entry.name}`"
+            :aria-label="`下载 ${entry.name}`"
+            @click="emit('download', entry)"
+          >
+            <i class="bi bi-download" />
+          </button>
+          <button
+            v-if="entry.is_dir && !entry.is_symlink"
+            type="button"
+            class="directory-size"
+            :class="{ partial: directorySize(entry.path).result?.complete === false }"
+            :title="directorySizeTitle(entry.path)"
+            :disabled="directorySize(entry.path).status === 'loading'"
+            @click="calculateDirectory(entry.path)"
+          >
+            <span v-if="directorySize(entry.path).status === 'loading'" class="spinner-border spinner-border-sm" aria-label="计算中" />
+            <template v-else-if="directorySize(entry.path).status === 'ready' && directorySize(entry.path).result">
+              {{ directorySize(entry.path).result?.complete ? "" : "~" }}{{ formatBytes(directorySize(entry.path).result?.size ?? 0) }}
+            </template>
+            <template v-else-if="directorySize(entry.path).status === 'error'">重试</template>
+            <template v-else>计算大小</template>
+          </button>
+        </div>
       </template>
     </div>
   </div>
@@ -211,6 +263,50 @@ function icon(entry: FileEntry): string {
   background: var(--color-surface-hover);
 }
 
+.file-entry-row {
+  align-items: center;
+  display: flex;
+  min-width: 100%;
+}
+.file-entry-row .file-row {
+  flex: 1;
+  min-width: 0;
+}
+.file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-size {
+  color: var(--color-text-subtle);
+  flex: 0 0 auto;
+  font-size: var(--font-size-ui-small);
+  font-variant-numeric: tabular-nums;
+  margin-left: 8px;
+}
+.directory-size {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-subtle);
+  flex: 0 0 78px;
+  font-size: var(--font-size-ui-small);
+  font-variant-numeric: tabular-nums;
+  min-height: 25px;
+  padding: 0 6px;
+  text-align: right;
+  white-space: nowrap;
+}
+.directory-size:hover { color: var(--color-text); }
+.directory-size.partial { color: var(--color-warning, #b58105); }
+.file-download {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-subtle);
+  flex: 0 0 26px;
+  padding: 2px 4px;
+}
+.file-download:hover { color: var(--color-text); }
 .entry-icon {
   color: var(--color-text-muted);
   flex: 0 0 14px;

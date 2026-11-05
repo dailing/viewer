@@ -27,8 +27,8 @@ import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { useThemeStore } from "../../stores/theme";
-import { base64ToBlob, readPdfPage } from "./fileData";
-import type { PdfPageResult } from "./types";
+import { base64ToBlob, readPdfPage } from "../../services/fileData";
+import type { PdfPageResult } from "../../services/fileTypes";
 
 const props = defineProps<{ path: string; trimX: number; trimY: number; themeMap: boolean; reloadTick: number }>();
 

@@ -22,6 +22,7 @@ type dispatchRequest struct {
 	Owner             string   `json:"owner"`
 	Fence             int64    `json:"fence"`
 	ChatID            string   `json:"chat_id"`
+	InputInstanceID   string   `json:"input_instance_id"`
 	Message           string   `json:"message"`
 	Text              string   `json:"text"`
 	RoleIDs           []string `json:"role_ids"`
@@ -228,7 +229,7 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	// A human send supersedes the synced composer draft of the target line
 	// on every device; automatic (loop) dispatches leave it alone.
 	if request.AutomationID == "" {
-		p.clearDraft(chat.ID, line)
+		p.clearDraft(chat.ID, request.InputInstanceID, line)
 	}
 	// Serialize on the work line: a busy line queues the whole batch (one
 	// entry per dispatch); a free line starts it immediately. Parallel

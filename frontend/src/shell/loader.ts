@@ -21,7 +21,18 @@ import { createCtx, type PluginCtx } from "./ctx";
 import { bus } from "./bus";
 import type { PluginModule } from "./definePlugin";
 import { ExternalPluginLoader, type ExternalAssetEntry } from "./externalLoader";
-import { registerComponent, registerDockActions, registerDockProvider, registerPlugin, unregisterComponent, unregisterDockActions, unregisterDockProvider, unregisterPlugin } from "./registries";
+import {
+  registerComponent,
+  registerDockActions,
+  registerDockProvider,
+  registerInstanceAdapter,
+  registerPlugin,
+  unregisterComponent,
+  unregisterDockActions,
+  unregisterDockProvider,
+  unregisterInstanceAdapter,
+  unregisterPlugin,
+} from "./registries";
 
 /** Plugin ids the static stage-A build already registered. */
 const staticIds = new Set<string>();
@@ -29,12 +40,14 @@ const staticIds = new Set<string>();
 interface ExternalHandle {
   module: PluginModule;
   ctx: PluginCtx;
+  instanceTypes?: string[];
   dockType?: string;
   actionIds?: string[];
   styleEl?: HTMLLinkElement;
 }
 
 interface ModuleRegistration {
+  instanceTypes?: string[];
   dockType?: string;
   actionIds?: string[];
   activation?: Promise<void>;
@@ -46,6 +59,15 @@ function registerModule(plugin: PluginModule, ctx: PluginCtx, builtin = false): 
   registerPlugin(plugin.id, plugin.name ?? plugin.id, builtin, plugin.settings);
   for (const [type, component] of Object.entries(plugin.components ?? {})) {
     registerComponent(type, component);
+  }
+  if (plugin.createInstanceAdapters !== undefined) {
+    try {
+      const adapters = plugin.createInstanceAdapters(ctx);
+      result.instanceTypes = adapters.map((adapter) => adapter.type);
+      for (const adapter of adapters) registerInstanceAdapter(adapter);
+    } catch (error) {
+      console.error(`plugin ${plugin.id} createInstanceAdapters failed`, error);
+    }
   }
   if (plugin.createDockProvider !== undefined) {
     try {
@@ -88,6 +110,7 @@ function unregisterModule(handle: ExternalHandle): void {
   for (const type of Object.keys(handle.module.components ?? {})) {
     unregisterComponent(type);
   }
+  for (const type of handle.instanceTypes ?? []) unregisterInstanceAdapter(type);
   if (handle.dockType !== undefined) unregisterDockProvider(handle.dockType);
   if (handle.actionIds !== undefined) unregisterDockActions(handle.actionIds);
   handle.styleEl?.remove();
@@ -165,8 +188,8 @@ async function importExternal(id: string, entry: ExternalAssetEntry): Promise<Ex
       throw new Error(`bundle ${url} has no definePlugin default export with id "${id}"`);
     }
     const ctx = createCtx(id);
-    const { dockType, actionIds, activation } = registerModule(plugin, ctx);
-    const handle: ExternalHandle = { module: plugin, ctx, dockType, actionIds, styleEl };
+    const { instanceTypes, dockType, actionIds, activation } = registerModule(plugin, ctx);
+    const handle: ExternalHandle = { module: plugin, ctx, instanceTypes, dockType, actionIds, styleEl };
     try {
       await activation;
     } catch (error) {

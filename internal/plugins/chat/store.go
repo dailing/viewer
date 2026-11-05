@@ -61,10 +61,11 @@ type PluginState struct {
 // shared across all devices viewing that line. BranchID "" = mainline;
 // the composer binds to the send-target line (全部/multi-select → mainline).
 type Draft struct {
-	ChatID    string `gorm:"primaryKey" json:"chat_id"`
-	BranchID  string `gorm:"primaryKey" json:"branch_id"`
-	Text      string `json:"text"`
-	UpdatedAt int64  `json:"updated_at"`
+	InputInstanceID string `gorm:"primaryKey;size:64" json:"input_instance_id"`
+	ChatID          string `gorm:"index;size:12;not null" json:"chat_id"`
+	BranchID        string `gorm:"primaryKey;size:12;not null" json:"branch_id"`
+	Text            string `json:"text"`
+	UpdatedAt       int64  `json:"updated_at"`
 }
 
 // TableName moves drafts to a fresh table: the pre-branch schema keyed the
@@ -298,9 +299,9 @@ func (s *store) chats() ([]Chat, error) {
 
 func (s *store) saveChat(value *Chat) error { return s.db.Save(value).Error }
 
-func (s *store) draft(chatID, branchID string) (*Draft, error) {
+func (s *store) draft(inputInstanceID, branchID string) (*Draft, error) {
 	var value Draft
-	result := s.db.Limit(1).Find(&value, "chat_id = ? AND branch_id = ?", chatID, branchID)
+	result := s.db.Limit(1).Find(&value, "input_instance_id = ? AND branch_id = ?", inputInstanceID, branchID)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -315,15 +316,22 @@ func (s *store) draft(chatID, branchID string) (*Draft, error) {
 // row, violating the primary key.
 func (s *store) saveDraft(value *Draft) error {
 	return s.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "chat_id"}, {Name: "branch_id"}},
+		Columns:   []clause.Column{{Name: "input_instance_id"}, {Name: "branch_id"}},
 		UpdateAll: true,
 	}).Create(value).Error
 }
 
 // clearDraft reports whether a row existed so callers only broadcast real clears.
-func (s *store) clearDraft(chatID, branchID string) (bool, error) {
-	result := s.db.Delete(&Draft{}, "chat_id = ? AND branch_id = ?", chatID, branchID)
+func (s *store) clearDraft(inputInstanceID, branchID string) (bool, error) {
+	result := s.db.Delete(&Draft{}, "input_instance_id = ? AND branch_id = ?", inputInstanceID, branchID)
 	return result.RowsAffected > 0, result.Error
+}
+
+// chatLineHasDrafts guards merge/archive across every view's input instance.
+func (s *store) chatLineHasDrafts(chatID, branchID string) (bool, error) {
+	var count int64
+	err := s.db.Model(&Draft{}).Where("chat_id = ? AND branch_id = ? AND text <> ''", chatID, branchID).Count(&count).Error
+	return count > 0, err
 }
 
 func (s *store) roles() ([]SuperRole, error) {

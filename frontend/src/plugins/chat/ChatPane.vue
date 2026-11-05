@@ -13,10 +13,9 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import { useChatSettingsStore } from "../../stores/chatSettings";
-import { useLayoutStore } from "../../stores/layout";
 import { registerInputSessionRuntime, useInputSessionsStore, type InputSession } from "../../stores/inputSessions";
-import { rawModeEnabled } from "./rawMode";
 import { chatInputRPC } from "./inputDispatch";
+import { chatIdForView, resolveChatView } from "./viewInstances";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import ComposerBox from "./ComposerBox.vue";
 import ToolActivity from "./ToolActivity.vue";
@@ -36,15 +35,11 @@ import { errorText } from "./types";
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("ChatPane requires PluginPaneHost");
 const ctx: PluginCtx = injectedCtx;
-/** Multi-view (framework v0.82): the pane instance id is the VIEW identity —
- *  `chatId` for the primary view, `chatId#<suffix>` for extra views of the
- *  same chat opened side by side. RPC/subscription addressing uses chatId;
- *  per-pane state (branch tabs, message cache, input session) keys on
- *  viewKey so two views of one chat never share view state. */
+/** The pane instance is an opaque ViewInstance id. RPC/subscription addressing
+ * uses its structured chatId; tabs, cache and the fixed input use viewKey. */
 const viewKey = ctx.instanceId;
-const chatId = viewKey.split("#")[0];
+const chatId = chatIdForView(viewKey);
 const chatSettings = useChatSettingsStore();
-const layout = useLayoutStore();
 
 const messages = ref<ChatMessage[]>([]);
 const blocks = ref<ChatBlock[]>([]);
@@ -53,7 +48,14 @@ const workspace = ref<Workspace | null>(null);
 const chat = ref<Chat | null>(null);
 const inputSessionId = `chat:${viewKey}`;
 const inputs = useInputSessionsStore();
-inputs.ensure({ id: inputSessionId, pluginId: "chat", paneType: "chat", instanceId: viewKey, label: "Chat input" });
+inputs.ensure({
+  id: inputSessionId,
+  pluginId: "chat",
+  paneType: "chat",
+  instanceId: viewKey,
+  params: { chatId },
+  label: "Chat input",
+});
 const selected = computed({
   get: () => inputs.session(inputSessionId)?.selectedRoleIds ?? [],
   set: (value: string[]) => inputs.patch(inputSessionId, { selectedRoleIds: value }),
@@ -301,8 +303,10 @@ function persistBranchTabs(): void {
 
 const restoredTabs = readBranchTabs(tabsKey);
 const legacyTabs = restoredTabs.length === 0 && tabsKey !== viewKey ? readBranchTabs(viewKey) : [];
+const initialTabs = resolveChatView(viewKey)?.initialTabs ?? [];
 if (restoredTabs.length > 0) activeTabs.value = restoredTabs;
 else if (legacyTabs.length > 0) activeTabs.value = legacyTabs;
+else if (initialTabs.length > 0) activeTabs.value = [...initialTabs];
 watch(activeTabs, () => { persistBranchTabs(); setChrome(); });
 // The view's message span is server-filtered per tab selection, so a tab
 // switch is a reload (per-view session cache hydrates instantly when warm),
@@ -1012,7 +1016,9 @@ function setChrome(): void {
         icon: "bi-columns-gap",
         active: false,
         run: () => {
-          layout.openInstance("chat", `${chatId}#${Math.random().toString(36).slice(2, 10)}`, {
+          void ctx.shell.open({
+            paneType: "chat",
+            params: { chatId, initialTabs: [...activeTabs.value] },
             newPane: true,
           });
         },
@@ -1628,13 +1634,18 @@ function routedLabelFor(startedIds: string[], queuedIds: string[]): string {
 async function reconcileSentDraft(session: InputSession): Promise<void> {
   const branchId = session.branchId ?? "";
   try {
-    const current = await ctx.bus.request("chat:_:draft:get", { chat_id: chatId, branch_id: branchId }) as { text?: string };
+    const current = await ctx.bus.request("chat:_:draft:get", {
+      chat_id: chatId,
+      input_instance_id: viewKey,
+      branch_id: branchId,
+    }) as { text?: string };
     // A branch switch during dispatch may have flushed the old sent text
     // after the backend's initial clear. Remove only that exact echo; a newer
     // draft on the same line is not ours to erase.
     if ((current.text ?? "") === session.text && session.text !== "") {
       await ctx.bus.request("chat:_:draft:set", {
         chat_id: chatId,
+        input_instance_id: viewKey,
         branch_id: branchId,
         text: "",
         source: `dispatch:${inputSessionId}`,
@@ -1674,7 +1685,7 @@ async function send(session: InputSession): Promise<boolean> {
   pendingSends.value = [...pendingSends.value, { key, text: message, branchIds: originBranchIds, ts: Date.now(), sending: true, routed: "", failed: "" }];
   void nextTick(() => scrollThreadToMessageEnd());
   try {
-    const { payload } = chatInputRPC(session, rawModeEnabled(chatId, branchId), chat.value?.member_role_ids);
+    const { payload } = chatInputRPC(session, chat.value?.member_role_ids);
     // Dispatch replies only after LLM role routing, which may take up to
     // llm.timeout_seconds (default 60s) under local-server queueing; the
     // bus's 30s default would report 发送失败 while the backend proceeds.
@@ -2208,6 +2219,7 @@ onMounted(() => {
         ref="composerRef"
         v-model:selected-role-ids="selected"
         :roles="members"
+        :chat-id="chatId"
         :context-id="'chat:' + viewKey"
         :draft-branch-id="composerBranchId"
       />

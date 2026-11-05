@@ -176,52 +176,66 @@ func TestComposerDraftSyncsAcrossClients(t *testing.T) {
 		t.Fatalf("chat reply: %v", chat)
 	}
 
-	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "text": "from laptop", "source": "a"})
-	if event := nextEvent(); event["text"] != "from laptop" || event["source"] != "a" || event["chat_id"] != chatID || event["branch_id"] != "" {
+	inputA := "view-a"
+	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "input_instance_id": inputA, "text": "from laptop", "source": "a"})
+	if event := nextEvent(); event["text"] != "from laptop" || event["source"] != "a" || event["chat_id"] != chatID || event["input_instance_id"] != inputA || event["branch_id"] != "" {
 		t.Fatalf("event: %v", event)
 	}
-	// A later set from another device overwrites the whole row (last write wins).
-	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "text": "merged on phone", "source": "b"})
+	// A later set from another device overwrites this input's whole row.
+	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "input_instance_id": inputA, "text": "merged on phone", "source": "b"})
 	if event := nextEvent(); event["text"] != "merged on phone" {
 		t.Fatalf("overwrite event: %v", event)
 	}
-	draft := request("chat:_:draft:get", map[string]any{"chat_id": chatID})
+	draft := request("chat:_:draft:get", map[string]any{"chat_id": chatID, "input_instance_id": inputA})
 	updatedAt, _ := draft["updated_at"].(float64)
 	if draft["text"] != "merged on phone" || updatedAt <= 0 {
 		t.Fatalf("draft: %v", draft)
 	}
-	// Drafts are scoped per line: a branch draft neither leaks into the
-	// mainline row nor is touched by mainline edits/clears.
+	// Drafts are scoped per input and line.
 	if err := p.store.createBranch(&Branch{ID: "b1", ChatID: chatID, Name: "B1", State: branchStateOpen, CreatedAt: nowMillis(), UpdatedAt: nowMillis()}); err != nil {
 		t.Fatal(err)
 	}
-	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "branch_id": "b1", "text": "branch draft", "source": "a"})
+	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "input_instance_id": inputA, "branch_id": "b1", "text": "branch draft", "source": "a"})
 	if event := nextEvent(); event["text"] != "branch draft" || event["branch_id"] != "b1" {
 		t.Fatalf("branch event: %v", event)
 	}
-	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "branch_id": "b1"}); draft["text"] != "branch draft" {
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "input_instance_id": inputA, "branch_id": "b1"}); draft["text"] != "branch draft" {
 		t.Fatalf("branch draft: %v", draft)
 	}
-	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID}); draft["text"] != "merged on phone" {
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "input_instance_id": inputA}); draft["text"] != "merged on phone" {
 		t.Fatalf("mainline draft after branch set: %v", draft)
 	}
-	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": chatID, "text": strings.Repeat("x", maxDraftBytes+1)}, 10*time.Second); err == nil {
+	inputB := "view-b"
+	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "input_instance_id": inputB, "text": "other view main", "source": "b"})
+	nextEvent()
+	request("chat:_:draft:set", map[string]any{"chat_id": chatID, "input_instance_id": inputB, "branch_id": "b1", "text": "other view branch", "source": "b"})
+	nextEvent()
+	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": chatID, "input_instance_id": inputA, "text": strings.Repeat("x", maxDraftBytes+1)}, 10*time.Second); err == nil {
 		t.Fatal("oversized draft accepted")
 	}
-	// The human-send clear broadcasts an empty draft for the sent line only.
-	p.clearDraft(chatID, "")
-	if event := nextEvent(); event["text"] != "" || event["branch_id"] != "" {
+	// The human-send clear affects only the dispatching input and sent line.
+	p.clearDraft(chatID, inputA, "")
+	if event := nextEvent(); event["text"] != "" || event["input_instance_id"] != inputA || event["branch_id"] != "" {
 		t.Fatalf("clear event: %v", event)
 	}
-	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID}); draft["text"] != "" {
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "input_instance_id": inputA}); draft["text"] != "" {
 		t.Fatalf("cleared draft: %v", draft)
 	}
-	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "branch_id": "b1"}); draft["text"] != "branch draft" {
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "input_instance_id": inputB}); draft["text"] != "other view main" {
+		t.Fatalf("other input mainline was cleared: %v", draft)
+	}
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "input_instance_id": inputA, "branch_id": "b1"}); draft["text"] != "branch draft" {
 		t.Fatalf("branch draft after mainline clear: %v", draft)
 	}
-	// Unknown chats cannot hold drafts.
-	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": "no-such-chat", "text": "x"}, 10*time.Second); err == nil {
+	if draft = request("chat:_:draft:get", map[string]any{"chat_id": chatID, "input_instance_id": inputB, "branch_id": "b1"}); draft["text"] != "other view branch" {
+		t.Fatalf("other input branch was cleared: %v", draft)
+	}
+	// Unknown chats and missing input identities cannot hold drafts.
+	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": "no-such-chat", "input_instance_id": inputA, "text": "x"}, 10*time.Second); err == nil {
 		t.Fatal("draft accepted for unknown chat")
+	}
+	if _, err := caller.Request(ctx, "chat:_:draft:set", map[string]any{"chat_id": chatID, "text": "x"}, 10*time.Second); err == nil {
+		t.Fatal("draft accepted without input instance")
 	}
 }
 

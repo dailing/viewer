@@ -21,7 +21,6 @@
 import { nextTick, ref, watch, type Ref } from "vue";
 
 import type { PluginCtx } from "../../shell/ctx";
-import { useLayoutStore } from "../../stores/layout";
 import { watchTrailingSilence, type SilenceWatchHandle } from "../voice/silence";
 import { speakText, stopSpeaking } from "../voice/speak";
 import { useVoiceStore, voiceStreamForContext } from "../voice/voiceStore";
@@ -69,7 +68,6 @@ const EXIT_PHRASES = ["退出语音", "关闭语音", "退出语音模式", "关
 export class VoiceControlController {
   readonly phase: Ref<VoiceControlPhase> = ref("off");
   private readonly voice = useVoiceStore();
-  private readonly layout = useLayoutStore();
   private silenceWatch: SilenceWatchHandle | null = null;
   private disposed = false;
   /** Monotonic nonce for voice-fx handoffs. */
@@ -195,7 +193,7 @@ export class VoiceControlController {
     const dictate = result.effects.find((effect) => effect.type !== "open_instance");
     for (const effect of result.effects) {
       if (effect.type === "open_instance" && typeof effect.instance_id === "string") {
-        this.layout.openInstance(effect.pane_type ?? "chat", effect.instance_id);
+        await this.ctx.shell.open({ paneType: effect.pane_type ?? "chat", instanceId: effect.instance_id });
       }
     }
     if (dictate !== undefined && result.ok) {
@@ -218,7 +216,7 @@ export class VoiceControlController {
       this.listen();
       return;
     }
-    this.layout.openInstance(paneType, instanceId);
+    await this.ctx.shell.open({ paneType, instanceId });
     await nextTick();
     this.fxNonce += 1;
     this.ctx.bus.set(`voice-fx:${effect.plugin ?? paneType}:${instanceId}`, {

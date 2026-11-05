@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"viewer/internal/plugins/pluginrpc"
@@ -31,20 +32,22 @@ const showHiddenFiles = false
 
 var Manifest = busclient.Manifest{
 	ID: "file-service", Version: "0.1.0",
-	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "pdfpage": map[string]any{}, "ticket": map[string]any{}, "ticket:resolve": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{}},
+	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "du": map[string]any{}, "pdfpage": map[string]any{}, "ticket": map[string]any{}, "ticket:resolve": map[string]any{}, "upload:ticket": map[string]any{}, "upload:resolve": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{}},
 	Emits: map[string]any{ChangedChannel: map[string]any{}},
 }
 
 type Plugin struct {
-	client  *busclient.Client
-	pdf     *pdfRenderer
-	cache   *hashCache
-	tickets *ticketIssuer
-	watcher *fileWatcher
+	client        *busclient.Client
+	pdf           *pdfRenderer
+	cache         *hashCache
+	tickets       *ticketIssuer
+	uploadTickets *uploadTicketIssuer
+	watcher       *fileWatcher
+	duJobs        sync.Map
 }
 
 func New(dataDir string) *Plugin {
-	return &Plugin{pdf: newPDFRenderer(dataDir), cache: newHashCache(), tickets: newTicketIssuer()}
+	return &Plugin{pdf: newPDFRenderer(dataDir), cache: newHashCache(), tickets: newTicketIssuer(), uploadTickets: newUploadTicketIssuer()}
 }
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
@@ -54,9 +57,12 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"file:_:read":           p.read,
 		"file:_:hash":           p.hash,
 		"file:_:list":           p.list,
+		"file:_:du":             p.du,
 		"file:_:pdfpage":        p.pdfpage,
 		"file:_:ticket":         p.ticket,
 		"file:_:ticket:resolve": p.ticketResolve,
+		"file:_:upload:ticket":  p.uploadTicket,
+		"file:_:upload:resolve": p.uploadResolve,
 		"file:_:watch":          p.watch,
 		"file:_:unwatch":        p.unwatch,
 	} {
@@ -90,6 +96,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 }
 
 func (p *Plugin) Close() error {
+	cancelDirectoryJobs(&p.duJobs)
 	if p.watcher != nil {
 		p.watcher.close()
 		p.watcher = nil

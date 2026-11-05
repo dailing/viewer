@@ -11,6 +11,31 @@ import type { Component } from "vue";
 
 import type { PluginCtx } from "./ctx";
 
+export type PluginCardinality = "singleton" | "multi";
+
+/** Structured input to the single plugin-facing instance opening path. */
+export interface InstanceOpenRequest<P = unknown> {
+  paneType: string;
+  /** Existing instance to restore/update; omitted means create from params. */
+  instanceId?: string;
+  /** JSON-serializable plugin-specific opening parameters. */
+  params?: P;
+  /** Force a fresh pane placement, not necessarily a fresh instance. */
+  newPane?: boolean;
+}
+
+export interface OpenedInstance {
+  paneId: string;
+  instanceId: string;
+}
+
+/** Plugin-owned factory/reopen logic; Shell owns subsequent pane placement. */
+export interface PluginInstanceAdapter {
+  type: string;
+  cardinality: PluginCardinality;
+  open(request: InstanceOpenRequest): string | Promise<string>;
+}
+
 /** One running instance shown in the shell Dock. */
 export interface DockInstance {
   id: string;
@@ -20,12 +45,6 @@ export interface DockInstance {
   state?: string;
   /** Per-instance icon override; falls back to the provider's icon. */
   icon?: string;
-  /**
-   * Launcher instance (files pinned folders): clicking the Dock entry calls
-   * `provider.create(id)` to spawn a fresh instance instead of opening this
-   * one. Launchers are removable via the provider's `remove` hook.
-   */
-  clickCreates?: boolean;
 }
 
 /**
@@ -38,25 +57,11 @@ export interface DockProvider {
   icon: string;
   /** "+" menu entry label. */
   title: string;
-  /**
-   * One main instance opened from "+". Singleton tools never create a
-   * permanent Dock entry; their `instances` can still list explicit items.
-   */
-  singleton?: boolean;
-  /**
-   * "+" calls `create()` instead of opening `type:main` (files launcher).
-   */
-  clickCreates?: boolean;
   /** Reactive list of running instances, maintained by the provider. */
   instances: DockInstance[];
-  /**
-   * "+" menu action (create a new instance); absent = not user-creatable.
-   * Receives the source instance id when invoked from a launcher entry
-   * (`DockInstance.clickCreates`). Returning an id opens the created pane;
-   * return void when creation already handles opening.
-   */
-  create?: (fromInstanceId?: string) => Promise<string | void> | string | void;
-  /** Remove a launcher instance (Dock hover ×); absent = not removable. */
+  /** "+" menu action; returning an instance id opens its pane. */
+  create?: () => Promise<string | void> | string | void;
+  /** Remove an instance (Dock hover ×); absent = not removable. */
   remove?: (instanceId: string) => Promise<void> | void;
 }
 
@@ -82,6 +87,8 @@ export interface PluginModule {
   components?: Record<string, Component>;
   /** Optional plugin-owned settings surface rendered inside 插件管理. */
   settings?: Component;
+  /** Build instance factories/restorers for this plugin's pane types. */
+  createInstanceAdapters?: (ctx: PluginCtx) => PluginInstanceAdapter[];
   /** Build the Dock contribution; called once at bootstrap with plugin ctx. */
   createDockProvider?: (ctx: PluginCtx) => DockProvider;
   /** Build global Dock-foot action buttons; called once at bootstrap. */

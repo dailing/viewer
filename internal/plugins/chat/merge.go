@@ -446,11 +446,11 @@ func (p *Plugin) mergeLines(chatID string, branchIDs []string, targetBranchID st
 		}
 	}
 	for _, source := range sources {
-		draft, draftErr := p.store.draft(chatID, source.ID)
+		hasDraft, draftErr := p.store.chatLineHasDrafts(chatID, source.ID)
 		if draftErr != nil {
 			return nil, draftErr
 		}
-		if draft != nil && draft.Text != "" {
+		if hasDraft {
 			return nil, fmt.Errorf("source line 「%s」 has an unsent draft", source.Name)
 		}
 	}

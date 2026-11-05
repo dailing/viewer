@@ -3,7 +3,6 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } fr
 import type { PluginCtx } from "../../shell/ctx";
 import { useInputSessionsStore } from "../../stores/inputSessions";
 import { sendInputSession } from "../voice/inputSessionVoice";
-import { rawModeEnabled, setRawMode } from "./rawMode";
 import { draftRequestCurrent } from "./draftSync";
 import VoiceInputButton from "../voice/VoiceInputButton.vue";
 import { useVoiceStore } from "../voice/voiceStore";
@@ -13,6 +12,7 @@ import { VoiceDictationController } from "./voiceDictation";
 const props = defineProps<{
   selectedRoleIds: string[];
   roles: Role[];
+  chatId: string;
   contextId: string;
   /** Line the next send lands on ("" = mainline): the draft binds to it —
    *  per-line server rows keep drafts of different branches independent. */
@@ -109,29 +109,17 @@ const voiceDictation = new VoiceDictationController(injectedCtx, props.contextId
 });
 onBeforeUnmount(() => voiceDictation.dispose());
 
-// Cross-device draft sync (framework: chat drafts). The server row in
-// chat.sqlite3 is the single source of truth: local edits push debounced
-// (every set overwrites the whole row — last write wins by arrival order),
-// and updates from other devices apply to the box live. Rows are scoped per
-// chat LINE (chat_id + branch_id, "" = mainline) and the box binds to the
-// send-target line, so switching the branch tab swaps the draft. `lastSynced`
-// tracks the value the server is known to hold for the CURRENT line, so own
-// echoes (filtered by `source` anyway) and remote-applied text never trigger
-// a re-push loop. Hoisted function declarations run before the
-// undefined-check narrowing applies to `injectedCtx`, so capture the bus once
-// here.
+// Draft rows are scoped to this fixed InputInstance and its current line.
+// Other views of the same Chat/Branch never receive or clear this text.
 const bus = injectedCtx.bus;
-// contextId is "chat:{viewKey}"; viewKey carries a "#suffix" on multi-view
-// copies, which RPC addressing must strip.
-const chatId = props.contextId.slice("chat:".length).split("#")[0];
+const chatId = props.chatId;
+const inputInstanceId = props.contextId.slice("chat:".length);
 
-// Persistent per-line raw toggle (framework v0.92): while armed, sends from
-// this chat line carry raw=true — zero viewer-side prompt injection, like
-// driving the agent from its own CLI. Keyed by chat + send-target branch
-// (draftBranchId), so each line remembers its own mode.
+// Persistent per-input, per-line raw toggle. It is frozen into the send
+// snapshot together with branch, role selection and one-shot options.
 const raw = computed({
-  get: () => rawModeEnabled(chatId, props.draftBranchId),
-  set: (value: boolean) => setRawMode(chatId, props.draftBranchId, value),
+  get: () => session.value.rawByBranch?.[props.draftBranchId] === true,
+  set: (value: boolean) => inputs.setRaw(props.contextId, props.draftBranchId, value),
 });
 const draftSource = crypto.randomUUID();
 let lastSynced: string | null = null;
@@ -144,7 +132,7 @@ const localDrafts = new Map<string, string>();
 const pendingLineFlushes = new Map<string, Promise<void>>();
 
 function flushSwitchedLine(branchId: string, text: string): void {
-  const pending = bus.request("chat:_:draft:set", { chat_id: chatId, branch_id: branchId, text, source: draftSource })
+  const pending = bus.request("chat:_:draft:set", { chat_id: chatId, input_instance_id: inputInstanceId, branch_id: branchId, text, source: draftSource })
     .then(() => {})
     .catch(() => { if (text !== "") localDrafts.set(branchId, text); })
     .finally(() => {
@@ -159,7 +147,7 @@ async function pullDraft(): Promise<void> {
   const generation = draftGeneration;
   const revision = session.value.revision;
   try {
-    const result = await bus.request("chat:_:draft:get", { chat_id: chatId, branch_id: branchId }) as { text?: string };
+    const result = await bus.request("chat:_:draft:get", { chat_id: chatId, input_instance_id: inputInstanceId, branch_id: branchId }) as { text?: string };
     const request = { branchId, generation, revision };
     if (!draftRequestCurrent(request, {
       branchId: props.draftBranchId,
@@ -182,7 +170,7 @@ async function flushDraft(): Promise<void> {
   const generation = draftGeneration;
   const revision = session.value.revision;
   try {
-    await bus.request("chat:_:draft:set", { chat_id: chatId, branch_id: branchId, text, source: draftSource });
+    await bus.request("chat:_:draft:set", { chat_id: chatId, input_instance_id: inputInstanceId, branch_id: branchId, text, source: draftSource });
     if (draftRequestCurrent(
       { branchId, generation, revision },
       { branchId: props.draftBranchId, generation: draftGeneration, revision: session.value.revision },
@@ -193,9 +181,9 @@ async function flushDraft(): Promise<void> {
 }
 
 function onDraftSynced(frame: { value?: unknown }): void {
-  const value = frame.value as { chat_id?: string; branch_id?: string; text?: string; source?: string } | undefined;
-  if (value === undefined || value.chat_id !== chatId || (value.branch_id ?? "") !== props.draftBranchId
-    || value.source === draftSource || queueEditing.value) return;
+  const value = frame.value as { chat_id?: string; input_instance_id?: string; branch_id?: string; text?: string; source?: string } | undefined;
+  if (value === undefined || value.chat_id !== chatId || value.input_instance_id !== inputInstanceId
+    || (value.branch_id ?? "") !== props.draftBranchId || value.source === draftSource || queueEditing.value) return;
   const text = value.text ?? "";
   lastSynced = text;
   if (text !== draft.value) draft.value = text;
@@ -240,6 +228,7 @@ watch(queueEditing, (editing) => {
     if (ordinaryDraft !== previousSynced) {
       void bus.request("chat:_:draft:set", {
         chat_id: chatId,
+        input_instance_id: inputInstanceId,
         branch_id: session.value.branchId,
         text: ordinaryDraft,
         source: draftSource,

@@ -75,6 +75,8 @@ type Server struct {
 	// /api/files/raw (fileraw.go): ticket resolver, stubbed by tests; nil
 	// means the live bus resolver resolveRawTicket.
 	rawResolver rawResolver
+	// /api/files/upload (fileupload.go): independent upload-ticket resolver.
+	uploadResolver uploadResolver
 
 	// Generic H.264/WebRTC media relay (media.go). No browser concepts here.
 	media *mediaHub
@@ -167,6 +169,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.servePluginAsset(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/files/raw":
 		s.serveFileRaw(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/files/upload":
+		s.serveFileUpload(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/media/publish":
 		s.media.servePublish(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/media/ticket":

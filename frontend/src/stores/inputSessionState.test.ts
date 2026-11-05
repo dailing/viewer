@@ -15,7 +15,7 @@ function session(): InputSession {
   return {
     id: "chat:c", pluginId: "chat", paneType: "chat", instanceId: "c", label: "Chat",
     text: "ordinary", branchId: "a", mode: "dispatch", queuedDispatchId: "", revision: 0,
-    selectedRoleIds: ["r1"], forceNewSession: false, parallel: false, pinned: true,
+    selectedRoleIds: ["r1"], forceNewSession: false, parallel: false, raw: false, rawByBranch: {}, pinned: true,
     phase: "idle", error: "", updatedAt: 0,
   };
 }

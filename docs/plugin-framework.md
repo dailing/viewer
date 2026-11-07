@@ -1,6 +1,10 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v1.06**（2026-11-04）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v1.10**（2026-11-05）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v1.10 变更：**大目录分页与目录大小订阅修复**——`file:_:list` 一律分页，默认 100 项、上限 200，返回 `{offset,limit,next_offset,has_more}`；后端按目录流分批读取，`dirs_only` 和隐藏项过滤后再计算 offset，仅对当前页逐项 stat，不再全量 `os.ReadDir` 或生成无界 bus 响应。文件列表滚动到底自动取下一页并保留手动重试，目录树按节点显示“加载更多子目录”；树与列表之间增加可拖拽/键盘调整的分隔条。目录大小是跨实例长生命周期订阅，必须使用全局 shell bus 并等待订阅完成后再 enqueue，不能经过会在 pane 关闭时退订、且 fire-and-forget 的 `ctx.bus.subscribe`。
+> v1.09 变更：**跨实例上传队列与进度面板**——文件/目录任务、目录扫描和顺序 worker 属于浏览器 Tab 内的 file-manager 模块单例，不再属于某个 pane；关闭或重开 File Manager 不丢失任务状态，多个实例显示同一队列。标题栏云上传按钮切换浮动面板，显示总体与逐文件字节进度、当前文件平均速度和 ETA；XHR upload progress 提供真实字节数。关闭浮动面板只隐藏 UI，不取消上传；清除操作只移除已结束记录。目标目录仍在入队时固定，完成事件通知所有打开到受影响目录的实例刷新。
+> v1.08 变更：**文件夹拖放上传**——通过 `webkitGetAsEntry()` 同步捕获拖放条目，递归分批读取目录并重建相对路径；目录任务先于其子项进入同一顺序队列，空目录也会创建。已存在目录合并使用，文件冲突仍按既有规则确认覆盖；扫描期间固定目标根目录。浏览器 API 不暴露软链接身份与 target，本功能只上传浏览器提供的普通文件和目录，不承诺保留软链接。
+> v1.07 变更：**文件管理器目录树、动态大小与管理操作**——①`file:_:list` 增加可选 `dirs_only`，管理器显示可收起的懒加载目录树，仅展开时取子目录，进入深层路径时逐级展开祖先，不跟随目录 symlink。②`file:_:du` 改为单 worker 串行队列并立即返回 queued/running；每批最多 128 个目录项、批次间隔 2ms，约 100ms 经 `file:_:du:progress` 发布部分/最终结果，`file:_:du:cancel` 可取消；可见目录自动排队，同路径任务去重。③新增 `file:_:mkdir {dir,name}` 与 `file:_:delete {path}`，目录删除递归执行、根目录拒绝删除、symlink 仅删链接本身；管理器提供新建/删除操作并在变更后失效对应树分支。④文件选择与多文件拖放共用同一顺序上传队列，目标目录在入队时固定，沿用既有覆盖确认与原始字节 ticket 数据面。
 > v1.06 变更：**文件管理器与文件预览器拆分 + 目录大小与原始流上传**——①独立 `file-manager` / `file-viewer` 多实例，分别持久化 `{dir,viewerId}` 与 `{path,mode,trim…}`；管理器默认更新并聚焦配对预览器，显式动作才新建面板，未固定实例清理同时统计平铺和浮动面板。②`file:_:du {path}` 提供按需可取消、不跟随 directory symlink 的递归统计，返回 size/files/directories/errors/complete；浅层目录列表不自动递归。③`file:_:upload:ticket {dir,name,overwrite}` 签发绑定绝对目标与覆盖策略的独立短效票据，`POST /api/files/upload?ticket=` 直接流式上传原始字节；同目录临时文件完成后原子发布，无覆盖通过 `renameat2(RENAME_NOREPLACE)` 防最终竞态，冲突返回 409，UI 仅在用户确认后申请 overwrite=true 票据。
 > v1.05 变更：**进一步收敛标题字号**——H1/H2 默认派生系数由 ×6/5、11/10 调整为 ×11/10、21/20（即 1.1×、1.05×）；默认内容字号 15px 时为 16.5/15.75px，H3/H4 与 700 字重不变，细节定制钉值仍优先生效。
 > v1.04 变更：**前端诊断日志经共用总线进入后端日志**——shell 通用 helper 以普通 publish 发送 `frontend:_:log {level,component,message,context,ts}`（level 仅 debug/info/warn/error，ts 为浏览器毫秒时间戳），fire-and-forget 且断线失败不影响原操作；新 core plugin `frontend-log` 订阅该事件并按后端 `slog` JSON 格式写入 `viewerd.log`，保留原 message/context 并补充 `source=frontend`、component、客户端时间与 browser origin。chat dispatch 的非成员角色过滤 warning 同时保留浏览器 Console 副本和此后端副本。
@@ -453,7 +457,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 | C0 | viewer.supervisor | 拉起/心跳/重启/熔断/日志全部插件进程；插件管理 RPC（install/reload/enable）归属（§9） |
 | C1 | config-store | `config:_:get/set` 等 RPC channel；`plugins.<id>.*` namespace |
 | C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件；每实例变更发 `instance-store:<plugin>:<instance>` mailbox（v0.72 起前端 files 实例注册表接入） |
-| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边裁切（v0.71；v0.83 起横/纵百分比 `trim_x`/`trim_y`）+ 磁盘 LRU 缓存（v0.70）+ watch/unwatch：打开文件变更监听（TTL 续约、目录级 fsnotify + 巡检、digest 变更才广播 `file:_:changed`，v0.74） |
+| C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边裁切（v0.71；v0.83 起横/纵百分比 `trim_x`/`trim_y`）+ 磁盘 LRU 缓存（v0.70）+ watch/unwatch：打开文件变更监听（TTL 续约、目录级 fsnotify + 巡检、digest 变更才广播 `file:_:changed`，v0.74）+ dirs_only 目录树列表、串行分片 du/progress/cancel、mkdir/delete（v1.07） |
 | C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37）+ `POST /api/admin/schedule-restart`（后台 build 成功后武装、等空闲自重启，v0.43）+ `GET /api/admin/schedule-restart`（状态 none/building/armed/failed，v0.43）+ `DELETE /api/admin/schedule-restart`（取消/复位，v0.44） |
 | C6 | llm | 全局 LLM 转发层：`llm:_:complete` 纯转发 OpenAI 兼容端点；配置 `plugins.llm`（v0.48，§8.11） |
 | C7 | voice-control | 全局语音控制：`voice-catalog:_:*` 目录合并 + 连续语音对话（LLM 直答或派发条目）+ 会话上下文压缩 + `chat:_:turn` 主动播报（v0.49，§8.11）+ 交互日志/可配置 prompt 模板/prompt 预览（v0.50，§8.11） |
@@ -606,6 +610,10 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v1.10**（2026-11-05）：**大目录分页、可调目录树与大小订阅修复**——目录列表默认/上限分页为 100/200，流式读取并只 stat 当前页，响应携带 next offset 和 has-more；文件列表滚动增量加载、树节点按需加载更多，树宽可拖。跨实例目录大小订阅改用可等待的全局 bus，消除订阅建立前完成事件丢失及 pane 关闭退订导致的永久 pending。
+- **v1.09**（2026-11-05）：**跨实例上传队列与进度面板**——上传任务、扫描与 worker 提升为浏览器 Tab 内模块单例，所有 File Manager 实例共享；pane 关闭/重开不丢状态。标题栏动作切换浮动面板，XHR 真实字节进度驱动总体/逐文件百分比、平均速度与 ETA；隐藏面板不中断任务，完成事件刷新所有正在查看受影响目录的实例。
+- **v1.08**（2026-11-05）：**文件夹拖放上传**——同步捕获拖放 entry，递归分批扫描并按相对路径生成目录/文件任务；目录先于子项上传，支持空目录、已存在目录合并和混合多选，目标根目录在 drop 时固定。浏览器不提供软链接元数据，因此不保留软链接。
+- **v1.07**（2026-11-05）：**文件管理器目录树、动态大小、管理操作与拖放上传**——目录列表支持 `dirs_only`；目录统计改为串行分片队列与 `file:_:du:progress` 动态结果，支持取消、部分结果和同路径去重；新增目录创建/递归删除与懒加载目录树。文件选择和多文件拖放共用顺序上传队列，入队固定目标目录，保留覆盖确认。
 - **v1.06**（2026-11-04）：**文件管理/预览拆分、目录统计与流式上传**——独立 `file-manager` / `file-viewer` 实例和配对打开语义；`file:_:du` 按需可取消统计且不跟随 directory symlink；独立 upload ticket + `/api/files/upload` 原始字节数据面，同目录临时文件原子发布，无覆盖 `RENAME_NOREPLACE` 防竞态，确认覆盖前不签 overwrite ticket。
 - **v1.05**（2026-11-03）：**进一步收敛标题字号**——H1/H2 默认派生系数改为 ×11/10、21/20（1.1×、1.05×），默认内容字号 15px 时为 16.5/15.75px；H3/H4、粗体与细节定制钉值优先级不变。
 - **v1.03**（2026-11-02）：**分支后台运行指示补齐**——`chats:list` 新增 `background_branch_ids`，background feed 的结束帧也携带 `branch_id`；分支 spinner 与 merge/archive guard 同时覆盖 running turn 和 background hold，并支持重载快照恢复。
@@ -750,7 +758,7 @@ my-plugin/
 - **C0 viewer.supervisor**：`restart.py` 的进程管理逻辑 + `main.py` 的插件进程拉起职责 → 独立 core plugin；内核只保留 autostart 它一个进程的逻辑（§9）。
 - **C1 config-store**：`config.py` + `models.py`（AppConfig schema）；路由 `GET/PUT /api/config`、`GET/POST /api/config/llm-provider-states(/clear)` → RPC `config:_:get/set` 等。前端 `ConfigPanel.vue` 拆为设置壳 + per-plugin section 贡献点（F2）。
 - **C2 instance-store**：新建（§7.2 bindings、instance state 落点）；同时接管 `viewer.layout.v1` 的服务端持久化（若需要跨设备）——view state 仍走 F6 localStorage。
-- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切（v0.83 百分比化）+ 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方（v0.87 落地：`file:_:ticket`/`ticket:resolve` + gateway `/api/files/raw`）。
+- **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切（v0.83 百分比化）+ 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方（v0.87 落地：`file:_:ticket`/`ticket:resolve` + gateway `/api/files/raw`）。v1.07 增加目录树 `dirs_only` 列表、串行分片 `du` + `du:progress` + `du:cancel`、目录创建与递归删除。
 - **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。admin API：`POST /api/admin/restart`（v0.34 优雅自重启）、`POST /api/admin/build-restart`（v0.37 构建成功后自重启）、`POST /api/admin/schedule-restart`（v0.43：先后台构建、成功才武装等空闲自重启：watchdog 5s 轮询 `chat:_:chats:list` 无 running + `voice:_:sessions` 无活动才触发；构建失败落 `failed` 不武装；`GET` 同路径返回 none/building/armed/failed；`DELETE` 同路径取消/复位（v0.44，armed/building/failed→none，幂等）；状态纯内存）。
 
 ### A.4 viewer.terminal（Phase 2，链路首验）

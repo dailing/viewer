@@ -3,20 +3,20 @@ package fileservice
 import (
 	"context"
 	"errors"
-	"io/fs"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"viewer/sdk/go/busclient"
 )
 
-func TestDirectorySizeDoesNotFollowSymlinks(t *testing.T) {
+func TestDirectorySizeIncrementalChunksAndDoesNotFollowSymlinks(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 3), 0o644); err != nil {
-		t.Fatal(err)
+	for index := 0; index < 300; index++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("%03d.bin", index)), []byte{1}, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
 		t.Fatal(err)
@@ -30,32 +30,23 @@ func TestDirectorySizeDoesNotFollowSymlinks(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "linked-dir")); err != nil {
 		t.Fatal(err)
 	}
-	result, err := directorySize(context.Background(), root)
+	var batches []directorySizeResult
+	result, err := directorySizeIncremental(context.Background(), root, 64, func(partial directorySizeResult) {
+		batches = append(batches, partial)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Size != 10 || result.Files != 2 || result.Directories != 2 || result.Errors != 0 || !result.Complete {
+	if result.Size != 307 || result.Files != 301 || result.Directories != 2 || result.Errors != 0 || !result.Complete || !result.Done {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-}
-
-func TestDirectorySizeReturnsPartialErrors(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "a"), []byte("ok"), 0o644); err != nil {
-		t.Fatal(err)
+	if len(batches) < 5 {
+		t.Fatalf("progress batches = %d, want chunked updates", len(batches))
 	}
-	walk := func(path string, fn fs.WalkDirFunc) error {
-		if err := fn(filepath.Join(path, "unreadable"), nil, errors.New("permission denied")); err != nil {
-			return err
+	for _, batch := range batches {
+		if batch.Done || batch.Complete {
+			t.Fatalf("partial batch marked final: %+v", batch)
 		}
-		return filepath.WalkDir(path, fn)
-	}
-	result, err := directorySizeWithWalker(context.Background(), root, walk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Size != 2 || result.Errors != 1 || result.Complete {
-		t.Fatalf("unexpected partial result: %+v", result)
 	}
 }
 
@@ -67,14 +58,64 @@ func TestDirectorySizeHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestDirectoryRPCCancelFrameStopsJob(t *testing.T) {
-	plugin := &Plugin{}
-	ctx, cancel := context.WithCancel(context.Background())
-	plugin.duJobs.Store("corr-1", cancel)
-	plugin.du(busclient.Frame{Channel: "file:_:du", Value: map[string]any{"_corr": "corr-1", "_cancel": true}})
+func TestDirectorySizerDeduplicatesAndPublishesCompletion(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan directorySizeResult, 10)
+	sizer := newDirectorySizer(func(_ string, value any) error {
+		events <- value.(directorySizeResult)
+		return nil
+	})
+	defer sizer.close()
+	if status := sizer.enqueue(root); status != "queued" {
+		t.Fatalf("first status = %q", status)
+	}
+	if status := sizer.enqueue(root); status != "queued" && status != "running" {
+		t.Fatalf("duplicate status = %q", status)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if !event.Done {
+				continue
+			}
+			if event.Cancelled || event.Size != 2 || event.Files != 1 || !event.Complete {
+				t.Fatalf("unexpected completion: %+v", event)
+			}
+			goto completed
+		case <-deadline:
+			t.Fatal("directory sizing did not complete")
+		}
+	}
+completed:
 	select {
-	case <-ctx.Done():
+	case event := <-events:
+		t.Fatalf("duplicate job published another event: %+v", event)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestDirectorySizerCancelsQueuedPath(t *testing.T) {
+	root := t.TempDir()
+	events := make(chan directorySizeResult, 1)
+	sizer := newDirectorySizer(func(_ string, value any) error {
+		events <- value.(directorySizeResult)
+		return nil
+	})
+	defer sizer.close()
+	sizer.enqueue(root)
+	if !sizer.cancelPath(root) {
+		t.Fatal("queued path was not registered")
+	}
+	select {
+	case event := <-events:
+		if !event.Done || !event.Cancelled || event.Path != root {
+			t.Fatalf("unexpected cancellation: %+v", event)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("du cancellation frame did not stop the walk")
+		t.Fatal("cancellation was not published")
 	}
 }

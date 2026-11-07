@@ -21,7 +21,7 @@ describe("independent file manager and viewer instances", () => {
     const managerId = await managerAdapter().open({ paneType: "file-manager", params: { dir: "/tmp/a" } });
     const viewerId = await viewerAdapter().open({ paneType: "file-viewer", params: { path: "/tmp/a/readme.md" } });
     expect(managerId).not.toBe(viewerId);
-    expect(getManager(managerId)?.state).toEqual({ dir: "/tmp/a", viewerId: null });
+    expect(getManager(managerId)?.state).toEqual({ dir: "/tmp/a", viewerId: null, showHidden: false });
     expect(getViewer(viewerId)?.state.path).toBe("/tmp/a/readme.md");
     expect(getViewer(viewerId)?.state).not.toHaveProperty("dir");
     await viewerAdapter().open({ paneType: "file-viewer", instanceId: viewerId, params: { path: "/tmp/a/other.pdf" } });

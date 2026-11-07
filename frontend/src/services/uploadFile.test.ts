@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { RpcError } from "@viewer/bus-sdk";
-import { uploadFile, UploadConflictError } from "./uploadFile";
+import { uploadFile, uploadFileWithProgress, UploadConflictError } from "./uploadFile";
 
 describe("uploadFile", () => {
   it("requests a scoped ticket and posts the raw File body", async () => {
@@ -33,5 +33,38 @@ describe("uploadFile", () => {
     const bus = { request: vi.fn(async () => ({ url: "/upload" })) };
     await expect(uploadFile(bus, "/", file, false, vi.fn(async () => new Response("exists", { status: 409 })))).rejects.toBeInstanceOf(UploadConflictError);
     await expect(uploadFile(bus, "/", file, false, vi.fn(async () => new Response("denied", { status: 403 })))).rejects.toThrow("HTTP 403");
+  });
+
+  it("reports real XHR upload bytes while posting the original File", async () => {
+    const file = new File(["123456789"], "a.bin");
+    const bus = { request: vi.fn(async () => ({ url: "/upload?ticket=signed" })) };
+    const xhr = {
+      upload: { onprogress: null as ((event: ProgressEvent) => void) | null },
+      open: vi.fn(),
+      setRequestHeader: vi.fn(),
+      send: vi.fn(() => {
+        xhr.upload.onprogress?.({ loaded: 4, total: 9, lengthComputable: true } as ProgressEvent);
+        xhr.status = 201;
+        xhr.responseText = JSON.stringify({ path: "/a.bin", size: 9 });
+        xhr.onload?.({ type: "load" } as ProgressEvent);
+      }),
+      onload: null as ((event: ProgressEvent) => void) | null,
+      onerror: null,
+      onabort: null,
+      status: 0,
+      responseText: "",
+    };
+    const onProgress = vi.fn();
+    await expect(uploadFileWithProgress(
+      bus,
+      "/",
+      file,
+      false,
+      onProgress,
+      () => xhr as unknown as XMLHttpRequest,
+    )).resolves.toEqual({ path: "/a.bin", size: 9 });
+    expect(xhr.open).toHaveBeenCalledWith("POST", "/upload?ticket=signed");
+    expect(xhr.send).toHaveBeenCalledWith(file);
+    expect(onProgress).toHaveBeenCalledWith(4, 9);
   });
 });

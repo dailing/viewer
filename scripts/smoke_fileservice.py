@@ -250,6 +250,17 @@ async def run(args: argparse.Namespace) -> None:
                 "link.json",
             ]
             assert all(not entry["name"].startswith(".") for entry in listing["entries"])
+            with_hidden = await client.request(
+                "file:_:list", {"path": str(listing_path), "show_hidden": True}
+            )
+            assert [entry["name"] for entry in with_hidden["entries"]] == [
+                "A-dir",
+                "z-dir",
+                ".hidden",
+                "a.txt",
+                "B.json",
+                "link.json",
+            ]
             assert all(
                 set(entry)
                 == {

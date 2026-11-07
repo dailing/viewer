@@ -6,16 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode/utf8"
 
 	"viewer/internal/plugins/pluginrpc"
@@ -28,12 +29,16 @@ const DefaultMaxReadBytes int64 = 1024 * 1024
 // maxInlineReplyBytes keeps reply payloads below the kernel frame cap with
 // slack for the reply envelope (channel, ids, trace).
 const maxInlineReplyBytes = protocol.DefaultFrameSize - 4096
-const showHiddenFiles = false
+const (
+	directoryListReadBatch   = 128
+	directoryListDefaultPage = 100
+	maxDirectoryListPage     = 200
+)
 
 var Manifest = busclient.Manifest{
 	ID: "file-service", Version: "0.1.0",
-	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "du": map[string]any{}, "pdfpage": map[string]any{}, "ticket": map[string]any{}, "ticket:resolve": map[string]any{}, "upload:ticket": map[string]any{}, "upload:resolve": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{}},
-	Emits: map[string]any{ChangedChannel: map[string]any{}},
+	Slots: map[string]any{"resolve": map[string]any{}, "read": map[string]any{}, "hash": map[string]any{}, "list": map[string]any{}, "du": map[string]any{}, "du:cancel": map[string]any{}, "mkdir": map[string]any{}, "delete": map[string]any{}, "pdfpage": map[string]any{}, "ticket": map[string]any{}, "ticket:resolve": map[string]any{}, "upload:ticket": map[string]any{}, "upload:resolve": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{}},
+	Emits: map[string]any{ChangedChannel: map[string]any{}, DirectorySizeProgressChannel: map[string]any{}},
 }
 
 type Plugin struct {
@@ -43,7 +48,7 @@ type Plugin struct {
 	tickets       *ticketIssuer
 	uploadTickets *uploadTicketIssuer
 	watcher       *fileWatcher
-	duJobs        sync.Map
+	sizer         *directorySizer
 }
 
 func New(dataDir string) *Plugin {
@@ -52,12 +57,18 @@ func New(dataDir string) *Plugin {
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	client := busclient.New(kernelWS, Manifest, busclient.WithManaged(managed))
+	p.sizer = newDirectorySizer(func(channel string, value any) error {
+		return client.Publish(context.Background(), channel, value)
+	})
 	for pattern, handler := range map[string]func(busclient.Frame){
 		"file:_:resolve":        p.resolve,
 		"file:_:read":           p.read,
 		"file:_:hash":           p.hash,
 		"file:_:list":           p.list,
 		"file:_:du":             p.du,
+		"file:_:du:cancel":      p.duCancel,
+		"file:_:mkdir":          p.mkdir,
+		"file:_:delete":         p.delete,
 		"file:_:pdfpage":        p.pdfpage,
 		"file:_:ticket":         p.ticket,
 		"file:_:ticket:resolve": p.ticketResolve,
@@ -67,6 +78,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"file:_:unwatch":        p.unwatch,
 	} {
 		if _, err := client.Subscribe(pattern, handler); err != nil {
+			p.sizer.close()
 			_ = client.Close()
 			return err
 		}
@@ -79,6 +91,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	})
 	if err != nil {
 		p.client = nil
+		p.sizer.close()
 		_ = client.Close()
 		return err
 	}
@@ -88,6 +101,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		p.watcher.close()
 		p.watcher = nil
 		p.client = nil
+		p.sizer.close()
 		_ = client.Close()
 		return err
 	}
@@ -96,7 +110,10 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 }
 
 func (p *Plugin) Close() error {
-	cancelDirectoryJobs(&p.duJobs)
+	if p.sizer != nil {
+		p.sizer.close()
+		p.sizer = nil
+	}
 	if p.watcher != nil {
 		p.watcher.close()
 		p.watcher = nil
@@ -244,6 +261,84 @@ type fileEntry struct {
 	LinkTarget *string  `json:"link_target"`
 }
 
+type directoryListPage struct {
+	Entries    []fileEntry
+	NextOffset int
+	HasMore    bool
+}
+
+func listPagination(value map[string]any) (offset int, limit int, err error) {
+	limit = directoryListDefaultPage
+	if raw, exists := value["offset"]; exists {
+		number, ok := raw.(float64)
+		if !ok || number < 0 || math.Trunc(number) != number {
+			return 0, 0, errors.New("offset must be a non-negative integer")
+		}
+		offset = int(number)
+	}
+	if raw, exists := value["limit"]; exists {
+		number, ok := raw.(float64)
+		if !ok || math.Trunc(number) != number || number < 1 || number > maxDirectoryListPage {
+			return 0, 0, fmt.Errorf("limit must be an integer between 1 and %d", maxDirectoryListPage)
+		}
+		limit = int(number)
+	}
+	return offset, limit, nil
+}
+
+// listDirectoryPage streams native directory order and stats only the returned
+// page. Offset counts visible entries after hidden and dirs_only filtering; no
+// full-size listing or unbounded inline response is constructed.
+func listDirectoryPage(path string, dirsOnly bool, showHidden bool, offset int, limit int) (directoryListPage, error) {
+	page := directoryListPage{Entries: make([]fileEntry, 0, limit), NextOffset: offset}
+	directory, err := os.Open(path)
+	if err != nil {
+		return page, err
+	}
+	defer directory.Close()
+	skipped := 0
+	for {
+		children, readErr := directory.ReadDir(directoryListReadBatch)
+		for _, child := range children {
+			if !showHidden && strings.HasPrefix(child.Name(), ".") {
+				continue
+			}
+			if dirsOnly && !child.IsDir() {
+				continue
+			}
+			if skipped < offset {
+				skipped++
+				continue
+			}
+			if len(page.Entries) >= limit {
+				sort.SliceStable(page.Entries, func(left, right int) bool {
+					if page.Entries[left].IsDir != page.Entries[right].IsDir {
+						return page.Entries[left].IsDir
+					}
+					return strings.ToLower(page.Entries[left].Name) < strings.ToLower(page.Entries[right].Name)
+				})
+				page.HasMore = true
+				return page, nil
+			}
+			page.Entries = append(page.Entries, entryFor(filepath.Join(path, child.Name())))
+			page.NextOffset++
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return page, readErr
+		}
+	}
+	sort.SliceStable(page.Entries, func(left, right int) bool {
+		if page.Entries[left].IsDir != page.Entries[right].IsDir {
+			return page.Entries[left].IsDir
+		}
+		return strings.ToLower(page.Entries[left].Name) < strings.ToLower(page.Entries[right].Name)
+	})
+	return page, nil
+}
+
 func (p *Plugin) list(frame busclient.Frame) {
 	if pluginrpc.Cancelled(frame) {
 		return
@@ -263,6 +358,13 @@ func (p *Plugin) list(frame busclient.Frame) {
 		p.replyError(frame, "invalid_request", "invalid path")
 		return
 	}
+	dirsOnly, _ := value["dirs_only"].(bool)
+	showHidden, _ := value["show_hidden"].(bool)
+	offset, limit, paginationErr := listPagination(value)
+	if paginationErr != nil {
+		p.replyError(frame, "invalid_request", paginationErr.Error())
+		return
+	}
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		p.replyError(frame, "not_found", "directory not found: "+path)
@@ -276,25 +378,15 @@ func (p *Plugin) list(frame busclient.Frame) {
 		p.replyError(frame, "not_directory", "path is not a directory: "+path)
 		return
 	}
-	children, err := os.ReadDir(path)
-	if err != nil {
-		p.replyError(frame, "read_error", err.Error())
+	page, pageErr := listDirectoryPage(path, dirsOnly, showHidden, offset, limit)
+	if pageErr != nil {
+		p.replyError(frame, "read_error", pageErr.Error())
 		return
 	}
-	entries := make([]fileEntry, 0, len(children))
-	for _, child := range children {
-		if !showHiddenFiles && strings.HasPrefix(child.Name(), ".") {
-			continue
-		}
-		entries = append(entries, entryFor(filepath.Join(path, child.Name())))
-	}
-	sort.SliceStable(entries, func(left, right int) bool {
-		if entries[left].IsDir != entries[right].IsDir {
-			return entries[left].IsDir
-		}
-		return strings.ToLower(entries[left].Name) < strings.ToLower(entries[right].Name)
+	p.reply(frame, map[string]any{
+		"path": path, "entries": page.Entries, "offset": offset, "limit": limit,
+		"next_offset": page.NextOffset, "has_more": page.HasMore,
 	})
-	p.reply(frame, map[string]any{"path": path, "entries": entries})
 }
 
 func entryFor(path string) fileEntry {

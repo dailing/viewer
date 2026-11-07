@@ -15,6 +15,10 @@ export interface FileEntry {
 export interface DirectoryListing {
   path: string;
   entries: FileEntry[];
+  offset?: number;
+  limit?: number;
+  next_offset?: number;
+  has_more?: boolean;
 }
 
 export type PreviewKind = "image" | "markdown" | "html" | "text" | "pdf" | "latex" | "notebook";

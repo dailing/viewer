@@ -1,5 +1,5 @@
-/** Server-synced File Manager instances. Directory and paired viewer are
- * instance state; the File Viewer plugin owns all preview state. */
+/** Server-synced File Manager instances. Directory, hidden-entry visibility and
+ * paired viewer are instance state; the File Viewer plugin owns all preview state. */
 import { reactive } from "vue";
 import type { BusFrame } from "@viewer/bus-sdk";
 import { bus } from "../../shell/bus";
@@ -8,6 +8,7 @@ import type { PluginCtx } from "../../shell/ctx";
 export interface FileManagerState {
   dir: string;
   viewerId: string | null;
+  showHidden: boolean;
 }
 
 export interface FileManagerInstance {
@@ -19,7 +20,7 @@ export interface FileManagerInstance {
 
 const PLUGIN_ID = "file-manager";
 const MAILBOX_PREFIX = "instance-store:file-manager:";
-const defaultState = (): FileManagerState => ({ dir: "", viewerId: null });
+const defaultState = (): FileManagerState => ({ dir: "", viewerId: null, showHidden: false });
 export const instances = reactive<FileManagerInstance[]>([]);
 
 function toWire(instance: FileManagerInstance): Record<string, unknown> {

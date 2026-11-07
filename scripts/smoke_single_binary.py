@@ -171,6 +171,9 @@ async def run(args: argparse.Namespace) -> None:
             )
             print("PASS gateway /ws registry contains all 12 resident plugins")
 
+            # Startup traffic can exceed the snapshot's 800 KiB response budget.
+            # Clear it so this assertion checks the operations exercised below.
+            await gateway.request("bus-inspector:_:clear")
             await gateway.request(
                 "config:_:set",
                 {"plugin": "m4-smoke", "key": "answer", "value": "persisted-value"},
@@ -205,9 +208,21 @@ async def run(args: argparse.Namespace) -> None:
             assert [(entry["name"], entry["size"]) for entry in listing["entries"]] == [
                 ("large.bin", len(upload_content))
             ]
-            sized = await gateway.request("file:_:du", {"path": str(upload_dir)}, timeout=10)
+            size_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+            async def size_progress(frame: dict[str, Any]) -> None:
+                await size_events.put(frame["value"])
+
+            await gateway.subscribe("file:_:du:progress", size_progress)
+            queued = await gateway.request("file:_:du", {"path": str(upload_dir)}, timeout=10)
+            assert queued["status"] in {"queued", "running"}
+            while True:
+                sized = await asyncio.wait_for(size_events.get(), 10)
+                if sized["path"] == str(upload_dir) and sized["done"]:
+                    break
             assert sized["size"] == len(upload_content) and sized["files"] == 1
             assert sized["directories"] == 1 and sized["complete"] is True
+            await gateway.unsubscribe("file:_:du:progress", size_progress)
             read_ticket = await gateway.request("file:_:ticket", {"path": str(upload_dir / "large.bin")})
             download_url = f"http://127.0.0.1:{gateway_port}{read_ticket['url']}&download=1"
             status, downloaded, headers = await asyncio.to_thread(http_bytes, download_url)
@@ -241,7 +256,35 @@ async def run(args: argparse.Namespace) -> None:
             status, _, _ = await asyncio.to_thread(http_bytes, overwrite_url, replacement)
             assert status == 201 and (upload_dir / "large.bin").read_bytes() == replacement
             assert not list(upload_dir.glob("*.upload-*"))
-            print("PASS file upload/list/du/download/conflict/ticket-separation/overwrite")
+            made = await gateway.request(
+                "file:_:mkdir", {"dir": str(upload_dir), "name": "nested"}
+            )
+            assert made["is_dir"] is True and made["path"] == str(upload_dir / "nested")
+            (upload_dir / "nested" / "child.txt").write_text("remove me")
+            directories_only = await gateway.request(
+                "file:_:list", {"path": str(upload_dir), "dirs_only": True}
+            )
+            assert [entry["name"] for entry in directories_only["entries"]] == ["nested"]
+            removed = await gateway.request("file:_:delete", {"path": made["path"]})
+            assert removed["deleted"] is True and not (upload_dir / "nested").exists()
+            paged_dir = upload_dir / "paged"
+            paged_dir.mkdir()
+            for index in range(205):
+                (paged_dir / f"{index:03d}.txt").write_bytes(b"x")
+            paged_entries: list[dict[str, Any]] = []
+            offset = 0
+            for expected_count in (100, 100, 5):
+                page = await gateway.request(
+                    "file:_:list", {"path": str(paged_dir), "offset": offset, "limit": 100}
+                )
+                assert len(page["entries"]) == expected_count
+                assert page["next_offset"] == offset + expected_count
+                assert page["has_more"] is (expected_count == 100)
+                paged_entries.extend(page["entries"])
+                offset = page["next_offset"]
+            assert len({entry["path"] for entry in paged_entries}) == 205
+            await gateway.request("file:_:delete", {"path": str(paged_dir)})
+            print("PASS file upload/list-pagination/du-progress/download/conflict/ticket-separation/overwrite/mkdir/dirs-only/delete")
 
             outputs: dict[str, list[str]] = {}
 
@@ -262,10 +305,22 @@ async def run(args: argparse.Namespace) -> None:
             print("PASS terminal create/write/output/close")
 
             await asyncio.sleep(0.15)
-            snapshot = await gateway.request(
-                "bus-inspector:_:snapshot", {"limit": 1000}, timeout=5
-            )
-            channels = {entry["channel"] for entry in snapshot["entries"]}
+            channels: set[str] = set()
+            before_seq = None
+            # Responses are newest-first and capped by encoded bytes, not just
+            # entry count; page backward instead of assuming one 1000-row page.
+            for _ in range(50):
+                snapshot_request: dict[str, Any] = {"limit": 1000}
+                if before_seq is not None:
+                    snapshot_request["before_seq"] = before_seq
+                snapshot = await gateway.request(
+                    "bus-inspector:_:snapshot", snapshot_request, timeout=5
+                )
+                entries = snapshot["entries"]
+                if not entries:
+                    break
+                channels.update(entry["channel"] for entry in entries)
+                before_seq = entries[-1]["seq"]
             required_channels = {
                 "config:_:set",
                 "config:_:get",

@@ -32,7 +32,6 @@ CORE_IDS = {
     "instance-store",
     "file-service",
     "chat",
-    "viewer.loop",
     "voice",
     "terminal",
     "supervisor",

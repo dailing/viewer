@@ -65,6 +65,34 @@ func TestRestartHandler(t *testing.T) {
 	})
 }
 
+func TestRunReleaseBuildUsesRepoOverrideAndCurrentExecutable(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result := filepath.Join(t.TempDir(), "output")
+	t.Setenv("VIEWER_REPO_ROOT", repo)
+	t.Setenv("VIEWER_BUILD_TEST_RESULT", result)
+	script := []byte("#!/usr/bin/env bash\nprintf '%s' \"$1\" > \"$VIEWER_BUILD_TEST_RESULT\"\n")
+	if err := os.WriteFile(filepath.Join(repo, "web", "build-release.sh"), script, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runReleaseBuild(); err != nil {
+		t.Fatalf("runReleaseBuild: %v", err)
+	}
+	got, err := os.ReadFile(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != exe {
+		t.Fatalf("build output = %q, want running executable %q", got, exe)
+	}
+}
+
 func TestBrowserHello(t *testing.T) {
 	const conn = "11111111-1111-4111-8111-111111111111"
 	version, got, err := browserHello(websocket.MessageText, []byte(`{"type":"hello","protocol_version":1,"conn":"`+conn+`"}`))
@@ -89,9 +117,12 @@ func TestStaticFS(t *testing.T) {
 	}})
 
 	root := httptest.NewRecorder()
-	server.serveStatic(root, httptest.NewRequest(http.MethodGet, "/", nil))
+	server.serveHTTP(root, httptest.NewRequest(http.MethodGet, "/", nil))
 	if root.Code != http.StatusOK || root.Body.String() != "<h1>viewer</h1>" {
 		t.Fatalf("GET / = %d %q", root.Code, root.Body.String())
+	}
+	if root.Header().Get("X-Viewer-Process") == "" {
+		t.Fatal("GET / is missing the restart generation header")
 	}
 
 	script := httptest.NewRecorder()

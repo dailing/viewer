@@ -1,0 +1,206 @@
+package chat
+
+import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+	"unicode/utf8"
+)
+
+const (
+	decisionOpenTag       = "<viewer-decision>"
+	decisionCloseTag      = "</viewer-decision>"
+	decisionMarkerMaxByte = 16 * 1024
+)
+
+var decisionKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+type decisionMarker struct {
+	Question    string
+	OptionsJSON string
+	Display     string
+	Kind        string
+	Tone        string
+	Warning     string
+	Start       int
+	End         int
+}
+
+type decisionSourceLine struct {
+	text    string
+	start   int
+	end     int
+	fullEnd int
+}
+
+func decisionSourceLines(text string) []decisionSourceLine {
+	lines := make([]decisionSourceLine, 0, strings.Count(text, "\n")+1)
+	for start := 0; start < len(text); {
+		end := strings.IndexByte(text[start:], '\n')
+		fullEnd := len(text)
+		if end >= 0 {
+			end += start
+			fullEnd = end + 1
+		} else {
+			end = len(text)
+		}
+		contentEnd := end
+		if contentEnd > start && text[contentEnd-1] == '\r' {
+			contentEnd--
+		}
+		lines = append(lines, decisionSourceLine{text: text[start:contentEnd], start: start, end: contentEnd, fullEnd: fullEnd})
+		start = fullEnd
+	}
+	return lines
+}
+
+// markdownFence describes a CommonMark-style fenced code delimiter. It is
+// used only to exclude markers in code; it never rewrites the source text.
+func markdownFence(line string) (marker byte, size int, rest string, ok bool) {
+	indent := 0
+	for indent < len(line) && indent < 4 && line[indent] == ' ' {
+		indent++
+	}
+	if indent > 3 || indent >= len(line) || line[indent] != '`' && line[indent] != '~' {
+		return 0, 0, "", false
+	}
+	marker = line[indent]
+	size = 0
+	for indent+size < len(line) && line[indent+size] == marker {
+		size++
+	}
+	if size < 3 {
+		return 0, 0, "", false
+	}
+	rest = line[indent+size:]
+	if marker == '`' && strings.ContainsRune(rest, '`') {
+		return 0, 0, "", false
+	}
+	return marker, size, rest, true
+}
+
+func parseDecisionMarker(text string) *decisionMarker {
+	lines := decisionSourceLines(text)
+	var opening, closing *decisionSourceLine
+	candidates := 0
+	invalid := false
+	var fenceMarker byte
+	fenceSize := 0
+	for index := range lines {
+		line := &lines[index]
+		if fenceMarker != 0 {
+			marker, size, rest, ok := markdownFence(line.text)
+			if ok && marker == fenceMarker && size >= fenceSize && strings.TrimSpace(rest) == "" {
+				fenceMarker = 0
+				fenceSize = 0
+			}
+			continue
+		}
+		if marker, size, _, ok := markdownFence(line.text); ok {
+			fenceMarker = marker
+			fenceSize = size
+			continue
+		}
+		if !strings.Contains(line.text, decisionOpenTag) && !strings.Contains(line.text, decisionCloseTag) {
+			continue
+		}
+		candidates++
+		switch line.text {
+		case decisionOpenTag:
+			if opening != nil || closing != nil {
+				invalid = true
+			} else {
+				opening = line
+			}
+		case decisionCloseTag:
+			if opening == nil || closing != nil {
+				invalid = true
+			} else {
+				closing = line
+			}
+		default:
+			invalid = true
+		}
+	}
+	if invalid || candidates == 0 || opening == nil || closing == nil || candidates != 2 || fenceMarker != 0 {
+		return nil
+	}
+	if strings.TrimSpace(text[closing.fullEnd:]) != "" {
+		return nil
+	}
+	if closing.end-opening.start > decisionMarkerMaxByte {
+		return nil
+	}
+	body := text[opening.fullEnd:closing.start]
+	if !utf8.ValidString(body) {
+		return nil
+	}
+	values := make(map[string][]string)
+	for _, line := range decisionSourceLines(body) {
+		if strings.Trim(line.text, " \t\r") == "" {
+			continue
+		}
+		colon := strings.IndexByte(line.text, ':')
+		if colon <= 0 {
+			return nil
+		}
+		key := line.text[:colon]
+		if !decisionKeyPattern.MatchString(key) {
+			return nil
+		}
+		value := strings.Trim(line.text[colon+1:], " \t\r")
+		switch key {
+		case "version", "kind", "question", "option", "display", "tone":
+		default:
+			return nil
+		}
+		values[key] = append(values[key], value)
+	}
+	for key, entries := range values {
+		if key != "option" && len(entries) != 1 {
+			return nil
+		}
+	}
+	if len(values["version"]) != 1 || values["version"][0] != "1" || len(values["kind"]) != 1 || values["kind"][0] != "choice" {
+		return nil
+	}
+	question := ""
+	if len(values["question"]) == 1 {
+		question = values["question"][0]
+	}
+	if utf8.RuneCountInString(question) > 2000 || len(values["option"]) > 8 {
+		return nil
+	}
+	options := make([]map[string]string, 0, len(values["option"]))
+	for index, option := range values["option"] {
+		if option == "" || utf8.RuneCountInString(option) > 500 {
+			return nil
+		}
+		options = append(options, map[string]string{"id": fmt.Sprintf("option-%d", index+1), "label": option})
+	}
+	display, tone := "auto", "neutral"
+	warnings := []string{}
+	if entries := values["display"]; len(entries) == 1 {
+		switch entries[0] {
+		case "auto", "buttons", "list":
+			display = entries[0]
+		default:
+			warnings = append(warnings, "invalid display; using auto")
+		}
+	}
+	if entries := values["tone"]; len(entries) == 1 {
+		switch entries[0] {
+		case "neutral", "warning":
+			tone = entries[0]
+		default:
+			warnings = append(warnings, "invalid tone; using neutral")
+		}
+	}
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return nil
+	}
+	return &decisionMarker{Question: question, OptionsJSON: string(encoded), Display: display, Kind: "choice", Tone: tone,
+		Warning: strings.Join(warnings, "; "), Start: opening.start, End: closing.end}
+}

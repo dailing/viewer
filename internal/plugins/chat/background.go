@@ -16,7 +16,7 @@ package chat
 // background work, in which case the line re-holds.
 //
 // Scope: the serial line path only. Parallel (send-now) turns fork
-// auto-branches with their own sessions and never hold a line.
+// auto-taskes with their own sessions and never hold a line.
 
 import (
 	"context"
@@ -41,7 +41,7 @@ type backgroundProcess struct {
 // completion message) and consecutive poll-error count (release tolerance).
 type backgroundBlock struct {
 	chatID    string
-	branchID  string
+	taskID    string
 	role      SuperRole
 	pluginID  string
 	sessionID string
@@ -56,7 +56,7 @@ type backgroundBlock struct {
 type relaySession struct {
 	pluginID  string
 	sessionID string
-	branch    string
+	task      string
 	role      SuperRole
 }
 
@@ -163,12 +163,12 @@ func (p *Plugin) holdForBackground(key string, sessions []relaySession) bool {
 		}
 		p.mu.Lock()
 		p.background[key] = &backgroundBlock{
-			chatID: strings.SplitN(key, "\x00", 2)[0], branchID: session.branch,
+			chatID: strings.SplitN(key, "\x00", 2)[0], taskID: session.task,
 			role: session.role, pluginID: session.pluginID, sessionID: session.sessionID,
 			processes: processes, since: nowMillis(),
 		}
 		p.mu.Unlock()
-		slog.Info("chat line held for background processes", "chat_id", strings.SplitN(key, "\x00", 2)[0], "branch", session.branch, "role_id", session.role.ID, "session_id", session.sessionID, "processes", len(processes))
+		slog.Info("chat line held for background processes", "chat_id", strings.SplitN(key, "\x00", 2)[0], "task", session.task, "role_id", session.role.ID, "session_id", session.sessionID, "processes", len(processes))
 		p.publishBackground(key)
 		p.ensureBackgroundWatcher()
 		return true
@@ -270,7 +270,7 @@ func (p *Plugin) completeBackground(key string) {
 	delete(p.background, key)
 	p.mu.Unlock()
 	p.publishBackground(key)
-	slog.Info("chat background processes finished; dispatching completion", "chat_id", block.chatID, "branch", block.branchID, "session_id", block.sessionID, "held_ms", nowMillis()-block.since)
+	slog.Info("chat background processes finished; dispatching completion", "chat_id", block.chatID, "task", block.taskID, "session_id", block.sessionID, "held_ms", nowMillis()-block.since)
 	chat, err := p.store.chat(block.chatID)
 	if err != nil || chat == nil {
 		p.releaseBusy([]string{key})
@@ -284,33 +284,23 @@ func (p *Plugin) completeBackground(key string) {
 	}
 	message := backgroundCompletionText(block)
 	dispatchID := newID()
-	user := &Message{ID: newID(), ChatID: chat.ID, TurnID: dispatchID, Role: "user", Text: message, SenderFrom: "user", CreatedAt: nowMillis()}
+	user := &Message{ID: newID(), ChatID: chat.ID, TaskID: block.taskID, TurnID: dispatchID, Role: "user", Text: message, SenderFrom: "user", SourcePlugin: "chat", CreatedAt: nowMillis()}
 	if err := p.store.addMessage(user); err != nil {
 		slog.Error("chat background completion message persistence failed", "chat_id", block.chatID, "error", err)
 		p.releaseBusy([]string{key})
 		return
 	}
 	p.retainVisibleMessage(user, "", "")
-	batchID, inputNode, stale, err := p.intakeBatch(chat.ID, block.branchID, dispatchID)
-	if err != nil {
-		slog.Error("chat background completion intake failed", "chat_id", block.chatID, "error", err)
-		p.releaseBusy([]string{key})
-		return
-	}
-	target := relayTarget{role: block.role, resume: block.sessionID, branch: block.branchID, batch: batchID, inputNode: inputNode}
-	if stale {
-		target.resume = ""
-	}
-	p.publishMessage(user, block.branchID)
-	// The completion resume inherits the line's raw state (set by the last
-	// dispatch on it): on a raw line the synthetic prompt stays injection-free.
+	target := relayTarget{role: block.role, resume: block.sessionID, task: block.taskID}
+	p.publishMessage(user, block.taskID)
+	// Completion resumes the same Task/session and inherits its raw mode.
 	p.mu.Lock()
 	raw := p.lineRaw[key]
 	p.mu.Unlock()
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		sessions := p.runRelay(*chat, workspace, []relayTarget{target}, message, user.CreatedAt, stale, false, raw, dispatchID)
+		sessions := p.runRelay(*chat, workspace, []relayTarget{target}, message, user.CreatedAt, false, false, raw, dispatchID)
 		p.releaseBusyOrHold([]string{key}, sessions)
 	}()
 }
@@ -352,35 +342,35 @@ func (p *Plugin) publishBackground(key string) {
 	block := p.background[key]
 	p.mu.Unlock()
 	chatID := strings.SplitN(key, "\x00", 2)[0]
-	branchID := ""
+	taskID := ""
 	if parts := strings.SplitN(key, "\x00", 3); len(parts) == 3 {
-		branchID = parts[2]
+		taskID = parts[2]
 	}
-	payload := map[string]any{"chat_id": chatID, "branch_id": branchID, "active": false}
+	payload := map[string]any{"chat_id": chatID, "task_id": taskID, "active": false}
 	if block != nil {
 		processes := make([]map[string]any, 0, len(block.processes))
 		for _, process := range block.processes {
 			processes = append(processes, map[string]any{"session_id": process.SessionID, "command": process.Command, "pid": process.PID})
 		}
-		payload = map[string]any{"chat_id": chatID, "active": true, "branch_id": block.branchID, "session_id": block.sessionID, "role_id": block.role.ID, "role_name": block.role.Name, "processes": processes, "since": block.since}
+		payload = map[string]any{"chat_id": chatID, "active": true, "task_id": block.taskID, "session_id": block.sessionID, "role_id": block.role.ID, "role_name": block.role.Name, "processes": processes, "since": block.since}
 	}
 	p.publish("chat:_:background", payload)
 }
 
-// backgroundBranchIDs returns the named lines currently held by live
-// background processes. chats:list exposes this snapshot so branch-tab
+// backgroundTaskIDs returns the named lines currently held by live
+// background processes. chats:list exposes this snapshot so task-tab
 // spinners survive a pane reload after the originating turn has ended.
-func (p *Plugin) backgroundBranchIDs(chatID string) []string {
+func (p *Plugin) backgroundTaskIDs(chatID string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	seen := map[string]bool{}
 	result := []string{}
 	for _, block := range p.background {
-		if block.chatID != chatID || block.branchID == "" || seen[block.branchID] {
+		if block.chatID != chatID || block.taskID == "" || seen[block.taskID] {
 			continue
 		}
-		seen[block.branchID] = true
-		result = append(result, block.branchID)
+		seen[block.taskID] = true
+		result = append(result, block.taskID)
 	}
 	sort.Strings(result)
 	return result

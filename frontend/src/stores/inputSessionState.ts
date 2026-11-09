@@ -12,7 +12,8 @@ export interface InputSession {
   params?: unknown;
   label: string;
   text: string;
-  branchId: string;
+  taskId: string;
+  continueTurnId: string;
   mode: InputSessionMode;
   queuedDispatchId: string;
   draftBeforeQueueEdit?: string;
@@ -20,9 +21,9 @@ export interface InputSession {
   selectedRoleIds: string[];
   forceNewSession: boolean;
   parallel: boolean;
-  /** Raw state for the currently bound branch, mirrored in rawByBranch. */
+  /** Raw state for the currently bound branch, mirrored in rawByTask. */
   raw: boolean;
-  rawByBranch: Record<string, boolean>;
+  rawByTask: Record<string, boolean>;
   pinned: boolean;
   phase: InputSessionPhase;
   error: string;
@@ -30,7 +31,8 @@ export interface InputSession {
 }
 
 export interface InputSessionIntent {
-  branchId: string;
+  taskId: string;
+  continueTurnId: string;
   mode: InputSessionMode;
   queuedDispatchId: string;
   draftBeforeQueueEdit?: string;
@@ -47,14 +49,15 @@ function bump(session: InputSession): void {
 
 export function inputSessionIntent(session: InputSession): InputSessionIntent {
   return {
-    branchId: session.branchId ?? "",
+    taskId: session.taskId ?? "",
+    continueTurnId: session.continueTurnId ?? "",
     mode: session.mode ?? "dispatch",
     queuedDispatchId: session.queuedDispatchId ?? "",
     draftBeforeQueueEdit: session.draftBeforeQueueEdit,
     selectedRoleIds: [...session.selectedRoleIds],
     forceNewSession: session.forceNewSession,
     parallel: session.parallel,
-    raw: session.rawByBranch?.[session.branchId ?? ""] === true || session.raw === true,
+    raw: session.rawByTask?.[session.taskId ?? ""] === true || session.raw === true,
   };
 }
 
@@ -77,33 +80,34 @@ export function setInputSessionText(session: InputSession, text: string): void {
   bump(session);
 }
 
-export function setInputSessionBranch(session: InputSession, branchId: string): void {
-  if ((session.branchId ?? "") === branchId) return;
+export function setInputSessionTask(session: InputSession, taskId: string): void {
+  if ((session.taskId ?? "") === taskId) return;
   // A queued edit belongs to its original entry even if the visible tabs
   // change. Restore the ordinary draft before re-binding the input.
   if (session.mode === "queued-update") cancelQueuedInputEdit(session);
-  session.branchId = branchId;
-  session.raw = session.rawByBranch?.[branchId] === true;
+  session.taskId = taskId;
+  session.continueTurnId = "";
+  session.raw = session.rawByTask?.[taskId] === true;
   bump(session);
 }
 
-export function setInputSessionRaw(session: InputSession, branchId: string, raw: boolean): void {
-  session.rawByBranch ??= {};
-  if (raw) session.rawByBranch[branchId] = true;
-  else delete session.rawByBranch[branchId];
-  if ((session.branchId ?? "") === branchId) session.raw = raw;
+export function setInputSessionRaw(session: InputSession, taskId: string, raw: boolean): void {
+  session.rawByTask ??= {};
+  if (raw) session.rawByTask[taskId] = true;
+  else delete session.rawByTask[taskId];
+  if ((session.taskId ?? "") === taskId) session.raw = raw;
   bump(session);
 }
 
 export function beginQueuedInputEdit(
   session: InputSession,
-  branchId: string,
+  taskId: string,
   dispatchId: string,
   text: string,
 ): void {
   if (session.mode !== "queued-update") session.draftBeforeQueueEdit = session.text;
-  session.branchId = branchId;
-  session.raw = session.rawByBranch?.[branchId] === true;
+  session.taskId = taskId;
+  session.raw = session.rawByTask?.[taskId] === true;
   session.mode = "queued-update";
   session.queuedDispatchId = dispatchId;
   session.text = text;
@@ -141,15 +145,17 @@ export function clearInputSession(session: InputSession): void {
   session.draftBeforeQueueEdit = undefined;
   session.forceNewSession = false;
   session.parallel = false;
+  session.continueTurnId = "";
   session.phase = "idle";
   session.error = "";
   bump(session);
 }
 
 function sameUnchangedIntent(session: InputSession, sent: InputSession): boolean {
-  const sameTarget = (session.branchId ?? "") === (sent.branchId ?? "")
+  const sameTarget = (session.taskId ?? "") === (sent.taskId ?? "")
     && (session.mode ?? "dispatch") === (sent.mode ?? "dispatch")
     && (session.queuedDispatchId ?? "") === (sent.queuedDispatchId ?? "")
+    && (session.continueTurnId ?? "") === (sent.continueTurnId ?? "")
     && (session.raw === true) === (sent.raw === true);
   if (!sameTarget) return false;
   // The backend's draft:sync empty frame may acknowledge the send before its

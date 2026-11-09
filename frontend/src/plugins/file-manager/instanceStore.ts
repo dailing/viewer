@@ -4,6 +4,7 @@ import { reactive } from "vue";
 import type { BusFrame } from "@viewer/bus-sdk";
 import { bus } from "../../shell/bus";
 import type { PluginCtx } from "../../shell/ctx";
+import { randomUUID } from "../../utils/randomUUID";
 
 export interface FileManagerState {
   dir: string;
@@ -102,7 +103,7 @@ export function getInstance(id: string): FileManagerInstance | undefined {
   return instances.find((entry) => entry.id === id);
 }
 export function createInstance(seed?: Partial<FileManagerState>, label = "文件管理器"): FileManagerInstance {
-  const instance: FileManagerInstance = { id: crypto.randomUUID(), pinned: false, label, state: { ...defaultState(), ...seed } };
+  const instance: FileManagerInstance = { id: randomUUID(), pinned: false, label, state: { ...defaultState(), ...seed } };
   instances.push(instance);
   pushRemote(instance);
   return instance;

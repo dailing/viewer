@@ -1,13 +1,11 @@
 package chat
 
-// Message citations: a user message may carry @<message id> tokens — the
-// pane's per-message cite button copies the token to the clipboard, so it
-// can be pasted into any chat/branch. At dispatch the tokens are resolved
-// against the messages table GLOBALLY (no chat filter), so citations work
-// across branches and across chats. The cited messages' visible text (user
-// and assistant message rows only — never tool calls, reasoning, or other
-// activity blocks) is injected into the prompt directly before the user
-// query, explicitly labeled as cited content.
+// Message citations: a user message may carry @<message id> tokens. The
+// per-message cite button copies a token that can be pasted into any Chat or
+// Task. Dispatch resolves tokens against the messages table globally, so
+// citations work across Tasks and Chats. Only visible user/assistant message
+// rows are eligible — never tool calls, reasoning, or other activity blocks.
+// The cited text is injected into the prompt directly before the user query, explicitly labeled as cited content.
 
 import (
 	"fmt"

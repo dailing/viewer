@@ -36,6 +36,11 @@ export interface PluginInstanceAdapter {
   open(request: InstanceOpenRequest): string | Promise<string>;
 }
 
+export interface DockInstanceGroup {
+  id: string;
+  label: string;
+}
+
 /** One running instance shown in the shell Dock. */
 export interface DockInstance {
   id: string;
@@ -45,6 +50,8 @@ export interface DockInstance {
   state?: string;
   /** Per-instance icon override; falls back to the provider's icon. */
   icon?: string;
+  /** Optional weak grouping header; the instance label remains the primary text. */
+  group?: DockInstanceGroup;
 }
 
 /**
@@ -61,6 +68,8 @@ export interface DockProvider {
   instances: DockInstance[];
   /** "+" menu action; returning an instance id opens its pane. */
   create?: () => Promise<string | void> | string | void;
+  /** Group-row action; creates an instance inside the specified weak group. */
+  createForGroup?: (groupId: string) => Promise<string | void> | string | void;
   /** Remove an instance (Dock hover ×); absent = not removable. */
   remove?: (instanceId: string) => Promise<void> | void;
 }
@@ -74,6 +83,8 @@ export interface DockAction {
   id: string;
   icon: () => string;
   title: () => string;
+  /** Optional compact numeric/text badge. */
+  badge?: () => string | number;
   /** Optional highlighted state (e.g. listening). */
   active?: () => boolean;
   onClick: () => void;

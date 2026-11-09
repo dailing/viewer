@@ -145,11 +145,12 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 	turnID, roleID, roleName, provider := update.TurnID, current.roleID, current.roleName, current.providerKey
 	p.mu.Unlock()
 	occurredAt := nowMillis()
-	event := &TurnEvent{ID: newID(), ChatID: chatIDForTurn(p, turnID), TurnID: turnID, RoleID: roleID, Provider: provider, SessionID: update.SessionID, Seq: update.Seq, Kind: fallback(update.Kind, "unknown"), RawJSON: update.RawJSON, OccurredAt: occurredAt}
+	taskID, _ := p.taskForTurn(turnID)
+	event := &TurnEvent{ID: newID(), ChatID: chatIDForTurn(p, turnID), TaskID: taskID, TurnID: turnID, RoleID: roleID, Provider: provider, SessionID: update.SessionID, Seq: update.Seq, Kind: fallback(update.Kind, "unknown"), RawJSON: update.RawJSON, OccurredAt: occurredAt}
 	if err := p.store.addTurnEvent(event); err != nil {
 		log.Printf("viewer-chat raw event persistence failed turn_id=%s provider=%s kind=%s: %v", turnID, provider, update.Kind, err)
 	} else {
-		block := &MessageBlock{ID: newID(), EventID: event.ID, ChatID: event.ChatID, TurnID: turnID, Kind: update.Block.Kind, Text: update.Block.Text, Payload: update.Block.Payload, OccurredAt: occurredAt}
+		block := &MessageBlock{ID: newID(), EventID: event.ID, ChatID: event.ChatID, TaskID: taskID, TurnID: turnID, Kind: update.Block.Kind, Text: update.Block.Text, Payload: update.Block.Payload, OccurredAt: occurredAt}
 		if block.Kind == "" {
 			block.Kind = agentdriver.KindOther
 		}
@@ -224,7 +225,7 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 		p.mu.Lock()
 		open, exists := p.openText[turnID]
 		if !exists {
-			open = &Message{ID: newID(), ChatID: event.ChatID, TurnID: turnID, Role: "assistant", SenderFrom: "role", RoleID: roleID, RoleName: roleName, CreatedAt: occurredAt}
+			open = &Message{ID: newID(), ChatID: event.ChatID, TaskID: taskID, TurnID: turnID, Role: "assistant", SenderFrom: "role", RoleID: roleID, RoleName: roleName, CreatedAt: occurredAt}
 			p.openText[turnID] = open
 		}
 		open.Text += update.Block.Text
@@ -237,8 +238,8 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 			err = p.store.addMessage(&message)
 		}
 		if err == nil {
-			if branch, ok := p.branchForTurn(turnID); ok {
-				p.publishMessage(&message, branch)
+			if task, ok := p.taskForTurn(turnID); ok {
+				p.publishMessage(&message, task)
 			} else {
 				p.publishMessage(&message)
 			}
@@ -353,13 +354,23 @@ func (p *Plugin) runningTurns(chatID string) []map[string]any {
 	seen := map[string]bool{}
 	result := []map[string]any{}
 	for key, current := range p.runtimes {
-		if current.activeTurn == "" || !strings.HasPrefix(key, chatID+"\x00") || seen[current.activeTurn] {
+		if current.activeTurn == "" || (chatID != "" && !strings.HasPrefix(key, chatID+"\x00")) || seen[current.activeTurn] {
 			continue
 		}
 		seen[current.activeTurn] = true
-		result = append(result, map[string]any{"turn_id": current.activeTurn, "role_id": current.roleID, "role_name": current.roleName, "branch_id": p.turnBranches[current.activeTurn]})
+		result = append(result, map[string]any{"turn_id": current.activeTurn, "role_id": current.roleID, "role_name": current.roleName, "task_id": p.turnTasks[current.activeTurn]})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i]["turn_id"].(string) < result[j]["turn_id"].(string) })
+	return result
+}
+
+func (p *Plugin) runningTaskTurns(taskID string) []map[string]any {
+	result := []map[string]any{}
+	for _, turn := range p.runningTurns("") {
+		if turn["task_id"] == taskID {
+			result = append(result, turn)
+		}
+	}
 	return result
 }
 
@@ -486,7 +497,7 @@ func candidateProfile(target agentdriver.Target) string {
 // session explicitly and likewise leave the stored canonical session
 // untouched; the explicit resume also overrides a new_each_run session
 // policy, since the user picked the session to continue.
-func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole, candidate resolvedCandidate, turnID, key string, forceNew bool, ephemeral bool, resumeID string) (*runtime, bool, error) {
+func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, taskID string, role SuperRole, candidate resolvedCandidate, turnID, key string, forceNew bool, ephemeral bool, resumeID string) (*runtime, bool, error) {
 	effectiveCWD := chat.Root
 	if role.CWD != "" {
 		if filepath.IsAbs(role.CWD) {
@@ -523,7 +534,7 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole
 		// fresh-retry (stale session refused) drops the pin and starts new.
 		requested = resumeID
 	case !ephemeral:
-		state, err := p.store.roleSession(chat.ID, role.ID)
+		state, err := p.store.roleSession(chat.ID, taskID, role.ID)
 		if err != nil {
 			return nil, false, err
 		}
@@ -544,7 +555,7 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, role SuperRole
 	}
 	current := &runtime{sessionID: started.SessionID, profile: profile, cwd: absolute, roleID: role.ID, roleName: role.Name, pluginID: candidate.pluginID, providerKey: providerKey, target: candidate.target, ended: make(chan turnEnd, 1)}
 	if !ephemeral && resumeID == "" {
-		if err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, RoleID: role.ID, Provider: providerKey, ProviderProfile: profile, ProviderSessionID: started.SessionID, CWD: absolute, UpdatedAt: nowMillis()}); err != nil {
+		if err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, TaskID: taskID, RoleID: role.ID, Provider: providerKey, ProviderProfile: profile, ProviderSessionID: started.SessionID, CWD: absolute, UpdatedAt: nowMillis()}); err != nil {
 			return nil, false, err
 		}
 	}

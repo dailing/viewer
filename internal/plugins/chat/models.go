@@ -77,14 +77,19 @@ type storedRoutingCandidate struct {
 	Enabled    bool           `json:"enabled"`
 }
 type SummaryConfig struct {
-	Enabled           bool `json:"enabled"`
-	ToolCharBudget    int  `json:"tool_char_budget"`
-	TimeoutSeconds    int  `json:"timeout_seconds"`
-	ContextEnabled    bool `json:"context_enabled"`
-	SummaryCharBudget int  `json:"summary_char_budget"`
-	TailWordBudget    int  `json:"tail_word_budget"`
-	TailByteBudget    int  `json:"tail_byte_budget"`
-	ContextByteBudget int  `json:"context_byte_budget"`
+	Enabled                    bool `json:"enabled"`
+	ToolCharBudget             int  `json:"tool_char_budget"`
+	TimeoutSeconds             int  `json:"timeout_seconds"`
+	ContextEnabled             bool `json:"context_enabled"`
+	SummaryCharBudget          int  `json:"summary_char_budget"`
+	EndedTaskSummaryCharBudget int  `json:"ended_task_summary_char_budget"`
+	TailTurns                  int  `json:"tail_turns"`
+	TailWordBudget             int  `json:"tail_word_budget"`
+	TailByteBudget             int  `json:"tail_byte_budget"`
+	ContextByteBudget          int  `json:"context_byte_budget"`
+	TitleWordBudget            int  `json:"title_word_budget"`
+	TaskSummaryWordBudget      int  `json:"task_summary_word_budget"`
+	TaskSummaryByteBudget      int  `json:"task_summary_byte_budget"`
 }
 
 type HindsightConfig struct {
@@ -104,7 +109,7 @@ type HindsightConfig struct {
 	// contexts. Default OFF (history-DAG model): the chat bank mixes every
 	// line's memories and recall results carry no verifiable source ids, so
 	// no snapshot can prove membership — isolated contexts must not inject
-	// unverifiable memories (docs/chat-branch-dag-plan.md §7 检索隔离).
+	// unverifiable memories (docs/chat-task-dag-plan.md §7 检索隔离).
 	// Retain keeps running either way; re-enable knowingly for mainline-
 	// only workspaces.
 	RecallEnabled bool `json:"recall_enabled"`

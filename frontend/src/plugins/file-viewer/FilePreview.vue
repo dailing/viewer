@@ -20,6 +20,7 @@ import type { BusFrame } from "@viewer/bus-sdk";
 
 import type { PluginCtx } from "../../shell/ctx";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
+import { randomUUID } from "../../utils/randomUUID";
 import type { PreviewMode } from "./instanceStore";
 import NotebookPreview from "./NotebookPreview.vue";
 import PdfPreview from "./PdfPreview.vue";
@@ -138,7 +139,7 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
 }
 
 // --- Server-side watch: one (path, watcher id) per open preview, renewed ---
-const watcherId = crypto.randomUUID();
+const watcherId = randomUUID();
 let watchedPath: string | null = null;
 let lastDigest: string | null = null;
 let renewTimer: ReturnType<typeof setInterval> | null = null;

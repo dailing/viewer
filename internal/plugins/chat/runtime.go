@@ -10,96 +10,56 @@ import (
 	"strings"
 	"time"
 
-	"gorm.io/gorm"
-
 	"viewer/internal/agentdriver"
 	"viewer/sdk/go/busclient"
 )
 
 type dispatchRequest struct {
 	IdempotencyKey    string   `json:"idempotency_key"`
-	AutomationID      string   `json:"automation_id"`
-	Owner             string   `json:"owner"`
-	Fence             int64    `json:"fence"`
-	ChatID            string   `json:"chat_id"`
+	ChatID            string   `json:"-"`
+	TaskID            string   `json:"task_id"`
 	InputInstanceID   string   `json:"input_instance_id"`
 	Message           string   `json:"message"`
 	Text              string   `json:"text"`
 	RoleIDs           []string `json:"role_ids"`
 	BeforeMessageID   string   `json:"before_message_id"`
 	HistoryWordBudget *int     `json:"history_word_budget"`
-	// ForceNewSession makes every selected role start a fresh agent session
-	// for this message instead of reusing the stored one (one-shot, set by
-	// the composer's new-session toggle).
-	ForceNewSession bool `json:"force_new_session"`
-	// ParallelDispatch sends immediately without waiting for in-flight
-	// turns: every selected role runs concurrently on a fresh, throwaway
-	// agent session (the composer's send-now toggle). Implies a fresh
-	// session; the canonical per-chat+role session is left untouched.
-	ParallelDispatch bool `json:"parallel_dispatch"`
-	// ContinueTurnID makes the dispatch a lane continuation: it skips LLM
-	// routing, goes to the role owning the referenced turn, and resumes
-	// that turn's session. Contradicts force_new_session / parallel_dispatch
-	// (both are cleared when set).
-	ContinueTurnID string `json:"continue_turn_id"`
-	// Raw sends the message with zero viewer-side injection: no
-	// workspace/chat common prompt, no role prompt, no line context
-	// (summaries/tail/recall), no role-switch bridge — the prompt is the
-	// cited section plus the message itself, like driving the agent from
-	// its own CLI. Sessions resume as usual; only this dispatch's prompt
-	// assembly changes. Write side (turn summaries, memory retain) is
-	// unaffected, so later non-raw sessions still get full context.
-	Raw bool `json:"raw"`
-	// BranchID targets a named branch (framework v0.63+). Since v0.66 a
-	// branch is a pure CONTEXT partition — a separated corner of the
-	// chat's working group — not a role/session binding: dispatching on
-	// it selects roles exactly like a mainline dispatch (explicit
-	// role_ids or LLM routing, any number of roles; force_new_session /
-	// parallel_dispatch apply). The only differences: each role's
-	// session is scoped to the branch (role × branch lane), and context
-	// builds draw from the branch's lineage.
-	BranchID string `json:"branch_id"`
+	ForceNewSession   bool     `json:"force_new_session"`
+	ParallelDispatch  bool     `json:"parallel_dispatch"`
+	ContinueTurnID    string   `json:"continue_turn_id"`
+	Raw               bool     `json:"raw"`
+	DecisionID        string   `json:"decision_id"`
+	SourcePlugin      string   `json:"-"`
+	SourceEventID     string   `json:"source_event_id"`
+	CausationID       string   `json:"causation_id"`
+	CorrelationID     string   `json:"correlation_id"`
+	DispatchID        string   `json:"-"`
 }
 
 func runtimeKey(chatID, roleID string) string { return chatID + "\x00" + roleID }
 
-// lineKey is the busy/queue key of one work line (history-DAG model):
-// batches serialize per line — cross-branch parallel, in-branch ordered.
+// Work is serialized per Task. Different Tasks never share a queue key.
 const maxQueuedPerLine = 32
 
-func lineKey(chatID, branchID string) string { return chatID + "\x00line\x00" + branchID }
+func lineKey(chatID, taskID string) string { return chatID + "\x00task\x00" + taskID }
 
-// queuedMessage is a dispatch batch waiting for a busy line: one entry per
-// dispatch (all resolved targets ride together), started as one relay once
-// the line's in-flight batch settles.
 type queuedMessage struct {
-	chatID   string
-	targets  []relayTarget
-	message  string
-	before   int64
-	forceNew bool
-	raw      bool
-	enqueued int64
-	// dispatchID of the dispatch that queued this batch, so the turns that
-	// eventually run it link back to the user message's turn_id.
+	chatID     string
+	targets    []relayTarget
+	message    string
+	before     int64
+	forceNew   bool
+	raw        bool
+	enqueued   int64
 	dispatchID string
-	// messageID is the user message row of the dispatch, so a queued cancel
-	// removes it from the timeline and a queued edit retexts it.
-	messageID string
-	// branchID is the line the queued batch belongs to ("" = mainline).
-	branchID string
+	messageID  string
+	taskID     string
 }
 
-// relayTarget is one role's turn within a relay, plus the lane session it
-// resumes ("" on the canonical and parallel paths), the line the turn is
-// stamped with ("" = mainline), and the batch's fixed input snapshot
-// (batch/inputNode) its history node hangs off.
 type relayTarget struct {
-	role      SuperRole
-	resume    string
-	branch    string
-	batch     string
-	inputNode string
+	role   SuperRole
+	resume string
+	task   string
 }
 
 func (p *Plugin) handleDispatch(frame busclient.Frame) {
@@ -112,14 +72,23 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		request.Message = request.Text
 	}
 	request.Message = strings.TrimSpace(request.Message)
-	if err != nil || request.ChatID == "" || request.Message == "" {
+	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
+	if err != nil || request.TaskID == "" || request.Message == "" || request.IdempotencyKey == "" {
 		if err == nil {
 			err = errBadRequest
 		}
 		p.reply(frame, nil, err)
 		return
 	}
-	chat, err := p.store.chat(request.ChatID)
+	task, err := p.store.task(request.TaskID)
+	if err != nil || task == nil {
+		if err == nil {
+			err = errors.New("task not found")
+		}
+		p.reply(frame, nil, err)
+		return
+	}
+	chat, err := p.store.chat(task.ChatID)
 	if err != nil || chat == nil {
 		if err == nil {
 			err = errors.New("chat not found")
@@ -132,56 +101,64 @@ func (p *Plugin) handleDispatch(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
+	request.ChatID = chat.ID
+	request.SourcePlugin = "unknown"
+	if frame.Origin != nil && frame.Origin.Plugin != "" {
+		request.SourcePlugin = frame.Origin.Plugin
+	}
+	request.DispatchID = newID()
+	p.operationMu.Lock()
+	defer p.operationMu.Unlock()
+	if existing, found, err := p.existingOperation(request.SourcePlugin, "dispatch", request.IdempotencyKey, value); found || err != nil {
+		p.reply(frame, existing, err)
+		return
+	}
+	if err := p.startOperation(request.SourcePlugin, "dispatch", request.IdempotencyKey, value, chat.ID, task.ID, request.DispatchID); err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
 	reply, _, err := p.dispatchMessage(chat, workspace, request, value)
+	status := "accepted"
+	if err != nil {
+		status = "failed"
+	}
+	if saveErr := p.finishOperation(request.SourcePlugin, "dispatch", request.IdempotencyKey, reply, status, err); saveErr != nil && err == nil {
+		err = saveErr
+	}
 	p.reply(frame, reply, err)
 }
 
-// dispatchMessage is the frame-free core of handleDispatch: it validates
-// targeting (lane continuation / branch / routing), persists the user
-// message, serializes the dispatch batch on its work line (queueing behind
-// an in-flight batch), records the batch's fixed input snapshot, starts the
-// relay, and returns the reply payload plus the user message row.
-func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispatchRequest, raw map[string]any) (map[string]any, *Message, error) {
-	p.automationMu.Lock()
-	defer p.automationMu.Unlock()
-	if request.AutomationID != "" {
-		if reply, found, err := p.existingDispatch(request); found || err != nil {
-			return reply, nil, err
-		}
+// dispatchMessage is the single intake/admission path used by browser and
+// programmatic sends. It persists the user Message and then starts or queues
+// the ordinary Agent relay; it never manipulates Shell/view state.
+func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispatchRequest, raw map[string]any) (reply map[string]any, user *Message, err error) {
+	reopenEnded, _ := raw["reopen_ended"].(bool)
+	task, err := p.resolveDispatchTask(*chat, request.TaskID, reopenEnded)
+	if err != nil {
+		return nil, nil, err
 	}
-	// Branch dispatch (branch_id): validate the branch, then route exactly
-	// like a mainline dispatch (framework v0.66 — the branch only scopes
-	// context and the role × branch session lanes; it no longer fixes a
-	// single owner role). Lane continuation (continue_turn_id): skip LLM
-	// routing and dispatch to the role owning the referenced turn,
-	// resuming that turn's session.
+	claimedDecision, err := p.associateDecision(task.ID, &request)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if finishErr := p.finishOrdinaryDecision(request.DecisionID, request.DispatchID, claimedDecision, err); err == nil {
+			err = finishErr
+		}
+	}()
 	resumeSession := ""
 	var selected []SuperRole
 	var rationale string
-	var branch *Branch
-	line := ""
-	var err error
 	if request.ContinueTurnID != "" {
 		var laneRole SuperRole
-		resumeSession, laneRole, line, err = p.resolveContinuation(*chat, workspace, request.ContinueTurnID)
+		resumeSession, laneRole, err = p.resolveContinuation(*chat, workspace, task.ID, request.ContinueTurnID)
 		if err != nil {
 			return nil, nil, err
 		}
 		selected = []SuperRole{laneRole}
 		rationale = "Continue the session of turn " + request.ContinueTurnID + "."
-		request.BranchID = line
 		request.ForceNewSession = false
 		request.ParallelDispatch = false
-	} else if request.BranchID != "" {
-		branch, err = p.resolveBranch(*chat, request.BranchID)
-		if err != nil {
-			return nil, nil, err
-		}
-		line = branch.ID
-		selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
-		if err != nil {
-			return nil, nil, err
-		}
 	} else {
 		selected, rationale, err = p.selectRoles(request, raw, *chat, workspace)
 		if err != nil {
@@ -189,26 +166,17 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 		}
 	}
 	parallel := request.ParallelDispatch
-	// resumeFor computes the lane session a role's turn resumes. An explicit
-	// continuation resumes the referenced session on the referenced turn's
-	// surviving line; an ordinary branch dispatch resumes the role's latest
-	// session on that branch; anything else rides the canonical session.
 	resumeFor := func(role SuperRole) string {
 		if request.ContinueTurnID != "" {
 			return resumeSession
 		}
-		if branch != nil {
-			if request.ForceNewSession {
-				return ""
-			}
-			return p.branchRoleSession(chat.ID, branch.ID, role.ID)
+		if request.ForceNewSession || parallel {
+			return ""
 		}
-		return ""
+		return p.taskRoleSession(chat.ID, task.ID, role.ID)
 	}
-	key := lineKey(chat.ID, line)
+	key := lineKey(chat.ID, task.ID)
 	if !parallel {
-		// Queue-capacity pre-check: an over-full line queue fails the
-		// dispatch before the user message lands in the timeline.
 		p.mu.Lock()
 		full := p.busy[key] && len(p.queues[key]) >= maxQueuedPerLine
 		p.mu.Unlock()
@@ -216,39 +184,44 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 			return nil, nil, errQueueFull
 		}
 	}
-	dispatchID := newID()
-	if err := p.prepareDispatch(request, dispatchID); err != nil {
-		return nil, nil, err
+	dispatchID := request.DispatchID
+	if dispatchID == "" {
+		dispatchID = newID()
 	}
-	user := &Message{ID: newID(), ChatID: chat.ID, TurnID: dispatchID, Role: "user", Text: request.Message, SenderFrom: "user", CreatedAt: nowMillis()}
+	request.DispatchID = dispatchID
+	user = &Message{ID: newID(), ChatID: chat.ID, TaskID: task.ID, TurnID: dispatchID,
+		Role: "user", Text: request.Message, SenderFrom: "user", SourcePlugin: request.SourcePlugin,
+		SourceEventID: request.SourceEventID, CausationID: request.CausationID,
+		CorrelationID: request.CorrelationID, CreatedAt: nowMillis()}
 	if err = p.store.addMessage(user); err != nil {
-		p.store.db.Model(&DispatchReceipt{}).Where("dispatch_id = ?", dispatchID).Update("failure", err.Error())
 		return nil, nil, err
 	}
-	p.retainVisibleMessage(user, "", "")
-	// A human send supersedes the synced composer draft of the target line
-	// on every device; automatic (loop) dispatches leave it alone.
-	if request.AutomationID == "" {
-		p.clearDraft(chat.ID, request.InputInstanceID, line)
+	p.touchTask(task.ID, user.CreatedAt)
+	if request.DecisionID != "" {
+		if err := p.store.db.Model(&Decision{}).Where("id = ? AND task_id = ? AND status = ?", request.DecisionID, task.ID, "dispatching").Update("resolved_dispatch_id", dispatchID).Error; err != nil {
+			return nil, nil, err
+		}
 	}
-	// Serialize on the work line: a busy line queues the whole batch (one
-	// entry per dispatch); a free line starts it immediately. Parallel
-	// dispatch skips the line lock — every role gets a fresh auto-branch.
+	p.maybeGenerateTaskTitle(task, user)
+	p.retainVisibleMessage(user, "", "")
+	p.clearDraft(chat.ID, request.InputInstanceID, task.ID)
 	targets := make([]relayTarget, 0, len(selected))
 	for _, role := range selected {
-		targets = append(targets, relayTarget{role: role, resume: resumeFor(role), branch: line})
+		targets = append(targets, relayTarget{role: role, resume: resumeFor(role), task: task.ID})
 	}
 	if !parallel {
 		p.mu.Lock()
-		// Raw mode changes only once the dispatch has passed every rejection
-		// path and is entering the line's accepted queue/run state.
 		p.lineRaw[key] = request.Raw
 		if p.busy[key] {
-			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, targets: targets, message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession, raw: request.Raw, enqueued: nowMillis(), dispatchID: dispatchID, messageID: user.ID, branchID: line})
+			p.queues[key] = append(p.queues[key], queuedMessage{chatID: chat.ID, targets: targets,
+				message: request.Message, before: user.CreatedAt, forceNew: request.ForceNewSession,
+				raw: request.Raw, enqueued: nowMillis(), dispatchID: dispatchID, messageID: user.ID, taskID: task.ID})
 			p.mu.Unlock()
-			p.publishMessage(user, line)
+			p.publishMessage(user, task.ID)
 			p.publishQueue(chat.ID)
-			return map[string]any{"role_ids": roleIDs(selected), "started_role_ids": []string{}, "queued_role_ids": roleIDs(selected), "rationale": rationale, "dispatch_id": dispatchID, "message_id": user.ID}, user, nil
+			return map[string]any{"role_ids": roleIDs(selected), "started_role_ids": []string{},
+				"queued_role_ids": roleIDs(selected), "rationale": rationale, "dispatch_id": dispatchID,
+				"message_id": user.ID, "task_id": task.ID, "status": "queued"}, user, nil
 		}
 		p.busy[key] = true
 		p.mu.Unlock()
@@ -256,89 +229,20 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	startedKeys := []string{}
 	if !parallel {
 		startedKeys = []string{key}
-		// Record the batch's fixed input snapshot; a post-merge line
-		// rebuilds every session from the new full snapshot.
-		batchID, inputNode, stale, intakeErr := p.intakeBatch(chat.ID, line, dispatchID)
-		if intakeErr != nil {
-			p.releaseBusy(startedKeys)
-			return nil, nil, intakeErr
-		}
-		for index := range targets {
-			targets[index].batch, targets[index].inputNode = batchID, inputNode
-			if stale {
-				targets[index].resume = ""
-			}
-		}
-		if stale {
-			request.ForceNewSession = true
-		}
 	}
-	// Parallel (send-now) dispatches open one named branch per started
-	// role, forked from the origin line's current head (framework v0.63;
-	// DAG model: the fork node's parent edge IS the fork point, so an
-	// explicit branch_id + parallel forks off that branch's head).
-	touchedBranches := []*Branch{}
-	if parallel {
-		for index := range targets {
-			created, createErr := p.createAutoBranch(chat.ID, autoBranchName(request.Message, targets[index].role, len(targets)), line, targets[index].role)
-			if createErr != nil {
-				slog.Warn("chat branch auto-create failed", "chat_id", chat.ID, "role_id", targets[index].role.ID, "error", createErr)
-				continue
-			}
-			batchID, inputNode, _, intakeErr := p.intakeBatch(chat.ID, created.ID, dispatchID)
-			if intakeErr != nil {
-				slog.Warn("chat branch intake failed", "branch_id", created.ID, "error", intakeErr)
-				continue
-			}
-			targets[index].branch = created.ID
-			targets[index].resume = ""
-			targets[index].batch, targets[index].inputNode = batchID, inputNode
-			touchedBranches = append(touchedBranches, created)
-			p.publishBranch(created, "created")
-		}
-		// Drop targets whose branch setup failed.
-		kept := targets[:0]
-		for _, target := range targets {
-			if target.branch != "" {
-				kept = append(kept, target)
-			}
-		}
-		targets = kept
-	} else if branch != nil && branch.RoleID == "" && len(targets) > 0 {
-		// An explicit branch dispatch stamps its first role onto an empty
-		// branch (display only — branches bind no owner).
-		branch.RoleID, branch.RoleName = targets[0].role.ID, targets[0].role.Name
-		branch.UpdatedAt = nowMillis()
-		if saveErr := p.store.saveBranch(branch); saveErr != nil {
-			slog.Warn("chat branch role stamp failed", "branch_id", branch.ID, "error", saveErr)
-		} else {
-			touchedBranches = append(touchedBranches, branch)
-			p.publishBranch(branch, "updated")
-		}
-	}
-	dispatchLines := make([]string, 0, len(targets))
-	for _, target := range targets {
-		if !branchIDListed(dispatchLines, target.branch) {
-			dispatchLines = append(dispatchLines, target.branch)
-		}
-	}
-	p.publishMessage(user, dispatchLines...)
+	p.publishMessage(user, task.ID)
 	startedRoleIDs := make([]string, 0, len(targets))
 	for _, target := range targets {
 		startedRoleIDs = append(startedRoleIDs, target.role.ID)
 	}
-	reply := map[string]any{"role_ids": roleIDs(selected), "started_role_ids": startedRoleIDs, "queued_role_ids": []string{}, "rationale": rationale, "dispatch_id": dispatchID, "message_id": user.ID}
-	if len(touchedBranches) > 0 {
-		payloads := make([]map[string]any, 0, len(touchedBranches))
-		for _, item := range touchedBranches {
-			payloads = append(payloads, item.payload())
-		}
-		reply["branches"] = payloads
-	}
+	reply = map[string]any{"role_ids": roleIDs(selected), "started_role_ids": startedRoleIDs,
+		"queued_role_ids": []string{}, "rationale": rationale, "dispatch_id": dispatchID,
+		"message_id": user.ID, "task_id": task.ID, "status": "running"}
 	if len(targets) == 0 {
 		if !parallel {
 			p.releaseBusy(startedKeys)
 		}
+		reply["status"] = "accepted"
 		return reply, user, nil
 	}
 	p.wg.Add(1)
@@ -355,51 +259,52 @@ func (p *Plugin) dispatchMessage(chat *Chat, workspace Workspace, request dispat
 	return reply, user, nil
 }
 
-// autoBranchName derives a branch name from the dispatching message (first
-// runes, so the tab is recognizable without a rename); multi-role parallel
-// dispatches suffix the role to tell the branches apart.
-func autoBranchName(message string, role SuperRole, roleCount int) string {
-	runes := []rune(strings.TrimSpace(message))
-	name := "分支"
-	if len(runes) > 0 {
-		if len(runes) > 12 {
-			name = string(runes[:12]) + "…"
-		} else {
-			name = string(runes)
-		}
-	}
-	if roleCount > 1 {
-		name += " · " + role.Name
-	}
-	return name
-}
-
-// resolveBranch validates a branch_id dispatch: the branch must belong to
-// the chat and be active (archived branches are read-only history). Role
-// selection is deliberately NOT the branch's business — since framework
-// v0.66 a branch is a pure context partition, and the caller routes
-// exactly like a mainline dispatch.
-func (p *Plugin) resolveBranch(chat Chat, branchID string) (*Branch, error) {
-	branch, err := p.store.branch(branchID)
+// resolveTaskOwnership validates that the Task belongs to the Chat. Drafts use
+// this read/write-neutral boundary so an ended Task can retain an unsent draft.
+func (p *Plugin) resolveTaskOwnership(chat Chat, taskID string) (*Task, error) {
+	task, err := p.store.task(taskID)
 	if err != nil {
 		return nil, err
 	}
-	if branch == nil || branch.ChatID != chat.ID {
-		return nil, errors.New("branch was not found in the chat")
+	if task == nil || task.ChatID != chat.ID {
+		return nil, errors.New("task was not found in the chat")
 	}
-	if branch.archived() {
-		return nil, errBranchArchived
-	}
-	return branch, nil
+	return task, nil
 }
 
-// branchRoleSession returns the role's latest resumable session on the
-// branch ("" when the role never ran there — the relay then starts a
-// fresh session fed with the branch's lineage context): the newest turn's
+// resolveTask validates ownership and the read-only ended boundary used by
+// operations that must not implicitly continue an ended Task.
+func (p *Plugin) resolveTask(chat Chat, taskID string) (*Task, error) {
+	task, err := p.resolveTaskOwnership(chat, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.ended() {
+		return nil, errTaskEnded
+	}
+	return task, nil
+}
+
+// A human send may explicitly continue an ended Task. Other dispatch callers
+// retain the existing open-only behavior by leaving reopen_ended unset.
+func (p *Plugin) resolveDispatchTask(chat Chat, taskID string, reopenEnded bool) (*Task, error) {
+	task, err := p.resolveTaskOwnership(chat, taskID)
+	if err != nil || !task.ended() {
+		return task, err
+	}
+	if !reopenEnded {
+		return nil, errTaskEnded
+	}
+	return p.reopenTask(task.ID)
+}
+
+// taskRoleSession returns the role's latest resumable session on the
+// task ("" when the role never ran there — the relay then starts a
+// fresh session fed with the task's lineage context): the newest turn's
 // stamped session, or the in-flight runtime's session while that turn
 // runs.
-func (p *Plugin) branchRoleSession(chatID, branchID, roleID string) string {
-	turn, err := p.store.latestBranchRoleTurn(chatID, branchID, roleID)
+func (p *Plugin) taskRoleSession(chatID, taskID, roleID string) string {
+	turn, err := p.store.latestTaskRoleTurn(chatID, taskID, roleID)
 	if err != nil || turn == nil {
 		return ""
 	}
@@ -468,7 +373,7 @@ func (p *Plugin) selectRoles(request dispatchRequest, raw map[string]any, chat C
 		}
 		before = marker.CreatedAt
 	}
-	history, err := p.historyPrompt(chat.ID, request.BranchID, before, budget)
+	history, err := p.historyPrompt(chat.ID, request.TaskID, before, budget)
 	if err != nil {
 		return nil, "", err
 	}
@@ -494,19 +399,14 @@ func roleIDs(roles []SuperRole) []string {
 	return result
 }
 
-// resolveContinuation validates a continue_turn_id dispatch: the turn must
-// belong to the chat and have a resumable session (stamped on the row once
-// its runtime starts, or visible on an in-flight runtime), and its role must
-// still exist in the workspace. It returns the session, role, and surviving
-// work line. A continuation of merged content follows the merge chain, just
-// like forking that turn; archive-only legacy lines remain read-only.
-func (p *Plugin) resolveContinuation(chat Chat, workspace Workspace, turnID string) (string, SuperRole, string, error) {
+// resolveContinuation resumes only a Turn owned by the target Task.
+func (p *Plugin) resolveContinuation(chat Chat, workspace Workspace, taskID, turnID string) (string, SuperRole, error) {
 	turn, err := p.store.turn(turnID)
 	if err != nil {
-		return "", SuperRole{}, "", err
+		return "", SuperRole{}, err
 	}
-	if turn == nil || turn.ChatID != chat.ID {
-		return "", SuperRole{}, "", errors.New("continue_turn_id was not found in the chat")
+	if turn == nil || turn.ChatID != chat.ID || turn.TaskID != taskID {
+		return "", SuperRole{}, errors.New("continue_turn_id was not found in the task")
 	}
 	sessionID := turn.SessionID
 	if sessionID == "" {
@@ -515,40 +415,14 @@ func (p *Plugin) resolveContinuation(chat Chat, workspace Workspace, turnID stri
 		p.mu.Unlock()
 	}
 	if sessionID == "" {
-		return "", SuperRole{}, "", errors.New("that turn has no resumable session")
+		return "", SuperRole{}, errors.New("that turn has no resumable session")
 	}
-	var role SuperRole
-	found := false
-	for _, candidate := range workspace.Roles {
-		if candidate.ID == turn.RoleID {
-			role, found = candidate, true
-			break
+	for _, role := range workspace.Roles {
+		if role.ID == turn.RoleID {
+			return sessionID, role, nil
 		}
 	}
-	if !found {
-		return "", SuperRole{}, "", errors.New("the turn's role no longer exists")
-	}
-	line := turn.BranchID
-	for hops := 0; line != ""; hops++ {
-		if hops >= 16 {
-			return "", SuperRole{}, "", errors.New("the continued turn's merge chain does not terminate")
-		}
-		branch, branchErr := p.store.branch(line)
-		if branchErr != nil {
-			return "", SuperRole{}, "", branchErr
-		}
-		if branch == nil || branch.ChatID != chat.ID {
-			return "", SuperRole{}, "", errors.New("the continued turn's branch was not found in the chat")
-		}
-		if !branch.archived() {
-			break
-		}
-		if !branch.merged() {
-			return "", SuperRole{}, "", errBranchArchived
-		}
-		line = branch.MergedIntoBranchID
-	}
-	return sessionID, role, line, nil
+	return "", SuperRole{}, errors.New("the turn's role no longer exists")
 }
 
 // inflightTurnSessionLocked returns the session of a currently running turn
@@ -574,11 +448,7 @@ func (p *Plugin) releaseBusy(keys []string) {
 	}
 }
 
-// startQueued pops the next queued batch for a freed line, marks the line
-// busy again, records the batch's actual execution snapshot (queued-time
-// and execution-time snapshots are separate records), and relays it.
-// Entries whose chat disappeared (or whose workspace can no longer load)
-// are dropped and the cascade continues with the following entry.
+// startQueued starts the next dispatch on a freed Task.
 func (p *Plugin) startQueued(key string) {
 	p.mu.Lock()
 	if p.busy[key] {
@@ -607,29 +477,17 @@ func (p *Plugin) startQueued(key string) {
 	if err == nil {
 		workspace, err = p.workspace(p.ctx)
 	}
-	var batchID, inputNode string
-	var stale bool
-	if err == nil {
-		batchID, inputNode, stale, err = p.intakeBatch(entry.chatID, entry.branchID, entry.dispatchID)
-	}
 	if err != nil {
 		slog.Warn("chat queued batch dropped", "chat_id", entry.chatID, "dispatch_id", entry.dispatchID, "error", err)
 		p.releaseBusy([]string{key})
 		return
 	}
-	targets := make([]relayTarget, 0, len(entry.targets))
-	for _, target := range entry.targets {
-		target.batch, target.inputNode = batchID, inputNode
-		if stale {
-			target.resume = ""
-		}
-		targets = append(targets, target)
-	}
-	slog.Info("chat queued batch starting", "chat_id", entry.chatID, "branch", entry.branchID, "roles", len(targets), "queued_ms", nowMillis()-entry.enqueued)
+	targets := entry.targets
+	slog.Info("chat queued batch starting", "chat_id", entry.chatID, "task", entry.taskID, "roles", len(targets), "queued_ms", nowMillis()-entry.enqueued)
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		sessions := p.runRelay(*chat, workspace, targets, entry.message, entry.before, entry.forceNew || stale, false, entry.raw, entry.dispatchID)
+		sessions := p.runRelay(*chat, workspace, targets, entry.message, entry.before, entry.forceNew, false, entry.raw, entry.dispatchID)
 		p.releaseBusyOrHold([]string{key}, sessions)
 	}()
 }
@@ -662,7 +520,7 @@ func (p *Plugin) queuedSnapshotLocked(chatID string) []map[string]any {
 			result = append(result, map[string]any{
 				"message_id": entry.messageID, "dispatch_id": entry.dispatchID,
 				"chat_id": entry.chatID, "role_id": firstID, "role_name": strings.Join(roleNames, ", "),
-				"role_ids": roleIDs, "branch_id": entry.branchID,
+				"role_ids": roleIDs, "task_id": entry.taskID,
 				"text": entry.message, "enqueued_at": entry.enqueued, "position": index + 1,
 			})
 		}
@@ -757,7 +615,7 @@ func (p *Plugin) handleQueuedCancel(frame busclient.Frame) {
 	}
 	removed, messageID := p.cancelQueued(chatID, dispatchID)
 	if removed > 0 {
-		if err := p.store.db.Model(&DispatchReceipt{}).Where("dispatch_id = ?", dispatchID).Update("cancelled", true).Error; err != nil {
+		if err := p.store.db.Model(&OperationReceipt{}).Where("result_id = ? AND operation = ?", dispatchID, "dispatch").Update("status", "cancelled").Error; err != nil {
 			p.reply(frame, nil, err)
 			return
 		}
@@ -780,8 +638,8 @@ func (p *Plugin) handleQueuedCancel(frame busclient.Frame) {
 }
 
 func (p *Plugin) handleQueuedUpdate(frame busclient.Frame) {
-	p.automationMu.Lock()
-	defer p.automationMu.Unlock()
+	p.operationMu.Lock()
+	defer p.operationMu.Unlock()
 	value, err := frameObject(frame)
 	chatID, _ := value["chat_id"].(string)
 	dispatchID, _ := value["dispatch_id"].(string)
@@ -793,22 +651,17 @@ func (p *Plugin) handleQueuedUpdate(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	updated, messageID := p.updateQueued(chatID, dispatchID, message)
-	if updated > 0 {
-		var receipt DispatchReceipt
-		found := p.store.db.Where("dispatch_id = ?", dispatchID).Limit(1).Find(&receipt)
-		if found.Error != nil {
-			p.reply(frame, nil, found.Error)
+	if taskID, ok := p.queuedDispatchLine(chatID, dispatchID); ok {
+		task, taskErr := p.store.task(taskID)
+		if taskErr != nil || task == nil || task.ended() {
+			if taskErr == nil {
+				taskErr = errTaskEnded
+			}
+			p.reply(frame, nil, taskErr)
 			return
 		}
-		if found.RowsAffected > 0 {
-			err := p.store.db.Model(&AutomationGate{}).Where("key = ?", gateKey(chatID, receipt.BranchID)).Updates(map[string]any{"paused": true, "revision": gorm.Expr("revision + 1"), "feedback": boundedTail(message, 8192)}).Error
-			if err != nil {
-				p.reply(frame, nil, err)
-				return
-			}
-		}
 	}
+	updated, messageID := p.updateQueued(chatID, dispatchID, message)
 	if updated == 0 {
 		p.reply(frame, nil, errNotQueued)
 		return
@@ -837,13 +690,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 	// context builders keep the raw message as their recall query.
 	cited := p.buildCitedSection(chat.ID, message)
 	routedMessage := withCitedSection(cited, message)
-	// Batch settlement collects each line's published result nodes; after
-	// all targets terminate, every touched line's head advances (join node
-	// for multi-role results).
-	results := map[string][]string{}
-	batches := map[string]string{}
-	// sessions collects the agent session each target's turn ran on; the
-	// caller probes them for live background work before releasing the line.
+	// sessions are probed for live background work before releasing the Task.
 	sessions := []relaySession{}
 	for _, target := range targets {
 		role := target.role
@@ -855,30 +702,30 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 			// canonical chat+role runtime (and its stored session) stays
 			// untouched; the entry is removed when the turn ends.
 			key += "\x00" + turnID
-		case target.branch != "":
-			// Branch turn: the branch's session runs under its own
-			// branch-scoped key, so it never fights the canonical
+		case target.task != "":
+			// Task turn: the task's session runs under its own
+			// task-scoped key, so it never fights the canonical
 			// session's busy lock; the runtime stays resident for the
-			// branch's next continuation.
-			key += "\x00branch\x00" + target.branch
+			// task's next continuation.
+			key += "\x00task\x00" + target.task
 		case target.resume != "":
 			// Lane continuation: the lane's session runs under its own key so
 			// it never fights the canonical session's busy lock, and the
 			// runtime stays resident for the lane's next continuation.
 			key += "\x00lane\x00" + target.resume
 		}
-		turn := &Turn{ID: turnID, ChatID: chat.ID, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, BranchID: target.branch, BatchID: target.batch, StartedAt: nowMillis()}
+		turn := &Turn{ID: turnID, ChatID: chat.ID, TaskID: target.task, RoleID: role.ID, RoleName: role.Name, DispatchID: dispatchID, StartedAt: nowMillis()}
 		if err := p.store.beginTurn(turn); err != nil {
 			slog.Error("chat turn persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "error", err)
-			p.store.db.Model(&DispatchReceipt{}).Where("dispatch_id = ?", dispatchID).Update("failure", err.Error())
+			p.store.db.Model(&OperationReceipt{}).Where("result_id = ? AND operation = ?", dispatchID, "dispatch").Update("failure", err.Error())
 			continue
 		}
 		p.mu.Lock()
-		p.turnBranches[turnID] = target.branch
+		p.turnTasks[turnID] = target.task
 		p.mu.Unlock()
 		// Global turn lifecycle feed for the Dock status dots: started here,
 		// completed below alongside the per-chat turn-completed frame.
-		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "started", "dispatch_id": dispatchID, "branch_id": target.branch})
+		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "started", "dispatch_id": dispatchID, "task_id": target.task})
 		candidates, err := p.resolveCandidates(chat, workspace, role)
 		reason, summaryProvider := "error", ""
 		endErr := ""
@@ -906,12 +753,12 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 				var current *runtime
 				var fresh bool
 				attempt := map[string]any{"agent": candidate.target.Agent, "provider": candidate.target.Provider, "model": candidate.target.Model}
-				// A branch's first turn starts a fresh session of its own:
+				// A task's first turn starts a fresh session of its own:
 				// forceNew + ephemeral (the stored canonical session is never
 				// read or overwritten), but unlike anonymous parallel the
-				// runtime stays resident under the branch key for continuations.
-				branchFresh := target.branch != "" && target.resume == ""
-				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, role, candidate, turnID, key, forceNew || retryFresh || parallel || branchFresh, parallel || branchFresh, target.resume)
+				// runtime stays resident under the task key for continuations.
+				taskFresh := target.task != "" && target.resume == ""
+				current, fresh, err = p.ensureBusRuntime(p.ctx, chat, target.task, role, candidate, turnID, key, forceNew || retryFresh || parallel || taskFresh, parallel, target.resume)
 				if err != nil {
 					attempt["outcome"], attempt["error"] = "start_error", err.Error()
 					attempts = append(attempts, attempt)
@@ -932,20 +779,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 					if sessionErr := p.store.setTurnSession(turnID, laneSession); sessionErr != nil {
 						slog.Warn("chat turn session persistence failed", "chat_id", chat.ID, "turn_id", turnID, "error", sessionErr)
 					}
-					p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "session", "dispatch_id": dispatchID, "session_id": laneSession, "branch_id": target.branch})
-					if target.branch != "" {
-						// Denormalize the branch's latest session for display;
-						// the turn rows stay authoritative.
-						if branch, branchErr := p.store.branch(target.branch); branchErr == nil && branch != nil && branch.SessionID != laneSession {
-							branch.SessionID = laneSession
-							branch.UpdatedAt = nowMillis()
-							if saveErr := p.store.saveBranch(branch); saveErr != nil {
-								slog.Warn("chat branch session stamp failed", "branch_id", branch.ID, "error", saveErr)
-							} else {
-								p.publishBranch(branch, "updated")
-							}
-						}
-					}
+					p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "session", "dispatch_id": dispatchID, "session_id": laneSession, "task_id": target.task})
 				}
 				prompt := routedMessage
 				contextBytes, promptMode := 0, "existing_session"
@@ -958,11 +792,11 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 					// driving the agent from its own CLI through the viewer.
 					promptMode = "raw"
 				case fresh:
-					contextBridge := p.buildLineContext(chat, target.inputNode, target.branch, message, before, dispatchID)
+					contextBridge := p.buildTaskContext(chat, target.task, role.ID, message, before, dispatchID)
 					contextBytes, promptMode = len(contextBridge), "new_session"
 					prompt = initialPrompt(workspace, chat, role, contextBridge, routedMessage)
 				default:
-					if bridge := p.buildLineBridge(chat, target.inputNode, target.branch, role.ID, message, before, dispatchID); bridge != "" {
+					if bridge := p.buildTaskRoleBridge(chat, target.task, role.ID, message, before, dispatchID); bridge != "" {
 						contextBytes, promptMode = len(bridge), "role_switch"
 						prompt = bridge + "\n\nCurrent routed message follows:\n" + routedMessage
 					}
@@ -1039,22 +873,17 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 		if completeErr := p.store.completeTurn(turnID, reason); completeErr != nil {
 			slog.Error("chat turn completion persistence failed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "stop_reason", reason, "error", completeErr)
 		}
+		p.touchTask(target.task, nowMillis())
 		p.mu.Lock()
-		delete(p.turnBranches, turnID)
+		delete(p.turnTasks, turnID)
 		p.mu.Unlock()
-		// Publish the terminated turn into the line's history DAG off the
-		// batch's fixed input snapshot (idempotent; recovery republishes
-		// whatever a crash drops here).
-		if nodeID, nodeErr := p.publishTurnNode(chat.ID, target.branch, turn, target.inputNode); nodeErr != nil {
-			slog.Error("chat turn history publish failed", "chat_id", chat.ID, "turn_id", turnID, "error", nodeErr)
-		} else {
-			results[target.branch] = append(results[target.branch], nodeID)
-			batches[target.branch] = target.batch
+		if reason != "cancelled" {
+			p.detectDecision(turn)
 		}
 		p.retainTurnMessages(turnID, resolved)
 		slog.Info("chat turn completed", "chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID, "role_name", role.Name, "stop_reason", reason, "latency_ms", nowMillis()-turn.StartedAt, "attempts", attempts)
-		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "attempts": attempts, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
-		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "completed", "stop_reason": reason, "dispatch_id": dispatchID, "agent": resolved.Agent, "provider": resolved.Provider, "model": resolved.Model, "branch_id": target.branch})
+		p.publish("chat:"+chat.ID+":turn-completed", map[string]any{"chat_id": chat.ID, "task_id": target.task, "turn_id": turnID, "stop_reason": reason, "role_id": role.ID, "role_name": role.Name, "attempts": attempts, "sender": map[string]any{"from": "role", "role_id": role.ID, "role_name": role.Name}})
+		p.publish("chat:_:turn", map[string]any{"chat_id": chat.ID, "turn_id": turnID, "role_id": role.ID, "role_name": role.Name, "phase": "completed", "stop_reason": reason, "dispatch_id": dispatchID, "agent": resolved.Agent, "provider": resolved.Provider, "model": resolved.Model, "task_id": target.task})
 		if reason != "cancelled" {
 			p.wg.Add(1)
 			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, summaryProvider)
@@ -1067,24 +896,10 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 			p.mu.Unlock()
 		}
 		if laneSession != "" {
-			// A lane continuation queued behind this turn waits on the
-			// session, which a throwaway or cross-key lane run holds no busy
-			// key for — kick its queue directly. (For a lane relay's own key
-			// this no-ops: the deferred releaseBusy drains it.)
-			p.startQueued(runtimeKey(chat.ID, role.ID) + "\x00lane\x00" + laneSession)
-			sessions = append(sessions, relaySession{pluginID: lanePluginID, sessionID: laneSession, branch: target.branch, role: role})
+			sessions = append(sessions, relaySession{pluginID: lanePluginID, sessionID: laneSession, task: target.task, role: role})
 		}
 		if err != nil || reason == "error" || reason == "cancelled" {
 			break
-		}
-	}
-	// Batch settlement: every touched line's head advances to its result
-	// (multi-role results收束 into one join node, so no finisher overwrites
-	// another's work).
-	for branch, nodeIDs := range results {
-		if err := p.advanceBatch(chat.ID, branch, batches[branch], nodeIDs); err != nil {
-			slog.Error("chat line head advance failed", "chat_id", chat.ID, "branch", branch, "error", err)
-			continue
 		}
 	}
 	return sessions
@@ -1115,7 +930,8 @@ func (p *Plugin) emitTurnFailure(chatID, turnID string, role SuperRole, reason s
 	if marshalErr != nil {
 		payloadJSON = []byte("{}")
 	}
-	block := &MessageBlock{ID: newID(), EventID: newID(), ChatID: chatID, TurnID: turnID, Kind: agentdriver.KindError, Text: text, Payload: string(payloadJSON), OccurredAt: nowMillis()}
+	taskID, _ := p.taskForTurn(turnID)
+	block := &MessageBlock{ID: newID(), EventID: newID(), ChatID: chatID, TaskID: taskID, TurnID: turnID, Kind: agentdriver.KindError, Text: text, Payload: string(payloadJSON), OccurredAt: nowMillis()}
 	if err := p.store.addMessageBlock(block); err != nil {
 		slog.Warn("chat turn failure block persistence failed", "chat_id", chatID, "turn_id", turnID, "error", err)
 		return
@@ -1188,7 +1004,24 @@ func commonPrompt(workspace Workspace, chat Chat) string {
 }
 
 func initialRolePrompt(role SuperRole) string {
-	return fmt.Sprintf("You are a persistent Super Workspace role named %q.\n\nRole prompt:\n%s\n\nOperate as this role only. Prefer work that matches the fixed rules, files, topic, and responsibilities above. If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks.", role.Name, fallback(role.Prompt, "(No role-specific prompt was provided.)"))
+	return fmt.Sprintf(`You are a persistent Super Workspace role named %q.
+
+Role prompt:
+%s
+
+Operate as this role only. Prefer work that matches the fixed rules, files, topic, and responsibilities above. If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks.
+
+When you genuinely need the user to choose before work can continue, end the visible reply with exactly one flat marker, and no text after its closing tag:
+<viewer-decision>
+version: 1
+kind: choice
+question: What should happen next?
+option: Recommended next step
+option: Alternative next step
+display: buttons
+tone: neutral
+</viewer-decision>
+Each non-empty marker line is one key: value entry. Do not use JSON, YAML, XML attributes, nested values, multiline values, or code fences around the marker. Options are optional and may repeat at most eight times. Use display auto, buttons, or list; use tone neutral or warning. Do not use this marker for rhetorical questions or ordinary status updates.`, role.Name, fallback(role.Prompt, "(No role-specific prompt was provided.)"))
 }
 func nonEmpty(values ...string) []string {
 	result := []string{}
@@ -1206,16 +1039,12 @@ func fallback(value, fallbackValue string) string {
 	return value
 }
 
-func (p *Plugin) historyPrompt(chatID, branchID string, before int64, budget int) (string, error) {
-	view, err := p.viewLineKeys(chatID, []string{branchID})
+func (p *Plugin) historyPrompt(chatID, taskID string, before int64, budget int) (string, error) {
+	messages, err := p.store.history(taskID, before, budget)
 	if err != nil {
 		return "", err
 	}
-	messages, err := p.store.historyByKeys(chatID, view.messageKeys, before, budget)
-	if err != nil {
-		return "", err
-	}
-	return renderRecentHistory(messages, "Recent visible chat history:", routerHistoryByteBudget), nil
+	return renderRecentHistory(messages, "Recent visible task history:", routerHistoryByteBudget), nil
 }
 
 func (p *Plugin) handleStop(frame busclient.Frame) {
@@ -1266,14 +1095,14 @@ func (p *Plugin) stopTurn(chatID, roleID, turnID string) (bool, error) {
 	return len(targets) > 0, result
 }
 
-// publishMessage pushes one message on the chat's live feed. branchIDs
+// publishMessage pushes one message on the chat's live feed. taskIDs
 // attributes the frame to its owning line(s) (main = "") so panes on a
 // filtered view merge only their lines' frames; frames without attribution
 // stay visible everywhere (anti-flicker fallback).
-func (p *Plugin) publishMessage(message *Message, branchIDs ...string) {
+func (p *Plugin) publishMessage(message *Message, taskIDs ...string) {
 	payload := message.payload()
-	if len(branchIDs) > 0 {
-		payload["branch_ids"] = branchIDs
+	if len(taskIDs) > 0 {
+		payload["task_ids"] = taskIDs
 	}
 	p.publish("chat:"+message.ChatID+":message", payload)
 }
@@ -1286,28 +1115,28 @@ func (p *Plugin) queuedDispatchLine(chatID, dispatchID string) (string, bool) {
 	for _, queue := range p.queues {
 		for _, entry := range queue {
 			if entry.chatID == chatID && entry.dispatchID == dispatchID {
-				return entry.branchID, true
+				return entry.taskID, true
 			}
 		}
 	}
 	return "", false
 }
 
-// branchForTurn resolves a turn's owning line for live frame attribution:
+// taskForTurn resolves a turn's owning line for live frame attribution:
 // the in-memory map stamped at beginTurn covers the streaming hot path; the
 // row lookup covers turns begun before this process started.
-func (p *Plugin) branchForTurn(turnID string) (string, bool) {
+func (p *Plugin) taskForTurn(turnID string) (string, bool) {
 	p.mu.Lock()
-	branch, ok := p.turnBranches[turnID]
+	task, ok := p.turnTasks[turnID]
 	p.mu.Unlock()
 	if ok {
-		return branch, true
+		return task, true
 	}
 	turn, err := p.store.turn(turnID)
 	if err != nil || turn == nil {
 		return "", false
 	}
-	return turn.BranchID, true
+	return turn.TaskID, true
 }
 func (p *Plugin) publish(channel string, value any) {
 	if p.client != nil {

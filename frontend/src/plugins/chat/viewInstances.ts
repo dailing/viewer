@@ -2,7 +2,7 @@ import { reactive } from "vue";
 
 export interface ChatViewParams {
   chatId: string;
-  initialTabs?: string[];
+  initialTaskId?: string;
 }
 
 export interface ChatViewInstance extends ChatViewParams {
@@ -10,7 +10,7 @@ export interface ChatViewInstance extends ChatViewParams {
   defaultForChat: boolean;
 }
 
-const STORAGE_KEY = "viewer.chatViews.v1";
+const STORAGE_KEY = "viewer.chatViews.v2";
 
 function load(): Record<string, ChatViewInstance> {
   try {
@@ -38,7 +38,7 @@ function create(params: ChatViewParams, defaultForChat: boolean): ChatViewInstan
   const view: ChatViewInstance = {
     id: newId(),
     chatId: params.chatId,
-    initialTabs: params.initialTabs === undefined ? undefined : [...params.initialTabs],
+    initialTaskId: params.initialTaskId,
     defaultForChat,
   };
   views[view.id] = view;
@@ -47,12 +47,35 @@ function create(params: ChatViewParams, defaultForChat: boolean): ChatViewInstan
 }
 
 /** The pinned/default Dock target for a Chat; repeated opens reuse it. */
-export function ensureDefaultChatView(chatId: string): string {
+export function ensureDefaultChatView(chatId: string, initialTaskId?: string): string {
   const existing = Object.values(views).find((view) => view.chatId === chatId && view.defaultForChat);
-  return existing?.id ?? create({ chatId }, true).id;
+  if (existing) {
+    if (initialTaskId !== undefined) { existing.initialTaskId = initialTaskId; persist(); }
+    return existing.id;
+  }
+  return create({ chatId, initialTaskId }, true).id;
 }
 
-/** A separate view+input pair, optionally seeded with the source view's tabs. */
+export function ensureTaskView(chatId: string, taskId: string): string {
+  const existing = Object.values(views).find((view) => view.chatId === chatId && view.initialTaskId === taskId);
+  if (existing) return existing.id;
+  const emptyDefault = Object.values(views).find((view) => view.chatId === chatId && view.defaultForChat && !view.initialTaskId);
+  if (emptyDefault) {
+    emptyDefault.initialTaskId = taskId;
+    persist();
+    return emptyDefault.id;
+  }
+  return create({ chatId, initialTaskId: taskId }, false).id;
+}
+
+export function setChatViewTask(instanceId: string, taskId: string): void {
+  const view = views[instanceId];
+  if (!view || view.initialTaskId === taskId) return;
+  view.initialTaskId = taskId;
+  persist();
+}
+
+/** A separate view+input pair. */
 export function createAdditionalChatView(params: ChatViewParams): string {
   return create(params, false).id;
 }

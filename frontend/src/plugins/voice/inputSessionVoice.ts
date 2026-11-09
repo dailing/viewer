@@ -22,7 +22,7 @@ export async function sendInputSession(id: string): Promise<boolean> {
   }
   const current = input.session(id);
   if (current !== undefined
-    && (current.branchId ?? "") === intent.branchId
+    && (current.taskId ?? "") === intent.taskId
     && current.mode === intent.mode
     && current.queuedDispatchId === intent.queuedDispatchId) {
     input.setText(id, text);

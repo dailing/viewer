@@ -469,12 +469,15 @@ describe.sequential("frontend pane contracts against viewerd", () => {
     const second = (await client.request("chat:_:roles:create", { name: "Two", description: "second", prompt: "TWO", routing_policy_id: "hermes-default" })) as { id: string };
     expect(await client.request("chat:_:roles:list", {})).toEqual(expect.arrayContaining([expect.objectContaining({ id: first.id }), expect.objectContaining({ id: second.id })]));
     const chat = (await client.request("chat:_:chats:create", { name: "Contract", root: REPO_DIR, member_role_ids: [first.id, second.id] })) as { id: string };
+    const taskList = (await client.request("chat:_:tasks:list", { chat_id: chat.id, status: "open", limit: 100 })) as { tasks: Array<{ id: string }> };
+    expect(taskList.tasks).toHaveLength(1);
+    const taskId = taskList.tasks[0]!.id;
     await client.request("chat:_:chats:patch", { id: chat.id, pinned: true, name: "Contract renamed" });
     await client.request("chat:_:chats:activate", { id: chat.id });
     await waitFor(() => active.at(-1) === chat.id);
     expect(await client.request("chat:_:chats:list", {})).toEqual(expect.objectContaining({ active_chat_id: chat.id, chats: [expect.objectContaining({ id: chat.id, pinned: true })] }));
 
-    const dispatched = (await client.request("chat:_:dispatch", { chat_id: chat.id, message: "hello", role_ids: [first.id, second.id] })) as { role_ids: string[] };
+    const dispatched = (await client.request("chat:_:send-message", { task_id: taskId, text: "hello", role_ids: [first.id, second.id], idempotency_key: "contract-hello" })) as { role_ids: string[] };
     expect(dispatched.role_ids).toEqual([first.id, second.id]);
     await waitFor(() => completed.filter((item) => item.chat_id === chat.id).length === 2);
     const relay = completed.filter((item) => item.chat_id === chat.id);
@@ -489,10 +492,10 @@ describe.sequential("frontend pane contracts against viewerd", () => {
     }
 
     const beforeLong = messages.length;
-    const longRun = (await client.request("chat:_:dispatch", { chat_id: chat.id, message: "long turn", role_ids: [first.id] })) as { dispatch_id: string };
+    const longRun = (await client.request("chat:_:send-message", { task_id: taskId, text: "long turn", role_ids: [first.id], idempotency_key: "contract-long" })) as { dispatch_id: string };
     expect(longRun.dispatch_id).toBeTruthy();
     await waitFor(() => messages.slice(beforeLong).some((item) => item.chat_id === chat.id && item.sender && (item.sender as { role_id?: string }).role_id === first.id && String(item.text).includes("mock:")));
-    const busy = (await client.request("chat:_:dispatch", { chat_id: chat.id, message: "busy", role_ids: [first.id] })) as {
+    const busy = (await client.request("chat:_:send-message", { task_id: taskId, text: "busy", role_ids: [first.id], idempotency_key: "contract-busy" })) as {
       dispatch_id: string;
       started_role_ids: string[];
       queued_role_ids: string[];
@@ -506,7 +509,7 @@ describe.sequential("frontend pane contracts against viewerd", () => {
     await waitFor(() => completed.some((item) => item.chat_id === chat.id && item.role_id === first.id && item.stop_reason === "cancelled"));
     await client.request("chat:_:roles:patch", { id: first.id, description: "" });
     await client.request("chat:_:roles:patch", { id: second.id, description: "" });
-    await expect(client.request("chat:_:dispatch", { chat_id: chat.id, message: "auto" })).rejects.toMatchObject({ code: "chat_error" });
+    await expect(client.request("chat:_:send-message", { task_id: taskId, text: "auto", idempotency_key: "contract-auto" })).rejects.toMatchObject({ code: "chat_error" });
     await client.request("chat:_:chats:delete", { id: chat.id });
     await client.request("chat:_:roles:delete", { id: first.id });
     await client.request("chat:_:roles:delete", { id: second.id });

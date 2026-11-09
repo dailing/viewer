@@ -9,6 +9,7 @@
 import { reactive } from "vue";
 
 import { BusClient, type BusErrorEntry, type PluginManifest } from "@viewer/bus-sdk";
+import { syncProgrammaticShell } from "./programmatic";
 
 export const SHELL_MANIFEST: PluginManifest = {
   id: "shell",
@@ -36,7 +37,8 @@ export const bus = new BusClient(busUrl(), SHELL_MANIFEST, {
 
 bus.onStateChange((connected) => {
   busState.connected = connected;
-  busState.conn = bus.conn;
+  busState.conn = connected ? bus.conn : null;
+  syncProgrammaticShell(bus, connected ? bus.conn : null);
 });
 
 bus.onError((entry) => {

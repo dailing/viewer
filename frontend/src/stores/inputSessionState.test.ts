@@ -5,7 +5,7 @@ import {
   completeInputSessionSend,
   inputSessionIntent,
   releaseQueuedInputEdit,
-  setInputSessionBranch,
+  setInputSessionTask,
   setInputSessionText,
   snapshotInputSession,
   type InputSession,
@@ -14,22 +14,22 @@ import {
 function session(): InputSession {
   return {
     id: "chat:c", pluginId: "chat", paneType: "chat", instanceId: "c", label: "Chat",
-    text: "ordinary", branchId: "a", mode: "dispatch", queuedDispatchId: "", revision: 0,
-    selectedRoleIds: ["r1"], forceNewSession: false, parallel: false, raw: false, rawByBranch: {}, pinned: true,
+    text: "ordinary", taskId: "a", continueTurnId: "", mode: "dispatch", queuedDispatchId: "", revision: 0,
+    selectedRoleIds: ["r1"], forceNewSession: false, parallel: false, raw: false, rawByTask: {}, pinned: true,
     phase: "idle", error: "", updatedAt: 0,
   };
 }
 
 describe("input session send intent", () => {
-  it("keeps an await-bound branch and never clears a newly selected line", () => {
+  it("keeps an await-bound Task and never clears a newly selected line", () => {
     const value = session();
     const intent = inputSessionIntent(value);
     const sent = snapshotInputSession(value, "from A", intent);
-    setInputSessionBranch(value, "b");
+    setInputSessionTask(value, "b");
     setInputSessionText(value, "draft on B");
     completeInputSessionSend(value, sent);
-    expect(sent.branchId).toBe("a");
-    expect(value.branchId).toBe("b");
+    expect(sent.taskId).toBe("a");
+    expect(value.taskId).toBe("b");
     expect(value.text).toBe("draft on B");
     expect(value.phase).toBe("idle");
   });
@@ -45,7 +45,7 @@ describe("input session send intent", () => {
     const second = snapshotInputSession(value);
     completeInputSessionSend(value, second);
     expect(value.text).toBe("");
-    expect(value.branchId).toBe("a");
+    expect(value.taskId).toBe("a");
   });
 
   it("accepts the backend empty-draft acknowledgement without re-arming one-shot options", () => {
@@ -87,16 +87,16 @@ describe("queued edit lifecycle", () => {
     expect(value.text).toBe("ordinary");
   });
 
-  it("cancel and branch switch restore rather than flush the queued text", () => {
+  it("cancel and Task switch restore rather than flush the queued text", () => {
     const value = session();
     beginQueuedInputEdit(value, "a", "d1", "queued");
     cancelQueuedInputEdit(value);
     expect(value.text).toBe("ordinary");
 
     beginQueuedInputEdit(value, "a", "d2", "queued 2");
-    setInputSessionBranch(value, "b");
+    setInputSessionTask(value, "b");
     expect(value.mode).toBe("dispatch");
-    expect(value.branchId).toBe("b");
+    expect(value.taskId).toBe("b");
     expect(value.text).toBe("ordinary");
   });
 
@@ -107,6 +107,6 @@ describe("queued edit lifecycle", () => {
     releaseQueuedInputEdit(value);
     expect(value.mode).toBe("dispatch");
     expect(value.text).toBe("too late but keep me");
-    expect(value.branchId).toBe("a");
+    expect(value.taskId).toBe("a");
   });
 });

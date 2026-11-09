@@ -18,7 +18,7 @@ echo "== building binaries =="
 cd "$ROOT"
 for b in viewerd viewer-terminal viewer-gateway viewer-configstore \
          viewer-instancestore viewer-fileservice viewer-supervisor viewer-inspector \
-         viewer-voice; do
+         viewer-voice viewer-chat-migrate; do
   go build -o "$BIN/$b" "./cmd/$b" || { echo "BUILD FAIL $b"; exit 1; }
 done
 export VIEWERD_BIN=$BIN/viewerd
@@ -28,6 +28,7 @@ export VIEWER_CONFIGSTORE_BIN=$BIN/viewer-configstore
 export VIEWER_INSTANCESTORE_BIN=$BIN/viewer-instancestore
 export VIEWER_FILESERVICE_BIN=$BIN/viewer-fileservice
 export VIEWER_VOICE_BIN=$BIN/viewer-voice
+export VIEWER_CHAT_MIGRATE_BIN=$BIN/viewer-chat-migrate
 
 PASS=0; FAIL=0
 run_suite() {
@@ -79,9 +80,11 @@ kill "${PIDS[-1]}" 2>/dev/null; unset 'PIDS[-1]'
 run_suite supervisor "$PY" "$SCRIPT_DIR/smoke_supervisor.py"
 run_suite inspector "$PY" "$SCRIPT_DIR/smoke_inspector.py"
 
-# 4. chat 单独拉起按需白名单 viewerd，并以 mock ACP agent 验证 turn/DB/cancel。
+# 4. chat / Task API / Decision / offline migration。
 run_suite chat "$PY" "$SCRIPT_DIR/smoke_chat.py"
-run_suite loop "$PY" "$SCRIPT_DIR/smoke_loop.py"
+run_suite task-api "$PY" "$SCRIPT_DIR/smoke_task_api.py"
+run_suite decision "$PY" "$SCRIPT_DIR/smoke_decision.py"
+run_suite chat-level-migration "$PY" "$SCRIPT_DIR/smoke_chat_level_migration.py"
 
 # 5. voice 单独拉起 config-store + voice，并 relay 到 mock voice-service。
 run_suite voice "$PY" "$SCRIPT_DIR/smoke_voice.py"

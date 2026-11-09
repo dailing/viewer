@@ -20,12 +20,16 @@ export function chatInputRPC(session: InputSession, memberRoleIds?: readonly str
       payload: { chat_id: targetChatId, dispatch_id: session.queuedDispatchId, message },
     };
   }
-  const branchId = session.branchId ?? "";
+  const taskId = session.taskId ?? "";
   const payload: Record<string, unknown> = {
     chat_id: targetChatId,
     input_instance_id: session.instanceId,
-    message,
-    branch_id: branchId,
+    text: message,
+    task_id: taskId,
+    // A human send explicitly continues an ended Task. Programmatic and queued
+    // edits keep the ordinary open-Task boundary unless they opt in separately.
+    reopen_ended: true,
+    idempotency_key: `${session.instanceId}:${session.revision}`,
   };
   const selectedRoleIds = memberRoleIds === undefined
     ? session.selectedRoleIds
@@ -45,5 +49,6 @@ export function chatInputRPC(session: InputSession, memberRoleIds?: readonly str
   if (session.forceNewSession) payload.force_new_session = true;
   if (session.parallel) payload.parallel_dispatch = true;
   if (session.raw) payload.raw = true;
-  return { channel: "chat:_:dispatch", payload };
+  if (session.continueTurnId) payload.continue_turn_id = session.continueTurnId;
+  return { channel: "chat:_:send-message", payload };
 }

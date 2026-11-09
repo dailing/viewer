@@ -13,6 +13,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+const chatSchemaVersion = "1"
+
+var ErrLegacyChatSchema = errors.New("legacy chat database: run the one-shot Chat-level settings migration first")
+
 type Chat struct {
 	ID                       string `gorm:"primaryKey" json:"id"`
 	Name                     string `json:"name"`
@@ -24,12 +28,6 @@ type Chat struct {
 	RoleRoutingOverridesJSON string `gorm:"column:role_routing_policy_overrides" json:"-"`
 	CreatedAt                int64  `json:"created_at"`
 	UpdatedAt                int64  `json:"updated_at"`
-	// M6a columns remain mapped so AutoMigrate is non-destructive.
-	Title             *string `json:"-"`
-	Provider          string  `json:"-"`
-	ProviderProfile   string  `json:"-"`
-	ProviderSessionID string  `json:"-"`
-	CWD               string  `json:"-"`
 }
 
 func (c Chat) payload() map[string]any {
@@ -41,8 +39,57 @@ func (c Chat) payload() map[string]any {
 	}
 }
 
+type Task struct {
+	ID                  string `gorm:"primaryKey" json:"id"`
+	ChatID              string `gorm:"index;not null" json:"chat_id"`
+	Title               string `json:"title"`
+	TitleSource         string `json:"title_source"`
+	TitleRevision       int64  `json:"title_revision"`
+	TitleQueryMessageID string `json:"title_query_message_id"`
+	CreatedBy           string `json:"created_by"`
+	CausationID         string `json:"causation_id"`
+	CorrelationID       string `json:"correlation_id"`
+	Pinned              bool   `json:"pinned"`
+	CreatedAt           int64  `json:"created_at"`
+	UpdatedAt           int64  `json:"updated_at"`
+	EndedAt             *int64 `gorm:"index" json:"ended_at"`
+}
+
+func (t Task) payload() map[string]any {
+	status := "open"
+	if t.EndedAt != nil {
+		status = "ended"
+	}
+	return map[string]any{
+		"id": t.ID, "chat_id": t.ChatID, "title": t.Title, "title_source": t.TitleSource,
+		"title_revision": t.TitleRevision, "title_query_message_id": t.TitleQueryMessageID,
+		"created_by": t.CreatedBy, "causation_id": t.CausationID, "correlation_id": t.CorrelationID,
+		"pinned": t.Pinned, "created_at": t.CreatedAt,
+		"updated_at": t.UpdatedAt, "ended_at": t.EndedAt, "status": status,
+	}
+}
+
+func (t Task) ended() bool { return t.EndedAt != nil }
+
+type TaskSummary struct {
+	TaskID          string `gorm:"primaryKey" json:"task_id"`
+	ChatID          string `gorm:"index;not null" json:"chat_id"`
+	Text            string `json:"text"`
+	SourceTurnIDs   string `json:"source_turn_ids"`
+	SummaryRevision int64  `json:"summary_revision"`
+	SourceRevision  int64  `json:"source_revision"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	Status          string `json:"status"`
+	Final           bool   `json:"final"`
+	Error           string `json:"error"`
+	CreatedAt       int64  `json:"created_at"`
+	UpdatedAt       int64  `json:"updated_at"`
+}
+
 type RoleSession struct {
 	ChatID            string `gorm:"primaryKey"`
+	TaskID            string `gorm:"primaryKey"`
 	RoleID            string `gorm:"primaryKey"`
 	Provider          string
 	ProviderProfile   string
@@ -56,38 +103,53 @@ type PluginState struct {
 	Value string
 }
 
-// Draft is the synced composer input of one chat line: one row per
-// (chat, branch), overwritten whole on every update (last write wins),
-// shared across all devices viewing that line. BranchID "" = mainline;
-// the composer binds to the send-target line (全部/multi-select → mainline).
 type Draft struct {
 	InputInstanceID string `gorm:"primaryKey;size:64" json:"input_instance_id"`
-	ChatID          string `gorm:"index;size:12;not null" json:"chat_id"`
-	BranchID        string `gorm:"primaryKey;size:12;not null" json:"branch_id"`
+	ChatID          string `gorm:"index;size:32;not null" json:"chat_id"`
+	TaskID          string `gorm:"primaryKey;size:32;not null" json:"task_id"`
 	Text            string `json:"text"`
 	UpdatedAt       int64  `json:"updated_at"`
 }
 
-// TableName moves drafts to a fresh table: the pre-branch schema keyed the
-// row by chat alone and SQLite cannot re-key an existing table. Drafts are
-// ephemeral, so the legacy table is dropped (openStore) rather than migrated.
 func (Draft) TableName() string { return "chat_drafts" }
 
 type Message struct {
-	ID         string `gorm:"primaryKey"`
-	ChatID     string `gorm:"index;not null"`
-	TurnID     string `gorm:"index;not null"`
-	Role       string `gorm:"not null"`
-	Text       string `gorm:"not null"`
-	SenderFrom string
-	RoleID     string `gorm:"index"`
-	RoleName   string
-	CreatedAt  int64
+	ID            string `gorm:"primaryKey"`
+	ChatID        string `gorm:"index;not null"`
+	TaskID        string `gorm:"index;not null"`
+	TurnID        string `gorm:"index;not null"`
+	Role          string `gorm:"not null"`
+	Text          string `gorm:"not null"`
+	SenderFrom    string
+	RoleID        string `gorm:"index"`
+	RoleName      string
+	SourcePlugin  string
+	SourceEventID string
+	CausationID   string
+	CorrelationID string
+	CreatedAt     int64
+}
+
+func (m Message) payload() map[string]any {
+	sender := map[string]any{"from": m.SenderFrom}
+	if m.RoleID != "" {
+		sender["role_id"] = m.RoleID
+	}
+	if m.RoleName != "" {
+		sender["role_name"] = m.RoleName
+	}
+	return map[string]any{
+		"id": m.ID, "chat_id": m.ChatID, "task_id": m.TaskID, "turn_id": m.TurnID,
+		"role": m.Role, "text": m.Text, "created_at": m.CreatedAt, "sender": sender,
+		"source_plugin": m.SourcePlugin, "source_event_id": m.SourceEventID,
+		"causation_id": m.CausationID, "correlation_id": m.CorrelationID,
+	}
 }
 
 type TurnEvent struct {
 	ID         string `gorm:"primaryKey"`
 	ChatID     string `gorm:"index;not null"`
+	TaskID     string `gorm:"index;not null"`
 	TurnID     string `gorm:"index;not null"`
 	RoleID     string `gorm:"index"`
 	Provider   string `gorm:"not null"`
@@ -102,6 +164,7 @@ type MessageBlock struct {
 	ID         string `gorm:"primaryKey"`
 	EventID    string `gorm:"index;not null"`
 	ChatID     string `gorm:"index;not null"`
+	TaskID     string `gorm:"index;not null"`
 	TurnID     string `gorm:"index;not null"`
 	Kind       string `gorm:"not null"`
 	Text       string
@@ -109,54 +172,24 @@ type MessageBlock struct {
 	OccurredAt int64
 }
 
-func (m Message) payload() map[string]any {
-	sender := map[string]any{"from": m.SenderFrom}
-	if m.RoleID != "" {
-		sender["role_id"] = m.RoleID
-	}
-	if m.RoleName != "" {
-		sender["role_name"] = m.RoleName
-	}
+func (m MessageBlock) payload() map[string]any {
 	return map[string]any{
-		"id": m.ID, "chat_id": m.ChatID, "turn_id": m.TurnID, "role": m.Role,
-		"text": m.Text, "created_at": m.CreatedAt, "sender": sender,
+		"id": m.ID, "chat_id": m.ChatID, "task_id": m.TaskID, "turn_id": m.TurnID,
+		"kind": m.Kind, "text": m.Text, "payload": m.Payload, "occurred_at": m.OccurredAt,
 	}
 }
 
 type Turn struct {
-	ID       string `gorm:"primaryKey"`
-	ChatID   string `gorm:"index;not null"`
-	RoleID   string `gorm:"index"`
-	RoleName string
-	// DispatchID links the turn back to the dispatch whose user message
-	// triggered it (user messages carry the dispatch id as their turn_id),
-	// so the user box's routing label can be rebuilt from turn records.
+	ID         string `gorm:"primaryKey"`
+	ChatID     string `gorm:"index;not null"`
+	TaskID     string `gorm:"index;not null"`
+	RoleID     string `gorm:"index"`
+	RoleName   string
 	DispatchID string `gorm:"index"`
-	// SessionID is the provider session the turn ran on, stamped once the
-	// runtime exists. Turns sharing a SessionID form a session lane — the
-	// unit the pane's lane tabs filter by and lane continuations resume.
-	SessionID string `gorm:"index" json:"session_id"`
-	// BranchID ties the turn to a named parallel branch (framework v0.63),
-	// stamped at beginTurn from the dispatch — branch identity survives
-	// session rebuilds because it does not derive from SessionID. Empty on
-	// mainline turns.
-	BranchID string `gorm:"index" json:"branch_id"`
-	// PrevTurnID is the turn's parent in its work line (framework v0.64),
-	// stamped at beginTurn: a branch turn points at the branch's latest turn
-	// (first turn: the fork turn in the parent line), a lane continuation at
-	// the session's latest turn, everything else at the latest mainline turn.
-	// Turns thus form a walkable commit chain that crosses fork points.
-	PrevTurnID string `gorm:"index" json:"prev_turn_id"`
-	// Agent/Provider/Model record the routing candidate that actually
-	// executed the turn (planned candidate at resolve time, updated on
-	// failover). Empty on turns that predate this column or never resolved
-	// a candidate — the frontend renders no routing label for those.
-	Agent    string
-	Provider string
-	Model    string
-	// BatchID links the turn to its execution batch's dispatch snapshot —
-	// the fixed input head its history node hangs off (history-DAG model).
-	BatchID    string `gorm:"index"`
+	SessionID  string `gorm:"index" json:"session_id"`
+	Agent      string
+	Provider   string
+	Model      string
 	StartedAt  int64
 	EndedAt    *int64
 	StopReason *string
@@ -165,6 +198,7 @@ type Turn struct {
 type TurnSummary struct {
 	TurnID             string `gorm:"primaryKey"`
 	ChatID             string `gorm:"index;not null"`
+	TaskID             string `gorm:"index;not null"`
 	RoleID             string `gorm:"index"`
 	RoleName           string
 	Provider           string
@@ -180,113 +214,144 @@ type TurnSummary struct {
 	CreatedAt          int64
 }
 
-// Branch is a named parallel work line of a chat (framework v0.63): an
-// independent, persistent record that OWNS its turns (Turn.BranchID), so the
-// pane's branch tabs no longer derive their identity from provider sessions
-// — a session rebuild mid-branch never spawns a new tab. Since v0.66 the
-// branch is a pure CONTEXT partition: it binds no role — RoleID/RoleName
-// merely record the first role that ran here (display) and every role keeps
-// its own session lane on the branch (role × branch).
-//
-// Lifecycle (history-DAG model, docs/chat-branch-dag-plan.md): State is the
-// operation-permission authority — open / archived / merged. Archiving
-// WITHOUT merging (the "by the way" pattern) just closes the work entry:
-// the branch leaves the bar, rejects dispatch, and its history joins no
-// line (no merge edge is ever written). Merging is a single atomic graph
-// operation: a merge node grafts the branch's head into the target line,
-// the branch disappears from every list (bar, open, archived) — the row,
-// its turns, and the graph edges stay for queries and debugging.
-// Unarchiving and merge-undo are reserved, unimplemented functions.
-//
-// Fork points (framework v0.64): ForkTurnID records the turn the branch
-// forked from (empty on pre-v0.64 rootless branches) and ParentBranchID the
-// fork turn's line ("" = mainline); the fork node fork:<branchID> in the
-// history graph carries the actual parent edge. MergedIntoBranchID records
-// the merge target ("" = mainline). MergedThroughTurnID and MergeMessageID
-// are retired pre-DAG merge artifacts, kept read-only for forensics.
-type Branch struct {
-	ID       string `gorm:"primaryKey" json:"id"`
-	ChatID   string `gorm:"index;not null" json:"chat_id"`
-	Name     string `json:"name"`
-	RoleID   string `json:"role_id"`
-	RoleName string `json:"role_name"`
-	// SessionID is the provider session of the branch's newest turn
-	// (informational; the turn rows are authoritative).
-	SessionID           string `json:"session_id"`
-	ForkTurnID          string `json:"fork_turn_id"`
-	ParentBranchID      string `json:"parent_branch_id"`
-	MergedIntoBranchID  string `json:"merged_into_branch_id"`
-	ArchivedAt          *int64 `json:"archived_at"`
-	MergedThroughTurnID string `json:"merged_through_turn_id"`
-	MergeMessageID      string `json:"merge_message_id"`
-	// DAG lifecycle: State ∈ open/archived/merged ("" on rows not yet
-	// migrated, treated as open); MergedAt/MergeNodeID record the merge.
-	State       string `gorm:"index" json:"state"`
-	MergedAt    *int64 `json:"merged_at"`
-	MergeNodeID string `json:"merge_node_id"`
-	CreatedAt   int64  `json:"created_at"`
-	UpdatedAt   int64  `json:"updated_at"`
+type Decision struct {
+	ID                 string `gorm:"primaryKey" json:"id"`
+	ChatID             string `gorm:"index;not null" json:"chat_id"`
+	TaskID             string `gorm:"index;not null" json:"task_id"`
+	SourceTurnID       string `gorm:"uniqueIndex" json:"source_turn_id"`
+	SourceMessageID    string `gorm:"index" json:"source_message_id"`
+	RoleID             string `json:"role_id"`
+	Version            int    `json:"version"`
+	Kind               string `json:"kind"`
+	Question           string `json:"question"`
+	OptionsJSON        string `json:"-"`
+	Display            string `json:"display"`
+	Tone               string `json:"tone"`
+	ParseWarning       string `json:"parse_warning"`
+	Status             string `gorm:"index" json:"status"`
+	Response           string `json:"response"`
+	ResolvedDispatchID string `json:"resolved_dispatch_id"`
+	MarkerStart        int    `json:"marker_start"`
+	MarkerEnd          int    `json:"marker_end"`
+	RequesterSession   string `json:"requester_session"`
+	RequesterProvider  string `json:"requester_provider"`
+	CreatedAt          int64  `json:"created_at"`
+	UpdatedAt          int64  `json:"updated_at"`
+	ResolvedAt         *int64 `json:"resolved_at"`
 }
 
-func (b Branch) payload() map[string]any {
-	return map[string]any{
-		"id": b.ID, "chat_id": b.ChatID, "name": b.Name,
-		"role_id": b.RoleID, "role_name": b.RoleName, "session_id": b.SessionID,
-		"fork_turn_id": b.ForkTurnID, "parent_branch_id": b.ParentBranchID,
-		"merged_into_branch_id": b.MergedIntoBranchID,
-		"archived_at":           b.ArchivedAt, "merged_through_turn_id": b.MergedThroughTurnID,
-		"merge_message_id": b.MergeMessageID,
-		"state":            b.State, "merged_at": b.MergedAt, "merge_node_id": b.MergeNodeID,
-		"created_at": b.CreatedAt, "updated_at": b.UpdatedAt,
-	}
+type OperationReceipt struct {
+	CallerPlugin   string `gorm:"primaryKey" json:"caller_plugin"`
+	Operation      string `gorm:"primaryKey" json:"operation"`
+	IdempotencyKey string `gorm:"primaryKey" json:"idempotency_key"`
+	ResultID       string `gorm:"index" json:"result_id"`
+	ResultJSON     string `json:"-"`
+	ChatID         string `gorm:"index" json:"chat_id"`
+	TaskID         string `gorm:"index" json:"task_id"`
+	Fingerprint    string `json:"-"`
+	Status         string `json:"status"`
+	Failure        string `json:"error,omitempty"`
+	CreatedAt      int64  `json:"created_at"`
 }
 
-// archived reports the retired guard: merged and shelved branches both
-// reject dispatch/fork/delete-of-history. (Pre-DAG rows carry ArchivedAt
-// with an empty State; the migration backfills State.)
-func (b Branch) archived() bool { return b.ArchivedAt != nil }
-
-// merged reports the merge terminal state (grafted into a target line).
-func (b Branch) merged() bool { return b.State == branchStateMerged }
+type ContextBuild struct {
+	ID                         string `gorm:"primaryKey"`
+	ChatID                     string `gorm:"index"`
+	TaskID                     string `gorm:"index"`
+	DispatchID                 string `gorm:"index"`
+	Kind                       string
+	Coverage                   string
+	SummaryCharBudget          int
+	EndedTaskSummaryCharBudget int
+	TailTurns                  int
+	TailWordBudget             int
+	TailByteBudget             int
+	ContextByteBudget          int
+	CreatedAt                  int64
+}
 
 type store struct{ db *gorm.DB }
 
 func openStore(dataDir string) (*store, error) {
-	path := filepath.Join(dataDir, "chat.sqlite3")
+	return openStorePath(filepath.Join(dataDir, "chat.sqlite3"))
+}
+
+func openStorePath(path string) (*store, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(path))
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open chat database: %w", err)
 	}
-	if err := db.AutoMigrate(&Chat{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &Branch{}, &AutomationLease{}, &AutomationGate{}, &DispatchReceipt{}, &Draft{}, &HistoryNode{}, &HistoryEdge{}, &LineHead{}, &DispatchSnapshot{}, &MergeReceipt{}, &ContextBuild{}); err != nil {
-		return nil, fmt.Errorf("migrate chat database: %w", err)
-	}
-	// The timeline queries blocks by (chat_id, occurred_at) windows; the
-	// single-column chat_id index alone forces a scan of every block in the
-	// chat (tens of thousands for long histories), which made page loads and
-	// the cache delta sluggish. Idempotent — safe on pre-existing databases.
-	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_message_blocks_chat_occurred ON message_blocks(chat_id, occurred_at)").Error; err != nil {
-		return nil, fmt.Errorf("index chat message blocks: %w", err)
-	}
-	// Legacy chat-keyed drafts table (pre branch-scoped drafts).
-	if db.Migrator().HasTable("drafts") {
-		if err := db.Migrator().DropTable("drafts"); err != nil {
-			return nil, fmt.Errorf("drop legacy drafts table: %w", err)
+	if db.Migrator().HasTable("chats") {
+		var state PluginState
+		lookup := db.Limit(1).Find(&state, "key = ?", "chat_schema_version")
+		if lookup.Error != nil || lookup.RowsAffected == 0 || state.Value != chatSchemaVersion {
+			_ = closeGORM(db)
+			return nil, ErrLegacyChatSchema
 		}
 	}
-	return &store{db: db}, nil
+	if err := db.AutoMigrate(&Chat{}, &Task{}, &TaskSummary{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &OperationReceipt{}, &Draft{}, &Decision{}, &ContextBuild{}); err != nil {
+		return nil, fmt.Errorf("migrate chat database: %w", err)
+	}
+	for _, index := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_message_blocks_task_occurred ON message_blocks(task_id, occurred_at)",
+		"CREATE INDEX IF NOT EXISTS idx_messages_task_cursor ON messages(task_id, created_at, id)",
+		"CREATE INDEX IF NOT EXISTS idx_turns_task_started ON turns(task_id, started_at, id)",
+	} {
+		if err := db.Exec(index).Error; err != nil {
+			return nil, err
+		}
+	}
+	if err := db.Save(&PluginState{Key: "chat_schema_version", Value: chatSchemaVersion}).Error; err != nil {
+		return nil, err
+	}
+	s := &store{db: db}
+	if err := s.ensureDefaultTasks(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func closeGORM(db *gorm.DB) error {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }
 
 func nowMillis() int64 { return time.Now().UnixMilli() }
 
+func (s *store) ensureDefaultTasks() error {
+	chats, err := s.chats()
+	if err != nil {
+		return err
+	}
+	for _, chat := range chats {
+		var count int64
+		if err := s.db.Model(&Task{}).Where("chat_id = ?", chat.ID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			if _, err := s.createDefaultTask(chat.ID, chat.Pinned); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *store) createDefaultTask(chatID string, pinned bool) (*Task, error) {
+	now := nowMillis()
+	task := &Task{ID: newID(), ChatID: chatID, Title: "主线", TitleSource: "default", CreatedBy: "chat", Pinned: pinned, CreatedAt: now, UpdatedAt: now}
+	return task, s.db.Create(task).Error
+}
+
 func (s *store) chat(id string) (*Chat, error) {
 	var value Chat
 	result := s.db.Limit(1).Find(&value, "id = ?", id)
-	if result.Error != nil {
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
 	}
 	return &value, nil
 }
@@ -299,39 +364,40 @@ func (s *store) chats() ([]Chat, error) {
 
 func (s *store) saveChat(value *Chat) error { return s.db.Save(value).Error }
 
-func (s *store) draft(inputInstanceID, branchID string) (*Draft, error) {
-	var value Draft
-	result := s.db.Limit(1).Find(&value, "input_instance_id = ? AND branch_id = ?", inputInstanceID, branchID)
-	if result.Error != nil {
+func (s *store) task(id string) (*Task, error) {
+	var value Task
+	result := s.db.Limit(1).Find(&value, "id = ?", id)
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
 	}
 	return &value, nil
 }
 
-// saveDraft is an explicit upsert: BranchID "" (mainline) is a zero value, so
-// Save would misread the composite key as unset and INSERT into the existing
-// row, violating the primary key.
+func (s *store) chatTasks(chatID string) ([]Task, error) {
+	var values []Task
+	err := s.db.Where("chat_id = ?", chatID).Order("created_at, id").Find(&values).Error
+	return values, err
+}
+
+func (s *store) createTask(value *Task) error { return s.db.Create(value).Error }
+func (s *store) saveTask(value *Task) error   { return s.db.Save(value).Error }
+
+func (s *store) draft(inputInstanceID, taskID string) (*Draft, error) {
+	var value Draft
+	result := s.db.Limit(1).Find(&value, "input_instance_id = ? AND task_id = ?", inputInstanceID, taskID)
+	if result.Error != nil || result.RowsAffected == 0 {
+		return nil, result.Error
+	}
+	return &value, nil
+}
+
 func (s *store) saveDraft(value *Draft) error {
-	return s.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "input_instance_id"}, {Name: "branch_id"}},
-		UpdateAll: true,
-	}).Create(value).Error
+	return s.db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "input_instance_id"}, {Name: "task_id"}}, UpdateAll: true}).Create(value).Error
 }
 
-// clearDraft reports whether a row existed so callers only broadcast real clears.
-func (s *store) clearDraft(inputInstanceID, branchID string) (bool, error) {
-	result := s.db.Delete(&Draft{}, "input_instance_id = ? AND branch_id = ?", inputInstanceID, branchID)
+func (s *store) clearDraft(inputInstanceID, taskID string) (bool, error) {
+	result := s.db.Delete(&Draft{}, "input_instance_id = ? AND task_id = ?", inputInstanceID, taskID)
 	return result.RowsAffected > 0, result.Error
-}
-
-// chatLineHasDrafts guards merge/archive across every view's input instance.
-func (s *store) chatLineHasDrafts(chatID, branchID string) (bool, error) {
-	var count int64
-	err := s.db.Model(&Draft{}).Where("chat_id = ? AND branch_id = ? AND text <> ''", chatID, branchID).Count(&count).Error
-	return count > 0, err
 }
 
 func (s *store) roles() ([]SuperRole, error) {
@@ -457,27 +523,20 @@ func (s *store) importDomain(roles []SuperRole, routing RoutingConfig) error {
 
 func (s *store) deleteChat(id string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &RoleSession{}, &Branch{}, &HistoryNode{}, &LineHead{}, &DispatchSnapshot{}, &MergeReceipt{}, &ContextBuild{}, &Draft{}} {
+		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &TaskSummary{}, &RoleSession{}, &ContextBuild{}, &Decision{}, &OperationReceipt{}, &Draft{}, &Task{}} {
 			if err := tx.Where("chat_id = ?", id).Delete(model).Error; err != nil {
 				return err
 			}
-		}
-		// History edges carry no chat column; they go with the chat's nodes.
-		if err := tx.Exec("DELETE FROM history_edges WHERE child_id NOT IN (SELECT id FROM history_nodes)").Error; err != nil {
-			return err
 		}
 		return tx.Delete(&Chat{}, "id = ?", id).Error
 	})
 }
 
-func (s *store) roleSession(chatID, roleID string) (*RoleSession, error) {
+func (s *store) roleSession(chatID, taskID, roleID string) (*RoleSession, error) {
 	var value RoleSession
-	result := s.db.Limit(1).Find(&value, "chat_id = ? AND role_id = ?", chatID, roleID)
-	if result.Error != nil {
+	result := s.db.Limit(1).Find(&value, "chat_id = ? AND task_id = ? AND role_id = ?", chatID, taskID, roleID)
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
 	}
 	return &value, nil
 }
@@ -497,23 +556,19 @@ func (s *store) setActiveChatID(id string) error {
 	return s.db.Save(&PluginState{Key: "active_chat_id", Value: id}).Error
 }
 
-func (s *store) beginTurn(turn *Turn) error        { return s.db.Create(turn).Error }
-func (s *store) addMessage(message *Message) error { return s.db.Create(message).Error }
+func (s *store) beginTurn(turn *Turn) error                { return s.db.Create(turn).Error }
+func (s *store) addMessage(message *Message) error         { return s.db.Create(message).Error }
+func (s *store) deleteMessage(id string) error             { return s.db.Delete(&Message{}, "id = ?", id).Error }
+func (s *store) addTurnEvent(event *TurnEvent) error       { return s.db.Create(event).Error }
+func (s *store) addMessageBlock(block *MessageBlock) error { return s.db.Create(block).Error }
+func (s *store) saveTurnSummary(value *TurnSummary) error  { return s.db.Save(value).Error }
 
-// deleteMessage removes one message row (queued-cancel drops the dispatch's
-// user message from the timeline).
-func (s *store) deleteMessage(id string) error { return s.db.Delete(&Message{}, "id = ?", id).Error }
 func (s *store) updateMessageText(id, text string) error {
 	return s.db.Model(&Message{}).Where("id = ?", id).Update("text", text).Error
 }
-func (s *store) addTurnEvent(event *TurnEvent) error       { return s.db.Create(event).Error }
-func (s *store) addMessageBlock(block *MessageBlock) error { return s.db.Create(block).Error }
 func (s *store) updateMessageBlockText(id, text string) error {
 	return s.db.Model(&MessageBlock{}).Where("id = ?", id).Update("text", text).Error
 }
-
-// updateMessageBlock rewrites text+payload of an existing block — used when a
-// tool_call status update merges into the block opened by the initial call.
 func (s *store) updateMessageBlock(id, text, payload string) error {
 	return s.db.Model(&MessageBlock{}).Where("id = ?", id).Updates(map[string]any{"text": text, "payload": payload}).Error
 }
@@ -521,11 +576,8 @@ func (s *store) updateMessageBlock(id, text, payload string) error {
 func (s *store) message(id string) (*Message, error) {
 	var value Message
 	result := s.db.Limit(1).Find(&value, "id = ?", id)
-	if result.Error != nil {
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
 	}
 	return &value, nil
 }
@@ -534,71 +586,50 @@ func (s *store) completeTurn(id, reason string) error {
 	ended := nowMillis()
 	return s.db.Model(&Turn{}).Where("id = ?", id).Updates(map[string]any{"ended_at": ended, "stop_reason": reason}).Error
 }
-
-// setTurnTarget records the routing candidate executing the turn (planned
-// candidate first, replaced on failover so the row ends on the candidate
-// that actually ran).
 func (s *store) setTurnTarget(id, agent, provider, model string) error {
 	return s.db.Model(&Turn{}).Where("id = ?", id).Updates(map[string]any{"agent": agent, "provider": provider, "model": model}).Error
 }
-
-// setTurnSession stamps the provider session a turn ran on.
 func (s *store) setTurnSession(id, sessionID string) error {
 	return s.db.Model(&Turn{}).Where("id = ?", id).Update("session_id", sessionID).Error
 }
 
-// chatTurnSessions returns the chat's turns with a recorded session — the
-// source of the pane's session lanes and lane-continuation targets.
-func (s *store) chatTurnSessions(chatID string) ([]Turn, error) {
+func (s *store) chatTurnSessions(taskID string) ([]Turn, error) {
 	var values []Turn
-	err := s.db.Where("chat_id = ? AND session_id <> ''", chatID).Find(&values).Error
+	err := s.db.Where("task_id = ? AND session_id <> ''", taskID).Find(&values).Error
 	return values, err
 }
-
-// chatTurnTargets returns the chat's turns that have an execution target
-// recorded — the source of the frontend's per-turn routing labels.
-func (s *store) chatTurnTargets(chatID string) ([]Turn, error) {
+func (s *store) chatTurnTargets(taskID string) ([]Turn, error) {
 	var values []Turn
-	err := s.db.Where("chat_id = ? AND agent <> ''", chatID).Find(&values).Error
+	err := s.db.Where("task_id = ? AND agent <> ''", taskID).Find(&values).Error
+	return values, err
+}
+func (s *store) chatTurns(taskID string) ([]Turn, error) {
+	var values []Turn
+	err := s.db.Where("task_id = ?", taskID).Find(&values).Error
 	return values, err
 }
 
 func (s *store) turn(id string) (*Turn, error) {
 	var value Turn
 	result := s.db.Limit(1).Find(&value, "id = ?", id)
-	if result.Error != nil {
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
 	}
 	return &value, nil
 }
-
 func (s *store) turnMessages(turnID string) ([]Message, error) {
 	var values []Message
 	err := s.db.Where("turn_id = ?", turnID).Order("created_at, id").Find(&values).Error
 	return values, err
 }
-
 func (s *store) turnMessageBlocks(turnID string) ([]MessageBlock, error) {
 	var values []MessageBlock
-	err := s.db.Table("message_blocks").
-		Select("message_blocks.*").
-		Joins("JOIN turn_events ON turn_events.id = message_blocks.event_id").
-		Where("message_blocks.turn_id = ?", turnID).
-		Order("turn_events.seq, message_blocks.id").
-		Find(&values).Error
+	err := s.db.Table("message_blocks").Select("message_blocks.*").Joins("JOIN turn_events ON turn_events.id = message_blocks.event_id").Where("message_blocks.turn_id = ?", turnID).Order("turn_events.seq, message_blocks.id").Find(&values).Error
 	return values, err
 }
 
-// chatMessageBlocks lists a chat's activity blocks in display order (strictly
-// by observation time), optionally restricted to a time window [after, before)
-// in ms — the timeline fetches blocks per loaded message span so long chats
-// lazy-load older pages instead of pulling everything at once. Zero bounds
-// mean unbounded.
-func (s *store) chatMessageBlocks(chatID string, after, before int64) ([]MessageBlock, error) {
-	query := s.db.Where("chat_id = ?", chatID)
+func (s *store) chatMessageBlocks(taskID string, after, before int64) ([]MessageBlock, error) {
+	query := s.db.Where("task_id = ?", taskID)
 	if after > 0 {
 		query = query.Where("occurred_at >= ?", after)
 	}
@@ -610,12 +641,9 @@ func (s *store) chatMessageBlocks(chatID string, after, before int64) ([]Message
 	return values, err
 }
 
-// latestAssistantMessage returns the chat's newest assistant message (the
-// voice read-latest command reads it aloud), or nil when none exists.
 func (s *store) latestAssistantMessage(chatID string) (*Message, error) {
 	var message Message
-	result := s.db.Where("chat_id = ? AND role = ?", chatID, "assistant").
-		Order("created_at DESC, id DESC").Limit(1).First(&message)
+	result := s.db.Where("chat_id = ? AND role = ?", chatID, "assistant").Order("created_at DESC, id DESC").Limit(1).First(&message)
 	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -625,16 +653,11 @@ func (s *store) latestAssistantMessage(chatID string) (*Message, error) {
 	return &message, nil
 }
 
-// historyPage returns one page of a chat's messages for newest-first
-// pagination: at most limit messages strictly older than the composite cursor
-// (created_at, id), in ascending display order (newest of the page last).
-// hasMore reports whether older messages exist beyond the page. A zero
-// beforeTs means "start from the newest end" (no cursor).
-func (s *store) historyPage(chatID string, beforeTs int64, beforeID string, limit int) ([]Message, bool, error) {
+func (s *store) historyPage(taskID string, beforeTs int64, beforeID string, limit int) ([]Message, bool, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	query := s.db.Where("chat_id = ?", chatID)
+	query := s.db.Where("task_id = ?", taskID)
 	if beforeTs > 0 {
 		if beforeID != "" {
 			query = query.Where("(created_at < ? OR (created_at = ? AND id < ?))", beforeTs, beforeTs, beforeID)
@@ -656,19 +679,11 @@ func (s *store) historyPage(chatID string, beforeTs int64, beforeID string, limi
 	return values, hasMore, nil
 }
 
-// historyPageAfter returns messages at-or-newer than the composite cursor
-// (created_at, id) in ascending display order — the incremental half of the
-// frontend chat cache: a reconnecting pane asks for everything newer than its
-// newest cached message and merges the delta. A non-empty afterID makes the
-// boundary inclusive, so the boundary row itself is re-fetched: its cached
-// copy may still be streaming and must be replaced with the final text.
-// hasMore reports whether even newer messages exist beyond the page. A zero
-// afterTs means "from the oldest end" (no cursor).
-func (s *store) historyPageAfter(chatID string, afterTs int64, afterID string, limit int) ([]Message, bool, error) {
+func (s *store) historyPageAfter(taskID string, afterTs int64, afterID string, limit int) ([]Message, bool, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	query := s.db.Where("chat_id = ?", chatID)
+	query := s.db.Where("task_id = ?", taskID)
 	if afterTs > 0 {
 		if afterID != "" {
 			query = query.Where("(created_at > ? OR (created_at = ? AND id >= ?))", afterTs, afterTs, afterID)
@@ -687,242 +702,88 @@ func (s *store) historyPageAfter(chatID string, afterTs int64, afterID string, l
 	return values, hasMore, nil
 }
 
-func (s *store) chatTurns(chatID string) ([]Turn, error) {
-	var values []Turn
-	err := s.db.Where("chat_id = ?", chatID).Find(&values).Error
-	return values, err
-}
-
-// --- Branches (framework v0.63) ---
-
-func (s *store) createBranch(value *Branch) error { return s.db.Create(value).Error }
-func (s *store) saveBranch(value *Branch) error   { return s.db.Save(value).Error }
-
-func (s *store) branch(id string) (*Branch, error) {
-	var value Branch
-	result := s.db.Limit(1).Find(&value, "id = ?", id)
-	if result.Error != nil {
-		return nil, result.Error
+func (s *store) historyAround(taskID string, createdAt int64, messageID string, limit int) ([]Message, bool, bool, error) {
+	if limit <= 0 {
+		limit = 50
 	}
-	if result.RowsAffected == 0 {
-		return nil, nil
+	olderLimit := limit / 2
+	newerLimit := limit - olderLimit
+	var older []Message
+	olderQuery := s.db.Where("task_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))", taskID, createdAt, createdAt, messageID).
+		Order("created_at desc, id desc").Limit(olderLimit + 1)
+	if err := olderQuery.Find(&older).Error; err != nil {
+		return nil, false, false, err
 	}
-	return &value, nil
-}
-
-// chatBranches lists every branch of a chat, active first then archived,
-// oldest first within each group — the pane's branch bar and the merge
-// cards both seed from it (archived rows back the 已合并分支 cards).
-func (s *store) chatBranches(chatID string) ([]Branch, error) {
-	var values []Branch
-	err := s.db.Where("chat_id = ?", chatID).Order("archived_at IS NOT NULL, created_at, id").Find(&values).Error
-	return values, err
-}
-
-// deleteBranch removes a branch record; only allowed for branches with no
-// turns (archived branches stay — they back the merged cards).
-func (s *store) deleteBranch(id string) error { return s.db.Delete(&Branch{}, "id = ?", id).Error }
-
-// branchTurns returns the branch's turns oldest-first — the merge draft's
-// transcript source and the cutoff basis.
-func (s *store) branchTurns(branchID string) ([]Turn, error) {
-	var values []Turn
-	err := s.db.Where("branch_id = ?", branchID).Order("started_at, id").Find(&values).Error
-	return values, err
-}
-
-// branchHasRunningTurn reports whether any of the branch's turns is still
-// in flight (row exists, no ended_at) — running branches refuse merges.
-func (s *store) branchHasRunningTurn(branchID string) (bool, error) {
-	var count int64
-	err := s.db.Model(&Turn{}).Where("branch_id = ? AND ended_at IS NULL", branchID).Count(&count).Error
-	return count > 0, err
-}
-
-// lineTurns returns one work line's turns (branchID "" = mainline) started
-// before cutoff, oldest-first — the lineage collector's per-line source.
-func (s *store) lineTurns(chatID, branchID string, before int64) ([]Turn, error) {
-	var values []Turn
-	err := s.db.Where("chat_id = ? AND branch_id = ? AND started_at < ?", chatID, branchID, before).Order("started_at, id").Find(&values).Error
-	return values, err
-}
-
-// latestBranchRoleTurn returns the role's newest turn on the branch — the
-// resume source for role × branch lane continuations (framework v0.66:
-// branches are multi-role, each role continues its own branch lane).
-func (s *store) latestBranchRoleTurn(chatID, branchID, roleID string) (*Turn, error) {
-	var value Turn
-	result := s.db.Where("chat_id = ? AND branch_id = ? AND role_id = ?", chatID, branchID, roleID).Order("started_at desc, id desc").Limit(1).Find(&value)
-	if result.Error != nil {
-		return nil, result.Error
+	hasBefore := len(older) > olderLimit
+	if hasBefore {
+		older = older[:olderLimit]
 	}
-	if result.RowsAffected == 0 {
-		return nil, nil
+	for left, right := 0, len(older)-1; left < right; left, right = left+1, right-1 {
+		older[left], older[right] = older[right], older[left]
 	}
-	return &value, nil
-}
-
-// latestSessionTurn returns the newest turn that ran on a provider session —
-// the prev-turn stamp for a lane continuation.
-func (s *store) latestSessionTurn(chatID, sessionID string) (*Turn, error) {
-	var value Turn
-	result := s.db.Where("chat_id = ? AND session_id = ?", chatID, sessionID).Order("started_at desc, id desc").Limit(1).Find(&value)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
-	}
-	return &value, nil
-}
-
-// lineTurnSummaries returns completed summaries within a turn set,
-// oldest-first — the lineage context's summary source.
-func (s *store) lineTurnSummaries(turnIDs []string, before, after int64, excludeRoleID string) ([]TurnSummary, error) {
-	if len(turnIDs) == 0 {
-		return nil, nil
-	}
-	var values []TurnSummary
-	query := s.db.Where("turn_id IN ? AND status = ? AND occurred_at < ?", turnIDs, "completed", before)
-	if after > 0 {
-		query = query.Where("occurred_at > ?", after)
-	}
-	if excludeRoleID != "" {
-		query = query.Where("role_id <> ?", excludeRoleID)
-	}
-	err := query.Order("occurred_at asc, turn_id asc").Limit(50).Find(&values).Error
-	return values, err
-}
-
-// lineHistoryAfter is historyAfter scoped to a turn-key set (turn ids plus
-// their dispatch ids — user messages key by dispatch): visible messages of
-// the lineage within (after, before), word-budgeted, oldest-first.
-func (s *store) lineHistoryAfter(chatID string, keys []string, after, before int64, wordBudget int) ([]Message, error) {
-	if len(keys) == 0 {
-		return nil, nil
-	}
-	var values []Message
-	query := s.db.Where("chat_id = ? AND turn_id IN ? AND created_at < ?", chatID, keys, before)
-	if after > 0 {
-		query = query.Where("created_at > ?", after)
-	}
-	if err := query.Order("created_at desc").Limit(1000).Find(&values).Error; err != nil {
-		return nil, err
-	}
-	used, picked := 0, []Message{}
-	for _, value := range values {
-		words := len(splitWords(value.Text))
-		if wordBudget > 0 && used+words > wordBudget && len(picked) > 0 {
-			break
+	var anchor []Message
+	if messageID != "" {
+		if err := s.db.Where("task_id = ? AND id = ? AND created_at = ?", taskID, messageID, createdAt).Limit(1).Find(&anchor).Error; err != nil {
+			return nil, false, false, err
 		}
-		used += words
-		picked = append(picked, value)
 	}
-	for left, right := 0, len(picked)-1; left < right; left, right = left+1, right-1 {
-		picked[left], picked[right] = picked[right], picked[left]
+	var newer []Message
+	newerQuery := s.db.Where("task_id = ? AND (created_at > ? OR (created_at = ? AND id > ?))", taskID, createdAt, createdAt, messageID).
+		Order("created_at asc, id asc").Limit(newerLimit + 1)
+	if err := newerQuery.Find(&newer).Error; err != nil {
+		return nil, false, false, err
 	}
-	return picked, nil
+	hasAfter := len(newer) > newerLimit
+	if hasAfter {
+		newer = newer[:newerLimit]
+	}
+	values := make([]Message, 0, len(older)+len(anchor)+len(newer))
+	values = append(values, older...)
+	values = append(values, anchor...)
+	values = append(values, newer...)
+	return values, hasBefore, hasAfter, nil
 }
 
-// lineRoleLastActivity returns the role's newest visible-message timestamp
-// within a turn-key set — the lineage bridge's "away since" basis.
-func (s *store) lineRoleLastActivity(chatID string, keys []string, roleID string, before int64) (int64, error) {
-	if len(keys) == 0 {
-		return 0, nil
-	}
-	var value Message
-	result := s.db.Where("chat_id = ? AND turn_id IN ? AND role_id = ? AND created_at < ?", chatID, keys, roleID, before).Order("created_at desc").Limit(1).Find(&value)
+func (s *store) latestRoleActivity(chatID, taskID, roleID string, before int64) (int64, error) {
+	var value Turn
+	result := s.db.Where("chat_id = ? AND task_id = ? AND role_id = ? AND started_at < ?", chatID, taskID, roleID, before).
+		Order("started_at desc, id desc").Limit(1).Find(&value)
 	if result.Error != nil || result.RowsAffected == 0 {
 		return 0, result.Error
 	}
-	return value.CreatedAt, nil
+	return value.StartedAt, nil
 }
 
-// lineHasActivityBetween reports whether the lineage saw any visible message
-// in (after, before).
-func (s *store) lineHasActivityBetween(chatID string, keys []string, after, before int64) (bool, error) {
-	if len(keys) == 0 {
-		return false, nil
-	}
-	var count int64
-	err := s.db.Model(&Message{}).Where("chat_id = ? AND turn_id IN ? AND created_at > ? AND created_at < ?", chatID, keys, after, before).Count(&count).Error
-	return count > 0, err
-}
-
-func (s *store) dispatchUserMessage(chatID, dispatchID string) (*Message, error) {
-	var value Message
-	result := s.db.Where("chat_id = ? AND turn_id = ? AND role = ?", chatID, dispatchID, "user").Order("created_at desc, id desc").Limit(1).Find(&value)
-	if result.Error != nil {
+func (s *store) latestTaskRoleTurn(chatID, taskID, roleID string) (*Turn, error) {
+	var value Turn
+	result := s.db.Where("chat_id = ? AND task_id = ? AND role_id = ?", chatID, taskID, roleID).Order("started_at desc, id desc").Limit(1).Find(&value)
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
 	}
 	return &value, nil
 }
 
-func (s *store) latestUserMessage(chatID string, before int64) (*Message, error) {
+func (s *store) dispatchUserMessage(taskID, dispatchID string) (*Message, error) {
 	var value Message
-	result := s.db.Where("chat_id = ? AND role = ? AND created_at <= ?", chatID, "user", before).Order("created_at desc").Limit(1).Find(&value)
-	if result.Error != nil {
+	result := s.db.Where("task_id = ? AND turn_id = ? AND role = ?", taskID, dispatchID, "user").Order("created_at desc, id desc").Limit(1).Find(&value)
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil, nil
 	}
 	return &value, nil
 }
 
-func (m MessageBlock) payload() map[string]any {
-	return map[string]any{
-		"id": m.ID, "chat_id": m.ChatID, "turn_id": m.TurnID, "kind": m.Kind,
-		"text": m.Text, "payload": m.Payload, "occurred_at": m.OccurredAt,
+func (s *store) latestUserMessage(taskID string, before int64) (*Message, error) {
+	var value Message
+	result := s.db.Where("task_id = ? AND role = ? AND created_at <= ?", taskID, "user", before).Order("created_at desc").Limit(1).Find(&value)
+	if result.Error != nil || result.RowsAffected == 0 {
+		return nil, result.Error
 	}
+	return &value, nil
 }
 
-func (s *store) saveTurnSummary(value *TurnSummary) error { return s.db.Save(value).Error }
-
-// historyByKeys is the line-scoped counterpart of history. Membership comes
-// from the History DAG view, so routing cannot read another branch's recent
-// messages merely because they are newer in the shared chat table.
-func (s *store) historyByKeys(chatID string, keys map[string]bool, before int64, wordBudget int) ([]Message, error) {
-	if len(keys) == 0 {
-		return nil, nil
-	}
-	ids := make([]string, 0, len(keys))
-	for id := range keys {
-		ids = append(ids, id)
-	}
+func (s *store) history(taskID string, before int64, wordBudget int) ([]Message, error) {
 	var values []Message
-	query := s.db.Where("chat_id = ? AND (turn_id IN ? OR id IN ?)", chatID, ids, ids)
-	if before > 0 {
-		query = query.Where("created_at < ?", before)
-	}
-	if err := query.Order("created_at desc, id desc").Limit(1000).Find(&values).Error; err != nil {
-		return nil, err
-	}
-	used, start := 0, len(values)
-	for i, value := range values {
-		words := len(splitWords(value.Text))
-		if wordBudget > 0 && used+words > wordBudget && start < len(values) {
-			break
-		}
-		used += words
-		start = i
-	}
-	if start == len(values) {
-		return nil, nil
-	}
-	selected := append([]Message(nil), values[:start+1]...)
-	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
-		selected[left], selected[right] = selected[right], selected[left]
-	}
-	return selected, nil
-}
-
-func (s *store) history(chatID string, before int64, wordBudget int) ([]Message, error) {
-	var values []Message
-	query := s.db.Where("chat_id = ?", chatID)
+	query := s.db.Where("task_id = ?", taskID)
 	if before > 0 {
 		query = query.Where("created_at < ?", before)
 	}
@@ -948,13 +809,7 @@ func (s *store) history(chatID string, before int64, wordBudget int) ([]Message,
 	return selected, nil
 }
 
-func (s *store) close() error {
-	sqlDB, err := s.db.DB()
-	if err != nil {
-		return err
-	}
-	return sqlDB.Close()
-}
+func (s *store) close() error { return closeGORM(s.db) }
 
 func encodeJSON(value any) string { data, _ := json.Marshal(value); return string(data) }
 func decodeStrings(raw string) []string {

@@ -30,6 +30,7 @@ import { computed, inject, onBeforeUnmount, onMounted, reactive, ref } from "vue
 
 import type { PluginCtx } from "../../shell/ctx";
 import MasterDetail from "../../shell/MasterDetail.vue";
+import { randomUUID } from "../../utils/randomUUID";
 
 const injectedCtx = inject<PluginCtx>("pluginCtx");
 if (injectedCtx === undefined) throw new Error("LLMPane requires PluginPaneHost");
@@ -210,7 +211,7 @@ async function saveHttpConfig(): Promise<void> {
 
 async function createProfile(): Promise<void> {
   const profile: LlmProfile = {
-    id: `p-${crypto.randomUUID().slice(0, 8)}`,
+    id: `p-${randomUUID().slice(0, 8)}`,
     name: "新配置",
     endpoint: "",
     key: "",

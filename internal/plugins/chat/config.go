@@ -149,9 +149,11 @@ func roleByID(roles []SuperRole, id string) (SuperRole, bool) {
 func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
 	result := SummaryConfig{
 		Enabled: true, ToolCharBudget: 4000, TimeoutSeconds: 60,
-		ContextEnabled: true, SummaryCharBudget: 6000,
+		ContextEnabled: true, SummaryCharBudget: 6000, EndedTaskSummaryCharBudget: 6000,
+		TailTurns:      3,
 		TailWordBudget: 1200, TailByteBudget: 12 * 1024,
-		ContextByteBudget: 24 * 1024,
+		ContextByteBudget: 24 * 1024, TitleWordBudget: 12000,
+		TaskSummaryWordBudget: 16000, TaskSummaryByteBudget: 96 * 1024,
 	}
 	_ = p.configGet(ctx, "turn_summary", &result)
 	if result.ToolCharBudget < 0 {
@@ -162,6 +164,12 @@ func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
 	}
 	if result.SummaryCharBudget < 0 {
 		result.SummaryCharBudget = 0
+	}
+	if result.EndedTaskSummaryCharBudget < 0 {
+		result.EndedTaskSummaryCharBudget = 0
+	}
+	if result.TailTurns <= 0 {
+		result.TailTurns = 3
 	}
 	if result.TailWordBudget < 0 {
 		result.TailWordBudget = 0

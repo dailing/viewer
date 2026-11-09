@@ -96,7 +96,11 @@ func transcriptBlockLine(block MessageBlock) string {
 	_ = json.Unmarshal([]byte(block.Payload), &payload)
 	switch block.Kind {
 	case "agent_text":
-		if text := strings.TrimSpace(block.Text); text != "" {
+		text := block.Text
+		if marker := parseDecisionMarker(text); marker != nil {
+			text = text[:marker.Start] + text[marker.End:]
+		}
+		if text := strings.TrimSpace(text); text != "" {
 			return "### Assistant\n" + text
 		}
 		return ""
@@ -139,20 +143,32 @@ func (p *Plugin) generateTurnSummary(turnID, provider string) {
 	if err != nil || transcript == "" || !strings.Contains(transcript, "### Assistant") {
 		return
 	}
-	base := &TurnSummary{TurnID: turnID, ChatID: turn.ChatID, RoleID: turn.RoleID, RoleName: turn.RoleName, Provider: provider, Status: "failed", SourceMessageCount: count, SourceCharCount: chars, OccurredAt: derefMillis(turn.EndedAt, nowMillis()), CreatedAt: nowMillis()}
+	base := &TurnSummary{TurnID: turnID, ChatID: turn.ChatID, TaskID: turn.TaskID, RoleID: turn.RoleID,
+		RoleName: turn.RoleName, Provider: provider, Status: "pending", SourceMessageCount: count,
+		SourceCharCount: chars, OccurredAt: derefMillis(turn.EndedAt, nowMillis()), CreatedAt: nowMillis()}
+	if err := p.store.saveTurnSummary(base); err != nil {
+		log.Printf("viewer-chat turn summary pending write failed turn_id=%s: %v", turnID, err)
+		return
+	}
 	ctx, cancel := context.WithTimeout(p.ctx, time.Duration(config.TimeoutSeconds)*time.Second)
 	started := time.Now()
 	result, err := summarizeTranscript(ctx, p.llmFn, transcript, config.TimeoutSeconds)
 	cancel()
 	base.LatencyMS = int(time.Since(started).Milliseconds())
 	if err != nil {
+		base.Status = "failed"
 		base.Error = truncateText(err.Error(), 1000)
 		_ = p.store.saveTurnSummary(base)
 		log.Printf("viewer-chat turn summary failed turn_id=%s: %v", turnID, err)
 		return
 	}
 	base.Status, base.Summary, base.Model, base.ProfileID = "completed", result.Content, result.Model, result.Model
-	_ = p.store.saveTurnSummary(base)
+	base.Error = ""
+	if err := p.store.saveTurnSummary(base); err != nil {
+		log.Printf("viewer-chat turn summary completion write failed turn_id=%s: %v", turnID, err)
+		return
+	}
+	p.enqueueTaskSummary(turn.TaskID)
 }
 
 func summarizeTranscript(ctx context.Context, complete llmCompleter, transcript string, timeoutSeconds int) (completionResult, error) {

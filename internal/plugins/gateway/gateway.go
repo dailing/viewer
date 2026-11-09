@@ -162,6 +162,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == "/" {
+		// Lets the settings UI distinguish the replacement from the old process
+		// without racing a short down/up window during an in-app restart.
+		w.Header().Set("X-Viewer-Process", strconv.Itoa(os.Getpid()))
+	}
 	switch {
 	case r.URL.Path == "/ws":
 		s.serveBrowser(w, r)
@@ -241,12 +246,16 @@ var runReleaseBuild = func() error {
 	if err != nil {
 		return err
 	}
-	// The deployed binary lives at <repo>/dist/viewerd; the release script
-	// is at <repo>/web/build-release.sh.
-	repoRoot := filepath.Dir(filepath.Dir(exe))
+	// The standard deployment lives at <repo>/dist/viewerd. Isolated previews
+	// can run from any other path; VIEWER_REPO_ROOT locates their source tree,
+	// and the explicit output keeps the build targeted at the running binary.
+	repoRoot := os.Getenv("VIEWER_REPO_ROOT")
+	if repoRoot == "" {
+		repoRoot = filepath.Dir(filepath.Dir(exe))
+	}
 	script := filepath.Join(repoRoot, "web", "build-release.sh")
-	slog.Info("build-release: building", "script", script)
-	cmd := exec.Command("bash", script)
+	slog.Info("build-release: building", "script", script, "output", exe)
+	cmd := exec.Command("bash", script, exe)
 	cmd.Dir = repoRoot
 	// The release script needs Go, which lives outside the systemd unit's
 	// default PATH (~/.local/go/bin).

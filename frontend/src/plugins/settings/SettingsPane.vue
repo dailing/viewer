@@ -266,10 +266,12 @@ const BUILD_POLL_MS = 2000;
  * Graceful backend restart (gateway admin API, framework v0.34):
  * POST /api/admin/restart → the gateway spawns a same-args replacement and
  * takes the graceful shutdown path (drains running turns ≤10s); the
- * replacement binds the ports only after the old pid is gone. We poll GET /
- * until the new gateway answers, then reload the shell. The TS BusClient
- * auto-reconnects, but a fresh page load is the cleanest recovery for the
- * whole UI (all stores re-init; module chat cache resets).
+ * replacement binds the ports only after the old pid is gone. We compare the
+ * root response's X-Viewer-Process header with the pre-restart process, so a
+ * fast old-server response cannot trigger a premature reload and a short
+ * down/up window cannot be missed. The TS BusClient auto-reconnects, but a
+ * fresh page load is the cleanest recovery for the whole UI (all stores
+ * re-init; module chat cache resets).
  */
 async function restartBackend(): Promise<void> {
   if (restarting.value) return;
@@ -278,6 +280,9 @@ async function restartBackend(): Promise<void> {
   );
   if (!confirmed) return;
   restarting.value = true;
+  const startedAt = Date.now();
+  const before = await fetch("/", { cache: "no-store" }).catch(() => null);
+  const previousProcess = before?.ok ? before.headers.get("x-viewer-process") ?? "" : "";
   try {
     const resp = await fetch("/api/admin/restart", { method: "POST" });
     if (!resp.ok) {
@@ -296,8 +301,14 @@ async function restartBackend(): Promise<void> {
     try {
       const probe = await fetch("/", { cache: "no-store" });
       if (probe.ok) {
-        location.reload();
-        return;
+        const currentProcess = probe.headers.get("x-viewer-process") ?? "";
+        const isReplacement = previousProcess !== "" && currentProcess !== ""
+          ? currentProcess !== previousProcess
+          : Date.now() - startedAt >= 1500;
+        if (isReplacement) {
+          location.reload();
+          return;
+        }
       }
     } catch {
       // Gateway not up yet (old process draining / replacement binding).

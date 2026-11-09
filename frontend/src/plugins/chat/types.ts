@@ -1,34 +1,34 @@
 export interface Sender { from: "user" | "role"; role_id?: string; role_name?: string }
-export interface ChatMessage { id: string; chat_id: string; turn_id: string; role: "user" | "assistant"; text: string; created_at: number; sender: Sender; deleted?: boolean; branch_ids?: string[] /* live frames only: owning line(s) attribution (main = "") for view filtering */ }
-export interface ChatBlock { id: string; chat_id: string; turn_id: string; kind: string; text: string; payload: string; occurred_at: number; role_id?: string; role_name?: string }
-export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession> }
-/** Per-turn execution target as persisted on the turn row — the record
- *  behind the pane's agent / provider / model routing labels. Turns without
- *  a record (pre-persistence history) render no label. */
+export interface ChatMessage { id: string; chat_id: string; task_id: string; turn_id: string; role: "user" | "assistant"; text: string; created_at: number; sender: Sender; source_plugin?: string; causation_id?: string; deleted?: boolean }
+export interface ChatBlock { id: string; chat_id: string; task_id: string; turn_id: string; kind: string; text: string; payload: string; occurred_at: number; role_id?: string; role_name?: string }
 export interface TurnTarget { dispatch_id?: string; role_id?: string; role_name?: string; agent?: string; provider?: string; model?: string }
-/** Pane-side normalized turn target: label pre-joined "agent / provider / model". */
 export interface TurnTargetEntry { dispatchId: string; roleId: string; roleName: string; label: string }
-/** One pending queue entry (a dispatch waiting behind an in-flight turn).
- *  position is the 1-based slot inside that role's queue; enqueued_at the
- *  queue time in ms. The pane's queued chip on a user box keys by
- *  dispatch_id (the user message's turn_id). */
-export interface QueuedMessage { message_id: string; dispatch_id: string; chat_id: string; role_id: string; role_ids?: string[]; role_name?: string; branch_id?: string; text: string; enqueued_at: number; position?: number }
+export interface TurnSession { session_id: string; dispatch_id?: string; role_id?: string; role_name?: string; started_at?: number; task_id: string }
+export interface QueuedMessage { message_id: string; dispatch_id: string; chat_id: string; task_id: string; role_id: string; role_ids?: string[]; role_name?: string; text: string; enqueued_at: number; position?: number }
+export interface RunningTurn { turn_id: string; task_id: string; role_id: string; role_name?: string }
+export interface Task {
+  id: string; chat_id: string; chat_name?: string; title: string; title_source: "default" | "generated" | "manual";
+  title_revision: number; title_query_message_id?: string; created_by: string; causation_id?: string; correlation_id?: string;
+  pinned: boolean; running?: boolean; created_at: number; updated_at: number; ended_at?: number | null; status: "open" | "ended";
+  summary_status?: "missing" | "pending" | "failed" | "completed"; summary_final?: boolean; summary_preview?: string;
+  summary_revision?: number; pending_decisions?: number;
+}
+export interface TaskSummary { task_id: string; chat_id: string; text: string; source_turn_ids: string[]; summary_revision: number; source_revision: number; provider: string; model: string; status: string; final: boolean; error: string; updated_at: number }
+export interface DecisionOption { id: string; label: string; description?: string }
+export interface Decision {
+  id: string; chat_id: string; task_id: string; source_turn_id: string; source_message_id: string; role_id: string;
+  chat_name?: string; task_title?: string; role_name?: string;
+  version: number; kind: string; question: string; options: DecisionOption[]; display: string; tone: string; parse_warning: string;
+  status: "pending" | "dispatching" | "resolved" | "cancelled" | "invalid"; response: string; resolved_dispatch_id: string;
+  marker_start: number; marker_end: number; created_at: number; updated_at: number;
+}
+export interface DecisionList { decisions: Decision[]; has_more?: boolean; next_created_at?: number; next_id?: string; pending_count?: number }
+export interface TaskList { tasks: Task[]; has_more?: boolean; next_updated_at?: number; next_id?: string }
+export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession> }
+export interface ChatHistory { chat: Chat; running_turns?: RunningTurn[]; background_task_ids?: string[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; messages?: ChatMessage[]; has_more?: boolean; has_more_after?: boolean }
+export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[] }
 export interface Role { id: string; name: string; description: string; prompt: string; cwd: string; routing_policy_id: string; session_policy: string; context_recycle_percent: number | null; context_recycle_tokens: number | null; created_at: number; updated_at: number }
 export interface Chat { id: string; name: string; type: string; pinned: boolean; root: string; common_prompt: string; member_role_ids: string[]; role_routing_policy_overrides: Record<string, string>; created_at: number; updated_at: number }
-/** Per-turn session record as persisted on the turn row — the source of
- *  the pane's session lanes (turns sharing a session_id form one lane) and
- *  of lane-continuation targets (continue_turn_id). branch_id ties the turn
- *  to a named branch (framework v0.63): the pane's branch tabs filter by it. */
-export interface TurnSession { session_id: string; dispatch_id?: string; role_id?: string; role_name?: string; started_at?: number; branch_id?: string }
-/** A named parallel branch of a chat (framework v0.63; fork/merge DAG fields
- *  v0.64). Active branches (archived_at null) get bar tabs; archived ones
- *  back the 已合并分支 cards (merge_message_id → the summary message).
- *  fork_turn_id/parent_branch_id record the fork point ("" = pre-v0.64
- *  rootless / mainline parent); merged_into_branch_id the merge target
- *  ("" = mainline). */
-export interface Branch { id: string; chat_id: string; name: string; role_id?: string; role_name?: string; session_id?: string; fork_turn_id?: string; parent_branch_id?: string; merged_into_branch_id?: string; archived_at?: number | null; merged_through_turn_id?: string; merge_message_id?: string; state?: string; merged_at?: number | null; merge_node_id?: string; created_at: number; updated_at: number }
-export interface RunningTurn { turn_id: string; role_id: string; role_name?: string; branch_id?: string }
-export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[]; running_turns?: RunningTurn[]; background_branch_ids?: string[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; branches?: Branch[]; messages?: ChatMessage[]; has_more?: boolean }
 export interface Workspace { id: string; name: string; common_prompt: string; roles: Role[]; routing_policies: RoutingPolicy[]; default_routing_policy_id: string }
 export interface AgentProviderCatalog { provider: string; models: string[]; parameter_schema?: Record<string, unknown> }
 export interface AgentCatalog { agent: string; plugin_id: string; online: boolean; providers: AgentProviderCatalog[] }

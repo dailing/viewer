@@ -68,8 +68,11 @@ def run_prompt(request_id: Any, params: dict[str, Any]) -> None:
     blocks = params.get("prompt") or []
     text = "".join(str(block.get("text", "")) for block in blocks if isinstance(block, dict))
     tool_update(session_id)
-    update(session_id, "mock: ")
-    update(session_id, text)
+    if "MOCK_DECISION" in text:
+        update(session_id, "请选择后续方向：\n<viewer-decision>\nversion: 1\nkind: choice\nquestion: Continue with the recommended path?\noption: Recommended path\noption: Alternative path\ndisplay: buttons\ntone: neutral\n</viewer-decision>")
+    else:
+        update(session_id, "mock: ")
+        update(session_id, text)
     if "long" in text.lower():
         deadline = time.monotonic() + 20
         while session_id not in cancelled and time.monotonic() < deadline:

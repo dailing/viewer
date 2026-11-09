@@ -6,7 +6,7 @@ import {
   completeInputSessionSend,
   inputSessionIntent,
   releaseQueuedInputEdit,
-  setInputSessionBranch,
+  setInputSessionTask,
   setInputSessionRaw,
   setInputSessionText,
   snapshotInputSession,
@@ -26,8 +26,8 @@ export interface InputSessionRegistration {
 
 export type InputSessionSender = (session: InputSession) => Promise<boolean | void>;
 
-const STORAGE_KEY = "viewer.inputSessions.v1";
-const ACTIVE_KEY = "viewer.activeInputSession.v1";
+const STORAGE_KEY = "viewer.inputSessions.v2";
+const ACTIVE_KEY = "viewer.activeInputSession.v2";
 const pluginSenders = new Map<string, InputSessionSender>();
 const runtimeSenders = new Map<string, InputSessionSender>();
 
@@ -42,7 +42,8 @@ function loadSessions(): Record<string, InputSession> {
       params: value.params,
       label: value.label ?? "Input",
       text: value.text ?? "",
-      branchId: value.branchId ?? "",
+      taskId: value.taskId ?? "",
+      continueTurnId: value.continueTurnId ?? "",
       mode: value.mode === "queued-update" ? "queued-update" : "dispatch",
       queuedDispatchId: value.queuedDispatchId ?? "",
       draftBeforeQueueEdit: value.draftBeforeQueueEdit,
@@ -50,8 +51,8 @@ function loadSessions(): Record<string, InputSession> {
       selectedRoleIds: Array.isArray(value.selectedRoleIds) ? value.selectedRoleIds.filter((item): item is string => typeof item === "string") : [],
       forceNewSession: value.forceNewSession === true,
       parallel: value.parallel === true,
-      raw: value.rawByBranch?.[value.branchId ?? ""] === true || value.raw === true,
-      rawByBranch: { ...(value.rawByBranch ?? {}) },
+      raw: value.rawByTask?.[value.taskId ?? ""] === true || value.raw === true,
+      rawByTask: { ...(value.rawByTask ?? {}) },
       pinned: value.pinned !== false,
       phase: value.phase === "error" ? "error" : "idle",
       error: value.phase === "error" ? value.error ?? "" : "",
@@ -93,19 +94,21 @@ export const useInputSessionsStore = defineStore("inputSessions", {
       const existing = this.sessions[registration.id];
       if (existing !== undefined) {
         Object.assign(existing, registration);
-        existing.branchId ??= "";
+        existing.taskId ??= "";
+        existing.continueTurnId ??= "";
         existing.mode ??= "dispatch";
         existing.queuedDispatchId ??= "";
         existing.revision ??= 0;
-        existing.rawByBranch ??= {};
-        existing.raw = existing.rawByBranch[existing.branchId ?? ""] === true;
+        existing.rawByTask ??= {};
+        existing.raw = existing.rawByTask[existing.taskId ?? ""] === true;
         this.save();
         return existing;
       }
       const session: InputSession = {
         ...registration,
         text: "",
-        branchId: "",
+        taskId: "",
+        continueTurnId: "",
         mode: "dispatch",
         queuedDispatchId: "",
         revision: 0,
@@ -113,7 +116,7 @@ export const useInputSessionsStore = defineStore("inputSessions", {
         forceNewSession: false,
         parallel: false,
         raw: false,
-        rawByBranch: {},
+        rawByTask: {},
         pinned: true,
         phase: "idle",
         error: "",
@@ -141,26 +144,26 @@ export const useInputSessionsStore = defineStore("inputSessions", {
       setInputSessionText(session, text);
       this.save();
     },
-    setBranch(id: string, branchId: string): void {
+    setTask(id: string, taskId: string): void {
       const session = this.sessions[id];
       if (session === undefined) return;
-      setInputSessionBranch(session, branchId);
+      setInputSessionTask(session, taskId);
       this.save();
     },
-    setRaw(id: string, branchId: string, raw: boolean): void {
+    setRaw(id: string, taskId: string, raw: boolean): void {
       const session = this.sessions[id];
       if (session === undefined) return;
-      setInputSessionRaw(session, branchId, raw);
+      setInputSessionRaw(session, taskId, raw);
       this.save();
     },
     intent(id: string): InputSessionIntent | undefined {
       const session = this.sessions[id];
       return session === undefined ? undefined : inputSessionIntent(session);
     },
-    beginQueuedEdit(id: string, branchId: string, dispatchId: string, text: string): void {
+    beginQueuedEdit(id: string, taskId: string, dispatchId: string, text: string): void {
       const session = this.sessions[id];
       if (session === undefined) return;
-      beginQueuedInputEdit(session, branchId, dispatchId, text);
+      beginQueuedInputEdit(session, taskId, dispatchId, text);
       this.save();
     },
     cancelQueuedEdit(id: string): void {
@@ -187,7 +190,7 @@ export const useInputSessionsStore = defineStore("inputSessions", {
       if (session === undefined) return false;
       const currentIntent = inputSessionIntent(session);
       const sameTarget = intent === undefined || (
-        currentIntent.branchId === intent.branchId
+        currentIntent.taskId === intent.taskId
         && currentIntent.mode === intent.mode
         && currentIntent.queuedDispatchId === intent.queuedDispatchId
       );

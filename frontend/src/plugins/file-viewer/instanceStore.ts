@@ -3,6 +3,7 @@ import { reactive } from "vue";
 import type { BusFrame } from "@viewer/bus-sdk";
 import { bus } from "../../shell/bus";
 import type { PluginCtx } from "../../shell/ctx";
+import { randomUUID } from "../../utils/randomUUID";
 
 export type PreviewMode = "render" | "source";
 export interface FileViewerState {
@@ -99,7 +100,7 @@ export function getInstance(id: string): FileViewerInstance | undefined {
   return instances.find((entry) => entry.id === id);
 }
 export function createInstance(seed?: Partial<FileViewerState>, label = "文件预览"): FileViewerInstance {
-  const instance: FileViewerInstance = { id: crypto.randomUUID(), pinned: false, label, state: { ...defaultState(), ...seed } };
+  const instance: FileViewerInstance = { id: randomUUID(), pinned: false, label, state: { ...defaultState(), ...seed } };
   instances.push(instance);
   pushRemote(instance);
   return instance;

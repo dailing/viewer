@@ -26,6 +26,14 @@ async def wait_port(port: int) -> None:
         except OSError: await asyncio.sleep(0.05)
     raise TimeoutError(f"kernel port {port} did not open")
 
+async def send(client: BusClient, chat_id: str, **payload: Any) -> dict[str, Any]:
+    tasks = await client.request("chat:_:tasks:list", {"chat_id": chat_id, "status": "open", "limit": 100})
+    assert tasks["tasks"], "new Chat must have a default open Task"
+    if "message" in payload:
+        payload["text"] = payload.pop("message")
+    payload.setdefault("idempotency_key", f"smoke-{time.time_ns()}")
+    return await client.request("chat:_:send-message", {"chat_id": chat_id, "task_id": tasks["tasks"][0]["id"], **payload})
+
 async def run() -> None:
     viewerd, mock, codex_mock, opencode_mock, port = Path(os.environ["VIEWERD_BIN"]), Path(__file__).with_name("mock_acp_agent.py"), Path(__file__).with_name("mock_codex_server.py"), Path(__file__).with_name("mock_opencode_agent.py"), free_port()
     with tempfile.TemporaryDirectory(prefix="viewer-chat-smoke-") as temp:
@@ -77,7 +85,7 @@ async def run() -> None:
             await wait_for(lambda: active and active[-1] == chat["id"])
             print("PASS workspace roles and chat CRUD + active mailbox")
 
-            dispatched = await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "relay hello", "role_ids": [first["id"], second["id"]]})
+            dispatched = await send(client, chat["id"], message="relay hello", role_ids=[first["id"], second["id"]])
             assert dispatched["role_ids"] == [first["id"], second["id"]]
             print("POLICY_ROUTE_SAMPLE", json.dumps({"policy_id": "hermes-policy", "candidate": "hermes/default", "dispatch_id": dispatched["dispatch_id"]}, separators=(",", ":")))
             await wait_for(lambda: len([item for item in completions if item["chat_id"] == chat["id"]]) == 2)
@@ -114,7 +122,7 @@ async def run() -> None:
             print("AGGREGATE_CATALOG_SAMPLE", json.dumps(aggregate, separators=(",", ":")))
 
             prior_events = len(agent_events)
-            await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "long cancellation", "role_ids": [first["id"]]})
+            await send(client, chat["id"], message="long cancellation", role_ids=[first["id"]])
             await wait_for(lambda: len(agent_events) > prior_events)
             stopped = await client.request("chat:_:stop", {"chat_id": chat["id"], "role_id": first["id"]})
             assert stopped["stopped"] is True
@@ -134,7 +142,7 @@ async def run() -> None:
 
             codex_role = await client.request("chat:_:roles:create", {"name": "Codex", "description": "codex", "prompt": "CODEX-RULE", "provider": "codex-app-server", "routing_policy_id": "codex-policy"})
             codex_chat = await client.request("chat:_:chats:create", {"name": "Codex bus", "root": str(ROOT), "type": "direct", "member_role_ids": [codex_role["id"]]})
-            codex_dispatched = await client.request("chat:_:dispatch", {"chat_id": codex_chat["id"], "message": "codex hello", "role_ids": [codex_role["id"]]})
+            codex_dispatched = await send(client, codex_chat["id"], message="codex hello", role_ids=[codex_role["id"]])
             await wait_for(lambda: any(item["chat_id"] == codex_chat["id"] for item in completions))
             codex_done = next(item for item in completions if item["chat_id"] == codex_chat["id"])
             assert codex_done["stop_reason"] == "end_turn" and codex_done["attempts"][0]["outcome"] == "completed"
@@ -150,7 +158,7 @@ async def run() -> None:
 
             opencode_role = await client.request("chat:_:roles:create", {"name": "OpenCode", "description": "opencode", "prompt": "OPENCODE-RULE", "provider": "opencode", "routing_policy_id": "opencode-policy"})
             opencode_chat = await client.request("chat:_:chats:create", {"name": "OpenCode bus", "root": str(ROOT), "type": "direct", "member_role_ids": [opencode_role["id"]]})
-            await client.request("chat:_:dispatch", {"chat_id": opencode_chat["id"], "message": "opencode hello", "role_ids": [opencode_role["id"]]})
+            await send(client, opencode_chat["id"], message="opencode hello", role_ids=[opencode_role["id"]])
             await wait_for(lambda: any(item["chat_id"] == opencode_chat["id"] for item in completions))
             opencode_done = next(item for item in completions if item["chat_id"] == opencode_chat["id"])
             assert opencode_done["stop_reason"] == "end_turn" and opencode_done["attempts"][0]["outcome"] == "completed"
@@ -166,7 +174,7 @@ async def run() -> None:
 
             failover_role = await client.request("chat:_:roles:create", {"name": "Fallback", "description": "fallback", "prompt": "FALLBACK-RULE", "provider": "codex-app-server", "routing_policy_id": "failover-policy"})
             failover_chat = await client.request("chat:_:chats:create", {"name": "Failover", "root": str(ROOT), "type": "direct", "member_role_ids": [failover_role["id"]]})
-            await client.request("chat:_:dispatch", {"chat_id": failover_chat["id"], "message": "fallback hello", "role_ids": [failover_role["id"]]})
+            await send(client, failover_chat["id"], message="fallback hello", role_ids=[failover_role["id"]])
             await wait_for(lambda: any(item["chat_id"] == failover_chat["id"] for item in completions))
             failover_done = next(item for item in completions if item["chat_id"] == failover_chat["id"])
             assert failover_done["stop_reason"] == "end_turn"
@@ -177,7 +185,7 @@ async def run() -> None:
 
             turn_error_role = await client.request("chat:_:roles:create", {"name": "Turn error", "description": "turn error", "prompt": "TURN-ERROR-RULE", "provider": "codex-app-server", "routing_policy_id": "turn-error-policy"})
             turn_error_chat = await client.request("chat:_:chats:create", {"name": "Turn error failover", "root": str(ROOT), "type": "direct", "member_role_ids": [turn_error_role["id"]]})
-            await client.request("chat:_:dispatch", {"chat_id": turn_error_chat["id"], "message": "mock turn error", "role_ids": [turn_error_role["id"]]})
+            await send(client, turn_error_chat["id"], message="mock turn error", role_ids=[turn_error_role["id"]])
             await wait_for(lambda: any(item["chat_id"] == turn_error_chat["id"] for item in completions))
             turn_error_done = next(item for item in completions if item["chat_id"] == turn_error_chat["id"])
             assert turn_error_done["stop_reason"] == "end_turn"
@@ -189,7 +197,7 @@ async def run() -> None:
             # resolve GLOBALLY (cross-chat included) and the cited messages'
             # visible text is injected directly before the user query — the
             # mock echoes the full prompt, so the reply carries the section.
-            await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": f"cite check @{dispatched['message_id']} and @{codex_dispatched['message_id']}", "role_ids": [first["id"]]})
+            await send(client, chat["id"], message=f"cite check @{dispatched['message_id']} and @{codex_dispatched['message_id']}", role_ids=[first["id"]])
             await wait_for(lambda: len([item for item in completions if item["chat_id"] == chat["id"]]) >= 4)
             cite_replies = [item for item in messages if item["chat_id"] == chat["id"] and item["role"] == "assistant" and "user cited message id" in item.get("text", "")]
             assert cite_replies, "no assistant reply carried the injected citation section"
@@ -198,7 +206,7 @@ async def run() -> None:
             assert f"user cited message id {codex_dispatched['message_id']}" in cite_text and "codex hello" in cite_text and "from a different chat" in cite_text
             print("PASS message citation injects same-chat and cross-chat cited content before the query")
 
-            try: await client.request("chat:_:dispatch", {"chat_id": chat["id"], "message": "auto"})
+            try: await send(client, chat["id"], message="auto")
             except Exception as exc: assert "LLM router is not configured" in str(exc)
             else: raise AssertionError("router without config unexpectedly succeeded")
             print("PASS router missing-config error")

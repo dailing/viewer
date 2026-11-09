@@ -15,31 +15,32 @@ import (
 	"strings"
 	"sync"
 
+	"gorm.io/gorm"
+
 	"viewer/internal/agentdriver"
 	"viewer/internal/plugins/pluginrpc"
 	"viewer/sdk/go/busclient"
 )
 
 var Manifest = busclient.Manifest{
-	ID: "chat", Version: "0.5.0",
+	ID: "chat", Version: "1.0.0",
 	Slots: map[string]any{
 		"chat:_:workspace:get": map[string]any{}, "chat:_:workspace:patch": map[string]any{},
 		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},
 		"chat:_:routing:get": map[string]any{}, "chat:_:routing:put": map[string]any{},
 		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
-		"chat:_:automation": map[string]any{}, "chat:_:dispatch-status": map[string]any{},
-		"chat:_:dispatch": map[string]any{}, "chat:_:send-message": map[string]any{}, "chat:_:stop": map[string]any{},
-		"chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{}, "chat:_:draft:get": map[string]any{}, "chat:_:draft:set": map[string]any{},
-		"chat:_:branches:create": map[string]any{}, "chat:_:branches:patch": map[string]any{}, "chat:_:branches:delete": map[string]any{},
-		"chat:_:branches:merge": map[string]any{}, "chat:_:branches:merge-confirm": map[string]any{}, "chat:_:branches:archive": map[string]any{},
-		"chat:_:branches:graph": map[string]any{},
-		"chat:_:agent-catalog":  map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
+		"chat:_:tasks:create": map[string]any{}, "chat:_:tasks:get": map[string]any{}, "chat:_:tasks:list": map[string]any{}, "chat:_:tasks:patch": map[string]any{}, "chat:_:tasks:end": map[string]any{}, "chat:_:tasks:pin": map[string]any{},
+		"chat:_:tasks:summary": map[string]any{}, "chat:_:tasks:summary-retry": map[string]any{}, "chat:_:turn-summaries:retry": map[string]any{},
+		"chat:_:send-message": map[string]any{}, "chat:_:history": map[string]any{}, "chat:_:turns:list": map[string]any{}, "chat:_:role-sessions:invalidate": map[string]any{},
+		"chat:_:decisions:list": map[string]any{}, "chat:_:decisions:respond": map[string]any{}, "chat:_:decisions:cancel": map[string]any{}, "chat:_:decisions:open": map[string]any{}, "chat:_:tasks:export": map[string]any{},
+		"chat:_:stop": map[string]any{}, "chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{}, "chat:_:draft:get": map[string]any{}, "chat:_:draft:set": map[string]any{},
+		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
 		"chat:_:voice:invoke": map[string]any{},
 	},
 	Emits: map[string]any{
 		"chat:*:message": map[string]any{}, "chat:*:block": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
-		"chat:_:turn": map[string]any{}, "chat:_:queue": map[string]any{}, "chat:_:branch": map[string]any{}, "chat:_:draft:sync": map[string]any{},
-		"chat:_:background":    map[string]any{},
+		"chat:_:turn": map[string]any{}, "chat:_:queue": map[string]any{}, "chat:_:task": map[string]any{}, "chat:_:draft:sync": map[string]any{},
+		"chat:_:background": map[string]any{}, "chat:_:decision": map[string]any{}, "chat:_:task-summary": map[string]any{},
 		"voice-catalog:_:chat": map[string]any{},
 	},
 }
@@ -65,29 +66,31 @@ type runtime struct {
 	sawEvent                                              bool
 }
 type Plugin struct {
-	automationMu  sync.Mutex
-	generation    string
-	dataDir       string
-	store         *store
-	client        *busclient.Client
-	httpClient    *http.Client
-	llmFn         llmCompleter
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mu            sync.Mutex
-	runtimes      map[string]*runtime
-	busy          map[string]bool
-	queues        map[string][]queuedMessage
-	lineRaw       map[string]bool // lineKey → last dispatch's raw flag (background resumes inherit it)
-	agents        map[string]string
-	catalogs      map[string]agentdriver.Catalog
-	turnBranches  map[string]string                   // turnID → owning line, stamped at beginTurn (live frame attribution; deleted at turn end)
-	openText      map[string]*Message                 // turnID → currently open assistant text message (deltas append until sealed)
-	openBlock     map[string]*MessageBlock            // turnID → currently open streaming block (agent_text/thinking deltas append until sealed)
-	openToolCalls map[string]map[string]*MessageBlock // turnID → tool_call_id → open tool_call block (status updates merge in place)
-	activeChatID  string
-	closed        bool
-	patchedBanks  map[string]bool // chat Hindsight banks whose config was already patched this process
+	operationMu        sync.Mutex
+	generation         string
+	dataDir            string
+	store              *store
+	client             *busclient.Client
+	httpClient         *http.Client
+	llmFn              llmCompleter
+	ctx                context.Context
+	cancel             context.CancelFunc
+	mu                 sync.Mutex
+	runtimes           map[string]*runtime
+	busy               map[string]bool
+	queues             map[string][]queuedMessage
+	lineRaw            map[string]bool // lineKey → last dispatch's raw flag (background resumes inherit it)
+	agents             map[string]string
+	catalogs           map[string]agentdriver.Catalog
+	turnTasks          map[string]string
+	taskSummaryRunning map[string]bool
+	taskSummaryPending map[string]bool
+	openText           map[string]*Message                 // turnID → currently open assistant text message (deltas append until sealed)
+	openBlock          map[string]*MessageBlock            // turnID → currently open streaming block (agent_text/thinking deltas append until sealed)
+	openToolCalls      map[string]map[string]*MessageBlock // turnID → tool_call_id → open tool_call block (status updates merge in place)
+	activeChatID       string
+	closed             bool
+	patchedBanks       map[string]bool // chat Hindsight banks whose config was already patched this process
 	// background holds one line busy after its relay ended while the turn's
 	// agent session still has live background processes (background.go).
 	background         map[string]*backgroundBlock
@@ -102,9 +105,11 @@ type Plugin struct {
 }
 
 var (
-	errBadRequest = errors.New("chat_id and message are required")
-	errQueueFull  = errors.New("QueueFull: chat role has too many queued messages")
+	errBadRequest = errors.New("task_id and text are required")
+	errQueueFull  = errors.New("QueueFull: task has too many queued messages")
 	errNotQueued  = errors.New("the message is no longer queued (already started or cancelled)")
+	errTaskEnded  = errors.New("task has ended")
+	errTaskBusy   = errors.New("task is still running or queued")
 )
 
 func New(dataDir string, options ...Option) (*Plugin, error) {
@@ -115,12 +120,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One-shot history-DAG migration (backup + rebuild + validate) runs
-	// before any dispatch path can touch the graph.
-	if err := migrateHistoryGraph(database, dataDir); err != nil {
-		return nil, err
-	}
-	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, lineRaw: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, turnBranches: map[string]string{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, background: map[string]*backgroundBlock{}, agentSlots: map[string]map[string]bool{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, lineRaw: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, turnTasks: map[string]string{}, taskSummaryRunning: map[string]bool{}, taskSummaryPending: map[string]bool{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, background: map[string]*backgroundBlock{}, agentSlots: map[string]map[string]bool{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -129,13 +129,6 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 
 func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error {
 	p.ctx, p.cancel = context.WithCancel(context.Background())
-	// History-DAG crash recovery runs before any dispatch is accepted:
-	// interrupted turns publish their nodes, orphan inputs become input
-	// nodes (idempotent).
-	if err := p.recoverHistory(); err != nil {
-		p.cancel()
-		return fmt.Errorf("history recovery: %w", err)
-	}
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed))
 	// Protocol errors (e.g. frame_too_large when a reply exceeds the kernel
 	// frame limit) arrive only on this connection's error mailbox; without a
@@ -148,13 +141,12 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:roles:list": p.handleRolesList, "chat:_:roles:create": p.handleRolesCreate, "chat:_:roles:patch": p.handleRolesPatch, "chat:_:roles:delete": p.handleRolesDelete,
 		"chat:_:routing:get": p.handleRoutingGet, "chat:_:routing:put": p.handleRoutingPut,
 		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
-		"chat:_:automation": p.handleAutomation, "chat:_:dispatch-status": p.handleDispatchGet,
-		"chat:_:dispatch": p.handleDispatch, "chat:_:send-message": p.handleDispatch, "chat:_:stop": p.handleStop,
-		"chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate, "chat:_:draft:get": p.handleDraftGet, "chat:_:draft:set": p.handleDraftSet,
-		"chat:_:branches:create": p.handleBranchesCreate, "chat:_:branches:patch": p.handleBranchesPatch, "chat:_:branches:delete": p.handleBranchesDelete,
-		"chat:_:branches:merge": p.handleBranchesMerge, "chat:_:branches:merge-confirm": p.handleBranchesMergeConfirm, "chat:_:branches:archive": p.handleBranchesArchive,
-		"chat:_:branches:graph": p.handleBranchesGraph,
-		"chat:_:agent-catalog":  p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
+		"chat:_:tasks:create": p.handleTaskCreate, "chat:_:tasks:get": p.handleTaskGet, "chat:_:tasks:list": p.handleTasksList, "chat:_:tasks:patch": p.handleTaskPatch, "chat:_:tasks:end": p.handleTaskEnd, "chat:_:tasks:pin": p.handleTaskPin,
+		"chat:_:tasks:summary": p.handleTaskSummary, "chat:_:tasks:summary-retry": p.handleTaskSummaryRetry, "chat:_:turn-summaries:retry": p.handleTurnSummaryRetry,
+		"chat:_:send-message": p.handleDispatch, "chat:_:history": p.handleChatsList, "chat:_:turns:list": p.handleTurnsList, "chat:_:role-sessions:invalidate": p.handleRoleSessionInvalidate,
+		"chat:_:decisions:list": p.handleDecisionsList, "chat:_:decisions:respond": p.handleDecisionRespond, "chat:_:decisions:cancel": p.handleDecisionCancel, "chat:_:decisions:open": p.handleDecisionOpen, "chat:_:tasks:export": p.handleTaskExport,
+		"chat:_:stop": p.handleStop, "chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate, "chat:_:draft:get": p.handleDraftGet, "chat:_:draft:set": p.handleDraftSet,
+		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
 		"chat:_:voice:invoke": p.handleVoiceInvoke,
 	}
 	for pattern, handler := range handlers {
@@ -173,6 +165,9 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		return err
 	}
 	p.llmFn = p.llmCompleteViaBus
+	if err := p.recoverTaskWork(); err != nil {
+		return err
+	}
 	if err := p.migrateLegacyDomainConfig(ctx); err != nil {
 		return err
 	}
@@ -213,23 +208,11 @@ func (p *Plugin) reply(frame busclient.Frame, value any, err error) {
 	if errors.Is(err, errNotQueued) {
 		code = "not_queued"
 	}
-	if errors.Is(err, errBranchArchived) {
-		code = "branch_archived"
+	if errors.Is(err, errTaskEnded) {
+		code = "task_ended"
 	}
-	if errors.Is(err, errBranchRunning) {
-		code = "branch_running"
-	}
-	if errors.Is(err, errBranchEmpty) {
-		code = "branch_empty"
-	}
-	if errors.Is(err, errLineBusy) {
-		code = "line_busy"
-	}
-	if errors.Is(err, errRevisionConflict) {
-		code = "revision_conflict"
-	}
-	if errors.Is(err, errMergeProtocol) {
-		code = "protocol_upgraded"
+	if errors.Is(err, errTaskBusy) {
+		code = "task_busy"
 	}
 	_ = pluginrpc.RespondError(p.client, frame, code, err.Error())
 }
@@ -447,94 +430,65 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 		payload = append(payload, chat.payload())
 	}
 	result := map[string]any{"chats": payload, "active_chat_id": p.activeChatID, "running_chat_ids": p.runningChatIDs()}
-	// Per-turn running snapshot for the pane: bound to a chat_id filter so
-	// the Dock-wide list payload stays lean.
-	if request != nil {
-		if chatID, _ := request["chat_id"].(string); chatID != "" {
-			result["running_turns"] = p.runningTurns(chatID)
-			result["background_branch_ids"] = p.backgroundBranchIDs(chatID)
-			// Per-turn routing targets (the execution record behind the
-			// pane's agent/provider/model labels): the whole chat's targeted
-			// turns, so cached windows and delta refreshes both reseed fully.
-			targets, targetsErr := p.store.chatTurnTargets(chatID)
-			if targetsErr != nil {
-				p.reply(frame, nil, targetsErr)
-				return
-			}
-			result["turn_targets"] = turnTargetsPayload(targets)
-			// Per-turn session records (turn_id → session): the source of the
-			// pane's session lanes and lane-continuation targets.
-			sessions, sessionsErr := p.store.chatTurnSessions(chatID)
-			if sessionsErr != nil {
-				p.reply(frame, nil, sessionsErr)
-				return
-			}
-			result["turn_sessions"] = turnSessionsPayload(sessions)
-			// Named parallel branches (active + archived): the branch bar and
-			// the 已合并分支 cards seed from this; the chat:_:branch feed
-			// carries live mutations.
-			branches, branchesErr := p.store.chatBranches(chatID)
-			if branchesErr != nil {
-				p.reply(frame, nil, branchesErr)
-				return
-			}
-			branchPayloads := make([]map[string]any, 0, len(branches))
-			for _, branch := range branches {
-				branchPayloads = append(branchPayloads, branch.payload())
-			}
-			result["branches"] = branchPayloads
-			// Pending per-role queue entries (waiting behind in-flight
-			// turns): the pane's queued chips on user boxes seed from this
-			// snapshot; the chat:_:queue feed takes over live.
-			result["queued_messages"] = p.queuedSnapshot(chatID)
+	taskID := requestString(request, "task_id")
+	if taskID == "" {
+		p.reply(frame, result, nil)
+		return
+	}
+	task, err := p.store.task(taskID)
+	if err != nil || task == nil {
+		if err == nil {
+			err = errors.New("task not found")
+		}
+		p.reply(frame, nil, err)
+		return
+	}
+	result["task"] = task.payload()
+	result["running_turns"] = p.runningTaskTurns(taskID)
+	result["background_task_ids"] = p.backgroundTaskIDs(task.ChatID)
+	targets, err := p.store.chatTurnTargets(taskID)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	result["turn_targets"] = turnTargetsPayload(targets)
+	sessions, err := p.store.chatTurnSessions(taskID)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	result["turn_sessions"] = turnSessionsPayload(sessions)
+	queued := []map[string]any{}
+	for _, entry := range p.queuedSnapshot(task.ChatID) {
+		if entry["task_id"] == taskID {
+			queued = append(queued, entry)
 		}
 	}
-	if request != nil && request["include_messages"] == true {
-		chatID, _ := request["chat_id"].(string)
-		var messages []Message
-		var hasMore bool
-		var historyErr error
-		// View-scoped filtering: branch_ids (main = "") restricts the page
-		// to the selected lines' visible membership, resolved server-side;
-		// has_more then reports older/newer VISIBLE history. No branch_ids
-		// (the 全部 view) pages the whole chat unfiltered.
-		branchIDs := sortedBranchIDs(requestStrings(request, "branch_ids"))
-		var view *viewKeys
-		if len(branchIDs) > 0 {
-			var viewErr error
-			view, viewErr = p.viewLineKeys(chatID, branchIDs)
-			if viewErr != nil {
-				p.reply(frame, nil, viewErr)
-				return
-			}
-		}
-		if requestInt64(request, "after") > 0 {
-			// Incremental fetch (v0.32): messages at-or-newer than the client's
-			// newest cached message; the inclusive boundary row is re-fetched so
-			// a still-streaming cached copy is replaced with its final text.
-			if view != nil {
-				messages, hasMore, historyErr = p.store.historyPageAfterView(chatID, view, requestInt64(request, "after"), requestString(request, "after_id"), int(requestInt64(request, "limit")))
-			} else {
-				messages, hasMore, historyErr = p.store.historyPageAfter(chatID, requestInt64(request, "after"), requestString(request, "after_id"), int(requestInt64(request, "limit")))
-			}
-		} else {
-			if view != nil {
-				messages, hasMore, historyErr = p.store.historyPageView(chatID, view, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
-			} else {
-				messages, hasMore, historyErr = p.store.historyPage(chatID, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
-			}
-		}
-		if historyErr != nil {
-			p.reply(frame, nil, historyErr)
-			return
-		}
-		values := make([]map[string]any, 0, len(messages))
-		for _, message := range messages {
-			values = append(values, message.payload())
-		}
-		result["messages"] = values
-		result["has_more"] = hasMore
+	result["queued_messages"] = queued
+	if request["include_messages"] != true {
+		p.reply(frame, result, nil)
+		return
 	}
+	var messages []Message
+	var hasMore, hasMoreAfter bool
+	if around := requestInt64(request, "around"); around > 0 {
+		messages, hasMore, hasMoreAfter, err = p.store.historyAround(taskID, around, requestString(request, "message_id"), int(requestInt64(request, "limit")))
+	} else if after := requestInt64(request, "after"); after > 0 {
+		messages, hasMoreAfter, err = p.store.historyPageAfter(taskID, after, requestString(request, "after_id"), int(requestInt64(request, "limit")))
+	} else {
+		messages, hasMore, err = p.store.historyPage(taskID, requestInt64(request, "before"), requestString(request, "before_id"), int(requestInt64(request, "limit")))
+	}
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	values := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
+		values = append(values, message.payload())
+	}
+	result["messages"] = values
+	result["has_more"] = hasMore
+	result["has_more_after"] = hasMoreAfter
 	p.reply(frame, result, nil)
 }
 
@@ -578,7 +532,7 @@ func turnSessionsPayload(turns []Turn) map[string]any {
 			"role_id":     turn.RoleID,
 			"role_name":   turn.RoleName,
 			"started_at":  turn.StartedAt,
-			"branch_id":   turn.BranchID,
+			"task_id":     turn.TaskID,
 		}
 	}
 	return values
@@ -586,34 +540,25 @@ func turnSessionsPayload(turns []Turn) map[string]any {
 
 func (p *Plugin) handleBlocksList(frame busclient.Frame) {
 	request, _ := pluginrpc.Object(frame)
-	chatID, _ := request["chat_id"].(string)
-	if chatID == "" {
+	taskID := requestString(request, "task_id")
+	if taskID == "" {
 		p.reply(frame, nil, errBadRequest)
 		return
 	}
-	blocks, err := p.store.chatMessageBlocks(chatID, requestInt64(request, "after"), requestInt64(request, "before"))
+	task, err := p.store.task(taskID)
+	if err != nil || task == nil {
+		if err == nil {
+			err = errors.New("task not found")
+		}
+		p.reply(frame, nil, err)
+		return
+	}
+	blocks, err := p.store.chatMessageBlocks(taskID, requestInt64(request, "after"), requestInt64(request, "before"))
 	if err != nil {
 		p.reply(frame, nil, err)
 		return
 	}
-	// View-scoped filtering (branch_ids, main = ""): blocks attach to their
-	// turn, so the view's turn membership decides — resolved server-side,
-	// same as the chats:list message pages.
-	if branchIDs := sortedBranchIDs(requestStrings(request, "branch_ids")); len(branchIDs) > 0 {
-		view, viewErr := p.viewLineKeys(chatID, branchIDs)
-		if viewErr != nil {
-			p.reply(frame, nil, viewErr)
-			return
-		}
-		visible := blocks[:0]
-		for _, block := range blocks {
-			if view.turnKeys[block.TurnID] {
-				visible = append(visible, block)
-			}
-		}
-		blocks = visible
-	}
-	turns, err := p.store.chatTurns(chatID)
+	turns, err := p.store.chatTurns(taskID)
 	if err != nil {
 		p.reply(frame, nil, err)
 		return
@@ -681,13 +626,26 @@ func (p *Plugin) handleChatsCreate(frame busclient.Frame) {
 		return
 	}
 	chat.Root, err = filepath.Abs(chat.Root)
+	var task *Task
 	if err == nil {
-		err = p.store.saveChat(&chat)
+		task = &Task{ID: newID(), ChatID: chat.ID, Title: "主线", TitleSource: "default", CreatedBy: "chat", Pinned: chat.Pinned, CreatedAt: now, UpdatedAt: now}
+		err = p.store.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Save(&chat).Error; err != nil {
+				return err
+			}
+			return tx.Create(task).Error
+		})
 	}
 	if err == nil {
 		p.publishVoiceCatalog()
+		p.publishTask(task, "created")
 	}
-	p.reply(frame, chat.payload(), err)
+	reply := chat.payload()
+	if task != nil {
+		reply["default_task_id"] = task.ID
+		reply["task"] = task.payload()
+	}
+	p.reply(frame, reply, err)
 }
 func (p *Plugin) handleChatsPatch(frame busclient.Frame) {
 	value, err := frameObject(frame)
@@ -752,19 +710,12 @@ func applyChatPatch(chat *Chat, value map[string]any) {
 	}
 }
 func (p *Plugin) handleChatsDelete(frame busclient.Frame) {
-	p.automationMu.Lock()
-	defer p.automationMu.Unlock()
+	p.operationMu.Lock()
+	defer p.operationMu.Unlock()
 	value, err := frameObject(frame)
 	id, _ := value["id"].(string)
 	if err == nil && id == "" {
 		err = errors.New("id is required")
-	}
-	if err == nil {
-		var count int64
-		err = p.store.db.Model(&AutomationGate{}).Where("chat_id = ? AND automation_id <> ''", id).Count(&count).Error
-		if err == nil && count > 0 {
-			err = errors.New("stop the chat's loop before deleting this chat")
-		}
 	}
 	if err == nil {
 		err = p.store.deleteChat(id)

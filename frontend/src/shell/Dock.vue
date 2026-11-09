@@ -9,7 +9,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useDockSettingsStore, clampDockWidth } from "../stores/dockSettings";
 import { useLayoutStore } from "../stores/layout";
 import type { DockProvider } from "./definePlugin";
-import { collectDockEntries, openProvider, type DockEntry } from "./dockModel";
+import { collectDockSections, openProvider, type DockEntry, type DockSection } from "./dockModel";
 import { openShellInstance } from "./instances";
 import { dockActions, dockProviders } from "./registries";
 
@@ -110,7 +110,22 @@ onBeforeUnmount(() => {
   if (schedRestartTimer !== null) clearInterval(schedRestartTimer);
 });
 
-const entries = computed<DockEntry[]>(() => collectDockEntries(dockProviders));
+const sections = computed<DockSection[]>(() => collectDockSections(dockProviders));
+const entries = computed<DockEntry[]>(() => sections.value.flatMap((section) => section.entries));
+// Chat groups start collapsed on every page load. Expansion is deliberately
+// session-local: the default Dock stays compact even with many open Tasks.
+const expandedGroupKeys = ref<Set<string>>(new Set());
+
+function isGroupCollapsed(key: string): boolean {
+  return !expandedGroupKeys.value.has(key);
+}
+
+function toggleGroup(key: string): void {
+  const next = new Set(expandedGroupKeys.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expandedGroupKeys.value = next;
+}
 
 /** Status-dot class for an instance state word; unknown words fall back to the neutral dot. */
 function dockDotClass(state: string): string {
@@ -137,6 +152,14 @@ function removeEntry(entry: DockEntry): void {
 async function createFrom(provider: DockProvider): Promise<void> {
   menuOpen.value = false;
   await openProvider(provider, { open: openShellInstance });
+}
+
+async function createFromGroup(section: DockSection): Promise<void> {
+  if (section.group === undefined) return;
+  const next = new Set(expandedGroupKeys.value);
+  next.add(section.key);
+  expandedGroupKeys.value = next;
+  await openProvider(section.provider, { open: openShellInstance }, section.group.id);
 }
 
 function openSettings(): void {
@@ -227,28 +250,54 @@ const buildTime = (() => {
       <div class="dock-sep"></div>
 
       <div class="dock-items">
-        <div
-          v-for="entry in entries"
-          :key="entry.key"
-          class="dock-item"
-          :class="{ active: entry.uid === activeUid }"
-        >
-          <button type="button" class="dock-btn" :title="entry.label" :aria-label="entry.label" @click="openEntry(entry)">
-            <i class="bi" :class="entry.icon"></i>
-            <span v-if="isExpanded" class="dock-label">{{ entry.displayLabel }}</span>
-          </button>
-          <button
-            v-if="entry.instance !== undefined && entry.provider.remove !== undefined"
-            type="button"
-            class="dock-item-remove"
-            title="移除此固定入口"
-            :aria-label="`移除 ${entry.label}`"
-            @click.stop="removeEntry(entry)"
+        <template v-for="section in sections" :key="section.key">
+          <div v-if="section.group !== undefined && isExpanded" class="dock-group-header">
+            <button
+              type="button"
+              class="dock-group-toggle"
+              :title="`${isGroupCollapsed(section.key) ? '展开' : '折叠'} ${section.group.label}`"
+              :aria-expanded="!isGroupCollapsed(section.key)"
+              @click="toggleGroup(section.key)"
+            >
+              <i class="bi bi-folder"></i>
+              <span class="dock-group-label">{{ section.group.label }}</span>
+              <span class="dock-group-count">{{ section.entries.length }}</span>
+            </button>
+            <button
+              v-if="section.provider.createForGroup !== undefined"
+              type="button"
+              class="dock-group-add"
+              :title="`在 ${section.group.label} 下新建 Task`"
+              :aria-label="`在 ${section.group.label} 下新建 Task`"
+              @click="createFromGroup(section)"
+            >
+              <i class="bi bi-plus-lg"></i>
+            </button>
+          </div>
+          <div
+            v-for="entry in section.entries"
+            v-show="!isExpanded || section.group === undefined || !isGroupCollapsed(section.key)"
+            :key="entry.key"
+            class="dock-item"
+            :class="{ active: entry.uid === activeUid, 'dock-grouped-item': isExpanded && section.group !== undefined }"
           >
-            <i class="bi bi-x"></i>
-          </button>
-          <span v-if="entry.state !== undefined" class="dock-dot" :class="dockDotClass(entry.state)"></span>
-        </div>
+            <button type="button" class="dock-btn" :title="entry.label" :aria-label="entry.label" @click="openEntry(entry)">
+              <i class="bi" :class="entry.icon"></i>
+              <span v-if="isExpanded" class="dock-label">{{ entry.displayLabel }}</span>
+            </button>
+            <button
+              v-if="entry.instance !== undefined && entry.provider.remove !== undefined"
+              type="button"
+              class="dock-item-remove"
+              title="移除此固定入口"
+              :aria-label="`移除 ${entry.label}`"
+              @click.stop="removeEntry(entry)"
+            >
+              <i class="bi bi-x"></i>
+            </button>
+            <span v-if="entry.state !== undefined" class="dock-dot" :class="dockDotClass(entry.state)"></span>
+          </div>
+        </template>
         <div v-if="entries.length === 0" class="dock-empty" title="没有正在运行的 instance"><i class="bi bi-dash-lg"></i></div>
       </div>
 
@@ -266,13 +315,13 @@ const buildTime = (() => {
           v-for="action in dockActions"
           :key="action.id"
           type="button"
-          class="dock-btn"
+          class="dock-btn dock-action"
           :class="{ 'dock-action-active': action.active?.() === true }"
           :title="action.title()"
           :aria-label="action.title()"
           :aria-pressed="action.active?.() === true"
           @click="action.onClick()"
-        ><i class="bi" :class="action.icon()"></i></button>
+        ><i class="bi" :class="action.icon()"></i><span v-if="action.badge?.()" class="dock-action-badge">{{ action.badge?.() }}</span></button>
         <button
           type="button"
           class="dock-btn"
@@ -409,11 +458,77 @@ const buildTime = (() => {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   width: 100%;
+}
+
+.dock-group-header {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  margin-top: 1px;
+  min-height: 20px;
+  width: calc(100% - 6px);
+}
+
+.dock-group-toggle,
+.dock-group-add {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-subtle);
+  display: inline-flex;
+  font-size: var(--font-size-ui-small);
+  height: 20px;
+  padding: 0;
+}
+
+.dock-group-toggle {
+  flex: 1 1 auto;
+  gap: 5px;
+  justify-content: flex-start;
+  min-width: 0;
+  padding-left: 4px;
+}
+
+.dock-group-toggle:hover,
+.dock-group-add:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-muted);
+}
+
+.dock-group-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-group-count {
+  color: var(--color-text-subtle);
+  font-size: calc(var(--font-size-ui) * 3 / 4);
+  margin-left: auto;
+  padding-right: 3px;
+}
+
+.dock-group-add {
+  flex: 0 0 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.dock.expanded .dock-item.dock-grouped-item {
+  margin-left: 10px;
+  width: calc(100% - 16px);
+}
+
+.dock.expanded .dock-grouped-item > .dock-btn {
+  padding-left: 6px;
 }
 
 .dock-item {
@@ -422,6 +537,10 @@ const buildTime = (() => {
   min-width: 0;
   position: relative;
   width: 28px;
+}
+
+.dock-items .dock-btn {
+  height: 22px;
 }
 
 .dock-item-remove {
@@ -519,6 +638,8 @@ const buildTime = (() => {
 }
 
 /* Global dock actions (e.g. voice control): accent tint while active. */
+.dock-action { position: relative; }
+.dock-action-badge { align-items: center; background: var(--color-danger); border-radius: 8px; color: var(--color-surface); display: flex; font-size: 9px; height: 14px; justify-content: center; min-width: 14px; padding: 0 3px; position: absolute; right: -2px; top: -3px; }
 .dock-action-active {
   color: var(--color-danger);
 }

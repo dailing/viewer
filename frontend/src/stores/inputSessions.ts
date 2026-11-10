@@ -43,14 +43,12 @@ function loadSessions(): Record<string, InputSession> {
       label: value.label ?? "Input",
       text: value.text ?? "",
       taskId: value.taskId ?? "",
-      continueTurnId: value.continueTurnId ?? "",
       mode: value.mode === "queued-update" ? "queued-update" : "dispatch",
       queuedDispatchId: value.queuedDispatchId ?? "",
       draftBeforeQueueEdit: value.draftBeforeQueueEdit,
       revision: typeof value.revision === "number" ? value.revision : 0,
       selectedRoleIds: Array.isArray(value.selectedRoleIds) ? value.selectedRoleIds.filter((item): item is string => typeof item === "string") : [],
       forceNewSession: value.forceNewSession === true,
-      parallel: value.parallel === true,
       raw: value.rawByTask?.[value.taskId ?? ""] === true || value.raw === true,
       rawByTask: { ...(value.rawByTask ?? {}) },
       pinned: value.pinned !== false,
@@ -95,7 +93,6 @@ export const useInputSessionsStore = defineStore("inputSessions", {
       if (existing !== undefined) {
         Object.assign(existing, registration);
         existing.taskId ??= "";
-        existing.continueTurnId ??= "";
         existing.mode ??= "dispatch";
         existing.queuedDispatchId ??= "";
         existing.revision ??= 0;
@@ -108,13 +105,11 @@ export const useInputSessionsStore = defineStore("inputSessions", {
         ...registration,
         text: "",
         taskId: "",
-        continueTurnId: "",
         mode: "dispatch",
         queuedDispatchId: "",
         revision: 0,
         selectedRoleIds: [],
         forceNewSession: false,
-        parallel: false,
         raw: false,
         rawByTask: {},
         pinned: true,

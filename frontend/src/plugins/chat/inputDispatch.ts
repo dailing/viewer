@@ -47,8 +47,6 @@ export function chatInputRPC(session: InputSession, memberRoleIds?: readonly str
   }
   if (selectedRoleIds.length > 0) payload.role_ids = [...selectedRoleIds];
   if (session.forceNewSession) payload.force_new_session = true;
-  if (session.parallel) payload.parallel_dispatch = true;
   if (session.raw) payload.raw = true;
-  if (session.continueTurnId) payload.continue_turn_id = session.continueTurnId;
   return { channel: "chat:_:send-message", payload };
 }

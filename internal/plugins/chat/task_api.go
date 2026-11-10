@@ -452,9 +452,21 @@ func (p *Plugin) handleTaskEnd(frame busclient.Frame) {
 		p.reply(frame, map[string]any{"task": task.payload()}, nil)
 		return
 	}
-	if p.taskBusy(task.ID) {
-		p.reply(frame, nil, errTaskBusy)
+	cancelled, err := p.finishTaskEnd(task, nil, nil)
+	if err != nil {
+		p.reply(frame, nil, err)
 		return
+	}
+	p.publishTaskEnd(task, nil, cancelled)
+	p.reply(frame, map[string]any{"task": task.payload()}, nil)
+}
+
+// finishTaskEnd serializes the Task, optional resolving Decision, final
+// summary and other pending Decisions. Callers hold operationMu so an ordinary
+// Task end and a Decision control option cannot race each other.
+func (p *Plugin) finishTaskEnd(task *Task, resolved *Decision, option *decisionOption) ([]Decision, error) {
+	if p.taskBusy(task.ID) {
+		return nil, errTaskBusy
 	}
 	now := nowMillis()
 	task.EndedAt = &now
@@ -462,6 +474,20 @@ func (p *Plugin) handleTaskEnd(frame busclient.Frame) {
 	task.UpdatedAt = now
 	var decisions []Decision
 	if err := p.store.db.Transaction(func(tx *gorm.DB) error {
+		if resolved != nil {
+			if option == nil || option.Action != "end_current_task" {
+				return errors.New("invalid Task-ending Decision option")
+			}
+			update := tx.Model(&Decision{}).Where("id = ? AND status = ? AND version = ?", resolved.ID, "pending", resolved.Version).
+				Updates(map[string]any{"status": "resolved", "response": option.Label, "version": resolved.Version + 1, "updated_at": now})
+			if update.Error != nil || update.RowsAffected != 1 {
+				return errors.New("decision version or status conflict")
+			}
+			resolved.Status = "resolved"
+			resolved.Response = option.Label
+			resolved.Version++
+			resolved.UpdatedAt = now
+		}
 		if err := tx.Save(task).Error; err != nil {
 			return err
 		}
@@ -469,20 +495,33 @@ func (p *Plugin) handleTaskEnd(frame busclient.Frame) {
 		if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "task_id"}}, DoUpdates: clause.Assignments(map[string]any{"status": "pending", "final": true, "error": "", "updated_at": now})}).Create(summary).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&Decision{}).Where("task_id = ? AND status = ?", task.ID, "pending").Updates(map[string]any{"status": "cancelled", "updated_at": now}).Error; err != nil {
+		cancel := tx.Model(&Decision{}).Where("task_id = ? AND status = ?", task.ID, "pending")
+		if resolved != nil {
+			cancel = cancel.Where("id <> ?", resolved.ID)
+		}
+		if err := cancel.Updates(map[string]any{"status": "cancelled", "updated_at": now}).Error; err != nil {
 			return err
 		}
-		return tx.Where("task_id = ? AND status = ?", task.ID, "cancelled").Find(&decisions).Error
+		query := tx.Where("task_id = ? AND status = ?", task.ID, "cancelled")
+		if resolved != nil {
+			query = query.Where("id <> ?", resolved.ID)
+		}
+		return query.Find(&decisions).Error
 	}); err != nil {
-		p.reply(frame, nil, err)
-		return
+		return nil, err
 	}
+	return decisions, nil
+}
+
+func (p *Plugin) publishTaskEnd(task *Task, resolved *Decision, cancelled []Decision) {
 	p.publishTask(task, "ended")
-	for _, decision := range decisions {
-		p.publish("chat:_:decision", map[string]any{"id": decision.ID, "task_id": task.ID, "status": "cancelled", "updated_at": now})
+	if resolved != nil {
+		p.publishDecision(resolved)
+	}
+	for _, decision := range cancelled {
+		p.publish("chat:_:decision", map[string]any{"id": decision.ID, "task_id": task.ID, "status": "cancelled", "updated_at": task.UpdatedAt})
 	}
 	p.enqueueTaskSummary(task.ID)
-	p.reply(frame, map[string]any{"task": task.payload()}, nil)
 }
 
 func (p *Plugin) handleTaskSummaryRetry(frame busclient.Frame) {

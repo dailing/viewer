@@ -13,15 +13,13 @@ export interface InputSession {
   label: string;
   text: string;
   taskId: string;
-  continueTurnId: string;
   mode: InputSessionMode;
   queuedDispatchId: string;
   draftBeforeQueueEdit?: string;
   revision: number;
   selectedRoleIds: string[];
   forceNewSession: boolean;
-  parallel: boolean;
-  /** Raw state for the currently bound branch, mirrored in rawByTask. */
+  /** Raw state for the currently bound Task, mirrored in rawByTask. */
   raw: boolean;
   rawByTask: Record<string, boolean>;
   pinned: boolean;
@@ -32,13 +30,11 @@ export interface InputSession {
 
 export interface InputSessionIntent {
   taskId: string;
-  continueTurnId: string;
   mode: InputSessionMode;
   queuedDispatchId: string;
   draftBeforeQueueEdit?: string;
   selectedRoleIds: string[];
   forceNewSession: boolean;
-  parallel: boolean;
   raw: boolean;
 }
 
@@ -50,13 +46,11 @@ function bump(session: InputSession): void {
 export function inputSessionIntent(session: InputSession): InputSessionIntent {
   return {
     taskId: session.taskId ?? "",
-    continueTurnId: session.continueTurnId ?? "",
     mode: session.mode ?? "dispatch",
     queuedDispatchId: session.queuedDispatchId ?? "",
     draftBeforeQueueEdit: session.draftBeforeQueueEdit,
     selectedRoleIds: [...session.selectedRoleIds],
     forceNewSession: session.forceNewSession,
-    parallel: session.parallel,
     raw: session.rawByTask?.[session.taskId ?? ""] === true || session.raw === true,
   };
 }
@@ -86,7 +80,6 @@ export function setInputSessionTask(session: InputSession, taskId: string): void
   // change. Restore the ordinary draft before re-binding the input.
   if (session.mode === "queued-update") cancelQueuedInputEdit(session);
   session.taskId = taskId;
-  session.continueTurnId = "";
   session.raw = session.rawByTask?.[taskId] === true;
   bump(session);
 }
@@ -144,8 +137,6 @@ export function clearInputSession(session: InputSession): void {
   session.queuedDispatchId = "";
   session.draftBeforeQueueEdit = undefined;
   session.forceNewSession = false;
-  session.parallel = false;
-  session.continueTurnId = "";
   session.phase = "idle";
   session.error = "";
   bump(session);
@@ -155,7 +146,6 @@ function sameUnchangedIntent(session: InputSession, sent: InputSession): boolean
   const sameTarget = (session.taskId ?? "") === (sent.taskId ?? "")
     && (session.mode ?? "dispatch") === (sent.mode ?? "dispatch")
     && (session.queuedDispatchId ?? "") === (sent.queuedDispatchId ?? "")
-    && (session.continueTurnId ?? "") === (sent.continueTurnId ?? "")
     && (session.raw === true) === (sent.raw === true);
   if (!sameTarget) return false;
   // The backend's draft:sync empty frame may acknowledge the send before its

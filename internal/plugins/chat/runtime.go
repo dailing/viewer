@@ -801,10 +801,11 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 						prompt = bridge + "\n\nCurrent routed message follows:\n" + routedMessage
 					}
 				}
+				prompt = withDecisionPostPrompt(prompt, raw)
 				slog.Info("agent prompt prepared",
 					"chat_id", chat.ID, "turn_id", turnID, "role_id", role.ID,
 					"agent", candidate.target.Agent, "provider", candidate.target.Provider, "model", candidate.target.Model,
-					"mode", promptMode, "prompt_bytes", len(prompt), "context_bytes", contextBytes,
+					"mode", promptMode, "prompt_bytes", len(prompt), "context_bytes", contextBytes, "decision_post_prompt", !raw,
 					"message_bytes", len(message), "common_prompt_bytes", len(commonPrompt(workspace, chat)), "role_prompt_bytes", len(initialRolePrompt(role)),
 				)
 				p.mu.Lock()
@@ -1009,9 +1010,11 @@ func initialRolePrompt(role SuperRole) string {
 Role prompt:
 %s
 
-Operate as this role only. Prefer work that matches the fixed rules, files, topic, and responsibilities above. If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks.
+Operate as this role only. Prefer work that matches the fixed rules, files, topic, and responsibilities above. If a later user message appears unrelated to this role, say so briefly and ask for clarification instead of silently switching tasks.`, role.Name, fallback(role.Prompt, "(No role-specific prompt was provided.)"))
+}
 
-When you genuinely need the user to choose before work can continue, end the visible reply with exactly one flat marker, and no text after its closing tag:
+const decisionPostPrompt = `Decision follow-up protocol for this Turn. Evaluate it independently on every Turn, even when earlier Turns already contained a Decision.
+After every substantive response, end the visible reply with exactly one flat marker when there is a meaningful next action, a blocking choice, or a completed Task that can be ended. Prefer one to three concrete next-step options so the user can continue without composing another prompt; put the recommended action first and make every option a complete instruction that can be sent as a user message. Omit the marker only for a purely mechanical acknowledgment with no meaningful next action and a Task that should remain open. Do not use the marker for rhetorical questions or ordinary status updates.
 <viewer-decision>
 version: 1
 kind: choice
@@ -1021,7 +1024,16 @@ option: Alternative next step
 display: buttons
 tone: neutral
 </viewer-decision>
-Each non-empty marker line is one key: value entry. Do not use JSON, YAML, XML attributes, nested values, multiline values, or code fences around the marker. Options are optional and may repeat at most eight times. Use display auto, buttons, or list; use tone neutral or warning. Do not use this marker for rhetorical questions or ordinary status updates.`, role.Name, fallback(role.Prompt, "(No role-specific prompt was provided.)"))
+Each non-empty marker line is one key: value entry. Do not use JSON, YAML, XML attributes, nested values, multiline values, or code fences around the marker. Options are optional and may repeat at most eight times. Use display auto, buttons, or list; use tone neutral or warning. No text may follow the closing tag.
+When the current Task is actually complete, add one final option such as "End current task" and put the following line immediately after that option:
+option_action: end_current_task
+This action line applies to the immediately preceding option. Use at most one end_current_task option in a marker and only when no further work is needed. It ends the current Task directly without sending the option text to the Agent.`
+
+func withDecisionPostPrompt(prompt string, raw bool) string {
+	if raw {
+		return prompt
+	}
+	return strings.TrimRight(prompt, "\n") + "\n\n" + decisionPostPrompt
 }
 func nonEmpty(values ...string) []string {
 	result := []string{}

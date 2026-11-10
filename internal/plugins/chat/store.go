@@ -751,6 +751,13 @@ func (s *store) latestRoleActivity(chatID, taskID, roleID string, before int64) 
 	if result.Error != nil || result.RowsAffected == 0 {
 		return 0, result.Error
 	}
+	// A Role remains active through ended_at, not merely at started_at. Using
+	// started_at makes its own assistant messages and Turn Summary look like
+	// missed work on the next resumed prompt. A still-running Turn has no end
+	// yet, so its start remains the safe high-water mark for a queued message.
+	if value.EndedAt != nil && *value.EndedAt < before {
+		return *value.EndedAt, nil
+	}
 	return value.StartedAt, nil
 }
 

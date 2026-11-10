@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
+import type { PaneChromeAction } from "../../stores/paneChrome";
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
 import { useInputSessionsStore } from "../../stores/inputSessions";
 import ComposerBox from "./ComposerBox.vue";
 import ToolActivity from "./ToolActivity.vue";
+import { activityDisplayable, activityGroupSummary, groupActivityItems, type ActivityTimelineItem } from "./toolPresentation";
 import DecisionCard from "./DecisionCard.vue";
-import type { DecisionResponseIntent } from "./decisionInput";
+import { decisionResponsePayload, type DecisionResponseIntent } from "./decisionInput";
 import { chatIdForView, resolveChatView, setChatViewTask } from "./viewInstances";
 import { formatChatTime as formatTime } from "./chatTime";
 import { mergeMessageWindow, readingAnchor, withReadingAnchor, type ReadingAnchor } from "./historyWindow";
@@ -43,6 +45,7 @@ const hasOlder = ref(false);
 const hasNewer = ref(false);
 const renaming = ref(false);
 const renameText = ref("");
+const summaryOpen = ref(false);
 const responseDrafts = ref<Record<string, string>>({});
 const thread = ref<HTMLElement | null>(null);
 const selectedRoleIds = computed({ get: () => inputs.session(inputSessionId)?.selectedRoleIds ?? [], set: (value: string[]) => inputs.patch(inputSessionId, { selectedRoleIds: value }) });
@@ -52,7 +55,6 @@ const composerVisible = computed(() => Boolean(inputs.session(inputSessionId)?.p
 const memberRoles = computed(() => { const ids = new Set(chat.value?.member_role_ids ?? []); return roles.value.filter((role) => ids.has(role.id)); });
 const currentRunning = computed(() => [...running.value.values()].filter((turn) => turn.task_id === currentTaskId.value));
 const ended = computed(() => currentTask.value?.status === "ended");
-function idempotencyKey(): string { return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`; }
 function mergeMessages(incoming: ChatMessage[]): void {
   const merged = mergeMessageWindow(messages.value, incoming);
   messages.value = merged.messages;
@@ -172,6 +174,7 @@ async function bootstrap(): Promise<void> {
 }
 watch(currentTaskId, (taskId, previous) => {
   if (taskId === previous) return;
+  summaryOpen.value = false;
   if (previous) saveReadingAnchor(previous);
   if (!taskId) { historyGeneration += 1; messages.value = []; blocks.value = []; return; }
   ctx.storage.set("currentTaskId", taskId); inputs.setTask(inputSessionId, taskId);
@@ -179,13 +182,43 @@ watch(currentTaskId, (taskId, previous) => {
   window.dispatchEvent(new CustomEvent("viewer:task-current", { detail: { viewKey, taskId } }));
   if (bootstrapped) void loadHistory(savedReadingAnchor(taskId));
 }, { flush: "sync" });
-watch(currentTask, (task) => {  ctx.setChrome({ title: `${chat.value?.name ?? "Chat"} · ${task?.title ?? "Tasks"}` }); });
-async function createTask(): Promise<void> {
-  try {
-    const result = await ctx.bus.request("chat:_:tasks:create", { chat_id: chatId, idempotency_key: idempotencyKey() }) as { task: Task };
-    tasks.value = [...tasks.value.filter((task) => task.id !== result.task.id), result.task]; currentTaskId.value = result.task.id;
-  } catch (cause) { error.value = errorText(cause); }
-}
+watchEffect(() => {
+  const task = currentTask.value;
+  const actions: PaneChromeAction[] = [];
+  if (currentRunning.value.length > 0) {
+    actions.push({
+      id: "stop-task",
+      title: `停止当前 Task（${currentRunning.value.length} 个 Turn）`,
+      icon: "bi-stop-circle",
+      variant: "danger",
+      run: stopCurrentTask,
+    });
+  }
+  if (task) {
+    actions.push({ id: "rename-task", title: "重命名 Task", icon: "bi-pencil", run: beginRename });
+    if (task.status !== "ended") {
+      actions.push({
+        id: "pin-task",
+        title: task.pinned ? "取消固定到侧边栏" : "固定到侧边栏",
+        icon: task.pinned ? "bi-pin-angle-fill" : "bi-pin-angle",
+        active: task.pinned,
+        run: togglePin,
+      });
+    }
+  }
+  actions.push({ id: "all-tasks", title: "所有 Tasks", icon: "bi-list-task", run: openTasksPage });
+  if (task) {
+    if (task.status !== "ended") {
+      actions.push({ id: "end-task", title: "结束 Task", icon: "bi-check2-circle", variant: "danger", run: endTask });
+    }
+  }
+  ctx.setChrome({
+    title: `${chat.value?.name ?? "Chat"} · ${task?.title ?? "Tasks"}`,
+    status: currentRunning.value.length > 0 ? `${currentRunning.value.length} running` : "",
+    statusClass: "text-primary",
+    actions,
+  });
+});
 function beginRename(): void { renameText.value = currentTask.value?.title ?? ""; renaming.value = true; }
 async function saveRename(): Promise<void> {
   const task = currentTask.value; if (!task || !renameText.value.trim()) return;
@@ -203,15 +236,6 @@ async function endTask(): Promise<void> {
   try { const result = await ctx.bus.request("chat:_:tasks:end", { task_id: task.id }) as { task: Task }; tasks.value = tasks.value.map((item) => item.id === task.id ? result.task : item); } catch (cause) { error.value = errorText(cause); }
 }
 async function retrySummary(): Promise<void> { if (currentTaskId.value) await ctx.bus.request("chat:_:tasks:summary-retry", { task_id: currentTaskId.value }).catch((cause) => { error.value = errorText(cause); }); }
-async function exportTask(format: "markdown" | "json"): Promise<void> {
-  if (!currentTask.value) return;
-  try {
-    const result = await ctx.bus.request("chat:_:tasks:export", { task_id: currentTaskId.value, format }) as { content?: string };
-    const content = result.content ?? JSON.stringify(result, null, 2);
-    const blob = new Blob([content], { type: format === "json" ? "application/json" : "text/markdown" }); const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${currentTask.value.title}.${format === "json" ? "json" : "md"}`; anchor.click(); URL.revokeObjectURL(url);
-  } catch (cause) { error.value = errorText(cause); }
-}
 function openTasksPage(): void { void ctx.shell.open({ paneType: "chat-tasks", instanceId: "main" }); }
 async function openDecisionSource(decision: Decision): Promise<void> {
   const target = await ctx.bus.request("chat:_:decisions:open", { decision_id: decision.id }) as { created_at: number; source_message_id: string };
@@ -219,7 +243,7 @@ async function openDecisionSource(decision: Decision): Promise<void> {
   await loadHistory({ createdAt: target.created_at, messageId: target.source_message_id });
 }
 async function respondDecision(intent: DecisionResponseIntent): Promise<void> {
-  try { await ctx.bus.request("chat:_:decisions:respond", { decision_id: intent.decisionId, response: intent.response, expected_version: intent.expectedVersion }, { timeout: 90_000 }); responseDrafts.value[intent.decisionId] = ""; } catch (cause) { error.value = errorText(cause); }
+  try { await ctx.bus.request("chat:_:decisions:respond", decisionResponsePayload(intent), { timeout: 90_000 }); responseDrafts.value[intent.decisionId] = ""; } catch (cause) { error.value = errorText(cause); }
 }
 async function cancelDecision(decision: Decision): Promise<void> { await ctx.bus.request("chat:_:decisions:cancel", { decision_id: decision.id, expected_version: decision.version }).catch((cause) => { error.value = errorText(cause); }); }
 async function cancelQueued(entry: QueuedMessage): Promise<void> { await ctx.bus.request("chat:_:queued-cancel", { chat_id: chatId, dispatch_id: entry.dispatch_id }).catch((cause) => { error.value = errorText(cause); }); }
@@ -241,27 +265,26 @@ function editQueued(entry: QueuedMessage): void {
   inputs.beginQueuedEdit(inputSessionId, entry.task_id, entry.dispatch_id, entry.text);
   openComposer();
 }
-async function stopTurn(turnId?: string): Promise<void> { await ctx.bus.request("chat:_:stop", { chat_id: chatId, turn_id: turnId ?? "" }).catch((cause) => { error.value = errorText(cause); }); }
-function continueTurn(turnId: string): void {
-  inputs.patch(inputSessionId, { continueTurnId: turnId });
-  openComposer();
+async function stopTurn(turnId: string): Promise<void> { await ctx.bus.request("chat:_:stop", { chat_id: chatId, turn_id: turnId }).catch((cause) => { error.value = errorText(cause); }); }
+async function stopCurrentTask(): Promise<void> {
+  await Promise.all(currentRunning.value.map((turn) => stopTurn(turn.turn_id)));
 }
 function citeMessage(messageId: string): void { const session = inputs.session(inputSessionId); if (session) inputs.setText(inputSessionId, `${session.text}${session.text ? " " : ""}@${messageId} `); }
-interface TimelineItem { id: string; at: number; message?: ChatMessage; block?: ChatBlock }
+interface TimelineItem extends ActivityTimelineItem { message?: ChatMessage }
 interface TimelineGroup { id: string; turnId: string; at: number; user?: ChatMessage; roleName: string; roleId: string; items: TimelineItem[]; decisions: Decision[] }
 const timeline = computed<TimelineGroup[]>(() => {
   const groups = new Map<string, TimelineGroup>();
-  const textTurns = new Set(blocks.value.filter((block) => block.kind === "agent_text").map((block) => block.turn_id));
   for (const message of messages.value) {
-    if (message.role === "assistant" && textTurns.has(message.turn_id)) continue;
     const id = message.role === "user" ? `user:${message.id}` : `turn:${message.turn_id}`;
     const group = groups.get(id) ?? { id, turnId: message.turn_id, at: message.created_at, user: message.role === "user" ? message : undefined, roleName: message.sender.role_name ?? "Agent", roleId: message.sender.role_id ?? "", items: [], decisions: [] };
-    group.items.push({ id: message.id, at: message.created_at, message }); group.at = Math.min(group.at, message.created_at); groups.set(id, group);
+    group.items.push({ id: message.id, at: message.created_at, kind: "message", message }); group.at = Math.min(group.at, message.created_at); groups.set(id, group);
   }
   for (const block of blocks.value) {
+    // Agent text is rendered from ChatMessage above, never as a small tool row.
+    if (!activityDisplayable(block)) continue;
     const id = `turn:${block.turn_id}`;
     const group = groups.get(id) ?? { id, turnId: block.turn_id, at: block.occurred_at, roleName: block.role_name ?? "Agent", roleId: block.role_id ?? "", items: [], decisions: [] };
-    group.items.push({ id: block.id, at: block.occurred_at, block }); group.at = Math.min(group.at, block.occurred_at); groups.set(id, group);
+    group.items.push({ id: block.id, at: block.occurred_at, kind: "activity", block }); group.at = Math.min(group.at, block.occurred_at); groups.set(id, group);
   }
   for (const decision of decisions.value) groups.get(`turn:${decision.source_turn_id}`)?.decisions.push(decision);
   for (const group of groups.values()) group.items.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
@@ -320,21 +343,66 @@ onBeforeUnmount(() => {
 </script>
 <template>
   <div class="task-chat">
-    <header class="task-header">
-      <select v-model="currentTaskId" class="task-picker" aria-label="Current Task"><option v-for="task in openTasks" :key="task.id" :value="task.id">{{ task.title }}</option><option v-if="currentTask?.status === 'ended'" :value="currentTask.id">{{ currentTask.title }}（已结束）</option></select>
-      <span v-if="currentRunning.length" class="running-label"><i class="bi bi-arrow-repeat spin" /> {{ currentRunning.length }}</span>
-      <button class="icon-button" type="button" title="新建 Task" @click="createTask"><i class="bi bi-plus-lg" /></button><button class="icon-button" type="button" title="重命名" @click="beginRename"><i class="bi bi-pencil" /></button><button class="icon-button" type="button" :title="currentTask?.pinned ? '取消固定' : '固定到侧边栏'" :disabled="ended" @click="togglePin"><i class="bi" :class="currentTask?.pinned ? 'bi-pin-angle-fill' : 'bi-pin-angle'" /></button><button class="icon-button" type="button" title="所有 Tasks" @click="openTasksPage"><i class="bi bi-list-task" /></button><button class="icon-button" type="button" title="导出 Markdown" @click="exportTask('markdown')"><i class="bi bi-filetype-md" /></button><button class="icon-button" type="button" title="导出 JSON" @click="exportTask('json')"><i class="bi bi-filetype-json" /></button><button v-if="!ended" class="icon-button danger" type="button" title="结束 Task（只读）" @click="endTask"><i class="bi bi-check2-circle" /></button>
-    </header>
     <div v-if="renaming" class="rename-row"><input v-model="renameText" @keyup.enter="saveRename"><button type="button" @click="saveRename">保存</button><button type="button" @click="renaming = false">取消</button></div><div v-if="error" class="error-row">{{ error }}<button type="button" @click="error = ''">×</button></div>
     <section class="task-body">
-      <div v-if="currentTask?.summary_preview" class="task-summary"><details><summary>Task 摘要 · {{ currentTask.summary_status }}<span v-if="currentTask.summary_final"> · final</span></summary><p>{{ currentTask.summary_preview }}</p></details><button v-if="currentTask.summary_status === 'failed' || currentTask.summary_status === 'missing'" type="button" @click="retrySummary">重试摘要</button></div>
+      <button
+        v-if="currentTask && (currentTask.summary_preview || currentTask.summary_status)"
+        class="summary-trigger"
+        type="button"
+        :class="{ active: summaryOpen }"
+        title="查看 Task 摘要"
+        aria-label="查看 Task 摘要"
+        :aria-expanded="summaryOpen"
+        @click="summaryOpen = !summaryOpen"
+      ><i class="bi bi-card-text" /></button>
+      <button v-if="summaryOpen" class="summary-backdrop" type="button" aria-label="关闭 Task 摘要" @click="summaryOpen = false" />
+      <section v-if="summaryOpen && currentTask" class="summary-popover" role="dialog" aria-label="Task 摘要">
+        <header class="summary-heading">
+          <strong>Task 摘要</strong>
+          <span class="summary-status" :class="currentTask.summary_status">{{ currentTask.summary_status }}<span v-if="currentTask.summary_final"> · final</span></span>
+          <button class="summary-close" type="button" title="关闭摘要" @click="summaryOpen = false"><i class="bi bi-x-lg" /></button>
+        </header>
+        <p v-if="currentTask.summary_preview" class="summary-text">{{ currentTask.summary_preview }}</p>
+        <p v-else class="summary-empty">暂无摘要。</p>
+        <button v-if="currentTask.summary_status === 'failed' || currentTask.summary_status === 'missing'" class="summary-retry" type="button" @click="retrySummary">重试摘要</button>
+      </section>
       <div ref="thread" class="timeline" @scroll.passive="onScroll">
         <button v-if="hasOlder" class="page-button" type="button" @click="loadOlder">加载更早消息</button><div v-if="loading && messages.length === 0" class="empty-state">加载中…</div>
         <article v-for="group in timeline" :key="group.id" class="turn-box" :class="{ user: group.user }" :data-message-id="groupAnchorId(group)">
-          <header class="turn-header"><strong>{{ group.user ? 'User' : group.roleName }}</strong><span v-if="!group.user && roleTarget(group.turnId)">{{ roleTarget(group.turnId) }}</span><time>{{ formatTime(group.at) }}</time><button v-if="group.user" class="icon-button" type="button" title="引用消息" @click="citeMessage(group.user.id)"><i class="bi bi-quote" /></button><button v-if="!group.user && !ended" class="continue-button" type="button" title="继续此 Turn 的 session" @click="continueTurn(group.turnId)">继续 session</button><button v-if="!group.user && running.has(group.turnId)" class="icon-button" type="button" title="停止 Turn" @click="stopTurn(group.turnId)"><i class="bi bi-stop-circle" /></button></header>
-          <template v-for="item in group.items" :key="item.id"><div v-if="item.message" class="markdown-body" v-html="markdown(visibleMessage(item.message))" /><ToolActivity v-else-if="item.block" :block="item.block" :time="formatTime(item.block.occurred_at)" /></template>
+          <header class="turn-header">
+            <strong>{{ group.user ? 'User' : group.roleName }}</strong>
+            <span v-if="!group.user && roleTarget(group.turnId)" class="turn-target">{{ roleTarget(group.turnId) }}</span>
+            <span v-if="!group.user && running.has(group.turnId)" class="turn-running"><i class="bi bi-arrow-repeat spin" /> running</span>
+            <time>{{ formatTime(group.at) }}</time>
+            <button v-if="group.user" class="cite-button" type="button" title="引用消息" @click="citeMessage(group.user.id)"><i class="bi bi-quote" /></button>
+            <button v-if="!group.user && running.has(group.turnId)" class="turn-stop-button" type="button" title="停止 Turn" @click="stopTurn(group.turnId)"><i class="bi bi-stop-circle" /></button>
+          </header>
+          <div class="turn-body">
+          <template v-for="item in groupActivityItems(group.items)" :key="item.id">
+            <div v-if="item.kind === 'message' && item.message" class="markdown-content" v-html="markdown(visibleMessage(item.message))" />
+            <ToolActivity v-else-if="item.kind === 'activity' && item.block" :block="item.block" :time="formatTime(item.at)" />
+            <details v-else-if="item.kind === 'activity-group'" class="chat-tool-group">
+              <summary class="chat-tool-group-summary">
+                <i class="bi bi-tools" aria-hidden="true" />
+                <span class="chat-tool-group-label">Tools</span>
+                <span class="chat-tool-group-text">{{ activityGroupSummary(item) }}</span>
+                <span class="chat-tool-group-count">×{{ item.items.length }}</span>
+                <span class="chat-tool-group-time">{{ formatTime(item.at) }}</span>
+                <i class="bi bi-chevron-right chat-tool-group-chevron" aria-hidden="true" />
+              </summary>
+              <div class="chat-tool-group-body">
+                <ToolActivity
+                  v-for="activity in item.items"
+                  :key="activity.id"
+                  :block="activity.block!"
+                  :time="formatTime(activity.at)"
+                />
+              </div>
+            </details>
+          </template>
           <div v-for="entry in queuedFor(group.turnId)" :key="entry.dispatch_id" class="queued-row">排队 #{{ entry.position }}<button type="button" @click="editQueued(entry)">编辑</button><button type="button" @click="cancelQueued(entry)">取消</button></div>
           <DecisionCard v-for="decision in group.decisions" :key="decision.id" :decision="decision" :draft="responseDrafts[decision.id] ?? ''" @update:draft="responseDrafts[decision.id] = $event" @respond="respondDecision" @cancel="cancelDecision(decision)" @open="openDecisionSource(decision)" />
+          </div>
         </article>
         <button v-if="hasNewer" class="page-button" type="button" @click="loadNewer">加载更新消息</button><div v-if="!loading && timeline.length === 0" class="empty-state">这个 Task 还没有消息。</div>
       </div>
@@ -358,7 +426,49 @@ onBeforeUnmount(() => {
   </div>
 </template>
 <style scoped>
-.task-chat{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;position:relative;color:var(--color-text)}.task-header{align-items:center;border-bottom:1px solid var(--color-border);display:flex;flex:0 0 auto;gap:4px;padding:5px 7px}.task-picker{background:transparent;border:0;color:var(--color-text);flex:1;font-weight:600;min-width:0}.icon-button{background:transparent;border:0;border-radius:var(--radius-sm);color:var(--color-text-muted);cursor:pointer;padding:4px 6px}.icon-button:hover{background:var(--color-surface-hover);color:var(--color-text)}.icon-button:disabled{opacity:.35}.icon-button.danger{color:var(--bs-danger)}.running-label{color:var(--color-text-muted);font-size:var(--font-size-ui-small)}.spin{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.rename-row,.error-row{align-items:center;display:flex;gap:5px;padding:5px 8px}.rename-row input,.task-filters input,.decision-free input{background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text);flex:1;min-width:0;padding:4px 6px}.error-row{color:var(--bs-danger);font-size:var(--font-size-ui-small)}.error-row button{margin-left:auto}.task-body{display:flex;flex:1;flex-direction:column;min-height:0;overflow:hidden}.timeline{flex:1;min-height:0;overflow-y:auto;padding:8px}.task-composer{border-top:1px solid var(--color-border);flex:0 0 auto;max-height:65vh;overflow-y:auto;position:relative;z-index:2}
+.task-chat{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;position:relative;color:var(--color-text)}.spin{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.rename-row,.error-row{align-items:center;display:flex;gap:5px;padding:5px 8px}.rename-row input{background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text);flex:1;min-width:0;padding:4px 6px}.error-row{color:var(--bs-danger);font-size:var(--font-size-ui-small)}.error-row button{margin-left:auto}.task-body{display:flex;flex:1;flex-direction:column;min-height:0;overflow:hidden}.timeline{flex:1;min-height:0;overflow-y:auto;padding:8px}.task-composer{border-top:1px solid var(--color-border);flex:0 0 auto;max-height:65vh;overflow-y:auto;position:relative;z-index:2}
+.chat-tool-group {
+  color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
+  min-width: 0;
+}
+.chat-tool-group-summary {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
+  gap: 4px;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
+  line-height: 1.3;
+  list-style: none;
+  min-height: 16px;
+  min-width: 0;
+  padding: 0 2px;
+  user-select: none;
+}
+.chat-tool-group-summary::-webkit-details-marker { display: none; }
+.chat-tool-group-summary:hover { color: var(--color-text-muted); }
+.chat-tool-group-label { font-weight: 600; white-space: nowrap; }
+.chat-tool-group-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-tool-group-count {
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: 999px;
+  font-size: calc(var(--font-size-ui) * 3 / 4);
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+.chat-tool-group-time { white-space: nowrap; }
+.chat-tool-group-chevron { font-size: calc(var(--font-size-ui) * 5 / 6); transition: transform 120ms ease; }
+.chat-tool-group[open] .chat-tool-group-chevron { transform: rotate(90deg); }
+.chat-tool-group-body {
+  border-left: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 3px 6px;
+  padding-left: 8px;
+}
 .composer-overlay-button {
   align-items: center;
   backdrop-filter: blur(6px);
@@ -378,5 +488,136 @@ onBeforeUnmount(() => {
 }
 .composer-overlay-button:hover,
 .composer-overlay-button.active { color: var(--color-text); opacity: 1; }
-.composer-overlay-dot { background: var(--color-accent); border-radius: 50%; height: 6px; position: absolute; right: 4px; top: 4px; width: 6px; }.turn-box{border-bottom:1px solid color-mix(in srgb,var(--color-border) 55%,transparent);margin:0 auto;max-width:980px;padding:7px 3px 10px}.turn-header{align-items:center;color:var(--color-text-muted);display:flex;font-size:var(--font-size-ui-small);gap:8px;margin-bottom:4px}.turn-header strong{color:var(--color-text)}.turn-header time{margin-left:auto}.continue-button,.source-link{background:transparent;border:0;color:var(--color-text-muted);font-size:var(--font-size-ui-small);padding:2px}.markdown-body{font-size:var(--markdown-body-font-size,15px);line-height:1.55;overflow-wrap:anywhere;user-select:text}.markdown-body :deep(pre){overflow:auto}.markdown-body :deep(p:last-child){margin-bottom:0}.queued-row{color:var(--color-text-muted);display:flex;font-size:var(--font-size-ui-small);gap:8px;padding-top:4px}.queued-row button,.task-summary button,.all-tasks button,.decision-card button{font-size:var(--font-size-ui-small)}.decision-card{border-left:2px solid var(--color-accent);display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding:5px 8px}.decision-card.error,.parse-warning{color:var(--bs-danger)}.decision-status{color:var(--color-text-muted);font-size:var(--font-size-ui-small)}.decision-free{display:flex;flex:1 1 260px;gap:4px}.source-link{flex-basis:100%;text-align:left}.page-button{color:var(--color-text-muted);display:block;margin:4px auto 10px}.empty-state,.ended-banner{color:var(--color-text-muted);padding:20px;text-align:center}.ended-banner{border-top:1px solid var(--color-border);padding:8px}.task-summary{border-bottom:1px solid var(--color-border);color:var(--color-text-muted);display:flex;font-size:var(--font-size-ui-small);padding:5px 9px}.task-summary details{flex:1}.task-summary p{white-space:pre-wrap}.all-tasks{flex:1;overflow:auto;padding:8px}.task-filters{display:flex;gap:5px;margin-bottom:8px}.all-task-columns,.all-task-row{align-items:center;display:grid;gap:10px;grid-template-columns:minmax(160px,1.2fr) 80px minmax(180px,2fr) 70px 90px;padding:6px;text-align:left}.all-task-columns{color:var(--color-text-muted);font-size:var(--font-size-ui-small)}.all-task-row{background:transparent;border:0;border-top:1px solid var(--color-border);color:var(--color-text);width:100%}.all-task-row:hover{background:var(--color-surface-hover)}.all-task-row small{color:var(--color-text-muted);display:block}.summary-preview{color:var(--color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}@media(max-width:700px){.all-task-columns{display:none}.all-task-row{grid-template-columns:1fr 70px}.all-task-row>:nth-child(n+3){display:none}.turn-header>span{display:none}}
+.composer-overlay-dot { background: var(--color-accent); border-radius: 50%; height: 6px; position: absolute; right: 4px; top: 4px; width: 6px; }.page-button{color:var(--color-text-muted);display:block;margin:4px auto 10px}.empty-state,.ended-banner{color:var(--color-text-muted);padding:20px;text-align:center}.ended-banner{border-top:1px solid var(--color-border);padding:8px}
+/* Task summary is an overlay, never a full-width row in the reading flow. */
+.task-body { position: relative; }
+.summary-trigger {
+  align-items: center;
+  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--color-surface-raised) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  border-radius: 999px;
+  color: var(--color-text-muted);
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  left: 8px;
+  opacity: .78;
+  padding: 0;
+  position: absolute;
+  top: 8px;
+  width: 28px;
+  z-index: 12;
+}
+.summary-trigger:hover,
+.summary-trigger.active { color: var(--color-accent); opacity: 1; }
+.summary-backdrop {
+  background: transparent;
+  border: 0;
+  inset: 0;
+  padding: 0;
+  position: absolute;
+  z-index: 10;
+}
+.summary-popover {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--bs-body-color) 18%, transparent);
+  left: 8px;
+  max-height: min(60vh, calc(100% - 48px));
+  overflow: auto;
+  padding: 10px 12px;
+  position: absolute;
+  top: 42px;
+  width: min(520px, calc(100% - 16px));
+  z-index: 11;
+}
+.summary-heading { align-items: center; display: flex; font-size: var(--font-size-ui); gap: 8px; }
+.summary-status { color: var(--color-text-muted); font-size: var(--font-size-ui-small); margin-left: auto; }
+.summary-status.completed,
+.summary-status.pending { color: var(--bs-primary); }
+.summary-status.failed { color: var(--bs-danger); }
+.summary-close,
+.summary-retry {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui-small);
+  padding: 2px 4px;
+}
+.summary-close:hover,
+.summary-retry:hover { color: var(--color-text); }
+.summary-retry { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 3px 8px; }
+.summary-text,
+.summary-empty { font-size: var(--font-size-ui); line-height: 1.5; margin: 8px 0; white-space: pre-wrap; }
+.summary-empty { color: var(--color-text-muted); }
+
+/* Old Viewer turn styling: quiet metadata, one muted surface per Turn, and
+   compact content typography. Activity rows remain boxless inside it. */
+.turn-box { border: 0; margin: 0 auto 8px; min-width: 0; padding: 0; }
+.turn-header {
+  align-items: center;
+  color: var(--color-text-muted);
+  display: flex;
+  font-size: var(--font-size-ui);
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 2px 2px;
+  white-space: nowrap;
+}
+.turn-header strong { color: inherit; flex: 0 0 auto; font-weight: 700; }
+.turn-target {
+  color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
+  flex: 0 1 auto;
+  font-size: calc(var(--font-size-ui) * 5 / 6);
+  line-height: 1.2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.turn-header time { color: var(--color-text-muted); flex: 0 0 auto; font-size: var(--font-size-ui-small); line-height: 1.2; margin-left: auto; }
+.turn-running { align-items: center; color: var(--bs-primary); display: inline-flex; flex: 0 0 auto; font-size: calc(var(--font-size-ui) * 7 / 8); gap: 4px; }
+.cite-button,
+.turn-stop-button { background: none; border: 0; font-size: var(--font-size-ui); line-height: 1; padding: 0 2px; }
+.cite-button { color: var(--color-text-muted); }
+.cite-button:hover { color: var(--bs-primary); }
+.turn-stop-button { color: var(--bs-danger); }
+.turn-stop-button:hover { color: var(--bs-danger-text-emphasis, var(--bs-danger)); }
+.turn-body {
+  background: var(--color-surface-muted);
+  border: 0;
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: hidden;
+  padding: 8px 10px;
+  user-select: text;
+  width: 100%;
+}
+.markdown-content {
+  --markdown-render-body-size: calc(var(--markdown-body-font-size) * 4 / 5);
+  --markdown-render-paragraph-line-height: 1.48;
+  --markdown-render-paragraph-size: calc(var(--markdown-body-font-size) * 4 / 5);
+  --markdown-render-pre-padding: 8px;
+  font-size: var(--markdown-render-body-size);
+  line-height: var(--markdown-render-paragraph-line-height);
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.markdown-content :deep(pre) { overflow: auto; }
+.markdown-content :deep(p:last-child) { margin-bottom: 0; }
+.queued-row { align-items: center; color: var(--color-text-muted); display: flex; font-size: var(--font-size-ui-small); gap: 8px; line-height: 1.3; padding: 0 2px; }
+.queued-row button { background: transparent; border: 0; color: var(--color-text-muted); font-size: var(--font-size-ui-small); line-height: 1; padding: 0 2px; }
+.queued-row button:hover { color: var(--color-text); }
+@media (max-width: 700px) {
+  .turn-header > .turn-running { display: inline-flex; }
+  .turn-header > .turn-target { display: none; }
+}
 </style>

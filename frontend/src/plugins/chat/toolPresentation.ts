@@ -11,10 +11,58 @@ export interface ToolPresentation {
 
 const SUMMARY_LIMIT = 220;
 const DETAIL_BUDGET = 9000;
-const TOOL_KINDS = new Set(["tool_call", "tool_result", "file_change", "command"]);
+const ACTIVITY_KINDS = new Set(["tool_call", "tool_result", "file_change", "command", "thinking", "error"]);
 
-export function isToolActivity(block: ChatBlock | undefined): boolean {
-  return Boolean(block && TOOL_KINDS.has(block.kind));
+export function activityDisplayable(block: ChatBlock): boolean {
+  return ACTIVITY_KINDS.has(block.kind);
+}
+
+export interface ActivityTimelineItem {
+  id: string;
+  at: number;
+  kind: "message" | "activity";
+  block?: ChatBlock;
+}
+
+export interface ActivityTimelineGroup<T extends ActivityTimelineItem = ActivityTimelineItem> {
+  id: string;
+  at: number;
+  kind: "activity-group";
+  items: T[];
+}
+
+export type TimelineDisplayItem<T extends ActivityTimelineItem = ActivityTimelineItem> = T | ActivityTimelineGroup<T>;
+
+/** Collapse consecutive activity runs of 3+ into one stable, default-closed
+ * details row. Only a real message breaks a run; agent_text blocks never
+ * reach this timeline because their ChatMessage rows render the body. */
+export function groupActivityItems<T extends ActivityTimelineItem>(items: T[]): TimelineDisplayItem<T>[] {
+  const result: TimelineDisplayItem<T>[] = [];
+  let run: T[] = [];
+  const flush = (): void => {
+    const first = run[0];
+    const last = run[run.length - 1];
+    if (run.length >= 3 && first && last) {
+      result.push({ id: `tool-group:${first.id}`, at: last.at, kind: "activity-group", items: run });
+    } else {
+      result.push(...run);
+    }
+    run = [];
+  };
+  for (const item of items) {
+    if (item.kind === "activity") run.push(item);
+    else {
+      flush();
+      result.push(item);
+    }
+  }
+  flush();
+  return result;
+}
+
+export function activityGroupSummary(group: ActivityTimelineGroup): string {
+  const block = group.items[group.items.length - 1]?.block;
+  return block ? presentToolBlock(block).summary : "";
 }
 
 function payloadOf(block: ChatBlock): Record<string, unknown> {

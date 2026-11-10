@@ -137,8 +137,10 @@ func parseDecisionMarker(text string) *decisionMarker {
 		return nil
 	}
 	values := make(map[string][]string)
+	optionActions := map[int]string{}
+	optionCount, previousKey := 0, ""
 	for _, line := range decisionSourceLines(body) {
-		if strings.Trim(line.text, " \t\r") == "" {
+		if strings.Trim(line.text, " 	\r") == "" {
 			continue
 		}
 		colon := strings.IndexByte(line.text, ':')
@@ -149,16 +151,25 @@ func parseDecisionMarker(text string) *decisionMarker {
 		if !decisionKeyPattern.MatchString(key) {
 			return nil
 		}
-		value := strings.Trim(line.text[colon+1:], " \t\r")
+		value := strings.Trim(line.text[colon+1:], " 	\r")
 		switch key {
 		case "version", "kind", "question", "option", "display", "tone":
+		case "option_action":
+			if previousKey != "option" || value != "end_current_task" || len(optionActions) != 0 {
+				return nil
+			}
+			optionActions[optionCount-1] = value
 		default:
 			return nil
 		}
+		if key == "option" {
+			optionCount++
+		}
 		values[key] = append(values[key], value)
+		previousKey = key
 	}
 	for key, entries := range values {
-		if key != "option" && len(entries) != 1 {
+		if key != "option" && key != "option_action" && len(entries) != 1 {
 			return nil
 		}
 	}
@@ -177,7 +188,11 @@ func parseDecisionMarker(text string) *decisionMarker {
 		if option == "" || utf8.RuneCountInString(option) > 500 {
 			return nil
 		}
-		options = append(options, map[string]string{"id": fmt.Sprintf("option-%d", index+1), "label": option})
+		encoded := map[string]string{"id": fmt.Sprintf("option-%d", index+1), "label": option}
+		if action := optionActions[index]; action != "" {
+			encoded["action"] = action
+		}
+		options = append(options, encoded)
 	}
 	display, tone := "auto", "neutral"
 	warnings := []string{}

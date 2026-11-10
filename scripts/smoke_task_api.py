@@ -29,7 +29,7 @@ async def chat_server(manifest: dict[str, Any] = CALLER) -> AsyncIterator[tuple[
     viewerd, mock, port = Path(os.environ["VIEWERD_BIN"]), Path(__file__).with_name("mock_acp_agent.py"), free_port()
     with tempfile.TemporaryDirectory(prefix="viewer-task-api-smoke-") as temp:
         data_dir, log_path = Path(temp) / "data", Path(temp) / "viewerd.log"
-        environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true"}
+        environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true", "MOCK_PROMPT_LOG": str(Path(temp) / "prompts.jsonl")}
         with log_path.open("wb") as log:
             process = subprocess.Popen([str(viewerd), "--plugins=config-store,llm,viewer.agent-hermes,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
         client = BusClient(f"ws://127.0.0.1:{port}/ws", manifest, request_timeout=25.0)

@@ -6,7 +6,7 @@
  * instance-store (cross-browser/machine; the active theme id stays
  * browser-local); the backend section drives the gateway admin API.
  * Sections: 布局 (open mode), 聊天 (virtual space), Dock (hover expand
- * delay), 外观 (theme list + 4 base colors + advanced overrides,
+ * delay), 外观 (theme list + 4 base colors + one code accent,
  * `stores/theme.ts`), 字号 (browser-local UI/content base sizes + pinned
  * detail sizes, `stores/typography.ts`, framework v0.88), 后端 (restart /
  * build-restart / scheduled restart toggle with live status). The chat
@@ -18,8 +18,7 @@ import { useChatSettingsStore } from "../../stores/chatSettings";
 import { useDockSettingsStore } from "../../stores/dockSettings";
 import { useLayoutStore } from "../../stores/layout";
 import { useThemeStore } from "../../stores/theme";
-import type { BaseVars, OverrideKind } from "../../stores/theme";
-import { OVERRIDE_VARS } from "../../stores/theme";
+import type { BaseVars } from "../../stores/theme";
 import { useTypographyStore } from "../../stores/typography";
 import { CONTENT_SIZE_RANGE, DETAIL_SIZE_RANGE, TYPO_DETAILS, UI_SIZE_RANGE } from "../../stores/typography";
 import ThemePreview from "./ThemePreview.vue";
@@ -80,70 +79,6 @@ const BASE_FIELDS: Array<{ key: keyof BaseVars; label: string }> = [
   { key: "accent", label: "主题色" },
 ];
 
-interface AdvancedField {
-  key: string;
-  label: string;
-  kind: OverrideKind;
-  min?: number;
-  max?: number;
-  step?: number;
-}
-
-const ADVANCED_GROUPS: Array<{ title: string; fields: AdvancedField[] }> = [
-  {
-    title: "界面",
-    fields: [
-      { key: "surfaceRaised", label: "浮起面底色", kind: "color" },
-      { key: "surfaceMuted", label: "柔和面底色", kind: "color" },
-      { key: "surfaceHover", label: "悬停底色", kind: "color" },
-      { key: "surfaceSelected", label: "选中底色", kind: "color" },
-      { key: "titlebar", label: "抬头底色", kind: "color" },
-      { key: "titlebarText", label: "抬头文字", kind: "color" },
-      { key: "textMuted", label: "次要文字", kind: "color" },
-      { key: "textSubtle", label: "弱化文字", kind: "color" },
-      { key: "textInverse", label: "反色文字", kind: "color" },
-      { key: "border", label: "边框", kind: "color" },
-      { key: "borderStrong", label: "强调边框", kind: "color" },
-      { key: "accentHover", label: "主题色（悬停）", kind: "color" },
-      { key: "accentSoft", label: "主题色（浅底）", kind: "color" },
-      { key: "focus", label: "焦点色", kind: "color" },
-      { key: "overlay", label: "遮罩层", kind: "color" },
-    ],
-  },
-  {
-    title: "语义色",
-    fields: [
-      { key: "success", label: "成功色", kind: "color" },
-      { key: "warning", label: "警告色", kind: "color" },
-      { key: "danger", label: "危险色", kind: "color" },
-      { key: "info", label: "信息色", kind: "color" },
-    ],
-  },
-  {
-    title: "消息",
-    fields: [
-      { key: "bodyLineHeight", label: "正文行高", kind: "number", min: 1.1, max: 2.4, step: 0.05 },
-      { key: "markdownBody", label: "正文颜色", kind: "color" },
-      { key: "markdownStrong", label: "加粗颜色", kind: "color" },
-      { key: "markdownLink", label: "链接颜色", kind: "color" },
-      { key: "markdownCodeColor", label: "行内代码文字", kind: "color" },
-      { key: "markdownCodeBackground", label: "行内代码底色", kind: "color" },
-      { key: "syntaxText", label: "代码块文字", kind: "color" },
-      { key: "syntaxBackground", label: "代码块底色", kind: "color" },
-      { key: "markdownBorder", label: "消息边框", kind: "color" },
-    ],
-  },
-];
-
-/** Seed values for the numeric overrides (mirror the styles.css constants). */
-const NUMBER_SEEDS: Record<string, string> = { bodyLineHeight: "1.65" };
-
-const overrideCount = computed(() => Object.keys(theme.active.overrides).length);
-
-function isOverridden(key: string): boolean {
-  return theme.active.overrides[key] !== undefined;
-}
-
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
 /** <input type="color"> only accepts #rrggbb; fall back for rgb()/named values. */
@@ -151,28 +86,12 @@ function colorInputValue(value: string | undefined): string {
   return value !== undefined && HEX_COLOR_RE.test(value) ? value : "#888888";
 }
 
-/** Resolve a derived CSS var to a concrete #rrggbb by probing a real
- *  element: color-mix() defaults only evaluate in a used property. */
-function resolveCssColor(cssVar: string): string {
-  const shell = document.querySelector(".app-shell");
-  if (!shell) return "#888888";
-  const probe = document.createElement("span");
-  probe.style.color = `var(${cssVar})`;
-  probe.style.display = "none";
-  shell.appendChild(probe);
-  const computedColor = getComputedStyle(probe).color;
-  probe.remove();
-  const match = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(computedColor);
-  if (!match) return "#888888";
-  const hex = (n: string | undefined): string => Number(n ?? 0).toString(16).padStart(2, "0");
-  return `#${hex(match[1])}${hex(match[2])}${hex(match[3])}`;
+const codeColor = computed(() => theme.active.overrides.codeAccent ?? theme.active.base.accent);
+function setCodeColor(value: string): void {
+  theme.setOverride(theme.activeId, "codeAccent", value);
 }
-
-/** Begin customizing an advanced field: seed it with the currently
- *  computed default so the palette doesn't jump on the first edit. */
-function startOverride(field: AdvancedField): void {
-  const seed = field.kind === "color" ? resolveCssColor(OVERRIDE_VARS[field.key].cssVar) : NUMBER_SEEDS[field.key] ?? "15";
-  theme.setOverride(theme.activeId, field.key, seed);
+function resetCodeColor(): void {
+  theme.setOverride(theme.activeId, "codeAccent", undefined);
 }
 
 function addTheme(): void {
@@ -569,7 +488,7 @@ function toggleScheduledRestart(): void {
             v-else
             type="button"
             class="btn btn-sm btn-outline-secondary"
-            title="清空该主题的全部高级定制（保留基色）"
+            title="清空该主题的全部额外定制（保留基色）"
             @click="theme.clearOverrides(theme.activeId)"
           >清空定制</button>
           <button
@@ -622,54 +541,22 @@ function toggleScheduledRestart(): void {
           >
         </span>
       </label>
-      <div class="settings-hint">其余颜色（悬停、边框、消息、代码块等）由这四个基色自动计算；明暗模式随背景底色自动切换。</div>
+      <label class="settings-field">
+        <span>代码颜色</span>
+        <span class="theme-color-inputs">
+          <input type="color" :value="colorInputValue(codeColor)" @input="setCodeColor(($event.target as HTMLInputElement).value)">
+          <input type="text" class="theme-hex" :value="codeColor" @change="setCodeColor(($event.target as HTMLInputElement).value)">
+          <button
+            v-if="theme.active.overrides.codeAccent !== undefined"
+            type="button"
+            class="advanced-reset"
+            title="跟随主题色"
+            @click="resetCodeColor"
+          ><i class="bi bi-x-lg"></i></button>
+        </span>
+      </label>
+      <div class="settings-hint">界面颜色由四个基色自动计算；代码高亮只额外使用代码颜色，并自动派生不同 token 的明暗。明暗模式随背景底色切换。</div>
       <ThemePreview />
-      <details class="settings-advanced">
-        <summary>
-          高级定制<span v-if="overrideCount > 0" class="advanced-count">（{{ overrideCount }} 项已定制）</span>
-        </summary>
-        <div class="settings-hint">以下各项默认跟随基色自动计算；点「定制」单独修改，× 恢复自动。</div>
-        <div v-for="group in ADVANCED_GROUPS" :key="group.title" class="advanced-group">
-          <div class="advanced-group-title">{{ group.title }}</div>
-          <div v-for="field in group.fields" :key="field.key" class="settings-field">
-            <span>{{ field.label }}</span>
-            <span v-if="isOverridden(field.key)" class="theme-color-inputs">
-              <template v-if="field.kind === 'color'">
-                <input
-                  type="color"
-                  :value="colorInputValue(theme.active.overrides[field.key])"
-                  @input="theme.setOverride(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
-                >
-                <input
-                  type="text"
-                  class="theme-hex"
-                  :value="theme.active.overrides[field.key]"
-                  @change="theme.setOverride(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
-                >
-              </template>
-              <input
-                v-else
-                type="number"
-                :min="field.min"
-                :max="field.max"
-                :step="field.step"
-                :value="theme.active.overrides[field.key]"
-                @change="theme.setOverride(theme.activeId, field.key, ($event.target as HTMLInputElement).value)"
-              >
-              <button
-                type="button"
-                class="advanced-reset"
-                title="恢复自动（跟随基色计算）"
-                @click="theme.setOverride(theme.activeId, field.key, undefined)"
-              ><i class="bi bi-x-lg"></i></button>
-            </span>
-            <span v-else class="settings-choice">
-              <span class="advanced-auto">自动</span>
-              <button type="button" class="settings-choice-btn" @click="startOverride(field)">定制</button>
-            </span>
-          </div>
-        </div>
-      </details>
     </div>
 
     <div class="settings-group">
@@ -779,19 +666,23 @@ function toggleScheduledRestart(): void {
 
 <style scoped>
 .settings-pane {
-  display: flex;
-  flex-direction: column;
+  align-items: start;
+  display: grid;
   gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
   height: 100%;
   overflow-y: auto;
   padding: 16px 20px;
+  width: 100%;
 }
 
 .settings-group {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-width: 460px;
+  max-width: none;
+  min-width: 0;
+  width: 100%;
 }
 
 .settings-group-title {
@@ -864,19 +755,6 @@ function toggleScheduledRestart(): void {
 .advanced-count {
   color: var(--color-text-subtle);
   font-weight: 400;
-}
-
-.advanced-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.advanced-group-title {
-  color: var(--color-text-subtle);
-  font-size: var(--font-size-ui-small);
-  font-weight: 700;
-  margin-top: 4px;
 }
 
 .advanced-auto {

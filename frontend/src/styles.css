@@ -38,13 +38,6 @@
   --markdown-h4-font-weight: 700;
   --markdown-h4-line-height: 1.35;
   --markdown-strong-font-weight: 700;
-  /* Syntax highlighting palette (light scheme constants). */
-  --syntax-keyword: #8f5f63;
-  --syntax-string: #55706b;
-  --syntax-number: #627796;
-  --syntax-title: #766b8c;
-  --syntax-comment: #8a8e93;
-  --syntax-meta: #72777c;
 }
 
 html,
@@ -112,12 +105,12 @@ body {
 }
 
 /**
- * Derived theme colors (framework v0.80): every non-base --color-* /
- * --markdown-* default is computed from the four base colors, so a whole
- * palette follows 背景/面板/文字/主题色. Declared on .app-shell (not :root)
+ * Derived theme colors (framework v0.80): non-base --color-* /
+ * --markdown-* defaults follow the four base colors, and syntax tokens follow
+ * the optional code accent plus text. Declared on .app-shell (not :root)
  * because custom-property var() references resolve where they are declared —
  * this binds the color-mix() formulas to the theme's inline base colors. A
- * theme's advanced overrides are set inline on the same element and win.
+ * theme's stored overrides are set inline on the same element and win.
  */
 .app-shell {
   --color-surface-raised: color-mix(in srgb, var(--color-text) 4%, var(--color-canvas));
@@ -139,6 +132,7 @@ body {
   --color-danger: #a05b57;
   --color-info: #557799;
   --color-overlay: rgb(15 23 42 / 0.38);
+  --color-code: var(--color-accent);
   --markdown-body-color: var(--color-text);
   --markdown-h1-color: var(--markdown-body-color);
   --markdown-h2-color: var(--markdown-body-color);
@@ -149,15 +143,21 @@ body {
   --markdown-paragraph-line-height: var(--markdown-body-line-height);
   --markdown-strong-color: var(--color-accent);
   --markdown-link-color: var(--color-accent);
-  --markdown-code-color: var(--color-text);
+  --markdown-code-color: var(--color-code);
   --markdown-code-background: var(--color-surface-raised);
   --markdown-border-color: var(--color-border);
   --syntax-background: var(--color-surface-raised);
   --syntax-text: var(--color-text);
+  --syntax-keyword: var(--color-code);
+  --syntax-string: color-mix(in srgb, var(--color-code) 72%, var(--color-text));
+  --syntax-number: color-mix(in srgb, var(--color-code) 58%, var(--color-text));
+  --syntax-title: color-mix(in srgb, var(--color-code) 85%, var(--color-text));
+  --syntax-comment: var(--color-text-subtle);
+  --syntax-meta: color-mix(in srgb, var(--color-code) 45%, var(--color-text-muted));
 }
 
-/* Dark-scheme constants: semantic hues, overlay, syntax palette, and the
-   accent hover direction (lighter instead of darker). */
+/* Dark-scheme constants: semantic hues, overlay, and the accent hover
+   direction (lighter instead of darker). Code colors stay theme-derived. */
 .app-shell[data-theme="dark"] {
   color-scheme: dark;
   --color-accent-hover: color-mix(in srgb, var(--color-accent) 80%, #ffffff);
@@ -166,12 +166,6 @@ body {
   --color-danger: #ff7b72;
   --color-info: #79c0ff;
   --color-overlay: rgb(0 0 0 / 0.58);
-  --syntax-keyword: #ff7b72;
-  --syntax-string: #a5d6ff;
-  --syntax-number: #79c0ff;
-  --syntax-title: #d2a8ff;
-  --syntax-comment: #8b949e;
-  --syntax-meta: #ffa657;
 }
 
 /* Bootstrap flattening (scoped): quiet the frosted/gradient defaults. */
@@ -382,15 +376,11 @@ body {
   padding: 8px 10px;
 }
 
-.markdown-content code,
-.markdown-syntax code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: var(--markdown-code-font-size);
-}
-
 .markdown-content code {
   background: var(--markdown-code-background);
   color: var(--markdown-code-color);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: var(--markdown-code-font-size);
 }
 
 .markdown-content pre code {
@@ -411,52 +401,38 @@ body {
   padding: 6px 8px;
 }
 
-.markdown-content .hljs,
-.markdown-syntax.hljs {
+.markdown-content .hljs {
   background: var(--syntax-background);
   color: var(--syntax-text);
 }
 
 .markdown-content .hljs-keyword,
 .markdown-content .hljs-selector-tag,
-.markdown-content .hljs-built_in,
-.markdown-syntax .hljs-keyword,
-.markdown-syntax .hljs-selector-tag,
-.markdown-syntax .hljs-built_in {
+.markdown-content .hljs-built_in {
   color: var(--syntax-keyword);
 }
 
 .markdown-content .hljs-string,
-.markdown-content .hljs-attr,
-.markdown-syntax .hljs-string,
-.markdown-syntax .hljs-attr {
+.markdown-content .hljs-attr {
   color: var(--syntax-string);
 }
 
 .markdown-content .hljs-number,
-.markdown-content .hljs-literal,
-.markdown-syntax .hljs-number,
-.markdown-syntax .hljs-literal {
+.markdown-content .hljs-literal {
   color: var(--syntax-number);
 }
 
 .markdown-content .hljs-title,
-.markdown-content .hljs-name,
-.markdown-syntax .hljs-title,
-.markdown-syntax .hljs-name {
+.markdown-content .hljs-name {
   color: var(--syntax-title);
 }
 
 .markdown-content .hljs-comment,
-.markdown-content .hljs-quote,
-.markdown-syntax .hljs-comment,
-.markdown-syntax .hljs-quote {
+.markdown-content .hljs-quote {
   color: var(--syntax-comment);
 }
 
 .markdown-content .hljs-meta,
-.markdown-content .hljs-doctag,
-.markdown-syntax .hljs-meta,
-.markdown-syntax .hljs-doctag {
+.markdown-content .hljs-doctag {
   color: var(--syntax-meta);
 }

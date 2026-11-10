@@ -41,7 +41,7 @@
           </div>
           <div class="preview-box-body markdown-content">
             <p>好的，这段是正文，含<strong>加粗</strong>、<a href="#" @click.prevent>链接</a>和<code>inline code</code>。</p>
-            <pre><code>theme.setBase(id, "accent", "#58749a")</code></pre>
+            <pre><code class="hljs"><span class="hljs-keyword">const</span> <span class="hljs-title">theme</span> = <span class="hljs-string">"dark"</span>; <span class="hljs-comment">// theme-derived</span></code></pre>
           </div>
         </div>
 

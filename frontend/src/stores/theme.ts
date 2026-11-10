@@ -81,6 +81,7 @@ export const OVERRIDE_VARS: Record<string, OverrideSpec> = {
   markdownCodeColor: { cssVar: "--markdown-code-color", kind: "color" },
   markdownCodeBackground: { cssVar: "--markdown-code-background", kind: "color" },
   markdownBorder: { cssVar: "--markdown-border-color", kind: "color" },
+  codeAccent: { cssVar: "--color-code", kind: "color" },
   syntaxText: { cssVar: "--syntax-text", kind: "color" },
   syntaxBackground: { cssVar: "--syntax-background", kind: "color" },
   bodyLineHeight: { cssVar: "--markdown-body-line-height", kind: "number" },

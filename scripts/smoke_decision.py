@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Persistent Decision marker, continuation, cursor list and cancellation smoke."""
 from __future__ import annotations
-import asyncio, sqlite3, sys
+import asyncio, json, sqlite3, sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -10,6 +10,9 @@ from smoke_task_api import chat_server, make_workspace, dispatch, wait_for  # no
 GATEWAY = {"id": "gateway", "version": "1.0.0", "slots": {}, "emits": {}}
 async def decisions(client: BusClient, task_id: str, **extra: object) -> dict:
     return await client.request("chat:_:decisions:list", {"task_id": task_id, "include_pending_count": True, "limit": 50, **extra})
+def prompts(data_dir: Path) -> list[dict[str, str]]:
+    path = data_dir.parent / "prompts.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 async def run() -> None:
     async with chat_server() as (client, data_dir, completions):
         role, chat, task = await make_workspace(client)
@@ -18,6 +21,10 @@ async def run() -> None:
         try:
             await dispatch(client, task["id"], "MOCK_DECISION first", role["id"], "decision-first")
             await wait_for(lambda: len(completions) >= 1)
+            captured = prompts(data_dir)
+            assert len(captured) == 1
+            assert captured[0]["text"].index("MOCK_DECISION first") < captured[0]["text"].index("Decision follow-up protocol")
+            assert captured[0]["text"].count("<viewer-decision>") == 1 and "option_action: end_current_task" in captured[0]["text"]
             pending = await decisions(client, task["id"], pending=True)
             assert pending["pending_count"] == 1 and len(pending["decisions"]) == 1
             decision = pending["decisions"][0]
@@ -37,13 +44,18 @@ async def run() -> None:
             try: await client.request("chat:_:decisions:respond", {"decision_id": decision["id"], "response": "Recommended path", "expected_version": decision["version"]})
             except Exception as exc: assert "gateway" in str(exc)
             else: raise AssertionError("non-gateway caller resolved a human Decision")
-            response = {"decision_id": decision["id"], "response": "Recommended path", "expected_version": decision["version"]}
+            response = {"decision_id": decision["id"], "response": "Recommended path", "option_id": "option-1", "expected_version": decision["version"]}
             resolved = await gateway.request("chat:_:decisions:respond", response)
             assert resolved["decision"]["status"] == "resolved" and resolved["decision"]["response"] == "Recommended path"
             assert resolved["decision"]["resolved_dispatch_id"]
             replay = await gateway.request("chat:_:decisions:respond", response)
             assert replay["decision"]["resolved_dispatch_id"] == resolved["decision"]["resolved_dispatch_id"]
             await wait_for(lambda: len(completions) >= 2)
+            captured = prompts(data_dir)
+            assert len(captured) == 2 and captured[1]["session_id"] == captured[0]["session_id"]
+            assert "While you were away" not in captured[1]["text"]
+            assert captured[1]["text"].index("Recommended path") < captured[1]["text"].index("Decision follow-up protocol")
+            assert captured[1]["text"].count("<viewer-decision>") == 1
             history_decisions = await decisions(client, task["id"], history=True)
             stored = next(item for item in history_decisions["decisions"] if item["id"] == decision["id"])
             assert stored["status"] == "resolved" and stored["response"] == "Recommended path"
@@ -63,8 +75,12 @@ async def run() -> None:
             auto_resolved = next(item for item in (await decisions(client, task["id"], history=True))["decisions"] if item["id"] == second["id"])
             assert auto_resolved["status"] == "resolved" and auto_resolved["response"] == "ordinary automatic reply"
             assert auto_resolved["resolved_dispatch_id"] == ordinary["dispatch_id"] and ordinary["role_ids"] == [role["id"]]
-            await dispatch(client, task["id"], "MOCK_DECISION third", role["id"], "decision-third")
+            await client.request("chat:_:send-message", {"task_id": task["id"], "role_ids": [role["id"]], "text": "raw independent", "raw": True, "idempotency_key": "decision-raw"})
             await wait_for(lambda: len(completions) >= 5)
+            captured = prompts(data_dir)
+            assert captured[-1]["text"] == "raw independent" and "<viewer-decision>" not in captured[-1]["text"]
+            await dispatch(client, task["id"], "MOCK_DECISION third", role["id"], "decision-third")
+            await wait_for(lambda: len(completions) >= 6)
             third = (await decisions(client, task["id"], pending=True))["decisions"][0]
             ended = await client.request("chat:_:tasks:end", {"task_id": task["id"]})
             assert ended["task"]["status"] == "ended"
@@ -78,7 +94,27 @@ async def run() -> None:
             assert full["has_more"] and full["next_created_at"]
             following = await decisions(client, task["id"], history=True, limit=1, before_created_at=full["next_created_at"], before_id=full["next_id"])
             assert full["decisions"][0]["id"] != following["decisions"][0]["id"]
-            print("PASS Decision parse/strip, gateway-only response, same Role/session continuation, idempotency, ended cancel and cursor list")
+            end_task = (await client.request("chat:_:tasks:create", {"chat_id": chat["id"], "title": "Decision ending", "idempotency_key": "decision-end-task-create"}))["task"]
+            await dispatch(client, end_task["id"], "MOCK_END_TASK_DECISION", role["id"], "decision-end-task")
+            await wait_for(lambda: len(completions) >= 7)
+            ending = (await decisions(client, end_task["id"], pending=True))["decisions"][0]
+            assert ending["options"][1] == {"id": "option-2", "label": "End current task", "action": "end_current_task"}
+            end_response = {"decision_id": ending["id"], "response": "End current task", "option_id": "option-2", "expected_version": ending["version"]}
+            before_end = len(completions)
+            ended_by_decision = await gateway.request("chat:_:decisions:respond", end_response)
+            assert ended_by_decision["task"]["status"] == "ended"
+            assert ended_by_decision["decision"]["status"] == "resolved" and ended_by_decision["decision"]["response"] == "End current task"
+            assert not ended_by_decision["decision"]["resolved_dispatch_id"]
+            replay_end = await gateway.request("chat:_:decisions:respond", end_response)
+            assert replay_end["decision"]["id"] == ending["id"] and replay_end["task"]["status"] == "ended"
+            await asyncio.sleep(0.2)
+            assert len(completions) == before_end
+            database = sqlite3.connect(data_dir / "chat.sqlite3")
+            try:
+                assert database.execute("select count(*) from turns where task_id=?", (end_task["id"],)).fetchone()[0] == 1
+                assert database.execute("select count(*) from messages where task_id=? and role='user' and text='End current task'", (end_task["id"],)).fetchone()[0] == 0
+            finally: database.close()
+            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, gateway response, same session without redundant bridge, direct Task end, idempotency and cursor list")
         finally: await gateway.close()
 def main() -> None: asyncio.run(run()); print("PASS Decision smoke complete")
 if __name__ == "__main__": main()

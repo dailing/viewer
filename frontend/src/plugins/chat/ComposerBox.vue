@@ -40,14 +40,6 @@ const forceNewSession = computed({
   set: (value: boolean) => inputs.patch(props.contextId, { forceNewSession: value }),
 });
 
-// One-shot send-now (parallel) toggle: when armed, the next send carries
-// parallel_dispatch=true — the message starts immediately on a throwaway
-// session instead of queueing behind an in-flight turn.
-const sendNow = computed({
-  get: () => session.value.parallel,
-  set: (value: boolean) => inputs.patch(props.contextId, { parallel: value }),
-});
-
 
 const voice = useVoiceStore();
 const voiceError = computed(() => {
@@ -394,17 +386,6 @@ defineExpose({ focus: () => textarea.value?.focus(), flushAllDrafts });
           @click="forceNewSession = !forceNewSession"
         >
           <i class="bi" :class="forceNewSession ? 'bi-plus-square-fill' : 'bi-plus-square'" />
-        </button>
-        <button
-          class="btn btn-sm btn-outline-secondary action-button"
-          :class="{ active: sendNow }"
-          type="button"
-          :title="sendNow ? '立即发送已激活：下一条消息不排队，开新会话与当前回复并行执行' : '立即发送：下一条消息开新会话并行执行，不排队等待（一次性）'"
-          :aria-pressed="sendNow"
-          aria-label="Send now in parallel on a fresh session"
-          @click="sendNow = !sendNow"
-        >
-          <i class="bi" :class="sendNow ? 'bi-lightning-fill' : 'bi-lightning'" />
         </button>
         <button
           class="btn btn-sm btn-outline-secondary action-button"

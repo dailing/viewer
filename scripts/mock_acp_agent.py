@@ -67,8 +67,14 @@ def run_prompt(request_id: Any, params: dict[str, Any]) -> None:
     session_id = str(params.get("sessionId", ""))
     blocks = params.get("prompt") or []
     text = "".join(str(block.get("text", "")) for block in blocks if isinstance(block, dict))
+    if prompt_log := os.environ.get("MOCK_PROMPT_LOG"):
+        with write_lock:
+            with open(prompt_log, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"session_id": session_id, "text": text}) + "\n")
     tool_update(session_id)
-    if "MOCK_DECISION" in text:
+    if "MOCK_END_TASK_DECISION" in text:
+        update(session_id, "工作已完成。\n<viewer-decision>\nversion: 1\nkind: choice\nquestion: What should happen next?\noption: Continue checking\noption: End current task\noption_action: end_current_task\ndisplay: buttons\ntone: neutral\n</viewer-decision>")
+    elif "MOCK_DECISION" in text:
         update(session_id, "请选择后续方向：\n<viewer-decision>\nversion: 1\nkind: choice\nquestion: Continue with the recommended path?\noption: Recommended path\noption: Alternative path\ndisplay: buttons\ntone: neutral\n</viewer-decision>")
     else:
         update(session_id, "mock: ")

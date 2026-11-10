@@ -14,8 +14,8 @@ import {
 function session(): InputSession {
   return {
     id: "chat:c", pluginId: "chat", paneType: "chat", instanceId: "c", label: "Chat",
-    text: "ordinary", taskId: "a", continueTurnId: "", mode: "dispatch", queuedDispatchId: "", revision: 0,
-    selectedRoleIds: ["r1"], forceNewSession: false, parallel: false, raw: false, rawByTask: {}, pinned: true,
+    text: "ordinary", taskId: "a", mode: "dispatch", queuedDispatchId: "", revision: 0,
+    selectedRoleIds: ["r1"], forceNewSession: false, raw: false, rawByTask: {}, pinned: true,
     phase: "idle", error: "", updatedAt: 0,
   };
 }
@@ -51,26 +51,21 @@ describe("input session send intent", () => {
   it("accepts the backend empty-draft acknowledgement without re-arming one-shot options", () => {
     const value = session();
     value.forceNewSession = true;
-    value.parallel = true;
     const sent = snapshotInputSession(value);
     setInputSessionText(value, ""); // remote draft:sync from the accepted dispatch
     completeInputSessionSend(value, sent);
     expect(value.text).toBe("");
     expect(value.forceNewSession).toBe(false);
-    expect(value.parallel).toBe(false);
   });
 
   it("captures role and one-shot options with the intent", () => {
     const value = session();
     value.forceNewSession = true;
-    value.parallel = true;
     const sent = snapshotInputSession(value);
     value.selectedRoleIds.push("r2");
     value.forceNewSession = false;
-    value.parallel = false;
     expect(sent.selectedRoleIds).toEqual(["r1"]);
     expect(sent.forceNewSession).toBe(true);
-    expect(sent.parallel).toBe(true);
   });
 });
 

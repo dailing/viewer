@@ -27,6 +27,20 @@ func TestDecisionMarkerFlatGrammar(t *testing.T) {
 	}
 }
 
+func TestDecisionMarkerEndCurrentTaskOption(t *testing.T) {
+	marker := parseDecisionMarker("工作已完成。\n<viewer-decision>\nversion: 1\nkind: choice\nquestion: What should happen next?\noption: Continue checking\noption: End current task\noption_action: end_current_task\ndisplay: buttons\ntone: neutral\n</viewer-decision>")
+	if marker == nil {
+		t.Fatal("valid Task-ending option was rejected")
+	}
+	options, err := parseDecisionOptions(marker.OptionsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options) != 2 || options[0].Action != "" || options[1].ID != "option-2" || options[1].Label != "End current task" || options[1].Action != "end_current_task" {
+		t.Fatalf("Task-ending option mismatch: %#v", options)
+	}
+}
+
 func TestDecisionMarkerDisplayFallbackOnly(t *testing.T) {
 	marker := parseDecisionMarker("<viewer-decision>\nversion: 1\nkind: choice\nquestion: Continue?\ndisplay: modal\ntone: dangerous\n</viewer-decision>")
 	if marker == nil || marker.Display != "auto" || marker.Tone != "neutral" || marker.Warning == "" {
@@ -49,6 +63,10 @@ func TestDecisionMarkerRejectsInvalidCore(t *testing.T) {
 		"missing version":      valid("kind: choice\nquestion: Continue?"),
 		"unknown version":      valid("version: 2\nkind: choice\nquestion: Continue?"),
 		"unknown kind":         valid("version: 1\nkind: action\nquestion: Continue?"),
+		"action before option": valid("version: 1\nkind: choice\noption_action: end_current_task\noption: End current task"),
+		"unknown action":       valid("version: 1\nkind: choice\noption: Do something\noption_action: run_arbitrary_code"),
+		"detached action":      valid("version: 1\nkind: choice\noption: End current task\nquestion: Continue?\noption_action: end_current_task"),
+		"multiple end actions": valid("version: 1\nkind: choice\noption: End current task\noption_action: end_current_task\noption: End again\noption_action: end_current_task"),
 		"unknown key":          valid("version: 1\nkind: choice\nquestion: Continue?\ntask: other"),
 		"duplicate singleton":  valid("version: 1\nkind: choice\nquestion: One\nquestion: Two"),
 		"empty option":         valid("version: 1\nkind: choice\nquestion: Continue?\noption:  "),

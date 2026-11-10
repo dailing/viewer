@@ -1,15 +1,10 @@
 /**
- * Chat Dock status dots (running / unread / unread-error).
+ * Chat Dock unread dots (unread / unread-error).
  *
- * Semantics, driven by the backend `chat:_:turn` lifecycle feed plus the
- * `running_chat_ids` snapshot in chats:list:
- *
- * - "running": the chat has at least one in-flight turn (green dot). Live
- *   only in memory; rebuilt from chats:list on refresh, nudged by turn
- *   started/completed frames. A count per chat (not a boolean) because two
- *   dispatches on disjoint roles can overlap in one chat.
- * - "unread": a turn completed while the chat had no open pane (amber dot).
- * - "error": same, but the turn's stop_reason was a failure (red dot).
+ * Running state is deliberately not stored here: each Dock row reads the
+ * authoritative `running` flag of its own Task. Chat-level running snapshots
+ * must never leak onto sibling Tasks. Turn completion only records unread
+ * state when the Chat has no open pane.
  *
  * Read state is browser-local (localStorage, non-namespaced like the other
  * shell stores): chats absent from the map are read, so a fresh browser
@@ -20,8 +15,7 @@ import { reactive } from "vue";
 const STORAGE_KEY = "viewer.chatUnread.v1";
 
 export type UnreadKind = "done" | "error";
-
-export type ChatDockState = "running" | "error" | "unread" | undefined;
+export type ChatDockState = "error" | "unread" | undefined;
 
 /** Stop reasons that count as a failed turn for the red dot. */
 export function isErrorStopReason(reason: string): boolean {
@@ -45,11 +39,6 @@ function loadUnread(): Record<string, UnreadKind> {
 }
 
 export const chatDockStatus = reactive({
-  /** chat id → number of in-flight turns. */
-  running: {} as Record<string, number>,
-  /** chat id → a background hold keeps the line busy after the turn ended
-   *  (its agent session's background processes still run). */
-  background: {} as Record<string, boolean>,
   /** chat id → unread kind; absence means read. Persisted. */
   unread: loadUnread(),
 });
@@ -63,47 +52,14 @@ function persistUnread(): void {
   }
 }
 
-/** Adopt the backend snapshot (chats:list running_chat_ids). */
-export function setRunningChats(ids: string[]): void {
-  const next: Record<string, number> = {};
-  for (const id of ids) {
-    if (id !== "") next[id] = 1;
-  }
-  chatDockStatus.running = next;
-}
-
-export function markTurnStarted(chatID: string): void {
-  if (chatID === "") return;
-  chatDockStatus.running[chatID] = (chatDockStatus.running[chatID] ?? 0) + 1;
-}
-
-/** chat:_:background feed: a line held by live background processes keeps
- *  the running dot after its turn's completed frame. */
-export function markBackground(chatID: string, active: boolean): void {
-  if (chatID === "") return;
-  if (active) {
-    chatDockStatus.background[chatID] = true;
-  } else {
-    delete chatDockStatus.background[chatID];
-  }
-}
-
 /**
  * Record a finished turn. When the chat has no open pane the completion is
  * unread: amber for a normal end, red when stop_reason reports a failure.
  */
 export function markTurnCompleted(chatID: string, stopReason: string, chatOpen: boolean): void {
-  if (chatID === "") return;
-  const remaining = (chatDockStatus.running[chatID] ?? 0) - 1;
-  if (remaining > 0) {
-    chatDockStatus.running[chatID] = remaining;
-  } else {
-    delete chatDockStatus.running[chatID];
-  }
-  if (!chatOpen) {
-    chatDockStatus.unread[chatID] = isErrorStopReason(stopReason) ? "error" : "done";
-    persistUnread();
-  }
+  if (chatID === "" || chatOpen) return;
+  chatDockStatus.unread[chatID] = isErrorStopReason(stopReason) ? "error" : "done";
+  persistUnread();
 }
 
 /** Opening a chat marks it read; the dot clears. */
@@ -116,14 +72,11 @@ export function markChatRead(chatID: string): void {
 
 /** Drop all state for a removed chat. */
 export function forgetChat(chatID: string): void {
-  delete chatDockStatus.running[chatID];
-  delete chatDockStatus.background[chatID];
   markChatRead(chatID);
 }
 
-/** Dock dot state for one chat: running wins over unread, error over done. */
-export function dockStateFor(chatID: string): ChatDockState {
-  if ((chatDockStatus.running[chatID] ?? 0) > 0 || chatDockStatus.background[chatID]) return "running";
+/** Unread dot state for one chat: error wins over done. */
+export function dockUnreadStateFor(chatID: string): ChatDockState {
   const kind = chatDockStatus.unread[chatID];
   if (kind === "error") return "error";
   if (kind === "done") return "unread";

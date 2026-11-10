@@ -97,6 +97,20 @@ func decisionPayload(decision *Decision) map[string]any {
 		"marker_start": decision.MarkerStart, "marker_end": decision.MarkerEnd, "created_at": decision.CreatedAt, "updated_at": decision.UpdatedAt}
 }
 
+type decisionOption struct {
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	Action string `json:"action,omitempty"`
+}
+
+func parseDecisionOptions(encoded string) ([]decisionOption, error) {
+	var options []decisionOption
+	if err := json.Unmarshal([]byte(encoded), &options); err != nil {
+		return nil, err
+	}
+	return options, nil
+}
+
 func (p *Plugin) decision(id string) (*Decision, error) {
 	var decision Decision
 	result := p.store.db.Limit(1).Find(&decision, "id = ?", id)
@@ -325,6 +339,28 @@ func (p *Plugin) handleDecisionRespond(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
+	if optionID := requestString(request, "option_id"); optionID != "" {
+		options, optionErr := parseDecisionOptions(decision.OptionsJSON)
+		if optionErr != nil {
+			p.reply(frame, nil, optionErr)
+			return
+		}
+		var selected *decisionOption
+		for index := range options {
+			if options[index].ID == optionID {
+				selected = &options[index]
+				break
+			}
+		}
+		if selected == nil {
+			p.reply(frame, nil, errors.New("decision option not found"))
+			return
+		}
+		if selected.Action == "end_current_task" {
+			p.respondEndTask(frame, request, decision, task, selected)
+			return
+		}
+	}
 	chat, err := p.store.chat(decision.ChatID)
 	if err != nil || chat == nil {
 		p.reply(frame, nil, errors.New("chat not found"))
@@ -370,6 +406,26 @@ func (p *Plugin) handleDecisionRespond(frame busclient.Frame) {
 	reply["decision"] = decisionPayload(decision)
 	_ = p.finishOperation("chat", "decision", decision.ID, reply, "resolved", nil)
 	p.publishDecision(decision)
+	p.reply(frame, reply, nil)
+}
+
+// respondEndTask handles the single built-in Decision control action. The
+// caller holds operationMu and has already checked idempotency, version and
+// the stored option identity; no option text is dispatched to the Agent.
+func (p *Plugin) respondEndTask(frame busclient.Frame, request map[string]any, decision *Decision, task *Task, option *decisionOption) {
+	if err := p.startOperation("chat", "decision", decision.ID, request, task.ChatID, task.ID, task.ID); err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	cancelled, err := p.finishTaskEnd(task, decision, option)
+	if err != nil {
+		_ = p.store.db.Where("caller_plugin = ? AND operation = ? AND idempotency_key = ?", "chat", "decision", decision.ID).Delete(&OperationReceipt{}).Error
+		p.reply(frame, nil, err)
+		return
+	}
+	reply := map[string]any{"task": task.payload(), "decision": decisionPayload(decision)}
+	_ = p.finishOperation("chat", "decision", decision.ID, reply, "resolved", nil)
+	p.publishTaskEnd(task, decision, cancelled)
 	p.reply(frame, reply, nil)
 }
 

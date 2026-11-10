@@ -116,3 +116,38 @@ func TestTaskContextLayersAndRawTailDoNotOverlap(t *testing.T) {
 		t.Fatalf("coverage mismatch: %#v", coverage)
 	}
 }
+
+func TestTaskRoleBridgeDoesNotReplayTheSameRolesLastTurn(t *testing.T) {
+	s, err := openStorePath(filepath.Join(t.TempDir(), "chat.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	chat := Chat{ID: "chat-a", Root: t.TempDir()}
+	started, ended := int64(10), int64(20)
+	if err := s.db.Create(&Turn{ID: "turn-a", ChatID: chat.ID, TaskID: "task-a", RoleID: "role-a", StartedAt: started, EndedAt: &ended}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&TurnSummary{TurnID: "turn-a", ChatID: chat.ID, TaskID: "task-a", RoleID: "role-a", Status: "completed", Summary: "same Role previous Turn", OccurredAt: 19}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.addMessage(&Message{ID: "message-a", ChatID: chat.ID, TaskID: "task-a", TurnID: "turn-a", Role: "assistant", Text: "same Role previous reply", CreatedAt: 19}); err != nil {
+		t.Fatal(err)
+	}
+	p := &Plugin{store: s, ctx: context.Background()}
+	if bridge := p.buildTaskRoleBridge(chat, "task-a", "role-a", "next request", 30, "dispatch-next"); bridge != "" {
+		t.Fatalf("same Role's completed Turn was replayed as missed work:\n%s", bridge)
+	}
+
+	otherEnded := int64(25)
+	if err := s.db.Create(&Turn{ID: "turn-b", ChatID: chat.ID, TaskID: "task-a", RoleID: "role-b", StartedAt: 21, EndedAt: &otherEnded}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.addMessage(&Message{ID: "message-b", ChatID: chat.ID, TaskID: "task-a", TurnID: "turn-b", Role: "assistant", Text: "genuinely missed other Role reply", CreatedAt: 24}); err != nil {
+		t.Fatal(err)
+	}
+	bridge := p.buildTaskRoleBridge(chat, "task-a", "role-a", "next request", 30, "dispatch-after-other-role")
+	if !strings.Contains(bridge, "genuinely missed other Role reply") || strings.Contains(bridge, "same Role previous reply") {
+		t.Fatalf("missed-work bridge has wrong coverage:\n%s", bridge)
+	}
+}

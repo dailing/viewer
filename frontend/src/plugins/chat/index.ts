@@ -5,7 +5,7 @@ import { definePlugin } from "../../shell/definePlugin";
 import { useLayoutStore } from "../../stores/layout";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { registerInputSessionSender, type InputSession } from "../../stores/inputSessions";
-import { dockStateFor, isErrorStopReason, markBackground, markChatRead, markTurnCompleted, markTurnStarted, setRunningChats } from "./dockStatus";
+import { dockUnreadStateFor, isErrorStopReason, markChatRead, markTurnCompleted } from "./dockStatus";
 import { chatInputRPC } from "./inputDispatch";
 import { chatIdForView, createAdditionalChatView, ensureDefaultChatView, ensureTaskView, restoreChatView, type ChatViewParams } from "./viewInstances";
 import type { ChatList, DecisionList, Task, TaskList } from "./types";
@@ -71,7 +71,7 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     instances.splice(0, instances.length, ...sidebarTasks.map((task) => ({
       id: ensureTaskView(task.chat_id, task.id),
       label: task.title,
-      state: task.running ? "running" : dockStateFor(task.chat_id),
+      state: task.running ? "running" : dockUnreadStateFor(task.chat_id),
       icon: task.pinned ? "bi-pin-angle-fill" : "bi-file-earmark-text",
       group: {
         id: task.chat_id,
@@ -86,7 +86,6 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     ]);
     chats = result.chats;
     sidebarTasks = tasks;
-    setRunningChats(result.running_chat_ids ?? []);
     sync();
   };
   watch(
@@ -102,23 +101,15 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   ctx.bus.subscribe("chat:_:turn", (frame) => {
     const value = frame.value as { chat_id?: string; phase?: string; stop_reason?: string; role_name?: string } | undefined;
     if (value === undefined || typeof value.chat_id !== "string") return;
-    if (value.phase === "started") {
-      markTurnStarted(value.chat_id);
-    } else if (value.phase === "completed") {
+    if (value.phase !== "started" && value.phase !== "completed") return;
+    if (value.phase === "completed") {
       const stopReason = typeof value.stop_reason === "string" ? value.stop_reason : "";
       markTurnCompleted(value.chat_id, stopReason, isChatOpen(value.chat_id));
       notifyTurnCompleted(value.chat_id, value.role_name, stopReason);
-    } else {
-      return;
     }
-    sync();
+    void refresh().catch(() => undefined);
   });
-  ctx.bus.subscribe("chat:_:background", (frame) => {
-    const value = frame.value as { chat_id?: string; active?: boolean } | undefined;
-    if (value === undefined || typeof value.chat_id !== "string") return;
-    markBackground(value.chat_id, value.active === true);
-    sync();
-  });
+  ctx.bus.subscribe("chat:_:background", () => { void refresh().catch(() => undefined); });
   const handleChatsChanged = (): void => { void refresh(); };
   window.addEventListener("viewer:chats-changed", handleChatsChanged);
   ctx.onDispose(() => window.removeEventListener("viewer:chats-changed", handleChatsChanged));

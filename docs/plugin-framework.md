@@ -1,6 +1,8 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v1.16**（2026-11-08）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v1.18**（2026-11-09）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v1.18 变更：**Decision 每轮提示、受控结束动作与 Role 活动高水位**——Decision post-prompt 独立于 Role prompt，fresh/resumed/bridge 均在完整用户 prompt 末尾追加一次，raw 不注入；`option_action: end_current_task` 通过原 Decision option 身份直接结束 Task，不新增 Turn。bridge 以已结束 Turn 的 `ended_at` 为高水位，不再把同一 Role 上一轮输出当作 missed work。
+> v1.17 变更：**主题配色收敛与 Task 运行状态归属**——外观设置只保留 4 个基色和 1 个代码颜色，所有语法 token 由代码颜色与文字色派生，移除高级颜色定制界面及暗色固定语法色板；Preview 使用真实 hljs token。Dock 的 running 只读取各 Task 自身的后端标志，Turn/background 事件刷新 Task 元数据，禁止 Chat 级 running 回退。当前 Task 的 stop 通过 Turn ID 注册到 pane chrome；移除 Markdown/JSON 导出按钮与 Turn 内容 max-width。
 > v1.16 变更：**支持局域网 plain HTTP 的组件初始化**——统一 `utils/randomUUID.ts`：安全上下文使用原生 `crypto.randomUUID()`，非安全上下文通过 `getRandomValues`（或最终随机回退）生成 RFC 4122 UUID。Composer、文件实例、文件 watch 和 LLM 配置不得在组件初始化时直接调用仅安全上下文可用的 API；否则 localhost 正常而局域网访问时子组件会空白。
 > v1.15 变更：**修复独立预览的构建/重启与 composer 布局边界**——release build 支持 `VIEWER_REPO_ROOT` 并显式更新当前运行二进制；首页以 `X-Viewer-Process` 标识后端代际，普通重启只在替换进程响应后刷新。composer 移出消息滚动/裁切容器，作为 Task 根布局的独立底部 footer。
 > v1.14 变更：**Chat 分组默认全部折叠**——移除分组左侧 chevron，点击 Chat 名称本身切换展开/折叠；展开状态仅保留在当前页面会话，刷新后恢复全部折叠。
@@ -405,7 +407,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 ### 8.10 插件主题集成（v0.80 基色派生）
 
 - **持久化（v0.81）**：主题**定义**存服务端 instance-store（plugin `shell` / instance `themes`，整值 `{themes:[...]}`），跨浏览器/机器共享，`instance-store:shell:themes` mailbox 实时同步 + 重连全量对账（server wins）；**活跃主题 id 浏览器本地**（`viewer.theme.active.v1`），每设备可不同；`viewer.themes.v2` 仅作启动缓存与一次性种子源。
-- **主题变量单源**：主题 = 4 个基色（`--color-canvas` / `--color-surface` / `--color-text` / `--color-accent`）+ 高级覆盖，活动主题以 inline custom property 设置在 `.app-shell` 上；其余 `--color-*` / `--markdown-*` / `--syntax-*` 默认值由 `styles.css` 的 `.app-shell` 块用 `color-mix()` 从基色派生，`[data-theme="dark"]`（由 canvas 亮度自动判定）仅覆盖语义色、语法色板等 scheme 常量。插件渲染在 `.app-shell` 子树内，直接 `var(--color-*)` 即跟随活动主题与亮暗切换。
+- **主题变量单源**：可见主题设置为 4 个基色（`--color-canvas` / `--color-surface` / `--color-text` / `--color-accent`）+ 1 个代码颜色（`overrides.codeAccent` → `--color-code`，缺省跟随 accent）；活动主题以 inline custom property 设置在 `.app-shell` 上。其余 `--color-*` / `--markdown-*` 默认值由基色派生，全部 `--syntax-*` 由代码颜色与文字色派生；暗色 scheme 不再持有固定语法色板。旧高级覆盖数据仅作兼容读取，可由重置/清空定制移除，不恢复高级颜色定制界面。插件渲染在 `.app-shell` 子树内，直接 `var(--color-*)` 即跟随活动主题与亮暗切换。
 - **禁止重声明**：插件**不得**在自己的根元素上重新定义 `--color-*` 变量（会把活动主题覆盖回硬编码值，亮暗切换失效）；只允许引用。插件自有色板（如重要性分级色）应派生自主题变量（`color-mix`）或定义为插件私有变量名。
 - **通用样式 class**（`styles.css`，scoped 在 `.app-shell` 下）：插件把 class 放到元素上即获得与 shell 一致的配色——
   - 底色：`.v-bg-canvas` / `.v-bg-surface` / `.v-bg-muted` / `.v-bg-raised`（同时设定匹配的前景色）
@@ -622,6 +624,8 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v1.18**（2026-11-09）：**Decision 每轮提示、受控结束动作与 Role 活动高水位**——Decision post-prompt 独立于 Role prompt，fresh/resumed/bridge 均在完整用户 prompt 末尾追加一次，raw 不注入。`option_action: end_current_task` 只由持久化 option 的 `option_id` 触发，直接 resolve Decision 并结束原 Task，不创建 Agent Turn。已结束 Turn 以 `ended_at` 推进 bridge 高水位。
+- **v1.17**（2026-11-09）：**主题配色收敛与 Task 运行状态归属**——外观仅保留 4 基色 + 代码颜色，语法 token 统一派生并移除高级颜色定制 UI；Dock running 只读 Task 自身标志。Task 级 stop 注册到 pane chrome，移除导出按钮与正文 max-width。
 - **v1.16**（2026-11-08）：**Plain HTTP UUID 兼容**——统一安全/非安全上下文均可用的 UUID 生成，修复局域网访问时 Composer 等子组件初始化空白。
 - **v1.15**（2026-11-08）：**预览构建/重启与 Composer 根布局**——支持任意预览二进制路径、按进程代际刷新重启页面，并将 composer 移出消息 overflow 容器。
 - **v1.14**（2026-11-08）：**Chat 分组默认折叠**——移除 chevron，点击 Chat 名称切换展开/折叠；刷新后全部恢复折叠。
@@ -810,6 +814,7 @@ my-plugin/
 - Instance：Chat view 为 multi，adapter 接受 `{chatId, initialTaskId?}` 并返回稳定 view id；`chat-tasks` 与 `chat-decisions` 均为 singleton `main`。Agent runtime 移出 chat：独立 headless `viewer.agent-hermes` / `viewer.agent-codex` / `viewer.agent-opencode` 插件经统一 `start/prompt/cancel` 与事件 RPC 工作；Turn 持有 Task、Role 与 execution target，RoleSession 以 `(chat_id, task_id, role_id)` 持久化。
 - slots：`tasks:create/list/get/patch/end`、`tasks:summary`、`tasks:summary-retry`、`tasks:export`、`turns:list`、`role-sessions:invalidate`、`send-message`（`task_id` 必填，可带 `continue_turn_id`）、`stop`、`queued-cancel`/`queued-update`、`draft:get/set`、`blocks:list`、`chats:list`、`decisions:list/open/respond/cancel`。emits：`chat:_:task`、`chat:_:turn`、`chat:_:task-summary`、`chat:_:decision`、`chat:{id}:message/block`、`chat:_:queue`。
 - **消息渲染（v0.30，v0.57 工具层升级，v0.59 折叠口径）**：一 turn 一盒（user 消息独立盒；role turn 一盒），盒顶 info 条 = 角色图标+名 + 时间（+活跃态 spinner）；盒内 segments 严格按 `occurred_at` 交错——`messages` 文本段走 markdown 渲染；连续 ≥3 条小灰行活动（tool_call/tool_result/file_change/command/thinking/error）收成 `Tools ×N` 第一层（仅正文文本打断），展开后每项仍是可展开第二层。单项外层以图标+语义类型+命令/路径摘要+状态+时间显示，摘要 220 字符封顶；内层按 Command/Path/Locations/Input/Arguments/Output/Result/Changes 分区，总展示预算 9000 字符并显式标注省略，不直接渲染裸 payload JSON。markdown 管线 = markdown-it + texmath(KaTeX) + hljs（行号）+ mermaid（对齐生产版 `markdownRender.ts`）；样式 = `--markdown-*`/`--syntax-*` CSS 变量主题（亮/暗内置默认随 app theme，自定义存 localStorage `viewer.markdownTheme.v1`）。
+- **Decision prompt、结束动作与 bridge（v1.18）**：Decision post-prompt 不属于 Role 的静态 initial prompt；每个非 raw Turn 在 fresh/resumed/bridge 用户正文完成后统一追加一次。平铺 marker 允许在 option 后紧跟 `option_action: end_current_task`，同一 marker 至多一个；前端回复必须携带持久化 option 的 `option_id`，后端按存储内容判定动作。该动作复用 `decisions:respond`，原子 resolve 当前 Decision、取消同 Task 其他 pending Decision、结束 Task 并排期 final summary，不调用 `send-message`、不新增 Turn。普通回复仍续接源 Turn 的 Role session。bridge 的活动高水位对已结束 Turn 使用 `ended_at`，运行中 Turn 才使用 `started_at`，因此同一 Role 上一轮自身输出不会重复注入。
 - 存储：Task-first SQLite（新库，无旧 Branch/DAG 表）；`turn_events` 保存 driver 原文，`message_blocks` 保存归一化块，`messages` 保存可见文本；Tasks/Turns/RoleSessions/TurnSummaries/TaskSummaries/Decisions/ContextBuilds/OperationReceipts 同库。Hindsight bank 仅以 Chat 为边界；任务级跨 Task 信息由 completed final Task Summary 进入 fresh Context，bridge 不重复注入跨 Task 层。
 - 迁移要点：Task-first 正常运行时不读取旧 Branch/DAG 数据库。只有显式执行离线 `viewer-chat-migrate --data-dir PATH --yes` 才进行一次性升级：保留 Chat/Role/routing 设置，为每个 Chat 建立一个 open 默认 Task；旧消息、分支、session、summary 与 Loop 状态不迁移。原始数据库保存为 `chat.pre-task-first.sqlite3`，已有备份时拒绝重复迁移。
 

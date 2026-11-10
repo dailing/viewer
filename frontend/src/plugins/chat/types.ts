@@ -14,7 +14,7 @@ export interface Task {
   summary_revision?: number; pending_decisions?: number;
 }
 export interface TaskSummary { task_id: string; chat_id: string; text: string; source_turn_ids: string[]; summary_revision: number; source_revision: number; provider: string; model: string; status: string; final: boolean; error: string; updated_at: number }
-export interface DecisionOption { id: string; label: string; description?: string }
+export interface DecisionOption { id: string; label: string; description?: string; action?: "end_current_task" }
 export interface Decision {
   id: string; chat_id: string; task_id: string; source_turn_id: string; source_message_id: string; role_id: string;
   chat_name?: string; task_title?: string; role_name?: string;

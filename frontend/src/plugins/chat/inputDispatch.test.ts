@@ -8,8 +8,8 @@ vi.mock("../../shell/frontendLog", () => ({ reportFrontendLog: vi.fn() }));
 function session(): InputSession {
   return {
     id: "chat:view-two", pluginId: "chat", paneType: "chat", instanceId: "view-two", params: { chatId: "c" }, label: "Chat",
-    text: "hello", taskId: "task-a", continueTurnId: "", mode: "dispatch", queuedDispatchId: "", revision: 0,
-    selectedRoleIds: ["r1"], forceNewSession: false, parallel: false, raw: false, rawByTask: {}, pinned: true,
+    text: "hello", taskId: "task-a", mode: "dispatch", queuedDispatchId: "", revision: 0,
+    selectedRoleIds: ["r1"], forceNewSession: false, raw: false, rawByTask: {}, pinned: true,
     phase: "idle", error: "", updatedAt: 0,
   };
 }

@@ -8,8 +8,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { useDockSettingsStore, clampDockWidth } from "../stores/dockSettings";
 import { useLayoutStore } from "../stores/layout";
-import type { DockProvider } from "./definePlugin";
-import { collectDockSections, openProvider, type DockEntry, type DockSection } from "./dockModel";
+import type { DockItemAction, DockProvider } from "./definePlugin";
+import { collectDockSections, openDockEntry, openProvider, type DockEntry, type DockSection } from "./dockModel";
 import { openShellInstance } from "./instances";
 import { dockActions, dockProviders } from "./registries";
 
@@ -111,7 +111,6 @@ onBeforeUnmount(() => {
 });
 
 const sections = computed<DockSection[]>(() => collectDockSections(dockProviders));
-const entries = computed<DockEntry[]>(() => sections.value.flatMap((section) => section.entries));
 // Chat groups start collapsed on every page load. Expansion is deliberately
 // session-local: the default Dock stays compact even with many open Tasks.
 const expandedGroupKeys = ref<Set<string>>(new Set());
@@ -141,12 +140,11 @@ const activeUid = computed(() => {
 const creatable = computed(() => dockProviders);
 
 function openEntry(entry: DockEntry): void {
-  void openShellInstance({ paneType: entry.provider.type, instanceId: entry.instance?.id ?? "main" });
+  void openDockEntry(entry, { open: openShellInstance });
 }
 
-function removeEntry(entry: DockEntry): void {
-  if (entry.instance === undefined) return;
-  void entry.provider.remove?.(entry.instance.id);
+function runEntryAction(action: DockItemAction): void {
+  void action.run();
 }
 
 async function createFrom(provider: DockProvider): Promise<void> {
@@ -259,7 +257,7 @@ const buildTime = (() => {
               :aria-expanded="!isGroupCollapsed(section.key)"
               @click="toggleGroup(section.key)"
             >
-              <i class="bi bi-folder"></i>
+              <i class="bi" :class="section.provider.icon"></i>
               <span class="dock-group-label">{{ section.group.label }}</span>
               <span class="dock-group-count">{{ section.entries.length }}</span>
             </button>
@@ -285,20 +283,25 @@ const buildTime = (() => {
               <i class="bi" :class="entry.icon"></i>
               <span v-if="isExpanded" class="dock-label">{{ entry.displayLabel }}</span>
             </button>
+            <span v-if="entry.instance?.meta?.()" class="dock-item-meta">{{ entry.instance.meta() }}</span>
             <button
-              v-if="entry.instance !== undefined && entry.provider.remove !== undefined"
+              v-for="action in entry.instance?.actions ?? []"
+              v-show="isExpanded"
+              :key="action.id"
               type="button"
-              class="dock-item-remove"
-              title="移除此固定入口"
-              :aria-label="`移除 ${entry.label}`"
-              @click.stop="removeEntry(entry)"
+              class="dock-item-action"
+              :class="{ active: action.active === true, danger: action.variant === 'danger' }"
+              :title="action.title"
+              :aria-label="action.title"
+              @click.stop="runEntryAction(action)"
             >
-              <i class="bi bi-x"></i>
+              <i v-if="action.icon" class="bi" :class="action.icon"></i>
+              <span v-if="action.label">{{ action.label }}</span>
             </button>
             <span v-if="entry.state !== undefined" class="dock-dot" :class="dockDotClass(entry.state)"></span>
           </div>
         </template>
-        <div v-if="entries.length === 0" class="dock-empty" title="没有正在运行的 instance"><i class="bi bi-dash-lg"></i></div>
+        <div v-if="sections.length === 0" class="dock-empty" title="没有正在运行的 instance"><i class="bi bi-dash-lg"></i></div>
       </div>
 
       <div class="dock-foot">
@@ -543,31 +546,37 @@ const buildTime = (() => {
   height: 22px;
 }
 
-.dock-item-remove {
+.dock-item-action {
   align-items: center;
-  background: var(--color-surface);
+  background: transparent;
   border: 0;
-  border-radius: 50%;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
-  display: none;
-  font-size: calc(var(--font-size-ui) * 5 / 6);
-  height: 14px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: var(--font-size-ui-small);
+  gap: 3px;
+  height: 20px;
   justify-content: center;
-  padding: 0;
+  min-width: 20px;
+  padding: 0 3px;
+}
+.dock-item-action:hover { background: var(--color-surface-hover); color: var(--color-text); }
+.dock-item-action.active { color: var(--color-accent); }
+.dock-item-action.danger:hover { color: var(--color-danger); }
+.dock-item-meta {
+  background: var(--color-surface-selected);
+  border-radius: 8px;
+  color: var(--color-accent);
+  font-size: 9px;
+  line-height: 14px;
+  min-width: 14px;
+  padding: 0 3px;
   position: absolute;
   right: -2px;
-  top: -2px;
-  width: 14px;
+  text-align: center;
+  top: -3px;
   z-index: 2;
-}
-
-.dock-item:hover .dock-item-remove {
-  display: inline-flex;
-}
-
-.dock-item-remove:hover {
-  background: var(--color-danger);
-  color: #fff;
 }
 
 .dock.expanded .dock-item {
@@ -581,6 +590,13 @@ const buildTime = (() => {
   min-width: 0;
   padding: 0 9px;
   width: auto;
+}
+.dock.expanded .dock-item-meta {
+  flex: 0 0 auto;
+  font-size: var(--font-size-ui-small);
+  line-height: 18px;
+  margin-right: 3px;
+  position: static;
 }
 
 .dock-label {

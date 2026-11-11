@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { DockProvider } from "./definePlugin";
-import { collectDockEntries, collectDockSections, openProvider } from "./dockModel";
+import { collectDockEntries, collectDockSections, openDockEntry, openProvider } from "./dockModel";
 
 function provider(values: Partial<DockProvider> = {}): DockProvider {
   return {
@@ -45,6 +45,49 @@ describe("Dock model", () => {
       ["Task C"],
       ["Notes"],
     ]);
+  });
+
+  it("keeps declared empty groups and merges their Task entries without duplication", () => {
+    const chat = provider({
+      type: "chat",
+      groups: [
+        { id: "chat-empty", label: "Pinned Empty" },
+        { id: "chat-open", label: "Pinned Open" },
+      ],
+      instances: [{ id: "view-a", label: "Task A", group: { id: "chat-open", label: "Pinned Open" } }],
+    });
+    const sections = collectDockSections([chat]);
+    expect(sections.map((section) => ({ label: section.group?.label, count: section.entries.length }))).toEqual([
+      { label: "Pinned Empty", count: 0 },
+      { label: "Pinned Open", count: 1 },
+    ]);
+  });
+
+  it("docks plugin-declared singleton items with trailing metadata and actions", () => {
+    const run = vi.fn();
+    const tool = provider({
+      instances: [{
+        id: "main",
+        label: "Decisions",
+        icon: "bi-inbox",
+        meta: () => 3,
+        actions: [{ id: "refresh", title: "Refresh", icon: "bi-arrow-clockwise", run }],
+      }],
+    });
+    const [entry] = collectDockEntries([tool]);
+    expect(entry).toMatchObject({ uid: "tool:main", icon: "bi-inbox", label: "Decisions" });
+    expect(entry.instance?.meta?.()).toBe(3);
+    void entry.instance?.actions?.[0].run();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("uses a plugin-owned instance opener instead of the default shell route", async () => {
+    const open = vi.fn();
+    const opener = { open: vi.fn() };
+    const [entry] = collectDockEntries([provider({ instances: [{ id: "main", label: "Tool", open }] })]);
+    await openDockEntry(entry, opener);
+    expect(open).toHaveBeenCalledOnce();
+    expect(opener.open).not.toHaveBeenCalled();
   });
 
   it("opens singleton main through the unified opener", async () => {

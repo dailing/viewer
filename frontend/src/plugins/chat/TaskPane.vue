@@ -2,11 +2,12 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import type { PaneChromeAction } from "../../stores/paneChrome";
-import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRender";
+import { renderMermaidIn } from "../../utils/markdownRender";
 import { useInputSessionsStore } from "../../stores/inputSessions";
 import ComposerBox from "./ComposerBox.vue";
-import ToolActivity from "./ToolActivity.vue";
-import { activityDisplayable, activityGroupSummary, groupActivityItems, type ActivityTimelineItem } from "./toolPresentation";
+import TurnContent from "./TurnContent.vue";
+import { activityDisplayable } from "./toolPresentation";
+import type { ChatTimelineItem } from "./turnContent";
 import DecisionCard from "./DecisionCard.vue";
 import { decisionResponsePayload, type DecisionResponseIntent } from "./decisionInput";
 import { chatIdForView, resolveChatView, setChatViewTask } from "./viewInstances";
@@ -270,8 +271,7 @@ async function stopCurrentTask(): Promise<void> {
   await Promise.all(currentRunning.value.map((turn) => stopTurn(turn.turn_id)));
 }
 function citeMessage(messageId: string): void { const session = inputs.session(inputSessionId); if (session) inputs.setText(inputSessionId, `${session.text}${session.text ? " " : ""}@${messageId} `); }
-interface TimelineItem extends ActivityTimelineItem { message?: ChatMessage }
-interface TimelineGroup { id: string; turnId: string; at: number; user?: ChatMessage; roleName: string; roleId: string; items: TimelineItem[]; decisions: Decision[] }
+interface TimelineGroup { id: string; turnId: string; at: number; user?: ChatMessage; roleName: string; roleId: string; items: ChatTimelineItem[]; decisions: Decision[] }
 const timeline = computed<TimelineGroup[]>(() => {
   const groups = new Map<string, TimelineGroup>();
   for (const message of messages.value) {
@@ -291,13 +291,6 @@ const timeline = computed<TimelineGroup[]>(() => {
   return [...groups.values()].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
 });
 function queuedFor(turnId: string): QueuedMessage[] { return queued.value.filter((entry) => entry.dispatch_id === turnId); }
-function visibleMessage(message: ChatMessage): string {
-  const decision = decisions.value.find((item) => item.source_message_id === message.id);
-  const bytes = new TextEncoder().encode(message.text);
-  const decoder = new TextDecoder();
-  return decision && decision.status !== 'invalid' ? `${decoder.decode(bytes.slice(0, decision.marker_start))}${decoder.decode(bytes.slice(decision.marker_end))}` : message.text;
-}
-function markdown(text: string): string { return renderMarkdown(text); }
 function roleTarget(turnId: string): string { return turnTargets.value.get(turnId)?.label ?? ""; }
 function onMessage(frame: { value?: unknown }): void { const value = frame.value as ChatMessage | undefined; if (value?.chat_id === chatId && value.task_id === currentTaskId.value) mergeMessages([value]); }
 function onBlock(frame: { value?: unknown }): void { const value = frame.value as ChatBlock | undefined; if (value?.chat_id === chatId && value.task_id === currentTaskId.value) mergeBlocks([value]); }
@@ -371,6 +364,12 @@ onBeforeUnmount(() => {
         <article v-for="group in timeline" :key="group.id" class="turn-box" :class="{ user: group.user }" :data-message-id="groupAnchorId(group)">
           <header class="turn-header">
             <strong>{{ group.user ? 'User' : group.roleName }}</strong>
+            <span v-for="entry in queuedFor(group.turnId)" :key="entry.dispatch_id" class="queued-meta">
+              <i class="bi bi-hourglass-split" aria-hidden="true" />
+              <span>排队 #{{ entry.position }}</span>
+              <button class="queued-action" type="button" title="编辑排队消息" aria-label="编辑排队消息" @click="editQueued(entry)"><i class="bi bi-pencil" /></button>
+              <button class="queued-action queued-cancel" type="button" title="取消排队消息" aria-label="取消排队消息" @click="cancelQueued(entry)"><i class="bi bi-x-lg" /></button>
+            </span>
             <span v-if="!group.user && roleTarget(group.turnId)" class="turn-target">{{ roleTarget(group.turnId) }}</span>
             <span v-if="!group.user && running.has(group.turnId)" class="turn-running"><i class="bi bi-arrow-repeat spin" /> running</span>
             <time>{{ formatTime(group.at) }}</time>
@@ -378,29 +377,7 @@ onBeforeUnmount(() => {
             <button v-if="!group.user && running.has(group.turnId)" class="turn-stop-button" type="button" title="停止 Turn" @click="stopTurn(group.turnId)"><i class="bi bi-stop-circle" /></button>
           </header>
           <div class="turn-body">
-          <template v-for="item in groupActivityItems(group.items)" :key="item.id">
-            <div v-if="item.kind === 'message' && item.message" class="markdown-content" v-html="markdown(visibleMessage(item.message))" />
-            <ToolActivity v-else-if="item.kind === 'activity' && item.block" :block="item.block" :time="formatTime(item.at)" />
-            <details v-else-if="item.kind === 'activity-group'" class="chat-tool-group">
-              <summary class="chat-tool-group-summary">
-                <i class="bi bi-tools" aria-hidden="true" />
-                <span class="chat-tool-group-label">Tools</span>
-                <span class="chat-tool-group-text">{{ activityGroupSummary(item) }}</span>
-                <span class="chat-tool-group-count">×{{ item.items.length }}</span>
-                <span class="chat-tool-group-time">{{ formatTime(item.at) }}</span>
-                <i class="bi bi-chevron-right chat-tool-group-chevron" aria-hidden="true" />
-              </summary>
-              <div class="chat-tool-group-body">
-                <ToolActivity
-                  v-for="activity in item.items"
-                  :key="activity.id"
-                  :block="activity.block!"
-                  :time="formatTime(activity.at)"
-                />
-              </div>
-            </details>
-          </template>
-          <div v-for="entry in queuedFor(group.turnId)" :key="entry.dispatch_id" class="queued-row">排队 #{{ entry.position }}<button type="button" @click="editQueued(entry)">编辑</button><button type="button" @click="cancelQueued(entry)">取消</button></div>
+          <TurnContent :items="group.items" :decisions="decisions" />
           <DecisionCard v-for="decision in group.decisions" :key="decision.id" :decision="decision" :draft="responseDrafts[decision.id] ?? ''" @update:draft="responseDrafts[decision.id] = $event" @respond="respondDecision" @cancel="cancelDecision(decision)" @open="openDecisionSource(decision)" />
           </div>
         </article>
@@ -427,48 +404,6 @@ onBeforeUnmount(() => {
 </template>
 <style scoped>
 .task-chat{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;position:relative;color:var(--color-text)}.spin{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.rename-row,.error-row{align-items:center;display:flex;gap:5px;padding:5px 8px}.rename-row input{background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text);flex:1;min-width:0;padding:4px 6px}.error-row{color:var(--bs-danger);font-size:var(--font-size-ui-small)}.error-row button{margin-left:auto}.task-body{display:flex;flex:1;flex-direction:column;min-height:0;overflow:hidden}.timeline{flex:1;min-height:0;overflow-y:auto;padding:8px}.task-composer{border-top:1px solid var(--color-border);flex:0 0 auto;max-height:65vh;overflow-y:auto;position:relative;z-index:2}
-.chat-tool-group {
-  color: color-mix(in srgb, var(--color-text-muted) 72%, transparent);
-  min-width: 0;
-}
-.chat-tool-group-summary {
-  align-items: center;
-  cursor: pointer;
-  display: grid;
-  font-size: calc(var(--font-size-ui) * 5 / 6);
-  gap: 4px;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
-  line-height: 1.3;
-  list-style: none;
-  min-height: 16px;
-  min-width: 0;
-  padding: 0 2px;
-  user-select: none;
-}
-.chat-tool-group-summary::-webkit-details-marker { display: none; }
-.chat-tool-group-summary:hover { color: var(--color-text-muted); }
-.chat-tool-group-label { font-weight: 600; white-space: nowrap; }
-.chat-tool-group-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-tool-group-count {
-  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
-  border-radius: 999px;
-  font-size: calc(var(--font-size-ui) * 3 / 4);
-  font-weight: 600;
-  line-height: 1.2;
-  padding: 0 5px;
-  white-space: nowrap;
-}
-.chat-tool-group-time { white-space: nowrap; }
-.chat-tool-group-chevron { font-size: calc(var(--font-size-ui) * 5 / 6); transition: transform 120ms ease; }
-.chat-tool-group[open] .chat-tool-group-chevron { transform: rotate(90deg); }
-.chat-tool-group-body {
-  border-left: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 2px 0 3px 6px;
-  padding-left: 8px;
-}
 .composer-overlay-button {
   align-items: center;
   backdrop-filter: blur(6px);
@@ -599,23 +534,10 @@ onBeforeUnmount(() => {
   user-select: text;
   width: 100%;
 }
-.markdown-content {
-  --markdown-render-body-size: calc(var(--markdown-body-font-size) * 4 / 5);
-  --markdown-render-paragraph-line-height: 1.48;
-  --markdown-render-paragraph-size: calc(var(--markdown-body-font-size) * 4 / 5);
-  --markdown-render-pre-padding: 8px;
-  font-size: var(--markdown-render-body-size);
-  line-height: var(--markdown-render-paragraph-line-height);
-  max-width: 100%;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-.markdown-content :deep(pre) { overflow: auto; }
-.markdown-content :deep(p:last-child) { margin-bottom: 0; }
-.queued-row { align-items: center; color: var(--color-text-muted); display: flex; font-size: var(--font-size-ui-small); gap: 8px; line-height: 1.3; padding: 0 2px; }
-.queued-row button { background: transparent; border: 0; color: var(--color-text-muted); font-size: var(--font-size-ui-small); line-height: 1; padding: 0 2px; }
-.queued-row button:hover { color: var(--color-text); }
+.queued-meta { align-items: center; color: var(--color-text-muted); display: inline-flex; flex: 0 0 auto; font-size: var(--font-size-ui-small); gap: 4px; line-height: 1; }
+.queued-action { background: transparent; border: 0; color: var(--color-text-muted); font-size: var(--font-size-ui-small); line-height: 1; padding: 0 2px; }
+.queued-action:hover { color: var(--color-text); }
+.queued-cancel:hover { color: var(--bs-danger); }
 @media (max-width: 700px) {
   .turn-header > .turn-running { display: inline-flex; }
   .turn-header > .turn-target { display: none; }

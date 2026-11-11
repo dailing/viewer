@@ -476,6 +476,13 @@ describe.sequential("frontend pane contracts against viewerd", () => {
     await client.request("chat:_:chats:activate", { id: chat.id });
     await waitFor(() => active.at(-1) === chat.id);
     expect(await client.request("chat:_:chats:list", {})).toEqual(expect.objectContaining({ active_chat_id: chat.id, chats: [expect.objectContaining({ id: chat.id, pinned: true })] }));
+    const appended = (await client.request("chat:_:chats:create", { name: "Appended", root: REPO_DIR, member_role_ids: [] })) as { id: string };
+    let ordered = (await client.request("chat:_:chats:list", {})) as { chats: Array<{ id: string; position: number }> };
+    expect(ordered.chats.map((item) => item.id)).toEqual([chat.id, appended.id]);
+    ordered = (await client.request("chat:_:chats:reorder", { ordered_ids: [appended.id, chat.id] })) as { chats: Array<{ id: string; position: number }> };
+    expect(ordered.chats.map((item) => item.id)).toEqual([appended.id, chat.id]);
+    expect(ordered.chats.map((item) => item.position)).toEqual([1, 2]);
+    await client.request("chat:_:chats:delete", { id: appended.id });
 
     const dispatched = (await client.request("chat:_:send-message", { task_id: taskId, text: "hello", role_ids: [first.id, second.id], idempotency_key: "contract-hello" })) as { role_ids: string[] };
     expect(dispatched.role_ids).toEqual([first.id, second.id]);

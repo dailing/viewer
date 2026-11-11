@@ -22,6 +22,7 @@ type Chat struct {
 	Name                     string `json:"name"`
 	Type                     string `json:"type"`
 	Pinned                   bool   `json:"pinned"`
+	Position                 int    `gorm:"index;not null;default:0" json:"position"`
 	Root                     string `json:"root"`
 	CommonPrompt             string `json:"common_prompt"`
 	MemberRoleIDsJSON        string `gorm:"column:member_role_ids" json:"-"`
@@ -32,7 +33,7 @@ type Chat struct {
 
 func (c Chat) payload() map[string]any {
 	return map[string]any{
-		"id": c.ID, "name": c.Name, "type": c.Type, "pinned": c.Pinned, "root": c.Root,
+		"id": c.ID, "name": c.Name, "type": c.Type, "pinned": c.Pinned, "position": c.Position, "root": c.Root,
 		"common_prompt": c.CommonPrompt, "member_role_ids": decodeStrings(c.MemberRoleIDsJSON),
 		"role_routing_policy_overrides": decodeStringMap(c.RoleRoutingOverridesJSON),
 		"created_at":                    c.CreatedAt, "updated_at": c.UpdatedAt,
@@ -114,9 +115,9 @@ type Draft struct {
 func (Draft) TableName() string { return "chat_drafts" }
 
 type Message struct {
-	ID            string `gorm:"primaryKey"`
+	ID            string `gorm:"primaryKey;index:idx_messages_task_cursor,priority:3"`
 	ChatID        string `gorm:"index;not null"`
-	TaskID        string `gorm:"index;not null"`
+	TaskID        string `gorm:"index:idx_messages_task_cursor,priority:1;not null"`
 	TurnID        string `gorm:"index;not null"`
 	Role          string `gorm:"not null"`
 	Text          string `gorm:"not null"`
@@ -127,7 +128,7 @@ type Message struct {
 	SourceEventID string
 	CausationID   string
 	CorrelationID string
-	CreatedAt     int64
+	CreatedAt     int64 `gorm:"index:idx_messages_task_cursor,priority:2"`
 }
 
 func (m Message) payload() map[string]any {
@@ -164,12 +165,12 @@ type MessageBlock struct {
 	ID         string `gorm:"primaryKey"`
 	EventID    string `gorm:"index;not null"`
 	ChatID     string `gorm:"index;not null"`
-	TaskID     string `gorm:"index;not null"`
+	TaskID     string `gorm:"index:idx_message_blocks_task_occurred,priority:1;not null"`
 	TurnID     string `gorm:"index;not null"`
 	Kind       string `gorm:"not null"`
 	Text       string
 	Payload    string `gorm:"not null"`
-	OccurredAt int64
+	OccurredAt int64  `gorm:"index:idx_message_blocks_task_occurred,priority:2"`
 }
 
 func (m MessageBlock) payload() map[string]any {
@@ -182,7 +183,7 @@ func (m MessageBlock) payload() map[string]any {
 type Turn struct {
 	ID         string `gorm:"primaryKey"`
 	ChatID     string `gorm:"index;not null"`
-	TaskID     string `gorm:"index;not null"`
+	TaskID     string `gorm:"index:idx_turns_task_started,priority:1;not null"`
 	RoleID     string `gorm:"index"`
 	RoleName   string
 	DispatchID string `gorm:"index"`
@@ -190,7 +191,7 @@ type Turn struct {
 	Agent      string
 	Provider   string
 	Model      string
-	StartedAt  int64
+	StartedAt  int64 `gorm:"index:idx_turns_task_started,priority:2"`
 	EndedAt    *int64
 	StopReason *string
 }
@@ -293,19 +294,13 @@ func openStorePath(path string) (*store, error) {
 	if err := db.AutoMigrate(&Chat{}, &Task{}, &TaskSummary{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &OperationReceipt{}, &Draft{}, &Decision{}, &ContextBuild{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
-	for _, index := range []string{
-		"CREATE INDEX IF NOT EXISTS idx_message_blocks_task_occurred ON message_blocks(task_id, occurred_at)",
-		"CREATE INDEX IF NOT EXISTS idx_messages_task_cursor ON messages(task_id, created_at, id)",
-		"CREATE INDEX IF NOT EXISTS idx_turns_task_started ON turns(task_id, started_at, id)",
-	} {
-		if err := db.Exec(index).Error; err != nil {
-			return nil, err
-		}
-	}
 	if err := db.Save(&PluginState{Key: "chat_schema_version", Value: chatSchemaVersion}).Error; err != nil {
 		return nil, err
 	}
 	s := &store{db: db}
+	if err := s.initializeChatOrder(); err != nil {
+		return nil, err
+	}
 	if err := s.ensureDefaultTasks(); err != nil {
 		return nil, err
 	}
@@ -356,13 +351,83 @@ func (s *store) chat(id string) (*Chat, error) {
 	return &value, nil
 }
 
+func (s *store) initializeChatOrder() error {
+	var count int64
+	if err := s.db.Model(&Chat{}).Where("position <= 0").Count(&count).Error; err != nil || count == 0 {
+		return err
+	}
+	var chats []Chat
+	if err := s.db.Order("pinned desc, updated_at desc, created_at desc, id").Find(&chats).Error; err != nil {
+		return err
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		for index, chat := range chats {
+			if err := tx.Model(&Chat{}).Where("id = ?", chat.ID).Update("position", index+1).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (s *store) chats() ([]Chat, error) {
 	var values []Chat
-	err := s.db.Order("pinned desc, updated_at desc, created_at desc").Find(&values).Error
+	err := s.db.Order("position, id").Find(&values).Error
 	return values, err
 }
 
 func (s *store) saveChat(value *Chat) error { return s.db.Save(value).Error }
+
+func (s *store) createChatWithDefaultTask(chat *Chat, task *Task) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var last Chat
+		result := tx.Order("position desc, id desc").Limit(1).Find(&last)
+		if result.Error != nil {
+			return result.Error
+		}
+		chat.Position = 1
+		if result.RowsAffected > 0 {
+			chat.Position = last.Position + 1
+		}
+		if err := tx.Create(chat).Error; err != nil {
+			return err
+		}
+		return tx.Create(task).Error
+	})
+}
+
+func (s *store) reorderChats(orderedIDs []string) ([]Chat, error) {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&Chat{}).Count(&count).Error; err != nil {
+			return err
+		}
+		if int(count) != len(orderedIDs) {
+			return errors.New("ordered_ids must contain every Chat exactly once")
+		}
+		seen := make(map[string]bool, len(orderedIDs))
+		for _, id := range orderedIDs {
+			if id == "" || seen[id] {
+				return errors.New("ordered_ids must contain every Chat exactly once")
+			}
+			seen[id] = true
+		}
+		for index, id := range orderedIDs {
+			result := tx.Model(&Chat{}).Where("id = ?", id).Update("position", index+1)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errors.New("ordered_ids contains an unknown Chat")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.chats()
+}
 
 func (s *store) task(id string) (*Task, error) {
 	var value Task

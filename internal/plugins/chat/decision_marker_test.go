@@ -113,3 +113,20 @@ func TestDecisionMarkerCRLFAndCodeFenceBoundaries(t *testing.T) {
 		t.Fatal("marker inside tilde fence was parsed")
 	}
 }
+
+func TestDecisionMarkerIgnoresInlineCodeSpans(t *testing.T) {
+	explanation := "协议标签写作 `<viewer-decision>` 和 `</viewer-decision>`，也可以用 ``<viewer-decision>`` 展示；这些都不是 Decision。"
+	if marker := parseDecisionMarker(explanation); marker != nil {
+		t.Fatalf("inline code was parsed as a marker: %#v", marker)
+	}
+	if hasDecisionMarkerCandidate(explanation) {
+		t.Fatal("inline code produced an invalid Decision candidate")
+	}
+	withMarker := explanation + "\n<viewer-decision>\nversion: 1\nkind: choice\nquestion: Continue?\n</viewer-decision>"
+	if marker := parseDecisionMarker(withMarker); marker == nil || marker.Question != "Continue?" {
+		t.Fatalf("real marker after inline code was rejected: %#v", marker)
+	}
+	if !hasDecisionMarkerCandidate("prefix <viewer-decision>") {
+		t.Fatal("non-code inline opening must remain an invalid marker candidate")
+	}
+}

@@ -1,14 +1,15 @@
-import { defineAsyncComponent, reactive, ref, watch } from "vue";
+import { defineAsyncComponent, reactive, watch } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
-import type { DockAction, DockInstance, DockProvider } from "../../shell/definePlugin";
+import type { DockInstance, DockInstanceGroup, DockProvider } from "../../shell/definePlugin";
 import { definePlugin } from "../../shell/definePlugin";
 import { useLayoutStore } from "../../stores/layout";
 import { useChatSettingsStore } from "../../stores/chatSettings";
 import { registerInputSessionSender, type InputSession } from "../../stores/inputSessions";
-import { dockUnreadStateFor, isErrorStopReason, markChatRead, markTurnCompleted } from "./dockStatus";
+import { dockUnreadStateFor, isErrorStopReason, markTaskRead, markTurnCompleted } from "./dockStatus";
+import { chatDockGroups } from "./dockGroups";
 import { chatInputRPC } from "./inputDispatch";
-import { chatIdForView, createAdditionalChatView, ensureDefaultChatView, ensureTaskView, restoreChatView, type ChatViewParams } from "./viewInstances";
-import type { ChatList, DecisionList, Task, TaskList } from "./types";
+import { chatIdForView, createAdditionalChatView, ensureDefaultChatView, ensureTaskView, resolveChatView, restoreChatView, type ChatViewParams } from "./viewInstances";
+import type { ChatList, Task, TaskList } from "./types";
 
 function sessionChatId(session: InputSession): string {
   const params = session.params as ChatViewParams | undefined;
@@ -42,12 +43,13 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   const layout = useLayoutStore();
   const chatSettings = useChatSettingsStore();
   const instances = reactive<DockInstance[]>([]);
+  const groups = reactive<DockInstanceGroup[]>([]);
   let chats: ChatList["chats"] = [];
   let sidebarTasks: Task[] = [];
 
-  const isChatOpen = (chatId: string): boolean => {
+  const isTaskOpen = (chatId: string, taskId: string): boolean => {
     const matches = (content: { paneType: string; instanceId: string } | null): boolean =>
-      content?.paneType === "chat" && chatIdForView(content.instanceId) === chatId;
+      content?.paneType === "chat" && chatIdForView(content.instanceId) === chatId && resolveChatView(content.instanceId)?.initialTaskId === taskId;
     return layout.panes.some((pane) => matches(pane.content)) || layout.floating.some((pane) => matches(pane.content));
   };
 
@@ -65,14 +67,15 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     };
   };
   const sync = (): void => {
-    for (const chat of chats) {
-      if (isChatOpen(chat.id)) markChatRead(chat.id);
+    for (const task of sidebarTasks) {
+      if (isTaskOpen(task.chat_id, task.id)) markTaskRead(task.id);
     }
+    groups.splice(0, groups.length, ...chatDockGroups(chats, sidebarTasks));
     instances.splice(0, instances.length, ...sidebarTasks.map((task) => ({
       id: ensureTaskView(task.chat_id, task.id),
       label: task.title,
-      state: task.running ? "running" : dockUnreadStateFor(task.chat_id),
-      icon: task.pinned ? "bi-pin-angle-fill" : "bi-file-earmark-text",
+      state: task.running ? "running" : dockUnreadStateFor(task.id),
+      icon: task.pinned ? "bi-pin-angle-fill" : "bi-chat-left-text",
       group: {
         id: task.chat_id,
         label: task.chat_name ?? chats.find((chat) => chat.id === task.chat_id)?.name ?? "Chat",
@@ -99,25 +102,35 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   ctx.bus.subscribe("chat:_:task", () => { void refresh(); });
   ctx.bus.subscribe("chat:_:task-summary", () => { void refresh(); });
   ctx.bus.subscribe("chat:_:turn", (frame) => {
-    const value = frame.value as { chat_id?: string; phase?: string; stop_reason?: string; role_name?: string } | undefined;
+    const value = frame.value as { chat_id?: string; task_id?: string; phase?: string; stop_reason?: string; role_name?: string } | undefined;
     if (value === undefined || typeof value.chat_id !== "string") return;
     if (value.phase !== "started" && value.phase !== "completed") return;
     if (value.phase === "completed") {
       const stopReason = typeof value.stop_reason === "string" ? value.stop_reason : "";
-      markTurnCompleted(value.chat_id, stopReason, isChatOpen(value.chat_id));
+      if (typeof value.task_id === "string") markTurnCompleted(value.task_id, stopReason, isTaskOpen(value.chat_id, value.task_id));
       notifyTurnCompleted(value.chat_id, value.role_name, stopReason);
     }
     void refresh().catch(() => undefined);
   });
   ctx.bus.subscribe("chat:_:background", () => { void refresh().catch(() => undefined); });
   const handleChatsChanged = (): void => { void refresh(); };
+  const handleTaskCurrent = (event: Event): void => {
+    const taskId = (event as CustomEvent<{ taskId?: string }>).detail?.taskId;
+    if (taskId) markTaskRead(taskId);
+    sync();
+  };
   window.addEventListener("viewer:chats-changed", handleChatsChanged);
-  ctx.onDispose(() => window.removeEventListener("viewer:chats-changed", handleChatsChanged));
+  window.addEventListener("viewer:task-current", handleTaskCurrent);
+  ctx.onDispose(() => {
+    window.removeEventListener("viewer:chats-changed", handleChatsChanged);
+    window.removeEventListener("viewer:task-current", handleTaskCurrent);
+  });
   void refresh().catch(() => undefined);
   return {
     type: "chat",
-    icon: "bi-folder",
+    icon: "bi-chat-left-text",
     title: "Chat 分组",
+    groups,
     instances,
     create: async () => {
       const chat = (await ctx.bus.request("chat:_:chats:create", {
@@ -140,40 +153,16 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   };
 }
 
-function createDecisionActions(ctx: PluginCtx): DockAction[] {
-  const pending = ref(0);
-  const refresh = async (): Promise<void> => {
-    const result = await ctx.bus.request("chat:_:decisions:list", { pending: true, limit: 1, include_pending_count: true }) as DecisionList;
-    pending.value = result.pending_count ?? 0;
-  };
-  ctx.bus.subscribe("chat:_:decision", () => { void refresh().catch(() => undefined); });
-  void refresh().catch(() => undefined);
-  return [{
-    id: "chat-decisions",
-    icon: () => "bi bi-inbox",
-    title: () => pending.value > 0 ? `Messages / Decisions（${pending.value} 待处理）` : "Messages / Decisions",
-    badge: () => pending.value > 99 ? "99+" : pending.value > 0 ? pending.value : "",
-    active: () => pending.value > 0,
-    onClick: () => { void ctx.shell.open({ paneType: "chat-decisions", instanceId: "main" }); },
-  }];
-}
-
 export default definePlugin({
   id: "chat",
   name: "聊天",
   components: {
     chat: defineAsyncComponent(() => import("./TaskPane.vue")),
     "chat-tasks": defineAsyncComponent(() => import("./TasksPage.vue")),
-    "chat-decisions": defineAsyncComponent(() => import("./DecisionCenter.vue")),
   },
   settings: defineAsyncComponent(() => import("./ChatSettings.vue")),
   createDockProvider,
-  createDockActions: createDecisionActions,
   createInstanceAdapters: () => [{
-    type: "chat-decisions",
-    cardinality: "singleton",
-    open() { return "main"; },
-  }, {
     type: "chat-tasks",
     cardinality: "singleton",
     open() { return "main"; },

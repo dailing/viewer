@@ -41,7 +41,17 @@ export interface DockInstanceGroup {
   label: string;
 }
 
-/** One running instance shown in the shell Dock. */
+export interface DockItemAction {
+  id: string;
+  title: string;
+  icon?: string;
+  label?: string;
+  active?: boolean;
+  variant?: "default" | "danger";
+  run: () => void | Promise<unknown>;
+}
+
+/** One running or explicitly pinned instance shown in the shell Dock. */
 export interface DockInstance {
   id: string;
   /** Tooltip text, e.g. "#3 /usr/bin/zsh · /home/d". */
@@ -52,6 +62,12 @@ export interface DockInstance {
   icon?: string;
   /** Optional weak grouping header; the instance label remains the primary text. */
   group?: DockInstanceGroup;
+  /** Plugin-owned click behavior; omitted means shell.open(type, instance id). */
+  open?: () => void | Promise<unknown>;
+  /** Reactive trailing text, such as a pending count or lightweight status. */
+  meta?: () => string | number;
+  /** Plugin-owned trailing buttons, rendered by the shell like pane chrome actions. */
+  actions?: DockItemAction[];
 }
 
 /**
@@ -66,12 +82,12 @@ export interface DockProvider {
   title: string;
   /** Reactive list of running instances, maintained by the provider. */
   instances: DockInstance[];
+  /** Reactive weak group headers that may remain visible with zero instances. */
+  groups?: DockInstanceGroup[];
   /** "+" menu action; returning an instance id opens its pane. */
   create?: () => Promise<string | void> | string | void;
   /** Group-row action; creates an instance inside the specified weak group. */
   createForGroup?: (groupId: string) => Promise<string | void> | string | void;
-  /** Remove an instance (Dock hover ×); absent = not removable. */
-  remove?: (instanceId: string) => Promise<void> | void;
 }
 
 /**

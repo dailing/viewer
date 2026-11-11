@@ -80,6 +80,55 @@ func markdownFence(line string) (marker byte, size int, rest string, ok bool) {
 	return marker, size, rest, true
 }
 
+func maskMarkdownInlineCode(line string) string {
+	source := []byte(line)
+	masked := append([]byte(nil), source...)
+	for start := 0; start < len(source); {
+		if source[start] != '`' {
+			start++
+			continue
+		}
+		backslashes := 0
+		for index := start - 1; index >= 0 && source[index] == '\\'; index-- {
+			backslashes++
+		}
+		if backslashes%2 != 0 {
+			start++
+			continue
+		}
+		openingEnd := start
+		for openingEnd < len(source) && source[openingEnd] == '`' {
+			openingEnd++
+		}
+		size := openingEnd - start
+		closingStart, closingEnd := -1, -1
+		for search := openingEnd; search < len(source); {
+			if source[search] != '`' {
+				search++
+				continue
+			}
+			runEnd := search
+			for runEnd < len(source) && source[runEnd] == '`' {
+				runEnd++
+			}
+			if runEnd-search == size {
+				closingStart, closingEnd = search, runEnd
+				break
+			}
+			search = runEnd
+		}
+		if closingStart < 0 {
+			start = openingEnd
+			continue
+		}
+		for index := start; index < closingEnd; index++ {
+			masked[index] = ' '
+		}
+		start = closingEnd
+	}
+	return string(masked)
+}
+
 func parseDecisionMarker(text string) *decisionMarker {
 	lines := decisionSourceLines(text)
 	var opening, closing *decisionSourceLine
@@ -102,7 +151,8 @@ func parseDecisionMarker(text string) *decisionMarker {
 			fenceSize = size
 			continue
 		}
-		if !strings.Contains(line.text, decisionOpenTag) && !strings.Contains(line.text, decisionCloseTag) {
+		lineText := maskMarkdownInlineCode(line.text)
+		if !strings.Contains(lineText, decisionOpenTag) && !strings.Contains(lineText, decisionCloseTag) {
 			continue
 		}
 		candidates++

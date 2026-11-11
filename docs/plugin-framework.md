@@ -1,6 +1,12 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v1.18**（2026-11-09）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v1.24**（2026-11-11）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v1.24 变更：**移除一次性迁移与修复工具**——删除 Chat-level 离线迁移命令、实现、测试及历史 Python 迁移脚本；Task-first 只维护当前 GORM schema，正常运行时不读取旧 Branch/DAG 数据库。
+> v1.23 变更：**Chat 手动持久化排序**——`Chat.position` 取代 pin/updated_at 动态排序；聊天设置的 Chat 列表提供上下移动，`chats:reorder` 事务性保存完整顺序，Sidebar 的可见 Chat 分组严格跟随。pin 只控制空分组常驻，不再影响位置；新建 Chat 总是追加到末尾。
+> v1.22 变更：**Pinned Chat 分组常驻 Dock**——Chat 管理中的 pin 决定该 Chat 是否在没有 open Task 时仍保留弱分组；空分组显示 `0` 并保留「＋」直接新建 Task。未 pin Chat 仍只在其有 open Task 时出现，最后一个 open Task 结束后移除；ended Task 本身不进入 Dock。`DockProvider.groups` 支持插件声明可保留的空弱分组。
+> v1.21 变更：**Dock 实例表现与行为归插件**——`DockInstance` 统一声明 icon/label，并可提供 `open`、右侧响应式 `meta` 与 `actions`；shell 只负责统一渲染，移除 `provider.remove` 特判。显式列入 `instances` 的 singleton 固定显示，Decision Center 从 Dock-foot 全局 action 迁入普通实例列表；Chat/group 改用对话图标。
+> v1.20 变更：**独立 Decision Center 与来源 Turn 上下文**——全局 Center 拆为独立前端插件，通过 Chat RPC/event 工作，不直接读 DB；单列表 pending 优先、历史置后并按状态着色，不显示 Turn 完成记录。每个 Decision 可展开来源 Turn 的 user/assistant 可见消息，复用 Chat `TurnContent`，以 `showActivities=false` 排除 tool/reasoning 等活动块。
+> v1.19 变更：**Decision 排除行内代码标签**——检测与解析统一忽略 Markdown inline code span 中的 Decision 开闭标签，避免协议说明被误判为未闭合 marker；非代码的行内 opening、真实未闭合 marker 及其他核心语法错误仍保持 invalid。
 > v1.18 变更：**Decision 每轮提示、受控结束动作与 Role 活动高水位**——Decision post-prompt 独立于 Role prompt，fresh/resumed/bridge 均在完整用户 prompt 末尾追加一次，raw 不注入；`option_action: end_current_task` 通过原 Decision option 身份直接结束 Task，不新增 Turn。bridge 以已结束 Turn 的 `ended_at` 为高水位，不再把同一 Role 上一轮输出当作 missed work。
 > v1.17 变更：**主题配色收敛与 Task 运行状态归属**——外观设置只保留 4 个基色和 1 个代码颜色，所有语法 token 由代码颜色与文字色派生，移除高级颜色定制界面及暗色固定语法色板；Preview 使用真实 hljs token。Dock 的 running 只读取各 Task 自身的后端标志，Turn/background 事件刷新 Task 元数据，禁止 Chat 级 running 回退。当前 Task 的 stop 通过 Turn ID 注册到 pane chrome；移除 Markdown/JSON 导出按钮与 Turn 内容 max-width。
 > v1.16 变更：**支持局域网 plain HTTP 的组件初始化**——统一 `utils/randomUUID.ts`：安全上下文使用原生 `crypto.randomUUID()`，非安全上下文通过 `getRandomValues`（或最终随机回退）生成 RFC 4122 UUID。Composer、文件实例、文件 watch 和 LLM 配置不得在组件初始化时直接调用仅安全上下文可用的 API；否则 localhost 正常而局域网访问时子组件会空白。
@@ -380,10 +386,10 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 - **浮动放回语义（v0.59）**：`dockFloating` 不顶替任何已占用 pane——平铺三模式在叶端追加一个新 tile 放入（末位 tile 为空则直接用之）；自由模式替换 active pane 的内容（geometry 由用户手工管理）。
 - **四种 tiling mode**：`cascade` 每层根据该层实际矩形长边二等分（宽高相等时上下切），first pane 占根一半、其余在 second 区递归；`columns` 横向等宽；`rows` 纵向等高；`free` 直接渲染 binary split tree 并开放横/纵 split + ratio drag。模式选择存 `viewer.layout.mode.v1`。前三种只显示通用「新增 pane」，不允许手改由算法确定的 geometry。
 - **移动语义**：共享抬头的「向树根/向叶端」将 active pane 内容与 DFS tile 顺序的前/后相邻项交换，并把 active 跟随到新位置；连续操作即可置首/置末，四模式与模式切换保持同一顺序语义。
-- **Dock 无 singleton 常驻项（v1.01）**：singleton provider（Bus Inspector、插件管理等）只出现在「＋」列表，点击打开或聚焦 `type:main`。文件也从「＋」新建；`create()` 返回新实例 id 时由 shell 直接打开对应 pane（Browser、终端），自行打开时返回 void。
-- **Dock 条目无动作按钮（v0.42；v0.73 修订）**：dock 条目上不放任何按钮；实例的终止/删除动作归 pane chrome（§8.8）——terminal 的终止是 chrome danger action（杀 PTY + 关 pane，plain close 只摘 pane、实例保留可回看 scrollback），files 是 pin + 关闭剪枝。唯一例外是 **launcher 实例**（v0.73）：`DockInstance.clickCreates` 标记的条目点击 = `provider.create(instanceId)` 新开实例而非聚焦自己，且 provider 实现 `remove(instanceId)` 时条目 hover 显示 × 删除该入口（files 的文件夹 pin 即 launcher：pinned 且无打开文件的实例，点击新开一个以 pin 时刻目录为初始 dir 的实例，同一文件夹可重复开多个；launcher 自身 pane 永不打开）。普通实例的 `remove` 契约仍然不存在。
+- **Dock 实例表现与行为归插件（v1.21）**：`createDockProvider` 是唯一实例列表注册入口；`DockInstance` 声明 `id/label/icon/group/state`，可另声明 `open`、响应式 `meta` 与 `actions`。shell 统一渲染 icon → name → 可选动态文字/按钮，缺省点击仍经统一 instance adapter 打开 `type:id`，提供 `open` 时执行插件行为。`provider.remove` 不再存在，unpin 等按钮全部由实例 action 提供。
+- **Singleton 常驻由显式 item 决定**：未列入 `instances` 的 singleton 只出现在「＋」；列入 `main` 即固定显示。Decision Center 以普通 `main` item 常驻并显示 pending 数量，不再使用 Dock-foot `createDockActions`；后者仅用于语音控制等不代表插件实例的全局开关。
 - **Dock 分区契约不变**：一个前端插件贡献一个 DockProvider（一个 dock 分区 + instances 列表）；一个插件可注册任意数量 pane 组件类型。需要第二个 dock 分区时由对应前端插件单独贡献，shell 契约零改动。
-- **Task-first 分组导航（v1.12）**：chat provider 分页取得全部 open Task 元数据，按 `chat_id` 组成弱分组；Task 标题是条目主文本，Chat 名称只显示在可折叠 group header。组内 running 优先，其后按 pinned、更新时间排序。group header 的「＋」经 `createForGroup(chat_id)` 在该 Chat 下创建并直接打开 Task；其他插件未声明 group 的实例仍按原平铺规则展示。导航不得为条目加载消息历史。
+- **Task-first 分组导航（v1.12，v1.22 增补，v1.23 排序）**：chat provider 分页取得全部 open Task 元数据，按 `chat_id` 组成弱分组；Task 标题是条目主文本，Chat 名称只显示在可折叠 group header。组内 running 优先，其后按 pinned、更新时间排序。group header 的「＋」经 `createForGroup(chat_id)` 在该 Chat 下创建并直接打开 Task；其他插件未声明 group 的实例仍按原平铺规则展示。`DockProvider.groups` 可声明没有实例也保留的弱分组；pinned Chat 始终声明分组，open Task 数为零时显示 `0` 并保留「＋」，unpinned Chat 仅在有 open Task 时声明分组。可见 Chat 分组严格使用 Chat 设置的持久化手动顺序；pin、updated_at 和 Task 活动不重排分组，新 Chat 追加到末尾。导航不得为条目加载消息历史。
 - **紧凑 Dock 与 ended Task 续聊（v1.13）**：分组行和 Task 行采用紧凑行高，条目之间无额外 gap。composer 对 open/ended Task 均固定显示；ended Task 的普通人工发送显式携带 `reopen_ended=true`，后端先恢复 open 再执行同一 dispatch。旧 summary 文本保留但取消 final，下一次 end 重新生成 final summary。未显式携带该字段的调用不得隐式重开。
 - **Chat 名称切换分组（v1.14）**：分组默认全部折叠，不显示独立 chevron；点击 Chat 名称展开或折叠其 Tasks。展开状态不持久化，刷新恢复默认。
 - **预览重启代际与独立 Composer（v1.15）**：独立二进制通过 `VIEWER_REPO_ROOT` 找到源码，release build 输出到当前 executable；手动预览启动时清除继承的 `INVOCATION_ID`。普通重启比较首页 `X-Viewer-Process`，确认新进程后才刷新。composer 是 Task 根 flex 布局中消息 section 的兄弟节点，不放入消息的 overflow 裁切容器。
@@ -394,13 +400,14 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 - **workspace 单一 title bar**：所有 tiled panes 共用 shell 顶部一条抬头（active pane 的图标 + 标题 + 状态 + 插件 actions/controls + layout selector + move/refresh/add-or-split/float/close）；tile 内不再重复占用标题高度，以 accent border 标 active。浮动 pane 因需 drag handle 而保留自己的标题栏。**插件禁止自渲染标题栏**；插件自定义标题/按钮一律走注册，注册 API 不变。
 - **注册 API**：`ctx.setChrome({title?, status?, statusClass?, actions?, controls?})`，按 instance uid（`paneType:instanceId`）键控；ctx dispose 时自动清除。actions = `{id, title, icon?, label?, active?, variant?, run()}`；controls = `select`（options + onChange）或 `chips`（只读条目）——类型移植自老版 `stores/paneToolbar.ts`，语义不变。
 - **标题回退**：未注册时 shell 沿用自动标题（provider title + instance 标识）。
-- **dock 实例过滤（v1.12）**：chat 显示全部 open Tasks 并按上述弱分组组织，ended Tasks 不进入 Dock；文件仍只显示置顶实例，Browser 仍只显示有 watcher 的已打开 Page，运行中终端不占位。完整 Chat 设置仍在 插件管理 → 聊天，完整 open/ended Task 管理归独立 Tasks 页面。
+- **dock 实例过滤（v1.12，v1.22 增补）**：chat 显示全部 open Tasks 并按上述弱分组组织，ended Tasks 不进入 Dock；pinned Chat 的空分组不是 Task 实例，可以常驻并创建新 Task。文件仍只显示置顶实例，Browser 仍只显示有 watcher 的已打开 Page，运行中终端不占位。完整 Chat 设置仍在 插件管理 → 聊天，完整 open/ended Task 管理归独立 Tasks 页面。
 - **dock 自动展开（v0.26 引入，v0.27 修订）**：dock 默认纯图标窄条；hover 持续超过阈值自动展开，每个条目显示名字（图标 + 文本）；指针移出即收回。**v0.27 修订两点**：①展开改 **overlay**——展开面板覆盖在 workspace 之上，dock 的 flex 占位不变，右侧 pane 布局不因展开/收回而 reflow；②悬停延迟**可配**（默认 500ms，0 = 立即），入口为 dock 底部设置按钮，值持久化于 localStorage（view state，F6）。
 
 ### 8.9 管理面板版式约定（v0.27 定稿）
 
 - **统一 master-detail**：管理型面板（聊天设置的聊天/Roles/路由三个 tab、插件管理等）一律**左窄 list + 右 configuration** 两栏，各 tab 共用同一套版式与视觉风格。list 条目**只显示名字**——无图标/星标前缀、无路径、无摘要行；list 顶部或底部固定一个"新建"按钮。
-- **动作归右栏**：list 条目上不放任何按钮；删除、pin 等破坏性或有副作用的动作一律在右栏 configuration 区（与保存并列）。
+- **动作归右栏**：除下一条定义的 Chat 排序控件外，list 条目上不放任何按钮；删除、pin 等破坏性或有副作用的动作一律在右栏 configuration 区（与保存并列）。
+- **Chat 手动排序（v1.23）**：聊天设置的 Chat list 每项右侧提供紧凑「上移／下移」图标按钮，首项禁上移、末项禁下移；每次移动提交完整 `ordered_ids`，由 `chats:reorder` 在单个事务中更新持久化 `position`。成功后 Dock 可见分组采用相同顺序，失败恢复操作前列表。pin 只决定空 Chat 是否常驻，不参与排序。
 - **dock 底部 = 设置入口**：总线连接状态指示从 dock 移除，原位为设置按钮（齿轮）；设置项含"悬停展开延迟（ms）"，持久化于 localStorage（view state，F6）。
 - **路由编辑器**：policy 的 candidates 每候选一行；agent/provider/model 渲染为"浅色小 label + 可点击文本"（不使用 select 下拉箭头样式），点击文本弹出选项菜单；相邻候选间的分割线轻微高亮、中央置小"+"按钮 = 在该位置插入新候选（列表末尾同样有一条"+"分割线用于追加）；候选排序用**拖拽**（drag & drop），不设上下移按钮；候选行不再内嵌 parameters JSON 框——右栏最底部用一个等宽框展示当前 policy 的完整 JSON 预览（只读，随可视化编辑实时更新）。
 
@@ -624,6 +631,12 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v1.24**（2026-11-11）：**移除一次性迁移与修复工具**——删除 Chat-level 离线迁移命令、实现、测试及历史 Python 迁移脚本；Task-first 只维护当前 GORM schema，正常运行时不读取旧 Branch/DAG 数据库。
+- **v1.23**（2026-11-10）：**Chat 手动持久化排序**——Chat 设置列表提供上下移动，`chats:reorder` 事务性保存完整 `position` 顺序，Sidebar 可见 Chat 分组严格跟随；pin/updated_at 不再改变位置，新建 Chat 追加末尾。
+- **v1.22**（2026-11-10）：**Pinned Chat 空分组常驻 Dock**——复用 Chat 管理中的 pin：pinned Chat 即使没有 open Task 也保留计数为 `0` 的 Chat 分组和「＋」新建入口；unpinned Chat 在最后一个 open Task 结束后移除。`DockProvider.groups` 支持声明无实例弱分组，Task 实例仍只包含 open Task。
+- **v1.21**（2026-11-10）：**Dock 实例表现与行为归插件**——`DockInstance.open/meta/actions` 分别定义点击行为、右侧动态文字与按钮；shell 统一渲染 icon → label → trailing 内容。显式 singleton instance 可固定驻留，Decision Center 使用普通 `main` item，不再占用 Dock-foot。`provider.remove` 删除，文件入口的 unpin 由插件 action 提供；Chat/group 使用对话图标。
+- **v1.20**（2026-11-09）：**独立 Decision Center 与来源 Turn 上下文**——全局 Center 拆为独立前端插件，Chat 仍唯一拥有领域数据与事务；插件采用 event-trigger + RPC reconciliation，不直接读 SQLite。单列表 pending 优先、历史置后并按状态着色，不显示 Turn 完成。`decisions:context` 返回来源 Turn 的 user/assistant 可见消息，展开区复用 `TurnContent` 且关闭 activities。
+- **v1.19**（2026-11-09）：**Decision 排除行内代码标签**——candidate 检测与 parser 均忽略 Markdown inline code span 中的开闭标签，协议说明不再产生伪 invalid Decision；非代码标签与核心语法校验不变。
 - **v1.18**（2026-11-09）：**Decision 每轮提示、受控结束动作与 Role 活动高水位**——Decision post-prompt 独立于 Role prompt，fresh/resumed/bridge 均在完整用户 prompt 末尾追加一次，raw 不注入。`option_action: end_current_task` 只由持久化 option 的 `option_id` 触发，直接 resolve Decision 并结束原 Task，不创建 Agent Turn。已结束 Turn 以 `ended_at` 推进 bridge 高水位。
 - **v1.17**（2026-11-09）：**主题配色收敛与 Task 运行状态归属**——外观仅保留 4 基色 + 代码颜色，语法 token 统一派生并移除高级颜色定制 UI；Dock running 只读 Task 自身标志。Task 级 stop 注册到 pane chrome，移除导出按钮与正文 max-width。
 - **v1.16**（2026-11-08）：**Plain HTTP UUID 兼容**——统一安全/非安全上下文均可用的 UUID 生成，修复局域网访问时 Composer 等子组件初始化空白。
@@ -810,13 +823,15 @@ my-plugin/
 
 - 后端（13 个模块）：`super_workspace.py` / `_runtime.py` / `_worker.py` / `_memory.py`、`agent_history.py`、`turn_summary.py`、`llm_client.py`、`inference.py`、`identity.py`、`driver_catalog.py`、`ws_clients.py`，及 ACP 层 `acp_runtime.py` / `acp_sessions.py` / `hermes_acp.py` / `hermes_sessions.py` / `codex_app_server*.py` / `opencode_*.py`。**（v0.23：ACP/agent 驱动层模块归对应 `viewer.agent-*` 插件，chat 只留编排 + 存储 + summaries/Hindsight。）**
 - 路由：`/api/super-workspace/*`（~20 条：workspace/chats/roles/routing/runs/events/dispatch/stop）+ `/api/agents/providers|inference-targets` + `/internal/super-workspace/notify` → 全部变 RPC/总线事件。
-- 前端：`TaskPane.vue`（多 Chat view、每视图一个 Active Task，300 条有限消息窗口与独立阅读锚点）、`TasksPage.vue`（独立 `chat-tasks` singleton，跨 Chat 筛选与 50 条游标分页）、`DecisionCenter.vue`（全局 `chat-decisions` singleton，Pending/History、badge 与来源跳转）、`DecisionCard.vue`（内联与全局共用）、`viewInstances.ts`、`inputDispatch.ts`、`inputSessions.ts`；设置仍由 `ChatSettings.vue` 统一承载 Chats/Roles/Routes。
-- Instance：Chat view 为 multi，adapter 接受 `{chatId, initialTaskId?}` 并返回稳定 view id；`chat-tasks` 与 `chat-decisions` 均为 singleton `main`。Agent runtime 移出 chat：独立 headless `viewer.agent-hermes` / `viewer.agent-codex` / `viewer.agent-opencode` 插件经统一 `start/prompt/cancel` 与事件 RPC 工作；Turn 持有 Task、Role 与 execution target，RoleSession 以 `(chat_id, task_id, role_id)` 持久化。
-- slots：`tasks:create/list/get/patch/end`、`tasks:summary`、`tasks:summary-retry`、`tasks:export`、`turns:list`、`role-sessions:invalidate`、`send-message`（`task_id` 必填，可带 `continue_turn_id`）、`stop`、`queued-cancel`/`queued-update`、`draft:get/set`、`blocks:list`、`chats:list`、`decisions:list/open/respond/cancel`。emits：`chat:_:task`、`chat:_:turn`、`chat:_:task-summary`、`chat:_:decision`、`chat:{id}:message/block`、`chat:_:queue`。
+- 前端：`TaskPane.vue`（多 Chat view、每视图一个 Active Task，300 条有限消息窗口与独立阅读锚点）、`TasksPage.vue`（独立 `chat-tasks` singleton，跨 Chat 筛选与 50 条游标分页）、`TurnContent.vue`（Task 与 Decision 上下文共用的正文/activity 渲染）、`DecisionCard.vue`（内联与全局共用）、`viewInstances.ts`、`inputDispatch.ts`、`inputSessions.ts`；设置仍由 `ChatSettings.vue` 统一承载 Chats/Roles/Routes。独立 `decision-center` 前端插件承载全局 singleton、pending 优先单列表、历史状态色、badge、来源 Turn 展开与来源跳转。
+- Instance：Chat view 为 multi，adapter 接受 `{chatId, initialTaskId?}` 并返回稳定 view id；`chat-tasks` 与独立插件的 `decision-center` 均为 singleton `main`。Agent runtime 移出 chat：独立 headless `viewer.agent-hermes` / `viewer.agent-codex` / `viewer.agent-opencode` 插件经统一 `start/prompt/cancel` 与事件 RPC 工作；Turn 持有 Task、Role 与 execution target，RoleSession 以 `(chat_id, task_id, role_id)` 持久化。
+- slots：`tasks:create/list/get/patch/end`、`tasks:summary`、`tasks:summary-retry`、`tasks:export`、`turns:list`、`role-sessions:invalidate`、`send-message`（`task_id` 必填，可带 `continue_turn_id`）、`stop`、`queued-cancel`/`queued-update`、`draft:get/set`、`blocks:list`、`chats:list/reorder`、`decisions:list/open/context/respond/cancel`。emits：`chat:_:task`、`chat:_:turn`、`chat:_:task-summary`、`chat:_:decision`、`chat:{id}:message/block`、`chat:_:queue`。
 - **消息渲染（v0.30，v0.57 工具层升级，v0.59 折叠口径）**：一 turn 一盒（user 消息独立盒；role turn 一盒），盒顶 info 条 = 角色图标+名 + 时间（+活跃态 spinner）；盒内 segments 严格按 `occurred_at` 交错——`messages` 文本段走 markdown 渲染；连续 ≥3 条小灰行活动（tool_call/tool_result/file_change/command/thinking/error）收成 `Tools ×N` 第一层（仅正文文本打断），展开后每项仍是可展开第二层。单项外层以图标+语义类型+命令/路径摘要+状态+时间显示，摘要 220 字符封顶；内层按 Command/Path/Locations/Input/Arguments/Output/Result/Changes 分区，总展示预算 9000 字符并显式标注省略，不直接渲染裸 payload JSON。markdown 管线 = markdown-it + texmath(KaTeX) + hljs（行号）+ mermaid（对齐生产版 `markdownRender.ts`）；样式 = `--markdown-*`/`--syntax-*` CSS 变量主题（亮/暗内置默认随 app theme，自定义存 localStorage `viewer.markdownTheme.v1`）。
+- **Decision Center 独立插件与来源上下文（v1.20）**：`decision-center` 前端插件拥有全局 pane 与显式常驻 Dock instance，pending 数量由实例 `meta` 提供，Chat 继续拥有 Decision/Task/Turn/Message 数据和事务。Center 以 Decision event 触发更新并用 RPC 对账，另监听 retained `plugins:_:list`，Chat 就绪后重试初始加载，避免 bootstrap RPC 竞态导致空列表或计数不更新；不直接打开 SQLite，不把 event 当唯一真相源。界面为单列表，pending/dispatching 在前、历史在后，状态用颜色区分，不显示 Turn 完成记录。`decisions:context` 仅返回来源 Turn 的 user/assistant 可见消息（含触发该 Turn 的用户输入）；展开区复用 `TurnContent` 并设置 `showActivities=false`，不查询或渲染 tool call、tool result、reasoning 等 activity block。
+- **Decision 行内代码边界（v1.19）**：candidate 检测与 marker parser 使用同一 inline-code masking；Markdown 行内代码中的开闭标签只是说明文本，不产生 Decision。代码围栏排除、标签独占一行、末尾约束和其他非法核心输入的拒绝规则不变。
 - **Decision prompt、结束动作与 bridge（v1.18）**：Decision post-prompt 不属于 Role 的静态 initial prompt；每个非 raw Turn 在 fresh/resumed/bridge 用户正文完成后统一追加一次。平铺 marker 允许在 option 后紧跟 `option_action: end_current_task`，同一 marker 至多一个；前端回复必须携带持久化 option 的 `option_id`，后端按存储内容判定动作。该动作复用 `decisions:respond`，原子 resolve 当前 Decision、取消同 Task 其他 pending Decision、结束 Task 并排期 final summary，不调用 `send-message`、不新增 Turn。普通回复仍续接源 Turn 的 Role session。bridge 的活动高水位对已结束 Turn 使用 `ended_at`，运行中 Turn 才使用 `started_at`，因此同一 Role 上一轮自身输出不会重复注入。
 - 存储：Task-first SQLite（新库，无旧 Branch/DAG 表）；`turn_events` 保存 driver 原文，`message_blocks` 保存归一化块，`messages` 保存可见文本；Tasks/Turns/RoleSessions/TurnSummaries/TaskSummaries/Decisions/ContextBuilds/OperationReceipts 同库。Hindsight bank 仅以 Chat 为边界；任务级跨 Task 信息由 completed final Task Summary 进入 fresh Context，bridge 不重复注入跨 Task 层。
-- 迁移要点：Task-first 正常运行时不读取旧 Branch/DAG 数据库。只有显式执行离线 `viewer-chat-migrate --data-dir PATH --yes` 才进行一次性升级：保留 Chat/Role/routing 设置，为每个 Chat 建立一个 open 默认 Task；旧消息、分支、session、summary 与 Loop 状态不迁移。原始数据库保存为 `chat.pre-task-first.sqlite3`，已有备份时拒绝重复迁移。
+- 兼容性：Task-first 正常运行时不读取旧 Branch/DAG 数据库，也不保留一次性迁移或修复工具。
 
 ### A.8 viewer.voice（语音输入，v0.28 定稿）
 

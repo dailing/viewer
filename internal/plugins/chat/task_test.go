@@ -51,15 +51,27 @@ func TestTaskSchemaStartsCleanAndPersistsAcrossReopen(t *testing.T) {
 	if err != nil || len(tasks) != 2 {
 		t.Fatalf("tasks were recreated or lost: %v err=%v", tasks, err)
 	}
+	for _, check := range []struct {
+		model any
+		name  string
+	}{
+		{&MessageBlock{}, "idx_message_blocks_task_occurred"},
+		{&Message{}, "idx_messages_task_cursor"},
+		{&Turn{}, "idx_turns_task_started"},
+	} {
+		if !s.db.Migrator().HasIndex(check.model, check.name) {
+			t.Errorf("ORM-managed index %s is missing", check.name)
+		}
+	}
 }
 
 func TestTaskStoreRejectsLegacySchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.sqlite3")
-	legacy, err := openLegacyFixture(path)
+	legacy, err := openChatSchemaFixture(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := legacy.Exec(`CREATE TABLE chats (id TEXT PRIMARY KEY, name TEXT)`).Error; err != nil {
+	if err := legacy.AutoMigrate(&chatOrderLegacyRow{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := closeGORM(legacy); err != nil {

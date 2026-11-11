@@ -15,8 +15,6 @@ import (
 	"strings"
 	"sync"
 
-	"gorm.io/gorm"
-
 	"viewer/internal/agentdriver"
 	"viewer/internal/plugins/pluginrpc"
 	"viewer/sdk/go/busclient"
@@ -28,11 +26,11 @@ var Manifest = busclient.Manifest{
 		"chat:_:workspace:get": map[string]any{}, "chat:_:workspace:patch": map[string]any{},
 		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},
 		"chat:_:routing:get": map[string]any{}, "chat:_:routing:put": map[string]any{},
-		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
+		"chat:_:chats:list": map[string]any{}, "chat:_:chats:create": map[string]any{}, "chat:_:chats:patch": map[string]any{}, "chat:_:chats:reorder": map[string]any{}, "chat:_:chats:delete": map[string]any{}, "chat:_:chats:activate": map[string]any{},
 		"chat:_:tasks:create": map[string]any{}, "chat:_:tasks:get": map[string]any{}, "chat:_:tasks:list": map[string]any{}, "chat:_:tasks:patch": map[string]any{}, "chat:_:tasks:end": map[string]any{}, "chat:_:tasks:pin": map[string]any{},
 		"chat:_:tasks:summary": map[string]any{}, "chat:_:tasks:summary-retry": map[string]any{}, "chat:_:turn-summaries:retry": map[string]any{},
 		"chat:_:send-message": map[string]any{}, "chat:_:history": map[string]any{}, "chat:_:turns:list": map[string]any{}, "chat:_:role-sessions:invalidate": map[string]any{},
-		"chat:_:decisions:list": map[string]any{}, "chat:_:decisions:respond": map[string]any{}, "chat:_:decisions:cancel": map[string]any{}, "chat:_:decisions:open": map[string]any{}, "chat:_:tasks:export": map[string]any{},
+		"chat:_:decisions:list": map[string]any{}, "chat:_:decisions:respond": map[string]any{}, "chat:_:decisions:cancel": map[string]any{}, "chat:_:decisions:open": map[string]any{}, "chat:_:decisions:context": map[string]any{}, "chat:_:tasks:export": map[string]any{},
 		"chat:_:stop": map[string]any{}, "chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{}, "chat:_:draft:get": map[string]any{}, "chat:_:draft:set": map[string]any{},
 		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
 		"chat:_:voice:invoke": map[string]any{},
@@ -140,11 +138,11 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:workspace:get": p.handleWorkspaceGet, "chat:_:workspace:patch": p.handleWorkspacePatch,
 		"chat:_:roles:list": p.handleRolesList, "chat:_:roles:create": p.handleRolesCreate, "chat:_:roles:patch": p.handleRolesPatch, "chat:_:roles:delete": p.handleRolesDelete,
 		"chat:_:routing:get": p.handleRoutingGet, "chat:_:routing:put": p.handleRoutingPut,
-		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
+		"chat:_:chats:list": p.handleChatsList, "chat:_:chats:create": p.handleChatsCreate, "chat:_:chats:patch": p.handleChatsPatch, "chat:_:chats:reorder": p.handleChatsReorder, "chat:_:chats:delete": p.handleChatsDelete, "chat:_:chats:activate": p.handleChatsActivate,
 		"chat:_:tasks:create": p.handleTaskCreate, "chat:_:tasks:get": p.handleTaskGet, "chat:_:tasks:list": p.handleTasksList, "chat:_:tasks:patch": p.handleTaskPatch, "chat:_:tasks:end": p.handleTaskEnd, "chat:_:tasks:pin": p.handleTaskPin,
 		"chat:_:tasks:summary": p.handleTaskSummary, "chat:_:tasks:summary-retry": p.handleTaskSummaryRetry, "chat:_:turn-summaries:retry": p.handleTurnSummaryRetry,
 		"chat:_:send-message": p.handleDispatch, "chat:_:history": p.handleChatsList, "chat:_:turns:list": p.handleTurnsList, "chat:_:role-sessions:invalidate": p.handleRoleSessionInvalidate,
-		"chat:_:decisions:list": p.handleDecisionsList, "chat:_:decisions:respond": p.handleDecisionRespond, "chat:_:decisions:cancel": p.handleDecisionCancel, "chat:_:decisions:open": p.handleDecisionOpen, "chat:_:tasks:export": p.handleTaskExport,
+		"chat:_:decisions:list": p.handleDecisionsList, "chat:_:decisions:respond": p.handleDecisionRespond, "chat:_:decisions:cancel": p.handleDecisionCancel, "chat:_:decisions:open": p.handleDecisionOpen, "chat:_:decisions:context": p.handleDecisionContext, "chat:_:tasks:export": p.handleTaskExport,
 		"chat:_:stop": p.handleStop, "chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate, "chat:_:draft:get": p.handleDraftGet, "chat:_:draft:set": p.handleDraftSet,
 		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
 		"chat:_:voice:invoke": p.handleVoiceInvoke,
@@ -629,12 +627,7 @@ func (p *Plugin) handleChatsCreate(frame busclient.Frame) {
 	var task *Task
 	if err == nil {
 		task = &Task{ID: newID(), ChatID: chat.ID, Title: "主线", TitleSource: "default", CreatedBy: "chat", Pinned: chat.Pinned, CreatedAt: now, UpdatedAt: now}
-		err = p.store.db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Save(&chat).Error; err != nil {
-				return err
-			}
-			return tx.Create(task).Error
-		})
+		err = p.store.createChatWithDefaultTask(&chat, task)
 	}
 	if err == nil {
 		p.publishVoiceCatalog()
@@ -646,6 +639,27 @@ func (p *Plugin) handleChatsCreate(frame busclient.Frame) {
 		reply["task"] = task.payload()
 	}
 	p.reply(frame, reply, err)
+}
+func (p *Plugin) handleChatsReorder(frame busclient.Frame) {
+	value, err := frameObject(frame)
+	var orderedIDs []string
+	if err == nil {
+		err = decodeInto(value["ordered_ids"], &orderedIDs)
+	}
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	chats, err := p.store.reorderChats(orderedIDs)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	payload := make([]map[string]any, 0, len(chats))
+	for _, chat := range chats {
+		payload = append(payload, chat.payload())
+	}
+	p.reply(frame, map[string]any{"chats": payload}, nil)
 }
 func (p *Plugin) handleChatsPatch(frame busclient.Frame) {
 	value, err := frameObject(frame)

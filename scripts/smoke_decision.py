@@ -41,6 +41,12 @@ async def run() -> None:
             assert message["task_id"] == task["id"]
             opened = await gateway.request("chat:_:decisions:open", {"decision_id": decision["id"]})
             assert opened["source_message_id"] == message["id"] and opened["task_id"] == task["id"]
+            context = await client.request("chat:_:decisions:context", {"decision_id": decision["id"]})
+            assert context["source_turn_id"] == decision["source_turn_id"]
+            assert [item["role"] for item in context["messages"]] == ["user", "assistant"]
+            assert context["messages"][0]["text"] == "MOCK_DECISION first"
+            assert context["messages"][1]["id"] == decision["source_message_id"] and context["messages"][1]["text"] == message["text"]
+            assert all(item["turn_id"] in {decision["source_turn_id"], context["messages"][0]["turn_id"]} for item in context["messages"])
             try: await client.request("chat:_:decisions:respond", {"decision_id": decision["id"], "response": "Recommended path", "expected_version": decision["version"]})
             except Exception as exc: assert "gateway" in str(exc)
             else: raise AssertionError("non-gateway caller resolved a human Decision")
@@ -114,7 +120,7 @@ async def run() -> None:
                 assert database.execute("select count(*) from turns where task_id=?", (end_task["id"],)).fetchone()[0] == 1
                 assert database.execute("select count(*) from messages where task_id=? and role='user' and text='End current task'", (end_task["id"],)).fetchone()[0] == 0
             finally: database.close()
-            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, gateway response, same session without redundant bridge, direct Task end, idempotency and cursor list")
+            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, visible source-Turn context, gateway response, same session without redundant bridge, direct Task end, idempotency and cursor list")
         finally: await gateway.close()
 def main() -> None: asyncio.run(run()); print("PASS Decision smoke complete")
 if __name__ == "__main__": main()

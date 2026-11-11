@@ -1,21 +1,17 @@
 /**
- * Chat Dock unread dots (unread / unread-error).
+ * Task Dock unread dots (unread / unread-error).
  *
  * Running state is deliberately not stored here: each Dock row reads the
- * authoritative `running` flag of its own Task. Chat-level running snapshots
- * must never leak onto sibling Tasks. Turn completion only records unread
- * state when the Chat has no open pane.
- *
- * Read state is browser-local (localStorage, non-namespaced like the other
- * shell stores): chats absent from the map are read, so a fresh browser
- * starts all-read. Opening a chat pane clears its entry; the dot disappears.
+ * authoritative `running` flag of its own Task. Completion and read state are
+ * keyed by Task ID so one Task can never mark its Chat siblings unread.
+ * Read state is browser-local; Tasks absent from the map are read.
  */
 import { reactive } from "vue";
 
-const STORAGE_KEY = "viewer.chatUnread.v1";
+const STORAGE_KEY = "viewer.taskUnread.v1";
 
 export type UnreadKind = "done" | "error";
-export type ChatDockState = "error" | "unread" | undefined;
+export type TaskDockState = "error" | "unread" | undefined;
 
 /** Stop reasons that count as a failed turn for the red dot. */
 export function isErrorStopReason(reason: string): boolean {
@@ -38,46 +34,42 @@ function loadUnread(): Record<string, UnreadKind> {
   }
 }
 
-export const chatDockStatus = reactive({
-  /** chat id → unread kind; absence means read. Persisted. */
+export const taskDockStatus = reactive({
+  /** Task id → unread kind; absence means read. Persisted. */
   unread: loadUnread(),
 });
 
 function persistUnread(): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(chatDockStatus.unread));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(taskDockStatus.unread));
   } catch {
-    // Quota/private-mode failures are non-fatal: the dots just become
-    // session-local for this browser.
+    // Quota/private-mode failures are non-fatal: dots remain session-local.
   }
 }
 
-/**
- * Record a finished turn. When the chat has no open pane the completion is
- * unread: amber for a normal end, red when stop_reason reports a failure.
- */
-export function markTurnCompleted(chatID: string, stopReason: string, chatOpen: boolean): void {
-  if (chatID === "" || chatOpen) return;
-  chatDockStatus.unread[chatID] = isErrorStopReason(stopReason) ? "error" : "done";
+/** Record a finished Turn only when its own Task has no open pane. */
+export function markTurnCompleted(taskID: string, stopReason: string, taskOpen: boolean): void {
+  if (taskID === "" || taskOpen) return;
+  taskDockStatus.unread[taskID] = isErrorStopReason(stopReason) ? "error" : "done";
   persistUnread();
 }
 
-/** Opening a chat marks it read; the dot clears. */
-export function markChatRead(chatID: string): void {
-  if (chatID in chatDockStatus.unread) {
-    delete chatDockStatus.unread[chatID];
+/** Opening one Task marks only that Task read. */
+export function markTaskRead(taskID: string): void {
+  if (taskID in taskDockStatus.unread) {
+    delete taskDockStatus.unread[taskID];
     persistUnread();
   }
 }
 
-/** Drop all state for a removed chat. */
-export function forgetChat(chatID: string): void {
-  markChatRead(chatID);
+/** Drop all state for a removed Task. */
+export function forgetTask(taskID: string): void {
+  markTaskRead(taskID);
 }
 
-/** Unread dot state for one chat: error wins over done. */
-export function dockUnreadStateFor(chatID: string): ChatDockState {
-  const kind = chatDockStatus.unread[chatID];
+/** Unread dot state for one Task: error wins over done. */
+export function dockUnreadStateFor(taskID: string): TaskDockState {
+  const kind = taskDockStatus.unread[taskID];
   if (kind === "error") return "error";
   if (kind === "done") return "unread";
   return undefined;

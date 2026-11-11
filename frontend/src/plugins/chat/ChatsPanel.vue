@@ -15,6 +15,7 @@ const roles = ref<Role[]>([]);
 const routing = ref<RoutingConfig>({ default_routing_policy_id: "", routing_policies: [] });
 const active = ref("");
 const selectedID = ref("");
+const reordering = ref(false);
 const error = ref("");
 const selected = computed(() => chats.value.find((chat) => chat.id === selectedID.value) ?? null);
 const items = computed(() => chats.value.map(({ id, name }) => ({ id, name })));
@@ -80,6 +81,27 @@ async function create(): Promise<void> {
   }
 }
 
+async function reorder(orderedIds: string[]): Promise<void> {
+  if (reordering.value) return;
+  const previous = chats.value;
+  const byId = new Map(previous.map((chat) => [chat.id, chat]));
+  const next = orderedIds.map((id) => byId.get(id)).filter((chat): chat is Chat => chat !== undefined);
+  if (next.length !== previous.length) return;
+  reordering.value = true;
+  error.value = "";
+  chats.value = next;
+  try {
+    const result = await ctx.bus.request("chat:_:chats:reorder", { ordered_ids: orderedIds }) as { chats: Chat[] };
+    chats.value = result.chats;
+    notifyChatsChanged();
+  } catch (cause) {
+    chats.value = previous;
+    error.value = errorText(cause);
+  } finally {
+    reordering.value = false;
+  }
+}
+
 async function patch(chat: Chat, values: Record<string, unknown>): Promise<void> {
   error.value = "";
   try {
@@ -125,7 +147,16 @@ onMounted(() => void load().catch((cause) => { error.value = errorText(cause); }
 </script>
 
 <template>
-  <MasterDetail :items="items" :selected-id="selectedID" create-label="＋ 新建聊天" @select="selectedID = $event" @create="create">
+  <MasterDetail
+    :items="items"
+    :selected-id="selectedID"
+    create-label="＋ 新建聊天"
+    reorderable
+    :reorder-disabled="reordering"
+    @select="selectedID = $event"
+    @create="create"
+    @reorder="reorder"
+  >
     <template #detail>
       <div v-if="error" class="small text-danger mb-2">{{ error }}</div>
       <div v-if="selected" class="chat-config">

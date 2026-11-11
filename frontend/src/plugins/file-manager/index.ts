@@ -31,7 +31,10 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
   const instances = reactive<DockInstance[]>([]);
   watchEffect(() => {
     instances.splice(0, instances.length, ...registry.filter((entry) => entry.pinned).map((entry) => ({
-      id: entry.id, label: entry.label, icon: "bi-folder2",
+      id: entry.id,
+      label: entry.label,
+      icon: "bi-folder2",
+      actions: [{ id: "unpin", title: "移除此固定入口", icon: "bi-x", run: () => removeInstance(entry.id) }],
     })));
   });
   const prune = (): void => pruneUnpinned(hostedInstanceIds("file-manager"));
@@ -44,7 +47,6 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
     title: "文件管理器",
     instances,
     create: () => createInstance().id,
-    remove: removeInstance,
   };
 }
 

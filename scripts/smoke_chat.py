@@ -210,6 +210,23 @@ async def run() -> None:
             except Exception as exc: assert "LLM router is not configured" in str(exc)
             else: raise AssertionError("router without config unexpectedly succeeded")
             print("PASS router missing-config error")
+
+            base_ids = [item["id"] for item in (await client.request("chat:_:chats:list", {}))["chats"]]
+            order_a = await client.request("chat:_:chats:create", {"name": "Order A", "root": str(ROOT), "type": "group", "member_role_ids": []})
+            order_b = await client.request("chat:_:chats:create", {"name": "Order B", "root": str(ROOT), "type": "group", "member_role_ids": []})
+            appended_ids = [item["id"] for item in (await client.request("chat:_:chats:list", {}))["chats"]]
+            assert appended_ids == base_ids + [order_a["id"], order_b["id"]]
+            ordered_ids = [order_b["id"], *base_ids, order_a["id"]]
+            reordered = (await client.request("chat:_:chats:reorder", {"ordered_ids": ordered_ids}))["chats"]
+            assert [item["id"] for item in reordered] == ordered_ids
+            assert [item["position"] for item in reordered] == list(range(1, len(ordered_ids) + 1))
+            await client.request("chat:_:chats:patch", {"id": order_a["id"], "pinned": True})
+            stable_ids = [item["id"] for item in (await client.request("chat:_:chats:list", {}))["chats"]]
+            assert stable_ids == ordered_ids
+            order_c = await client.request("chat:_:chats:create", {"name": "Order C", "root": str(ROOT), "type": "group", "member_role_ids": []})
+            final_ids = [item["id"] for item in (await client.request("chat:_:chats:list", {}))["chats"]]
+            assert final_ids == ordered_ids + [order_c["id"]]
+            print("PASS persistent Chat reorder, update-stable order, and append-on-create")
         except Exception:
             if log_path.exists(): print(log_path.read_text(errors="replace")[-4000:], file=sys.stderr)
             raise

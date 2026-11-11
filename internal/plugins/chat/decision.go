@@ -28,6 +28,7 @@ func hasDecisionMarkerCandidate(text string) bool {
 			fenceMarker, fenceSize = marker, size
 			continue
 		}
+		line = maskMarkdownInlineCode(line)
 		if strings.Contains(line, decisionOpenTag) || strings.Contains(line, decisionCloseTag) {
 			return true
 		}
@@ -458,6 +459,48 @@ func (p *Plugin) handleDecisionCancel(frame busclient.Frame) {
 	}
 	p.publishDecision(decision)
 	p.reply(frame, map[string]any{"decision": decisionPayload(decision)}, nil)
+}
+
+func (p *Plugin) decisionTurnMessages(decision *Decision) ([]Message, error) {
+	turn, err := p.store.turn(decision.SourceTurnID)
+	if err != nil {
+		return nil, err
+	}
+	if turn == nil {
+		return nil, errors.New("decision source turn not found")
+	}
+	turnIDs := []string{turn.ID}
+	if turn.DispatchID != "" && turn.DispatchID != turn.ID {
+		turnIDs = append(turnIDs, turn.DispatchID)
+	}
+	var messages []Message
+	if err := p.store.db.Where("turn_id IN ? AND role IN ?", turnIDs, []string{"user", "assistant"}).Order("created_at, id").Find(&messages).Error; err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func (p *Plugin) handleDecisionContext(frame busclient.Frame) {
+	request, err := frameObject(frame)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	decision, err := p.decision(requestString(request, "decision_id"))
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	messages, err := p.decisionTurnMessages(decision)
+	if err != nil {
+		p.reply(frame, nil, err)
+		return
+	}
+	values := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
+		values = append(values, message.payload())
+	}
+	p.reply(frame, map[string]any{"decision_id": decision.ID, "source_turn_id": decision.SourceTurnID, "messages": values}, nil)
 }
 
 func (p *Plugin) handleDecisionOpen(frame busclient.Frame) {

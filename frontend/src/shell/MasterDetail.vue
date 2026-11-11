@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
-defineProps<{
+const props = defineProps<{
   items: Array<{ id: string; name: string }>;
   selectedId: string;
   createLabel: string;
+  reorderable?: boolean;
+  reorderDisabled?: boolean;
 }>();
 
 const emit = defineEmits<{
   select: [id: string];
   create: [];
+  reorder: [orderedIds: string[]];
 }>();
 
 // Mobile drill-down (≤760px): the fixed 230px split leaves the detail form
@@ -36,23 +39,47 @@ function onCreate(): void {
   emit("create");
   if (narrow.value) detailOpen.value = true;
 }
+
+function onMove(index: number, offset: number): void {
+  const target = index + offset;
+  if (target < 0 || target >= props.items.length) return;
+  const orderedIds = props.items.map((item) => item.id);
+  [orderedIds[index], orderedIds[target]] = [orderedIds[target], orderedIds[index]];
+  emit("reorder", orderedIds);
+}
 </script>
 
 <template>
   <section class="master-detail">
     <aside v-if="!narrow || !detailOpen" class="master-column">
       <div class="master-list">
-        <button
-          v-for="item in items"
-          :key="item.id"
-          type="button"
-          class="master-item"
-          :class="{ selected: item.id === selectedId }"
-          :title="item.name"
-          @click="onSelect(item.id)"
-        >
-          {{ item.name }}
-        </button>
+        <div v-for="(item, index) in items" :key="item.id" class="master-item-row">
+          <button
+            type="button"
+            class="master-item"
+            :class="{ selected: item.id === selectedId }"
+            :title="item.name"
+            @click="onSelect(item.id)"
+          >
+            {{ item.name }}
+          </button>
+          <div v-if="reorderable" class="master-item-reorder">
+            <button
+              type="button"
+              :disabled="reorderDisabled || index === 0"
+              :title="`上移 ${item.name}`"
+              :aria-label="`上移 ${item.name}`"
+              @click.stop="onMove(index, -1)"
+            ><i class="bi bi-arrow-up"></i></button>
+            <button
+              type="button"
+              :disabled="reorderDisabled || index === items.length - 1"
+              :title="`下移 ${item.name}`"
+              :aria-label="`下移 ${item.name}`"
+              @click.stop="onMove(index, 1)"
+            ><i class="bi bi-arrow-down"></i></button>
+          </div>
+        </div>
         <div v-if="items.length === 0" class="master-empty">暂无项目</div>
       </div>
       <button type="button" class="master-create" @click="onCreate">{{ createLabel }}</button>
@@ -107,6 +134,41 @@ function onCreate(): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.master-item-row {
+  align-items: center;
+  display: flex;
+  min-width: 0;
+}
+
+.master-item-row .master-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.master-item-reorder {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.master-item-reorder button {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  height: 26px;
+  padding: 0;
+  width: 24px;
+}
+
+.master-item-reorder button:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.master-item-reorder button:disabled {
+  opacity: 0.25;
 }
 
 .master-item:hover,

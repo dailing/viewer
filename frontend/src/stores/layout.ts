@@ -99,6 +99,138 @@ export type OpenMode = "new" | "replace";
 
 const OPEN_MODE_STORAGE_KEY = "viewer.layout.openMode.v1";
 const LAYOUT_MODE_STORAGE_KEY = "viewer.layout.mode.v1";
+export const WORKSPACE_STORAGE_KEY = "viewer.layout.workspace.v1";
+
+export interface WorkspaceSnapshot {
+  root: LayoutNode;
+  activePaneId: string;
+  floating: FloatingPane[];
+}
+
+function emptyWorkspace(): WorkspaceSnapshot {
+  return {
+    root: { type: "pane", id: "p1", content: null, epoch: 0 },
+    activePaneId: "p1",
+    floating: [],
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseContent(value: unknown, allowEmpty: boolean): PaneContent | null {
+  if (value === null && allowEmpty) return null;
+  if (!isRecord(value) || typeof value.paneType !== "string" || value.paneType === "" ||
+      typeof value.instanceId !== "string" || value.instanceId === "") {
+    throw new Error("invalid pane content");
+  }
+  return { paneType: value.paneType, instanceId: value.instanceId };
+}
+
+function parseLayoutNode(
+  value: unknown,
+  ids: Set<string>,
+  paneIds: Set<string>,
+  contents: Set<string>,
+): LayoutNode {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "" || ids.has(value.id)) {
+    throw new Error("invalid layout node");
+  }
+  ids.add(value.id);
+  if (value.type === "pane") {
+    const content = parseContent(value.content, true);
+    if (content !== null) {
+      const uid = contentUid(content);
+      if (contents.has(uid)) throw new Error("duplicate pane content");
+      contents.add(uid);
+    }
+    paneIds.add(value.id);
+    return { type: "pane", id: value.id, content, epoch: 0 };
+  }
+  if (value.type !== "split" || (value.direction !== "horizontal" && value.direction !== "vertical") ||
+      typeof value.ratio !== "number" || !Number.isFinite(value.ratio)) {
+    throw new Error("invalid split node");
+  }
+  return {
+    type: "split",
+    id: value.id,
+    direction: value.direction,
+    ratio: Math.min(RATIO_MAX, Math.max(RATIO_MIN, value.ratio)),
+    first: parseLayoutNode(value.first, ids, paneIds, contents),
+    second: parseLayoutNode(value.second, ids, paneIds, contents),
+  };
+}
+
+function parseFloatingPane(
+  value: unknown,
+  ids: Set<string>,
+  contents: Set<string>,
+): FloatingPane {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "" || ids.has(value.id)) {
+    throw new Error("invalid floating pane");
+  }
+  const content = parseContent(value.content, false);
+  if (content === null) throw new Error("empty floating pane");
+  const uid = contentUid(content);
+  if (contents.has(uid)) throw new Error("duplicate floating content");
+  for (const field of ["x", "y", "w", "h", "z"] as const) {
+    if (typeof value[field] !== "number" || !Number.isFinite(value[field])) {
+      throw new Error("invalid floating geometry");
+    }
+  }
+  ids.add(value.id);
+  contents.add(uid);
+  return {
+    id: value.id,
+    content,
+    x: Math.round(value.x as number),
+    y: Math.round(value.y as number),
+    w: Math.max(FLOAT_MIN_W, Math.round(value.w as number)),
+    h: Math.max(FLOAT_MIN_H, Math.round(value.h as number)),
+    z: Math.max(1, Math.round(value.z as number)),
+    epoch: 0,
+  };
+}
+
+function loadWorkspace(): WorkspaceSnapshot {
+  try {
+    const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+    if (raw === null) return emptyWorkspace();
+    const value: unknown = JSON.parse(raw);
+    if (!isRecord(value) || typeof value.activePaneId !== "string" || !Array.isArray(value.floating)) {
+      throw new Error("invalid workspace snapshot");
+    }
+    const ids = new Set<string>();
+    const paneIds = new Set<string>();
+    const contents = new Set<string>();
+    const root = parseLayoutNode(value.root, ids, paneIds, contents);
+    if (!paneIds.has(value.activePaneId)) throw new Error("invalid active pane");
+    const floating = value.floating.map((entry) => parseFloatingPane(entry, ids, contents));
+    return { root, activePaneId: value.activePaneId, floating };
+  } catch {
+    return emptyWorkspace();
+  }
+}
+
+function nextWorkspaceId(snapshot: WorkspaceSnapshot): number {
+  const ids: string[] = [];
+  const visit = (node: LayoutNode): void => {
+    ids.push(node.id);
+    if (node.type === "split") {
+      visit(node.first);
+      visit(node.second);
+    }
+  };
+  visit(snapshot.root);
+  ids.push(...snapshot.floating.map((pane) => pane.id));
+  let next = 1;
+  for (const id of ids) {
+    const match = /^p(\d+)$/.exec(id);
+    if (match !== null) next = Math.max(next, Number(match[1]) + 1);
+  }
+  return next;
+}
 
 function readOpenMode(): OpenMode {
   return localStorage.getItem(OPEN_MODE_STORAGE_KEY) === "replace" ? "replace" : "new";
@@ -110,15 +242,18 @@ function readLayoutMode(): LayoutMode {
 }
 
 export const useLayoutStore = defineStore("layout", {
-  state: () => ({
-    root: { type: "pane", id: "p1", content: null, epoch: 0 } as LayoutNode,
-    activePaneId: "p1",
-    nextId: 2,
-    openMode: readOpenMode() as OpenMode,
-    mode: readLayoutMode() as LayoutMode,
-    floating: [] as FloatingPane[],
-    nextZ: 1,
-  }),
+  state: () => {
+    const workspace = loadWorkspace();
+    return {
+      root: workspace.root,
+      activePaneId: workspace.activePaneId,
+      nextId: nextWorkspaceId(workspace),
+      openMode: readOpenMode() as OpenMode,
+      mode: readLayoutMode() as LayoutMode,
+      floating: workspace.floating,
+      nextZ: Math.max(1, ...workspace.floating.map((pane) => pane.z + 1)),
+    };
+  },
   getters: {
     panes(state): PaneNode[] {
       return collectPanes(state.root, []);
@@ -330,3 +465,44 @@ export const useLayoutStore = defineStore("layout", {
     },
   },
 });
+
+/**
+ * Restore happens in the store initializer, before plugin activation. Persist
+ * subsequent mutations with a short debounce so floating-pane drags do not
+ * synchronously serialize the workspace for every pointer event. `pagehide`
+ * flushes the latest state before a refresh or tab close.
+ */
+export function startLayoutPersistence(): () => void {
+  const layout = useLayoutStore();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const save = (): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    const snapshot: WorkspaceSnapshot = {
+      root: layout.root,
+      activePaneId: layout.activePaneId,
+      floating: layout.floating,
+    };
+    try {
+      localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot));
+    } catch {
+      // Storage denial/quota must not break workspace interactions.
+    }
+  };
+  const schedule = (): void => {
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(save, 150);
+  };
+  const unsubscribe = layout.$subscribe(schedule, { detached: true, flush: "post" });
+  if (typeof window !== "undefined") window.addEventListener("pagehide", save);
+  save();
+
+  return () => {
+    unsubscribe();
+    if (typeof window !== "undefined") window.removeEventListener("pagehide", save);
+    if (timer !== null) clearTimeout(timer);
+  };
+}

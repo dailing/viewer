@@ -111,19 +111,13 @@ onBeforeUnmount(() => {
 });
 
 const sections = computed<DockSection[]>(() => collectDockSections(dockProviders));
-// Chat groups start collapsed on every page load. Expansion is deliberately
-// session-local: the default Dock stays compact even with many open Tasks.
-const expandedGroupKeys = ref<Set<string>>(new Set());
-
+// Group expansion is a browser-local preference, independent of hover expansion.
 function isGroupCollapsed(key: string): boolean {
-  return !expandedGroupKeys.value.has(key);
+  return !dockSettings.expandedGroups.includes(key);
 }
 
 function toggleGroup(key: string): void {
-  const next = new Set(expandedGroupKeys.value);
-  if (next.has(key)) next.delete(key);
-  else next.add(key);
-  expandedGroupKeys.value = next;
+  dockSettings.setGroupExpanded(key, isGroupCollapsed(key));
 }
 
 /** Status-dot class for an instance state word; unknown words fall back to the neutral dot. */
@@ -154,9 +148,7 @@ async function createFrom(provider: DockProvider): Promise<void> {
 
 async function createFromGroup(section: DockSection): Promise<void> {
   if (section.group === undefined) return;
-  const next = new Set(expandedGroupKeys.value);
-  next.add(section.key);
-  expandedGroupKeys.value = next;
+  dockSettings.setGroupExpanded(section.key, true);
   await openProvider(section.provider, { open: openShellInstance }, section.group.id);
 }
 

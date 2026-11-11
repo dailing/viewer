@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v1.24**（2026-11-11）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> 状态：**草案 v1.26**（2026-11-11）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`（Phase 0，冻结后写码）。**
+> v1.26 变更：**浏览器本地恢复 Sidebar 与 Pane 工作区**——`viewer.layout.workspace.v1` 保存平铺分割树、Pane 实例身份、活动 Pane 与浮动几何，在插件激活前恢复，变更防抖写入并在 `pagehide` 补写；损坏快照回退为空工作区。Dock 固定展开/宽度沿用现有本地设置，Chat 分组展开集合新增 `viewer.dock.expandedGroups.v1`；hover/menu 保持瞬态，全部 UI 快照不同步后端或其他浏览器。
 > v1.24 变更：**移除一次性迁移与修复工具**——删除 Chat-level 离线迁移命令、实现、测试及历史 Python 迁移脚本；Task-first 只维护当前 GORM schema，正常运行时不读取旧 Branch/DAG 数据库。
 > v1.23 变更：**Chat 手动持久化排序**——`Chat.position` 取代 pin/updated_at 动态排序；聊天设置的 Chat 列表提供上下移动，`chats:reorder` 事务性保存完整顺序，Sidebar 的可见 Chat 分组严格跟随。pin 只控制空分组常驻，不再影响位置；新建 Chat 总是追加到末尾。
 > v1.22 变更：**Pinned Chat 分组常驻 Dock**——Chat 管理中的 pin 决定该 Chat 是否在没有 open Task 时仍保留弱分组；空分组显示 `0` 并保留「＋」直接新建 Task。未 pin Chat 仍只在其有 open Task 时出现，最后一个 open Task 结束后移除；ended Task 本身不进入 Dock。`DockProvider.groups` 支持插件声明可保留的空弱分组。
@@ -379,19 +380,20 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 
 静态与动态汇于一处：registries 只有一套，in-repo core plugins bootstrap 静态注册（build-time chunk），external plugins 走本节动态流程，插件作者无感知。
 
-### 8.7 Dock 与 pane 打开语义（v1.12 修订）
+### 8.7 Dock 与 pane 打开语义（v1.26 修订）
 
 - **`openInstance` 打开语义**：目标 instance 已开 → 聚焦所在 pane；当前 active pane 为空 → 用之；存在其他空 pane → 用第一个空 pane；都没有 → 自适应主次/横向等宽/纵向等高模式追加一个叶端 pane，自由模式对 active pane 自动 split（默认垂直即左右分）并放入。`openMode=replace` 仍显式允许替换 active 内容；默认 new 模式下任何已占用 pane 的内容不被静默替换。
 - **Programmatic Shell（v1.11）**：前端在每个 bus 连接上订阅 `shell:<conn>:open`、`shell:<conn>:panes:list/focus/close/move`。open 直接走现有 instance adapter，pane 操作走同一批 shell helpers；回复只发到请求的 `_reply_to`。断线后旧 conn 订阅失效，重连先退订旧前缀再订阅新前缀；不保存离线请求、不跨浏览器寻找 pane。
 - **浮动放回语义（v0.59）**：`dockFloating` 不顶替任何已占用 pane——平铺三模式在叶端追加一个新 tile 放入（末位 tile 为空则直接用之）；自由模式替换 active pane 的内容（geometry 由用户手工管理）。
 - **四种 tiling mode**：`cascade` 每层根据该层实际矩形长边二等分（宽高相等时上下切），first pane 占根一半、其余在 second 区递归；`columns` 横向等宽；`rows` 纵向等高；`free` 直接渲染 binary split tree 并开放横/纵 split + ratio drag。模式选择存 `viewer.layout.mode.v1`。前三种只显示通用「新增 pane」，不允许手改由算法确定的 geometry。
+- **完整工作区本地恢复（v1.26）**：`viewer.layout.workspace.v1` 保存 split tree、每个 tile/floating pane 的 `paneType + instanceId`、active pane、自由分割比例与浮动位置/尺寸/z-order；store 初始化先于插件激活，避免托管实例对账误删恢复记录。变更经 150ms 防抖写 localStorage，`pagehide` 强制补写。恢复时 epoch 归零、ID/z 计数器重建，比例和浮动尺寸按现有限制校正；缺失、损坏、重复节点/内容或 active 引用失效的快照整体回退为一个空 pane。未知插件 type 不按启动注册表过滤，沿用 `PluginPaneHost` placeholder 等待后续加载。布局/open mode 仍使用各自既有 key；快照不进入后端，不跨浏览器同步。
 - **移动语义**：共享抬头的「向树根/向叶端」将 active pane 内容与 DFS tile 顺序的前/后相邻项交换，并把 active 跟随到新位置；连续操作即可置首/置末，四模式与模式切换保持同一顺序语义。
 - **Dock 实例表现与行为归插件（v1.21）**：`createDockProvider` 是唯一实例列表注册入口；`DockInstance` 声明 `id/label/icon/group/state`，可另声明 `open`、响应式 `meta` 与 `actions`。shell 统一渲染 icon → name → 可选动态文字/按钮，缺省点击仍经统一 instance adapter 打开 `type:id`，提供 `open` 时执行插件行为。`provider.remove` 不再存在，unpin 等按钮全部由实例 action 提供。
 - **Singleton 常驻由显式 item 决定**：未列入 `instances` 的 singleton 只出现在「＋」；列入 `main` 即固定显示。Decision Center 以普通 `main` item 常驻并显示 pending 数量，不再使用 Dock-foot `createDockActions`；后者仅用于语音控制等不代表插件实例的全局开关。
 - **Dock 分区契约不变**：一个前端插件贡献一个 DockProvider（一个 dock 分区 + instances 列表）；一个插件可注册任意数量 pane 组件类型。需要第二个 dock 分区时由对应前端插件单独贡献，shell 契约零改动。
 - **Task-first 分组导航（v1.12，v1.22 增补，v1.23 排序）**：chat provider 分页取得全部 open Task 元数据，按 `chat_id` 组成弱分组；Task 标题是条目主文本，Chat 名称只显示在可折叠 group header。组内 running 优先，其后按 pinned、更新时间排序。group header 的「＋」经 `createForGroup(chat_id)` 在该 Chat 下创建并直接打开 Task；其他插件未声明 group 的实例仍按原平铺规则展示。`DockProvider.groups` 可声明没有实例也保留的弱分组；pinned Chat 始终声明分组，open Task 数为零时显示 `0` 并保留「＋」，unpinned Chat 仅在有 open Task 时声明分组。可见 Chat 分组严格使用 Chat 设置的持久化手动顺序；pin、updated_at 和 Task 活动不重排分组，新 Chat 追加到末尾。导航不得为条目加载消息历史。
 - **紧凑 Dock 与 ended Task 续聊（v1.13）**：分组行和 Task 行采用紧凑行高，条目之间无额外 gap。composer 对 open/ended Task 均固定显示；ended Task 的普通人工发送显式携带 `reopen_ended=true`，后端先恢复 open 再执行同一 dispatch。旧 summary 文本保留但取消 final，下一次 end 重新生成 final summary。未显式携带该字段的调用不得隐式重开。
-- **Chat 名称切换分组（v1.14）**：分组默认全部折叠，不显示独立 chevron；点击 Chat 名称展开或折叠其 Tasks。展开状态不持久化，刷新恢复默认。
+- **Chat 名称切换分组（v1.14，v1.26 持久化）**：分组默认全部折叠，不显示独立 chevron；点击 Chat 名称展开或折叠其 Tasks。展开的 group key 集合保存于浏览器本地 `viewer.dock.expandedGroups.v1`，刷新后恢复；空分组也保留其展开偏好。Dock hover 展开和新建菜单仍为会话瞬态，不持久化。
 - **预览重启代际与独立 Composer（v1.15）**：独立二进制通过 `VIEWER_REPO_ROOT` 找到源码，release build 输出到当前 executable；手动预览启动时清除继承的 `INVOCATION_ID`。普通重启比较首页 `X-Viewer-Process`，确认新进程后才刷新。composer 是 Task 根 flex 布局中消息 section 的兄弟节点，不放入消息的 overflow 裁切容器。
 - **Plain HTTP UUID（v1.16）**：前端组件统一调用 `utils/randomUUID.ts`，不得直接依赖仅安全上下文提供的 `crypto.randomUUID()`。回退仍生成 RFC 4122 UUID，保证局域网 HTTP 下 composer、文件实例、文件 watch 和 LLM 配置正常初始化。
 
@@ -631,6 +633,7 @@ my-plugin/
 
 ## 18. 修订记录
 
+- **v1.26**（2026-11-11）：**浏览器本地恢复 Sidebar 与 Pane 工作区**——完整 split tree、Pane 实例身份、active pane 和浮动几何保存到 `viewer.layout.workspace.v1`，在插件激活前恢复，防抖保存并在 `pagehide` 补写；损坏快照回退为空工作区。Chat 分组展开集合持久化到 `viewer.dock.expandedGroups.v1`，固定展开/宽度沿用现有本地设置；hover/menu 不保存，工作区与 Dock UI 状态不跨浏览器同步。
 - **v1.24**（2026-11-11）：**移除一次性迁移与修复工具**——删除 Chat-level 离线迁移命令、实现、测试及历史 Python 迁移脚本；Task-first 只维护当前 GORM schema，正常运行时不读取旧 Branch/DAG 数据库。
 - **v1.23**（2026-11-10）：**Chat 手动持久化排序**——Chat 设置列表提供上下移动，`chats:reorder` 事务性保存完整 `position` 顺序，Sidebar 可见 Chat 分组严格跟随；pin/updated_at 不再改变位置，新建 Chat 追加末尾。
 - **v1.22**（2026-11-10）：**Pinned Chat 空分组常驻 Dock**——复用 Chat 管理中的 pin：pinned Chat 即使没有 open Task 也保留计数为 `0` 的 Chat 分组和「＋」新建入口；unpinned Chat 在最后一个 open Task 结束后移除。`DockProvider.groups` 支持声明无实例弱分组，Task 实例仍只包含 open Task。

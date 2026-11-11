@@ -9,11 +9,14 @@ import "./styles.css";
 import App from "./App.vue";
 import { connectBus } from "./shell/bus";
 import { loadExternalPlugins, loadPlugins } from "./shell/loader";
+import { startLayoutPersistence } from "./stores/layout";
 import { useThemeStore } from "./stores/theme";
 import { useTypographyStore } from "./stores/typography";
 
 const app = createApp(App);
 app.use(createPinia());
+// Restore pane identities before plugins activate and reconcile hosted instances.
+startLayoutPersistence();
 loadPlugins();
 loadExternalPlugins();
 app.mount("#app");

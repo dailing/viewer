@@ -36,11 +36,18 @@ export interface PluginInstanceAdapter {
   open(request: InstanceOpenRequest): string | Promise<string>;
 }
 
+export interface DockGroupMetaSegment {
+  text: string | number;
+  tone?: "default" | "success";
+  /** Accessible name and tooltip for an otherwise compact visual value. */
+  title?: string;
+}
+
 export interface DockInstanceGroup {
   id: string;
   label: string;
-  /** Optional reactive trailing summary; omitted means the instance count. */
-  meta?: () => string | number;
+  /** Optional reactive trailing summary segments; omitted means the instance count. */
+  meta?: () => readonly DockGroupMetaSegment[];
 }
 
 export interface DockItemAction {

@@ -2,7 +2,6 @@ package acp
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"viewer/internal/agentdriver"
@@ -13,14 +12,14 @@ func ParseBlock(updateKind string, data map[string]any) agentdriver.Block {
 	kind, text, payload := agentdriver.KindOther, "", map[string]any{}
 	switch updateKind {
 	case "agent_message_chunk":
-		kind, text = agentdriver.KindAgentText, updateText(data)
+		kind, text = agentdriver.KindAgentText, contentText(data)
 	case "agent_thought_chunk":
 		kind, text = agentdriver.KindThinking, contentText(data)
 	case "tool_call", "tool_call_update":
-		kind, payload = agentdriver.KindToolCall, selectedPayload(data, "name", "title", "arguments", "status", "kind", "locations")
+		kind, payload = agentdriver.KindToolCall, agentdriver.SelectedPayload(data, "name", "title", "arguments", "status", "kind", "locations")
 		content := contentListText(data)
 		if updateKind == "tool_call" {
-			text = stringField(data, "title", "name")
+			text = agentdriver.StringField(data, "title", "name")
 			if content != "" {
 				payload["input"] = content
 			}
@@ -32,14 +31,14 @@ func ParseBlock(updateKind string, data map[string]any) agentdriver.Block {
 		}
 		// The lifecycle id lets the chat plugin merge pending → in_progress →
 		// completed updates into a single block.
-		if callID := stringField(data, "toolCallId", "tool_call_id"); callID != "" {
+		if callID := agentdriver.StringField(data, "toolCallId", "tool_call_id"); callID != "" {
 			payload["tool_call_id"] = callID
 		}
 		if _, ok := payload["name"]; !ok {
 			if title, ok := payload["title"]; ok {
 				payload["name"] = title
 				delete(payload, "title")
-			} else if callID := stringField(data, "toolCallId", "tool_call_id"); callID != "" {
+			} else if callID := agentdriver.StringField(data, "toolCallId", "tool_call_id"); callID != "" {
 				payload["name"] = callID
 			}
 		}
@@ -65,18 +64,11 @@ func ParseBlock(updateKind string, data map[string]any) agentdriver.Block {
 	return agentdriver.Block{Kind: kind, Text: text, Payload: string(encoded)}
 }
 
-func updateText(data map[string]any) string {
-	if content, ok := data["content"].(map[string]any); ok {
-		return stringField(content, "text")
-	}
-	return stringField(data, "text", "delta")
-}
-
 func contentText(data map[string]any) string {
 	if content, ok := data["content"].(map[string]any); ok {
-		return stringField(content, "text")
+		return agentdriver.StringField(content, "text")
 	}
-	return stringField(data, "text", "delta")
+	return agentdriver.StringField(data, "text", "delta")
 }
 
 // contentListText flattens ACP's content blocks. Hermes uses
@@ -95,7 +87,7 @@ func contentListText(data map[string]any) string {
 		if nested, ok := entry["content"].(map[string]any); ok {
 			entry = nested
 		}
-		if text := stringField(entry, "text"); text != "" {
+		if text := agentdriver.StringField(entry, "text"); text != "" {
 			parts = append(parts, text)
 		}
 	}
@@ -107,43 +99,9 @@ func readableText(data map[string]any) string {
 		return text
 	}
 	for _, key := range []string{"output", "result", "rawOutput", "title", "name", "command"} {
-		if text := stringify(data[key]); text != "" {
+		if text := agentdriver.Stringify(data[key]); text != "" {
 			return text
 		}
 	}
 	return ""
-}
-
-func stringField(data map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if text, ok := data[key].(string); ok {
-			return text
-		}
-	}
-	return ""
-}
-
-func stringify(value any) string {
-	switch value := value.(type) {
-	case string:
-		return value
-	case nil:
-		return ""
-	default:
-		encoded, err := json.Marshal(value)
-		if err == nil {
-			return string(encoded)
-		}
-		return fmt.Sprint(value)
-	}
-}
-
-func selectedPayload(data map[string]any, keys ...string) map[string]any {
-	payload := map[string]any{}
-	for _, key := range keys {
-		if value, ok := data[key]; ok && value != nil && stringify(value) != "" {
-			payload[key] = value
-		}
-	}
-	return payload
 }

@@ -39,7 +39,7 @@ const MARKDOWN_EXTS = new Set(["md", "markdown", "mdown", "mkd"]);
 const HTML_EXTS = new Set(["html", "htm"]);
 const TEX_EXTS = new Set(["tex"]);
 
-export function extensionOf(path: string): string {
+function extensionOf(path: string): string {
   const name = basename(path);
   const dot = name.lastIndexOf(".");
   return dot <= 0 ? "" : name.slice(dot + 1).toLowerCase();

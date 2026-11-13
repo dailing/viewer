@@ -35,28 +35,32 @@ async def send(client: BusClient, chat_id: str, **payload: Any) -> dict[str, Any
     return await client.request("chat:_:send-message", {"chat_id": chat_id, "task_id": tasks["tasks"][0]["id"], **payload})
 
 async def run() -> None:
-    viewerd, mock, codex_mock, opencode_mock, port = Path(os.environ["VIEWERD_BIN"]), Path(__file__).with_name("mock_acp_agent.py"), Path(__file__).with_name("mock_codex_server.py"), Path(__file__).with_name("mock_opencode_agent.py"), free_port()
+    viewerd, mock, codex_mock, opencode_mock, pi_mock, port = Path(os.environ["VIEWERD_BIN"]), Path(__file__).with_name("mock_acp_agent.py"), Path(__file__).with_name("mock_codex_server.py"), Path(__file__).with_name("mock_opencode_agent.py"), Path(__file__).with_name("mock_pi_rpc.py"), free_port()
     with tempfile.TemporaryDirectory(prefix="viewer-chat-smoke-") as temp:
         data_dir, log_path = Path(temp) / "data", Path(temp) / "viewerd.log"
-        environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true", "VIEWER_CODEX_APP_SERVER_COMMAND": str(codex_mock), "VIEWER_CODEX_APP_SERVER_YOLO": "true", "VIEWER_OPENCODE_COMMAND": str(opencode_mock), "VIEWER_OPENCODE_ARGS": "acp"}
+        environment = {**os.environ, "VIEWER_HERMES_COMMAND": str(mock), "VIEWER_HERMES_PROFILE": "mock-profile", "VIEWER_HERMES_YOLO": "true", "VIEWER_CODEX_APP_SERVER_COMMAND": str(codex_mock), "VIEWER_CODEX_APP_SERVER_YOLO": "true", "VIEWER_OPENCODE_COMMAND": str(opencode_mock), "VIEWER_OPENCODE_ARGS": "acp", "VIEWER_PI_COMMAND": sys.executable, "VIEWER_PI_ARGS": str(pi_mock)}
         with log_path.open("wb") as log:
-            process = subprocess.Popen([str(viewerd), "--plugins=config-store,llm,viewer.agent-hermes,viewer.agent-codex,viewer.agent-opencode,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(viewerd), "--plugins=config-store,llm,viewer.agent-hermes,viewer.agent-codex,viewer.agent-opencode,viewer.agent-pi,chat", "--kernel-port", str(port), "--data-dir", str(data_dir)], env=environment, stdout=log, stderr=subprocess.STDOUT)
         client = BusClient(f"ws://127.0.0.1:{port}/ws", CALLER, request_timeout=25.0)
-        messages: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []; catalogs: list[Any] = []; codex_catalogs: list[Any] = []; opencode_catalogs: list[Any] = []; agent_events: list[dict[str, Any]] = []; codex_events: list[dict[str, Any]] = []; opencode_events: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []; blocks: list[dict[str, Any]] = []; completions: list[dict[str, Any]] = []; active: list[Any] = []; catalogs: list[Any] = []; codex_catalogs: list[Any] = []; opencode_catalogs: list[Any] = []; pi_catalogs: list[Any] = []; agent_events: list[dict[str, Any]] = []; codex_events: list[dict[str, Any]] = []; opencode_events: list[dict[str, Any]] = []; pi_events: list[dict[str, Any]] = []
         try:
             await wait_port(port)
             registry: list[list[dict[str, Any]]] = []
             async def collect_messages(frame: dict[str, Any]) -> None: messages.append(frame["value"])
+            async def collect_blocks(frame: dict[str, Any]) -> None: blocks.append(frame["value"])
             async def collect_completions(frame: dict[str, Any]) -> None: completions.append(frame["value"])
             async def collect_active(frame: dict[str, Any]) -> None: active.append(frame["value"])
             async def collect_registry(frame: dict[str, Any]) -> None: registry.append(frame["value"])
             async def collect_catalog(frame: dict[str, Any]) -> None: catalogs.append(frame["value"])
             async def collect_codex_catalog(frame: dict[str, Any]) -> None: codex_catalogs.append(frame["value"])
             async def collect_opencode_catalog(frame: dict[str, Any]) -> None: opencode_catalogs.append(frame["value"])
+            async def collect_pi_catalog(frame: dict[str, Any]) -> None: pi_catalogs.append(frame["value"])
             async def collect_agent_event(frame: dict[str, Any]) -> None: agent_events.append(frame["value"])
             async def collect_codex_event(frame: dict[str, Any]) -> None: codex_events.append(frame["value"])
             async def collect_opencode_event(frame: dict[str, Any]) -> None: opencode_events.append(frame["value"])
+            async def collect_pi_event(frame: dict[str, Any]) -> None: pi_events.append(frame["value"])
             await client.subscribe("chat:*:message", collect_messages)
+            await client.subscribe("chat:*:block", collect_blocks)
             await client.subscribe("chat:*:turn-completed", collect_completions)
             await client.subscribe("chat:_:active", collect_active)
             await client.subscribe("plugins:_:list", collect_registry)
@@ -66,14 +70,18 @@ async def run() -> None:
             await client.subscribe("viewer.agent-codex:_:event", collect_codex_event)
             await client.subscribe("viewer.agent-opencode:_:catalog", collect_opencode_catalog)
             await client.subscribe("viewer.agent-opencode:_:event", collect_opencode_event)
+            await client.subscribe("viewer.agent-pi:_:catalog", collect_pi_catalog)
+            await client.subscribe("viewer.agent-pi:_:event", collect_pi_event)
             await client.connect()
-            await wait_for(lambda: registry and {item["manifest"]["id"] for item in registry[-1]} >= {"chat", "config-store", "viewer.agent-hermes", "viewer.agent-codex", "viewer.agent-opencode"})
+            await wait_for(lambda: registry and {item["manifest"]["id"] for item in registry[-1]} >= {"chat", "config-store", "viewer.agent-hermes", "viewer.agent-codex", "viewer.agent-opencode", "viewer.agent-pi"})
             await wait_for(lambda: catalogs and catalogs[-1] and catalogs[-1]["agent"] == "hermes")
             await wait_for(lambda: codex_catalogs and codex_catalogs[-1] and codex_catalogs[-1]["agent"] == "codex")
             await wait_for(lambda: opencode_catalogs and opencode_catalogs[-1] and opencode_catalogs[-1]["agent"] == "opencode")
+            await wait_for(lambda: pi_catalogs and pi_catalogs[-1] and pi_catalogs[-1]["agent"] == "pi")
             print("CATALOG_MAILBOX_SAMPLE", json.dumps(catalogs[-1], separators=(",", ":")))
             print("CODEX_CATALOG_MAILBOX_SAMPLE", json.dumps(codex_catalogs[-1], separators=(",", ":")))
             print("OPENCODE_CATALOG_MAILBOX_SAMPLE", json.dumps(opencode_catalogs[-1], separators=(",", ":")))
+            print("PI_CATALOG_MAILBOX_SAMPLE", json.dumps(pi_catalogs[-1], separators=(",", ":")))
             routing = {"default_routing_policy_id": "hermes-policy", "routing_policies": [{"id": "hermes-policy", "name": "Hermes", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "hermes-default", "name": "Hermes default", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]}]}
             await client.request("chat:_:routing:put", routing)
             first = await client.request("chat:_:roles:create", {"name": "Planner", "description": "plans", "prompt": "PLAN-RULE", "provider": "hermes", "routing_policy_id": "hermes-policy"})
@@ -119,6 +127,7 @@ async def run() -> None:
             aggregate = await client.request("chat:_:agent-catalog", {})
             assert any(item["agent"] == "hermes" and item["online"] and item["providers"] for item in aggregate)
             assert any(item["agent"] == "opencode" and item["online"] and item["providers"] for item in aggregate)
+            assert any(item["agent"] == "pi" and item["online"] and item["providers"] for item in aggregate)
             print("AGGREGATE_CATALOG_SAMPLE", json.dumps(aggregate, separators=(",", ":")))
 
             prior_events = len(agent_events)
@@ -137,6 +146,7 @@ async def run() -> None:
                 {"id": "failover-policy", "name": "Failover", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "codex-fails", "name": "Failing Codex", "agent_id": "codex-app-server", "provider_id": "openai-subscription", "model_id": "fail-start", "enabled": True, "parameters": {}}, {"id": "hermes-fallback", "name": "Hermes fallback", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]},
                 {"id": "turn-error-policy", "name": "Turn error failover", "enabled": True, "auto_failover": True, "max_attempts": 2, "candidates": [{"id": "codex-turn-error", "name": "Codex turn error", "agent_id": "codex-app-server", "provider_id": "openai-subscription", "model_id": "gpt-test", "enabled": True, "parameters": {}}, {"id": "hermes-after-turn-error", "name": "Hermes fallback", "agent_id": "hermes", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {"profile": "mock-profile"}}]},
                 {"id": "opencode-policy", "name": "OpenCode", "enabled": True, "auto_failover": False, "max_attempts": 1, "candidates": [{"id": "opencode-default", "name": "OpenCode mock", "agent_id": "opencode", "provider_id": "default", "model_id": "", "enabled": True, "parameters": {}}]},
+                {"id": "pi-policy", "name": "Pi", "enabled": True, "auto_failover": False, "max_attempts": 1, "candidates": [{"id": "pi-model-b", "name": "Pi mock model B", "agent_id": "pi", "provider_id": "mockprov", "model_id": "model-b", "enabled": True, "parameters": {"thinking_level": "high"}}]},
             ])
             await client.request("chat:_:routing:put", routing)
 
@@ -172,6 +182,27 @@ async def run() -> None:
             print("OPENCODE_BUS_EVENT_SAMPLE", json.dumps(next(item for item in opencode_events if item["kind"] == "opencode_step"), separators=(",", ":")))
             print("PASS opencode bus start -> prompt -> event persistence -> turn-ended")
 
+            pi_role = await client.request("chat:_:roles:create", {"name": "Pi", "description": "pi", "prompt": "PI-RULE", "provider": "pi", "routing_policy_id": "pi-policy"})
+            pi_chat = await client.request("chat:_:chats:create", {"name": "Pi bus", "root": str(ROOT), "type": "direct", "member_role_ids": [pi_role["id"]]})
+            await send(client, pi_chat["id"], message="pi hello", role_ids=[pi_role["id"]])
+            await wait_for(lambda: any(item["chat_id"] == pi_chat["id"] for item in completions))
+            pi_done = next(item for item in completions if item["chat_id"] == pi_chat["id"])
+            assert pi_done["stop_reason"] == "end_turn" and pi_done["attempts"][0]["outcome"] == "completed"
+            await wait_for(lambda: any(item["chat_id"] == pi_chat["id"] and item.get("text", "").startswith("pi:") and "pi hello" in item.get("text", "") for item in messages))
+            assert any(item["kind"] == "get_session_stats" and item["block"]["kind"] == "token_usage" for item in pi_events)
+            assert any(item["kind"] == "extension_ui_request" and item["block"]["kind"] == "other" for item in pi_events)
+            assert any(item["block"]["kind"] == "command" for item in pi_events)
+            assert any(item["block"]["kind"] == "tool_call" and json.loads(item["block"]["payload"]).get("tool_call_id") == "call-read" for item in pi_events)
+            database = sqlite3.connect(data_dir / "chat.sqlite3")
+            try:
+                assert database.execute("select count(*) from turn_events where chat_id=? and provider='pi/mockprov'", (pi_chat["id"],)).fetchone()[0] >= 10
+                assert database.execute("select count(*) from message_blocks where chat_id=? and kind='agent_text'", (pi_chat["id"],)).fetchone()[0] == 1
+                assert database.execute("select count(*) from message_blocks where chat_id=? and kind='token_usage'", (pi_chat["id"],)).fetchone()[0] == 1
+                assert database.execute("select provider_session_id from role_sessions where chat_id=?", (pi_chat["id"],)).fetchone()[0].endswith(".jsonl")
+            finally: database.close()
+            print("PI_BUS_EVENT_SAMPLE", json.dumps(next(item for item in pi_events if item["kind"] == "get_session_stats"), separators=(",", ":")))
+            print("PASS pi native RPC bus start -> prompt -> normalized/raw event persistence -> session stats -> turn-ended")
+
             failover_role = await client.request("chat:_:roles:create", {"name": "Fallback", "description": "fallback", "prompt": "FALLBACK-RULE", "provider": "codex-app-server", "routing_policy_id": "failover-policy"})
             failover_chat = await client.request("chat:_:chats:create", {"name": "Failover", "root": str(ROOT), "type": "direct", "member_role_ids": [failover_role["id"]]})
             await send(client, failover_chat["id"], message="fallback hello", role_ids=[failover_role["id"]])
@@ -206,10 +237,11 @@ async def run() -> None:
             assert f"user cited message id {codex_dispatched['message_id']}" in cite_text and "codex hello" in cite_text and "from a different chat" in cite_text
             print("PASS message citation injects same-chat and cross-chat cited content before the query")
 
-            try: await send(client, chat["id"], message="auto")
-            except Exception as exc: assert "LLM router is not configured" in str(exc)
-            else: raise AssertionError("router without config unexpectedly succeeded")
-            print("PASS router missing-config error")
+            auto_missing = await send(client, chat["id"], message="auto")
+            assert auto_missing["status"] == "routing"
+            route_error = await wait_for(lambda: next((item for item in reversed(blocks) if item.get("turn_id") == auto_missing["dispatch_id"] and item.get("kind") == "error"), None))
+            assert "LLM router is not configured" in route_error["text"]
+            print("PASS async router missing-config error")
 
             base_ids = [item["id"] for item in (await client.request("chat:_:chats:list", {}))["chats"]]
             order_a = await client.request("chat:_:chats:create", {"name": "Order A", "root": str(ROOT), "type": "group", "member_role_ids": []})

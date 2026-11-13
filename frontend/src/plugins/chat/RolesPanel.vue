@@ -13,7 +13,7 @@ const roles = ref<Role[]>([]);
 const catalogs = ref<AgentCatalog[]>([]);
 const routing = ref<RoutingConfig>({ default_routing_policy_id: "", routing_policies: [] });
 const error = ref("");
-const form = reactive({ id: "", name: "", description: "", prompt: "", cwd: "", routing_policy_id: "", session_policy: "reuse", context_recycle_percent: "", context_recycle_tokens: "" });
+const form = reactive({ id: "", name: "", description: "", prompt: "", cwd: "", routing_policy_id: "", session_policy: "reuse" });
 const target = reactive({ agent: "", provider: "", model: "" });
 const items = computed(() => roles.value.map(({ id, name }) => ({ id, name })));
 const selectedAgent = computed(() => catalogs.value.find((item) => item.agent === target.agent));
@@ -54,25 +54,17 @@ async function load(): Promise<void> {
 function editByID(id: string): void {
   const role = roles.value.find((item) => item.id === id);
   if (role === undefined) return;
-  Object.assign(form, role, {
-    context_recycle_percent: role.context_recycle_percent?.toString() ?? "",
-    context_recycle_tokens: role.context_recycle_tokens?.toString() ?? "",
-  });
+  Object.assign(form, role);
 }
 
 function reset(): void {
-  Object.assign(form, { id: "", name: "", description: "", prompt: "", cwd: "", routing_policy_id: "", session_policy: "reuse", context_recycle_percent: "", context_recycle_tokens: "" });
+  Object.assign(form, { id: "", name: "", description: "", prompt: "", cwd: "", routing_policy_id: "", session_policy: "reuse" });
   error.value = "";
 }
 
 async function save(): Promise<void> {
   try {
-    const payload = {
-      ...form,
-      context_recycle_percent: form.context_recycle_percent === "" ? null : Number(form.context_recycle_percent),
-      context_recycle_tokens: form.context_recycle_tokens === "" ? null : Number(form.context_recycle_tokens),
-    };
-    await ctx.bus.request(form.id ? "chat:_:roles:patch" : "chat:_:roles:create", payload);
+    await ctx.bus.request(form.id ? "chat:_:roles:patch" : "chat:_:roles:create", form);
     reset();
     await load();
   } catch (cause) {
@@ -121,8 +113,6 @@ onMounted(() => void load().catch((cause) => { error.value = errorText(cause); }
         <label class="col-12 form-label small">Run prompt<textarea v-model="form.prompt" class="form-control form-control-sm mt-1" rows="5"></textarea></label>
         <label class="col-md-6 form-label small">Role cwd<input v-model="form.cwd" class="form-control form-control-sm mt-1"></label>
         <label class="col-md-6 form-label small">Session policy<select v-model="form.session_policy" class="form-select form-select-sm mt-1"><option value="reuse">reuse</option><option value="new_each_run">new_each_run</option></select></label>
-        <label class="col-md-6 form-label small">Context recycle %<input v-model="form.context_recycle_percent" type="number" class="form-control form-control-sm mt-1"></label>
-        <label class="col-md-6 form-label small">Context recycle tokens<input v-model="form.context_recycle_tokens" type="number" class="form-control form-control-sm mt-1"></label>
       </div>
 
       <div class="small text-secondary mt-3 mb-1">用 Agent catalog 构造并绑定 policy candidate</div>

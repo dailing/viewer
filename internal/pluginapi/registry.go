@@ -8,6 +8,7 @@ import (
 	"viewer/internal/plugins/agentcodex"
 	"viewer/internal/plugins/agenthermes"
 	"viewer/internal/plugins/agentopencode"
+	"viewer/internal/plugins/agentpi"
 	"viewer/internal/plugins/chat"
 	"viewer/internal/plugins/configstore"
 	"viewer/internal/plugins/fileservice"
@@ -32,6 +33,7 @@ var Registry = []Entry{
 	{ID: agenthermes.Manifest.ID, Factory: newAgentHermes},
 	{ID: agentcodex.Manifest.ID, Factory: newAgentCodex},
 	{ID: agentopencode.Manifest.ID, Factory: newAgentOpenCode},
+	{ID: agentpi.Manifest.ID, Factory: newAgentPi},
 	{ID: instancestore.Manifest.ID, Factory: newInstanceStore},
 	{ID: fileservice.Manifest.ID, Factory: newFileService},
 	{ID: chat.Manifest.ID, Factory: newChat},
@@ -63,6 +65,14 @@ func newVoice(config RuntimeConfig) (Plugin, error) {
 
 func newAgentOpenCode(config RuntimeConfig) (Plugin, error) {
 	plugin := agentopencode.New()
+	return lifecycleAdapter{
+		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
+		wait:  waitContext, close: func(context.Context) error { return plugin.Close() },
+	}, nil
+}
+
+func newAgentPi(config RuntimeConfig) (Plugin, error) {
+	plugin := agentpi.New()
 	return lifecycleAdapter{
 		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
 		wait:  waitContext, close: func(context.Context) error { return plugin.Close() },

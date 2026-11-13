@@ -18,7 +18,14 @@ export function chatDockGroups(chats: readonly DockChat[], tasks: readonly DockT
   }
   const makeGroup = (id: string, label: string): DockInstanceGroup => {
     const count = counts.get(id) ?? { running: 0, idle: 0 };
-    return { id, label, meta: () => `${count.running} running · ${count.idle} idle` };
+    return {
+      id,
+      label,
+      meta: () => [
+        { text: count.running, tone: "success", title: `${count.running} running` },
+        { text: count.idle, title: `${count.idle} idle` },
+      ],
+    };
   };
 
   const groups = new Map<string, DockInstanceGroup>();

@@ -3,7 +3,6 @@ package chat
 import (
 	"errors"
 	"path/filepath"
-	"reflect"
 	"testing"
 )
 
@@ -23,13 +22,13 @@ func TestAssociateDecisionOrdinaryReplies(t *testing.T) {
 	if err := s.db.Create(decision).Error; err != nil {
 		t.Fatal(err)
 	}
-	request := dispatchRequest{Message: "ordinary reply", SourcePlugin: "gateway"}
+	request := dispatchRequest{Message: "ordinary reply", SourcePlugin: "gateway", ForceNewSession: true}
 	claimed, err := p.associateDecision(task.ID, &request)
 	if err != nil || !claimed {
 		t.Fatalf("associate claimed=%v err=%v", claimed, err)
 	}
-	if request.DecisionID != decision.ID || request.ContinueTurnID != "turn-a" || !reflect.DeepEqual(request.RoleIDs, []string{"role-a"}) {
-		t.Fatalf("continuation was not inherited: %#v", request)
+	if request.DecisionID != decision.ID || request.ContinueTurnID != "" || len(request.RoleIDs) != 0 || !request.ForceNewSession {
+		t.Fatalf("Decision association changed dispatch routing: %#v", request)
 	}
 	if err := p.finishOrdinaryDecision(decision.ID, "dispatch-a", claimed, nil); err != nil {
 		t.Fatal(err)
@@ -78,10 +77,43 @@ func TestAssociateDecisionOrdinaryReplies(t *testing.T) {
 	if _, err := p.associateDecision(task.ID, &external); err == nil {
 		t.Fatal("external dispatch entered an already claimed Decision")
 	}
-	internal := dispatchRequest{DecisionID: "decision-c", Message: "dedicated", SourcePlugin: "chat", ContinueTurnID: "turn-c"}
+	internal := dispatchRequest{DecisionID: "decision-c", Message: "dedicated", SourcePlugin: "chat"}
 	claimed, err = p.associateDecision(task.ID, &internal)
 	if err != nil || claimed {
-		t.Fatalf("dedicated continuation claimed=%v err=%v", claimed, err)
+		t.Fatalf("dedicated dispatch claimed=%v err=%v", claimed, err)
+	}
+}
+
+func TestDecisionAlwaysIncludesEndCurrentTaskOption(t *testing.T) {
+	marker := parseDecisionMarker("<viewer-decision>\nversion: 1\nkind: choice\nquestion: Continue?\noption: First path\noption: Second path\n</viewer-decision>")
+	if marker == nil {
+		t.Fatal("ordinary Decision marker was rejected")
+	}
+	ensureDecisionEndTaskOption(marker)
+	options, err := parseDecisionOptions(marker.OptionsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options) != 3 || options[2].ID != decisionEndTaskOptionID || options[2].Label != decisionEndTaskOptionLabel || options[2].Action != "end_current_task" {
+		t.Fatalf("built-in Task-ending option mismatch: %#v", options)
+	}
+	ensureDecisionEndTaskOption(marker)
+	options, _ = parseDecisionOptions(marker.OptionsJSON)
+	if len(options) != 3 {
+		t.Fatalf("built-in Task-ending option was duplicated: %#v", options)
+	}
+
+	agentEnded := parseDecisionMarker("<viewer-decision>\nversion: 1\nkind: choice\noption: Continue\noption: End current task\noption_action: end_current_task\n</viewer-decision>")
+	ensureDecisionEndTaskOption(agentEnded)
+	options, _ = parseDecisionOptions(agentEnded.OptionsJSON)
+	if len(options) != 2 || options[1].ID != "option-2" {
+		t.Fatalf("Agent-provided Task-ending option was replaced or duplicated: %#v", options)
+	}
+
+	legacy := decisionPayload(&Decision{OptionsJSON: `[{"id":"option-1","label":"Continue"}]`, Status: "pending"})
+	legacyOptions, ok := legacy["options"].([]decisionOption)
+	if !ok || len(legacyOptions) != 2 || legacyOptions[1].ID != decisionEndTaskOptionID {
+		t.Fatalf("existing pending Decision did not gain the built-in option: %#v", legacy["options"])
 	}
 }
 

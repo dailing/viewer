@@ -59,6 +59,7 @@ func (p *Plugin) detectDecision(turn *Turn) {
 			status, warning = "invalid", "invalid <viewer-decision> marker; left unchanged in the assistant message"
 		} else {
 			warning = marker.Warning
+			ensureDecisionEndTaskOption(marker)
 		}
 		now := nowMillis()
 		decision := &Decision{ID: newID(), ChatID: turn.ChatID, TaskID: turn.TaskID, SourceTurnID: turn.ID,
@@ -88,8 +89,13 @@ func decisionPayload(decision *Decision) map[string]any {
 	if decision == nil {
 		return map[string]any{}
 	}
-	options := []map[string]any{}
+	options := []decisionOption{}
 	_ = json.Unmarshal([]byte(decision.OptionsJSON), &options)
+	if decision.Status == "pending" {
+		// Decisions created before the built-in option was introduced gain the
+		// same server-validated control when they are read and answered.
+		options = withEndCurrentTaskOption(options)
+	}
 	return map[string]any{"id": decision.ID, "chat_id": decision.ChatID, "task_id": decision.TaskID,
 		"source_turn_id": decision.SourceTurnID, "source_message_id": decision.SourceMessageID, "role_id": decision.RoleID,
 		"version": decision.Version, "kind": decision.Kind, "question": decision.Question, "options": options,
@@ -102,6 +108,28 @@ type decisionOption struct {
 	ID     string `json:"id"`
 	Label  string `json:"label"`
 	Action string `json:"action,omitempty"`
+}
+
+const (
+	decisionEndTaskOptionID    = "viewer-end-current-task"
+	decisionEndTaskOptionLabel = "结束当前 Task"
+)
+
+func withEndCurrentTaskOption(options []decisionOption) []decisionOption {
+	for _, option := range options {
+		if option.Action == "end_current_task" {
+			return options
+		}
+	}
+	return append(options, decisionOption{ID: decisionEndTaskOptionID, Label: decisionEndTaskOptionLabel, Action: "end_current_task"})
+}
+
+func ensureDecisionEndTaskOption(marker *decisionMarker) {
+	options, err := parseDecisionOptions(marker.OptionsJSON)
+	if err != nil {
+		return
+	}
+	marker.OptionsJSON = encodeJSON(withEndCurrentTaskOption(options))
 }
 
 func parseDecisionOptions(encoded string) ([]decisionOption, error) {
@@ -188,15 +216,24 @@ func (p *Plugin) handleDecisionsList(frame busclient.Frame) {
 		roleNames[role.ID] = role.Name
 	}
 	taskTitles := map[string]string{}
+	if len(decisions) > 0 {
+		taskIDs := make([]string, 0, len(decisions))
+		for index := range decisions {
+			taskIDs = append(taskIDs, decisions[index].TaskID)
+		}
+		var tasks []Task
+		if err := p.store.db.Select("id", "title").Where("id IN ?", taskIDs).Find(&tasks).Error; err != nil {
+			p.reply(frame, nil, err)
+			return
+		}
+		for _, task := range tasks {
+			taskTitles[task.ID] = task.Title
+		}
+	}
 	values := make([]map[string]any, 0, len(decisions))
 	for index := range decisions {
 		decision := &decisions[index]
 		value := decisionPayload(decision)
-		if _, ok := taskTitles[decision.TaskID]; !ok {
-			if task, taskErr := p.store.task(decision.TaskID); taskErr == nil && task != nil {
-				taskTitles[decision.TaskID] = task.Title
-			}
-		}
 		value["chat_name"] = chatNames[decision.ChatID]
 		value["task_title"] = taskTitles[decision.TaskID]
 		value["role_name"] = roleNames[decision.RoleID]
@@ -219,10 +256,11 @@ func (p *Plugin) handleDecisionsList(frame busclient.Frame) {
 	p.reply(frame, result, nil)
 }
 
-// associateDecision joins an ordinary user reply to the same continuation as
-// the dedicated Decision response. With no explicit id, only a unique pending
-// Decision is associated; multiple pending Decisions are never guessed.
-// The bool reports a new pending→dispatching claim owned by this dispatch.
+// associateDecision joins an ordinary user reply or the dedicated Decision
+// response to the Decision lifecycle without changing dispatch routing. With
+// no explicit id, only a unique pending Decision is associated; multiple
+// pending Decisions are never guessed. The bool reports a new
+// pending→dispatching claim owned by this dispatch.
 func (p *Plugin) associateDecision(taskID string, request *dispatchRequest) (bool, error) {
 	if request.DecisionID == "" {
 		var pending []Decision
@@ -244,7 +282,7 @@ func (p *Plugin) associateDecision(taskID string, request *dispatchRequest) (boo
 	if decision.Status == "dispatching" {
 		// Only the dedicated response path may enter an already claimed
 		// Decision. Public duplicate sends must not attach another message.
-		if request.SourcePlugin != "chat" || request.ContinueTurnID != decision.SourceTurnID {
+		if request.SourcePlugin != "chat" {
 			return false, errors.New("decision was already responded to")
 		}
 		return false, nil
@@ -260,10 +298,6 @@ func (p *Plugin) associateDecision(taskID string, request *dispatchRequest) (boo
 	if claimed.RowsAffected != 1 {
 		return false, errors.New("decision was already responded to")
 	}
-	request.ContinueTurnID = decision.SourceTurnID
-	request.RoleIDs = []string{decision.RoleID}
-	request.ForceNewSession = false
-	request.ParallelDispatch = false
 	if request.CausationID == "" {
 		request.CausationID = decision.ID
 	}
@@ -346,6 +380,7 @@ func (p *Plugin) handleDecisionRespond(frame busclient.Frame) {
 			p.reply(frame, nil, optionErr)
 			return
 		}
+		options = withEndCurrentTaskOption(options)
 		var selected *decisionOption
 		for index := range options {
 			if options[index].ID == optionID {
@@ -382,7 +417,6 @@ func (p *Plugin) handleDecisionRespond(frame busclient.Frame) {
 	dispatchID := newID()
 	dispatch := dispatchRequest{IdempotencyKey: "decision:" + decision.ID, ChatID: chat.ID, TaskID: task.ID, Message: response,
 		DecisionID: decision.ID, DispatchID: dispatchID, SourcePlugin: "chat", SourceEventID: decision.SourceMessageID,
-		RoleIDs: []string{decision.RoleID}, ContinueTurnID: decision.SourceTurnID,
 		CausationID: decision.ID, CorrelationID: decision.ID}
 	if err := p.startOperation("chat", "decision", decision.ID, request, chat.ID, task.ID, dispatchID); err != nil {
 		p.reply(frame, nil, err)

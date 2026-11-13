@@ -1,4 +1,5 @@
 import { reactive } from "vue";
+import { randomUUID } from "../../utils/randomUUID";
 
 export interface ChatViewParams {
   chatId: string;
@@ -30,7 +31,7 @@ function persist(): void {
 }
 
 function newId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `view-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return randomUUID();
 }
 
 function create(params: ChatViewParams, defaultForChat: boolean): ChatViewInstance {
@@ -103,8 +104,4 @@ export function removeChatViews(chatId: string): void {
     changed = true;
   }
   if (changed) persist();
-}
-
-export function clearChatViewsForTest(): void {
-  for (const id of Object.keys(views)) delete views[id];
 }

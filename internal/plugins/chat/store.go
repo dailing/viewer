@@ -216,7 +216,7 @@ type TurnSummary struct {
 }
 
 type Decision struct {
-	ID                 string `gorm:"primaryKey" json:"id"`
+	ID                 string `gorm:"primaryKey;index:idx_decisions_status_cursor,priority:3" json:"id"`
 	ChatID             string `gorm:"index;not null" json:"chat_id"`
 	TaskID             string `gorm:"index;not null" json:"task_id"`
 	SourceTurnID       string `gorm:"uniqueIndex" json:"source_turn_id"`
@@ -229,14 +229,14 @@ type Decision struct {
 	Display            string `json:"display"`
 	Tone               string `json:"tone"`
 	ParseWarning       string `json:"parse_warning"`
-	Status             string `gorm:"index" json:"status"`
+	Status             string `gorm:"index;index:idx_decisions_status_cursor,priority:1" json:"status"`
 	Response           string `json:"response"`
 	ResolvedDispatchID string `json:"resolved_dispatch_id"`
 	MarkerStart        int    `json:"marker_start"`
 	MarkerEnd          int    `json:"marker_end"`
 	RequesterSession   string `json:"requester_session"`
 	RequesterProvider  string `json:"requester_provider"`
-	CreatedAt          int64  `json:"created_at"`
+	CreatedAt          int64  `gorm:"index:idx_decisions_status_cursor,priority:2" json:"created_at"`
 	UpdatedAt          int64  `json:"updated_at"`
 	ResolvedAt         *int64 `json:"resolved_at"`
 }
@@ -751,9 +751,9 @@ func (s *store) historyPageAfter(taskID string, afterTs int64, afterID string, l
 	query := s.db.Where("task_id = ?", taskID)
 	if afterTs > 0 {
 		if afterID != "" {
-			query = query.Where("(created_at > ? OR (created_at = ? AND id >= ?))", afterTs, afterTs, afterID)
+			query = query.Where("(created_at > ? OR (created_at = ? AND id > ?))", afterTs, afterTs, afterID)
 		} else {
-			query = query.Where("created_at >= ?", afterTs)
+			query = query.Where("created_at > ?", afterTs)
 		}
 	}
 	var values []Message

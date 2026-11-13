@@ -11,17 +11,24 @@ export interface HistoryMessage {
 
 export const MESSAGE_WINDOW_LIMIT = 300;
 
-/** Keep one ordered, bounded window per Task. Eviction is always from the old
- * edge, so streaming newer messages cannot silently make older history
- * unreachable. */
-export function mergeMessageWindow<T extends HistoryMessage>(current: readonly T[], incoming: readonly T[], limit = MESSAGE_WINDOW_LIMIT): { messages: T[]; evictedOlder: boolean } {
+export type MessageWindowEviction = "older" | "newer";
+
+/** Keep one ordered, bounded sliding window per Task. Ordinary updates evict
+ * the old edge; backward pagination evicts the new edge so both history
+ * cursors remain reachable without growing the DOM indefinitely. */
+export function mergeMessageWindow<T extends HistoryMessage>(current: readonly T[], incoming: readonly T[], limit = MESSAGE_WINDOW_LIMIT, evict: MessageWindowEviction = "older"): { messages: T[]; evictedOlder: boolean; evictedNewer: boolean } {
   const byId = new Map(current.map((message) => [message.id, message]));
   for (const message of incoming) {
     if (message.deleted) byId.delete(message.id);
     else byId.set(message.id, message);
   }
   const ordered = [...byId.values()].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
-  return { messages: ordered.slice(-limit), evictedOlder: ordered.length > limit };
+  const evicted = ordered.length > limit;
+  return {
+    messages: evict === "newer" ? ordered.slice(0, limit) : ordered.slice(-limit),
+    evictedOlder: evicted && evict === "older",
+    evictedNewer: evicted && evict === "newer",
+  };
 }
 
 export function readingAnchor(value: unknown, taskId: string): ReadingAnchor | undefined {

@@ -87,9 +87,9 @@ func recallChatMemories(parent context.Context, client *http.Client, config Hind
 }
 
 func (p *Plugin) buildHindsightRecallSection(chatID, query, recentTail string, occurredAt int64) string {
-	// 检索隔离 (history-DAG model): recall results carry no source ids that
-	// could prove snapshot membership, so the section is skipped unless the
-	// operator knowingly enables it (hindsight.recall_enabled).
+	// Chat-bank recall results carry no source ids proving Task membership.
+	// Keep the section out of isolated Task contexts unless the operator
+	// explicitly enables cross-Task recall (hindsight.recall_enabled).
 	config := p.hindsightConfig(p.ctx)
 	if !config.RecallEnabled {
 		return ""

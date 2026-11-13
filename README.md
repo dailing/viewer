@@ -1,6 +1,6 @@
 # Local Live File Viewer
 
-Local Live File Viewer is a private-network workspace for coordinating Codex, Hermes, and OpenCode roles while browsing and editing local files. A Go microkernel (`viewerd`) exposes a WebSocket bus, runs all core plugins in-process, and serves the built Vue application on the same HTTP port; the normal frontend is a single Super Workspace shell with chats, roles, files, Git changes, terminals, Settings, and recursively split panes.
+Local Live File Viewer is a private-network workspace for coordinating Codex, Hermes, OpenCode, and Pi roles while browsing and editing local files. A Go microkernel (`viewerd`) exposes a WebSocket bus, runs all core plugins in-process, and serves the built Vue application on the same HTTP port; the normal frontend is a single Super Workspace shell with chats, roles, files, Git changes, terminals, Settings, and recursively split panes.
 
 The implementation is Go-first: kernel and core plugins live under `cmd/` and `internal/`, frontend under `frontend/`. Language SDKs live under `sdk/` (`sdk/go`, `sdk/python`, `sdk/ts`). Python exists only as development tooling under `scripts/` (smoke tests, mocks, migrations) — there is no Python product code. Design decisions: `docs/plugin-framework.md` (authoritative) and `docs/plugin-protocol.md` (wire-level protocol spec).
 
@@ -17,7 +17,7 @@ sdk/
   ts/                TS bus SDK (@viewer/bus-sdk, browser/Node>=22)
 frontend/            Vue 3 + Pinia frontend; in-repo plugins at src/plugins/<id>/
 web/                 go:embed mount point for the frontend dist + build-release.sh
-scripts/             black-box smoke suites, mock services, migration tools
+scripts/             black-box smoke suites and deterministic mock services
 examples/pingpong/   two-way RPC example against the kernel
 docs/                architecture decisions (plugin-framework.md) + wire protocol (plugin-protocol.md)
 ```
@@ -39,14 +39,15 @@ subscriptions, retained-state mailbox reads, and automatic reconnect.
 
 ## Features
 
-- Create direct or group chats and assign member roles.
-- Route a message through an OpenAI-compatible dispatcher or target roles explicitly.
-- Run Codex (App Server), Hermes (ACP), and OpenCode (ACP) roles in the background and stream their persisted output into Chat panes.
+- Create Chats and Tasks, and assign globally available Roles.
+- Route a Task message through an OpenAI-compatible dispatcher or target Roles explicitly.
+- Run Codex (App Server), Hermes (ACP), OpenCode (ACP), and Pi (native JSONL RPC) Roles in the background and stream their persisted Task Turns into Chat panes.
 - Retain visible Super Workspace chat messages to an optional chat-scoped Hindsight memory bank.
 - Stop a running role with a two-click confirmation.
 - Give each role a dispatcher-facing description and a separate Agent-facing prompt.
 - Decouple roles from Agents/providers/models with reusable routing profiles, per-chat overrides, capability filters, and ordered automatic failover.
-- Reuse role sessions per chat or start a new session for each run.
+- Reuse each Role session within its Task, or configure `new_each_run` to start a fresh session for every dispatch; the composer also offers a one-shot fresh-session choice.
+- Route ordinary Decision replies through the same asynchronous LLM Auto Route as other dispatch messages, without pinning the source Turn's Role or session.
 - Cite earlier messages with `@msg-...` references.
 - Browse, upload, delete, edit, and live-refresh files under the current Chat Root.
 - Preview Markdown, HTML, images, PDFs, CSV, text, source code, and Git diffs.
@@ -70,9 +71,9 @@ A role has two distinct instruction fields:
 
 The dispatcher receives descriptions but not prompts. A role Agent receives its prompt but not its description. A Role selects a reusable routing profile; a Chat may override it for one Role. Viewer treats each driver's model selection value as opaque and never modifies Agent credentials or Agent-owned configuration.
 
-Normal message delivery is asynchronous: the chat plugin persists the user query and dispatch tasks; agent service plugins create or resume ACP/App Server sessions for the selected targets; events stream back over the bus with an echoed `turn_id`; the Chat pane incrementally reloads the changed run.
+Normal message delivery is asynchronous and serialized per Task: the chat plugin persists the user query and dispatch; agent service plugins create or resume Task/Role-scoped ACP/App Server/native RPC sessions for the selected targets; events stream back over the bus with an echoed `turn_id`; the Chat pane incrementally reloads the changed run. A human may explicitly reopen an ended Task by sending from its composer; programmatic dispatches and other writes keep the ended boundary.
 
-Codex uses its native App Server protocol; Hermes and OpenCode use ACP. Hermes runs through the user-selected Hermes Profile, preserving Hermes-owned configuration, memory, history, channels, and credentials.
+Codex uses its native App Server protocol; Hermes and OpenCode use ACP; Pi uses its native JSONL RPC (`pi --mode rpc`). Hermes runs through the user-selected Hermes Profile, preserving Hermes-owned configuration, memory, history, channels, and credentials. Pi RoleSessions persist Pi's `sessionFile` path and resume it with `switch_session`; model catalogs come from `get_available_models` and concrete candidates use `set_model`/`set_thinking_level`.
 
 ## Requirements
 
@@ -81,6 +82,7 @@ Codex uses its native App Server protocol; Hermes and OpenCode use ACP. Hermes r
 - `codex` on `PATH` with App Server support for Codex roles
 - `hermes` on `PATH` with the ACP optional dependency for Hermes roles
 - `opencode` on `PATH` for OpenCode roles
+- `pi` on `PATH` for Pi roles (Node.js 22.19+; `@earendil-works/pi-coding-agent`)
 - An OpenAI-compatible chat-completions endpoint for automatic routing
 
 ## Build

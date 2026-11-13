@@ -82,11 +82,14 @@ function createDockProvider(ctx: PluginCtx): DockProvider {
       },
     })));
   };
+  let refreshGeneration = 0;
   const refresh = async (): Promise<void> => {
+    const generation = ++refreshGeneration;
     const [result, tasks] = await Promise.all([
       ctx.bus.request("chat:_:chats:list", {}) as Promise<ChatList>,
       listAllOpenTasks(ctx),
     ]);
+    if (generation !== refreshGeneration) return;
     chats = result.chats;
     sidebarTasks = tasks;
     sync();

@@ -46,10 +46,17 @@ onMounted(async () => {
   ctx.setChrome({ title: "Tasks" });
   ctx.bus.subscribe("chat:_:task", refresh);
   ctx.bus.subscribe("chat:_:task-summary", refresh);
+  ctx.bus.subscribe("chat:_:turn", refresh);
+  ctx.bus.subscribe("chat:_:background", refresh);
   try { chats.value = (await ctx.bus.request("chat:_:chats:list", {}) as ChatList).chats; } catch (cause) { error.value = errorText(cause); }
   await load();
 });
-onBeforeUnmount(() => { ctx.bus.unsubscribe("chat:_:task", refresh); ctx.bus.unsubscribe("chat:_:task-summary", refresh); });
+onBeforeUnmount(() => {
+  ctx.bus.unsubscribe("chat:_:task", refresh);
+  ctx.bus.unsubscribe("chat:_:task-summary", refresh);
+  ctx.bus.unsubscribe("chat:_:turn", refresh);
+  ctx.bus.unsubscribe("chat:_:background", refresh);
+});
 </script>
 
 <template>

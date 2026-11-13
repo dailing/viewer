@@ -1,7 +1,7 @@
 # Viewer Plugin Protocol Specification
 
-> 状态：**草案 v0.2**（2026-08-13，**未冻结**）。本文档是插件协议在线路级（wire-level）的唯一权威来源；架构层决策见 `docs/plugin-framework.md`（§5/§6/§9）。Phase 0 要求：**本规范评审冻结后才写码**。
-> v0.2 变更：channel field 语法允许点号（`[a-z0-9][a-z0-9_.-]*`）——agent 插件族 id（如 `viewer.agent-hermes`）含点号并进入 channel 第一段（framework v0.23）。
+> 状态：**现行 v0.3**（2026-11-11）。本文档是插件协议在线路级（wire-level）的唯一权威来源；架构层决策见 `docs/plugin-framework.md`（§5/§6/§9）。
+> v0.3 变更：同步已实现的 RPC `no_route` fail-fast、gateway 透明 relay 与 asset 业务层大小上限；v0.2 允许 channel field 点号。
 >
 > 范围：单机 localhost。多机 federation 暂缓（framework §16-11）。不向后兼容（§12）。
 
@@ -9,7 +9,7 @@
 
 - 协议 = **一条 WebSocket 上的 5 种 JSON 帧**：`hello` / `publish` / `set` / `subscribe` / `unsubscribe`。没有第 6 种帧；RPC、错误通知、生命周期全部建立在这 5 种帧与 channel 约定之上。
 - 内核（Kernel）是唯一的消息路由者：publish 路由 + mailbox retained 当前值 + 连接注册表。内核不含任何功能逻辑。
-- 本规范面向四种实现者：内核、后端插件（任何语言）、gateway（C4 core plugin）、SDK（Python/TS 及未来其他语言）。
+- 本规范面向四种实现者：内核、后端插件（任何语言）、gateway（C4 core plugin）、SDK（Go/Python/TS 及未来其他语言）。
 
 ## 2. 连接拓扑
 
@@ -18,9 +18,9 @@
 | 连接 | 方向 | 说明 |
 |---|---|---|
 | plugin backend → kernel | 插件主动连 | 每个插件进程（含插件自行 spawn 的子进程）一条 WS，各自 `hello` |
-| supervisor (C0) → kernel | 插件主动连 | supervisor 自己也是插件连接；内核唯一 autostart 的进程是它 |
+| supervisor (C0) → kernel | 插件主动连 | supervisor 自己也是普通插件连接；外部插件生命周期由 supervisor 管理 |
 | gateway (C4) → kernel | 插件主动连 | gateway 是普通插件连接 |
-| browser → gateway | 浏览器主动连 | **唯一一条多路复用 WS**；gateway 做协议翻译（§11），浏览器不直连内核 |
+| browser → gateway | 浏览器主动连 | **每个浏览器一条多路复用 WS**；gateway 为每条浏览器连接建立专用 kernel 连接并透明 relay，浏览器不直连内核 |
 | plugin ↔ plugin | **不存在直连** | 一切插件间流量经内核路由（含 RPC，§8） |
 
 组件身份只在 `hello` 时建立；连接断开即注销（§9）。
@@ -30,6 +30,7 @@
 - WebSocket（RFC 6455）**文本帧**，每帧一个完整 JSON object（UTF-8）。无二进制帧；二进制效率不足时未来整体升级 MessagePack，协议语义不变。
 - 心跳复用 WebSocket 内建 ping/pong：内核每 **30s** 发 ping，连续 **2 次**未收到 pong（≈60s）即关闭连接。连接存活检测是 lifecycle 事件的来源，不做应用层心跳帧。
 - 帧大小上限：默认 **1 MiB**；例外 channel（目前仅 `gateway:_:assets:push`，见 framework §6.2）内核配置放宽至 **64 MiB**。超限帧 → 丢弃 + 错误通知（§10），连接保持。
+- 上述 **64 MiB 是单帧 transport 上限，不是 bundle 配额**。asset 业务层另限制单文件累计 **32 MiB**、单次上传总累计 **64 MiB**（含 `append` chunks）；超过业务上限时 RPC 返回 `{ok:false,error:{code:"too_large"}}`，不得将其描述为“协议允许 64 MiB 文件”。
 - TCP 背压内建；应用层背压见 §10。
 
 ## 4. Channel 语法与匹配
@@ -165,10 +166,11 @@ RPC 不是帧类型，是 `publish` 之上的约定（framework §5.3）。跨�
    ```
 4. 调用方按 `_corr` 匹配后 unsubscribe 该 inbox channel。
 
-- **超时**：client-side，SDK 默认 **30s** 可配；超时后丢弃迟到响应。
+- **无订阅者 fail-fast**：请求帧发布时目标 channel 零订阅者，broker 立即向 `_reply_to` 合成 `{ "_corr": "ab12", "ok": false, "error": { "code": "no_route", "message": "..." } }`。普通 event 零订阅者仍静默丢弃；broker 不因此获得 RPC 路由子系统。
+- **超时**：client-side，SDK 默认 **30s** 可配；目标已有订阅者但不响应时按超时处理，超时后丢弃迟到响应。
 - **取消**：调用方向目标 channel 再发一条 `{ "_corr": "ab12", "_cancel": true }`；被叫方自行决定是否响应/终止。
 - **错误分类**：响应 payload 的 `error.code` 是被叫方自己的约定，协议层不分类、不设专门错误 channel（framework §16-3）。
-- 请求了没人回、订阅了没人发都是正常状态（松耦合）。
+- 订阅了没人发是正常状态；RPC 目标零订阅者立即返回 `no_route`，已有订阅者但不响应由 client-side timeout 结束。
 - 分页快照类 RPC 的请求参数必须显式（如 `before_id` + `limit`），禁止隐式取数（framework §5.6）。
 
 ## 9. 护栏
@@ -200,10 +202,9 @@ close reason 携带 JSON：`{"code": 4003, "message": "protocol version mismatch
 - 每连接出站队列上限 **1000 帧**；超限时**丢弃新帧**并节流发送错误通知（`slow_consumer`，含累计丢弃数）。event 与 set 同策略（mailbox 语义下丢中间 set 无害——下一个 set 仍是完整值）。
 - 入站不节流；帧大小上限见 §3。
 
-## 11. 浏览器面（gateway 翻译）
+## 11. 浏览器面（gateway 透明 relay）
 
-- 浏览器与 gateway 之间是**同一套 5 帧 JSON**（一条多路复用 WS）；gateway 是协议翻译器与订阅代理（framework §6.1）。
-- gateway 以自己身份（plugin id `gateway`）对内核持有连接，代浏览器 subscribe/publish；浏览器来源的流量 origin 为 `gateway`（浏览器无插件身份，前端 instance 归属由 gateway 在 channel/payload 层表达）。
+- 浏览器与 gateway 之间使用**同一套 5 帧 JSON**（一条多路复用 WS）。gateway 为每个浏览器连接建立一条专用 kernel 连接，hello 复用浏览器 conn UUID，后续帧逐字节 relay；不维护独立的浏览器协议或订阅投影。
 - 浏览器帧的大小/错误策略与内核侧一致；gateway 侧的浏览器连接管理（鉴权、断连）是 gateway 插件内部设计，不在本规范范围。
 
 ## 12. 版本与兼容
@@ -268,14 +269,14 @@ kernel                        plugin (SDK)
   │ ── set（retained 当前值）─▶ │ state 自动恢复（§6 交接）；event 流自然接续
 ```
 
-## 14. 实现清单（冻结核对表）
+## 14. 实现核对表
 
 - [ ] 5 帧 schema（§5）+ partial 校验（帧/manifest 强校验，value 自由）
 - [ ] §4.2 匹配算法（含前缀规则、`*`、`>`）
 - [ ] mailbox：replace-only + §6 原子交接
 - [ ] hello 流程：版本严格相等、conn 规则、无 ack、close codes（§10.1）
 - [ ] `_conn:{conn}:error` 通知 mailbox
-- [ ] RPC inbox 约定（`_reply_to`/`_corr`/`ok`/`error`/`_cancel`，30s 超时）
+- [ ] RPC inbox 约定（`_reply_to`/`_corr`/`ok`/`error`/`_cancel`，零订阅者 `no_route`，30s 超时）
 - [ ] trace_id/depth 护栏（上限 8）
 - [ ] 出站队列 1000 + 慢消费者丢弃通知
 - [ ] 重连重放订阅（SDK 职责）

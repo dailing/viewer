@@ -5,17 +5,15 @@ import "strings"
 const configNamespace = "plugins.viewer-chat"
 
 type SuperRole struct {
-	ID                    string   `gorm:"primaryKey" json:"id"`
-	Name                  string   `json:"name"`
-	Description           string   `json:"description"`
-	Prompt                string   `json:"prompt"`
-	CWD                   string   `json:"cwd"`
-	RoutingPolicyID       string   `json:"routing_policy_id"`
-	SessionPolicy         string   `json:"session_policy"`
-	ContextRecyclePercent *float64 `json:"context_recycle_percent"`
-	ContextRecycleTokens  *int     `json:"context_recycle_tokens"`
-	CreatedAt             int64    `json:"created_at"`
-	UpdatedAt             int64    `json:"updated_at"`
+	ID              string `gorm:"primaryKey" json:"id"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	Prompt          string `json:"prompt"`
+	CWD             string `json:"cwd"`
+	RoutingPolicyID string `json:"routing_policy_id"`
+	SessionPolicy   string `json:"session_policy"`
+	CreatedAt       int64  `json:"created_at"`
+	UpdatedAt       int64  `json:"updated_at"`
 	// Legacy C1 migration inputs; never persisted to the roles table.
 	Provider string  `gorm:"-" json:"provider,omitempty"`
 	Model    *string `gorm:"-" json:"model,omitempty"`
@@ -105,13 +103,11 @@ type HindsightConfig struct {
 	// deployment takes 5-8s per message).
 	RetainEnabled        bool `json:"retain_enabled"`
 	RetainTimeoutSeconds int  `json:"retain_timeout_seconds"`
-	// RecallEnabled gates the long-term-memory recall section in line
-	// contexts. Default OFF (history-DAG model): the chat bank mixes every
-	// line's memories and recall results carry no verifiable source ids, so
-	// no snapshot can prove membership — isolated contexts must not inject
-	// unverifiable memories (docs/chat-task-dag-plan.md §7 检索隔离).
-	// Retain keeps running either way; re-enable knowingly for mainline-
-	// only workspaces.
+	// RecallEnabled gates the long-term-memory recall section in Task contexts.
+	// Default OFF: the shared chat bank cannot prove that a recalled memory
+	// belongs to this Task, so isolated contexts must not inject it.
+	// Retain keeps running either way; enable recall only for workspaces where
+	// this cross-Task sharing is intentional.
 	RecallEnabled bool `json:"recall_enabled"`
 }
 

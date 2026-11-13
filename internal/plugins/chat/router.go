@@ -12,7 +12,23 @@ import (
 const (
 	defaultHistoryWordBudget = 1200
 	routerHistoryByteBudget  = 12 * 1024
+	defaultRouterModel       = "k2.8"
+	defaultRouterTimeout     = 15
 )
+
+type dispatchRouterConfig struct {
+	Model          string         `json:"model"`
+	TimeoutSeconds int            `json:"timeout_seconds"`
+	ExtraBody      map[string]any `json:"extra_body"`
+}
+
+func defaultDispatchRouterConfig() dispatchRouterConfig {
+	return dispatchRouterConfig{
+		Model: defaultRouterModel, TimeoutSeconds: defaultRouterTimeout,
+		ExtraBody: map[string]any{"reasoning_effort": "none", "temperature": 0.6},
+	}
+}
+
 const dispatchTemplate = `You route one user message to persistent agent roles.
 
 Default to exactly one role.
@@ -42,9 +58,9 @@ func renderDispatchPrompt(message string, roles []SuperRole, history string) str
 	return strings.ReplaceAll(result, "{{message}}", message)
 }
 
-func routeWithLLM(ctx context.Context, complete llmCompleter, message string, roles []SuperRole, history string) ([]string, string, error) {
+func routeWithLLM(ctx context.Context, complete llmRouteCompleter, message string, roles []SuperRole, history string, config dispatchRouterConfig) ([]string, string, error) {
 	messages := []map[string]string{{"role": "system", "content": "Follow the routing prompt exactly. Return only a JSON object with role_ids and rationale."}, {"role": "user", "content": renderDispatchPrompt(message, roles, history)}}
-	result, err := complete(ctx, messages, true, 0)
+	result, err := complete(ctx, messages, true, config.TimeoutSeconds, config.Model, config.ExtraBody)
 	if err != nil {
 		if llmNotConfigured(err) {
 			return nil, "", errors.New("LLM router is not configured: set endpoint and model in the LLM pane")
@@ -95,8 +111,8 @@ func parseRoute(content string, roles []SuperRole) ([]string, string, error) {
 	return nil, "", fmt.Errorf("no eligible roles")
 }
 
-// No client-level Timeout: every caller bounds its own context (router:
-// llm.timeout_seconds; summary: turn_summary.timeout_seconds; hindsight:
-// hindsight.timeout_seconds). A shared cap used to silently truncate the
-// summary's configured 60s budget to 30s under local-server queueing.
+// No client-level Timeout: every caller bounds its own context (Auto Route:
+// dispatch_router.timeout_seconds; summary: turn_summary.timeout_seconds;
+// hindsight: hindsight.timeout_seconds). A shared cap used to silently truncate
+// the summary's configured 60s budget to 30s under local-server queueing.
 func defaultHTTPClient() *http.Client { return &http.Client{} }

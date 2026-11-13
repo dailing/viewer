@@ -4,7 +4,7 @@
  * results aloud; deliberately standalone so other plugins can reuse it.
  */
 
-export function speechSupported(): boolean {
+function speechSupported(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window;
 }
 

@@ -251,7 +251,16 @@ const buildTime = (() => {
             >
               <i class="bi" :class="section.provider.icon"></i>
               <span class="dock-group-label">{{ section.group.label }}</span>
-              <span v-if="section.group.meta !== undefined" class="dock-group-meta">{{ section.group.meta() }}</span>
+              <span v-if="section.group.meta !== undefined" class="dock-group-meta">
+                <span
+                  v-for="(item, index) in section.group.meta()"
+                  :key="index"
+                  class="dock-group-meta-item"
+                  :class="{ 'dock-group-meta-success': item.tone === 'success' }"
+                  :title="item.title"
+                  :aria-label="item.title"
+                >{{ item.text }}</span>
+              </span>
               <span v-else class="dock-group-count">{{ section.entries.length }}</span>
             </button>
             <button
@@ -519,7 +528,14 @@ const buildTime = (() => {
 }
 
 .dock-group-meta {
+  align-items: center;
   color: var(--color-text-muted);
+  display: inline-flex;
+  gap: 6px;
+}
+
+.dock-group-meta-success {
+  color: var(--color-success);
 }
 
 .dock-group-add {

@@ -1,22 +1,17 @@
 package chat
 
-// Background-process line hold.
+// Background-process Task hold.
 //
 // Hermes under ACP never delivers its in-process completion notifications
 // (its completion queue has no consumer in acp mode), so a turn that spawned
 // background terminal processes ends with the work still running and no way
 // for the result to come back. This file closes the loop viewer-side: when a
-// relay finishes, the line's agent sessions are polled (provider RPC
+// relay finishes, the Task's agent sessions are polled (provider RPC
 // <plugin>:_:background, served by viewer.agent-hermes from Hermes's
-// processes.json checkpoint); a line with live background work stays busy —
-// new user messages queue per the existing line semantics — and a watcher
-// polls until the last process exits, then injects a completion dispatch
-// into the SAME agent session (resume) so the agent reads the output with
-// process_manage and reports. The completion turn itself can spawn new
-// background work, in which case the line re-holds.
-//
-// Scope: the serial line path only. Parallel (send-now) turns fork
-// auto-taskes with their own sessions and never hold a line.
+// processes.json checkpoint). A Task with live background work stays busy and
+// queues new user messages. A watcher polls until the last process exits, then
+// injects a completion dispatch into the SAME agent session so the agent reads
+// the output with process_manage and reports. New background work re-holds it.
 
 import (
 	"context"
@@ -300,7 +295,7 @@ func (p *Plugin) completeBackground(key string) {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		sessions := p.runRelay(*chat, workspace, []relayTarget{target}, message, user.CreatedAt, false, false, raw, dispatchID)
+		sessions := p.runRelay(*chat, workspace, []relayTarget{target}, message, user.CreatedAt, false, raw, dispatchID)
 		p.releaseBusyOrHold([]string{key}, sessions)
 	}()
 }

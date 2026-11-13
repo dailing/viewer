@@ -16,7 +16,7 @@ import (
 )
 
 func defaultAgents() map[string]string {
-	return map[string]string{"hermes": "viewer.agent-hermes", "codex-app-server": "viewer.agent-codex", "opencode": "viewer.agent-opencode"}
+	return map[string]string{"hermes": "viewer.agent-hermes", "codex-app-server": "viewer.agent-codex", "opencode": "viewer.agent-opencode", "pi": "viewer.agent-pi"}
 }
 
 func pluginFromChannel(channel string) string {
@@ -346,8 +346,7 @@ func (p *Plugin) runningChatIDs() []string {
 // runningTurns returns one entry per in-flight turn of a chat, carrying the
 // owning role. chats:list exposes it when a chat_id filter is present so the
 // pane can bind each turn box's running state — and target a stop at one
-// specific turn — even after a reload, and even while parallel send-now
-// turns of the same role run side by side.
+// specific turn — even after a full reload.
 func (p *Plugin) runningTurns(chatID string) []map[string]any {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -488,16 +487,10 @@ func candidateProfile(target agentdriver.Target) string {
 	return string(encoded)
 }
 
-// ensureBusRuntime starts (or reuses) the agent session for a turn. `key` is
-// the runtimes map key chosen by the caller: the canonical chat+role key for
-// regular turns, a unique per-turn key for parallel send-now turns, a
-// lane-scoped key for lane continuations. Ephemeral (parallel) runtimes never
-// resume or overwrite the stored role session — the canonical session belongs
-// to the serial path. Lane continuations (resumeID != "") resume the given
-// session explicitly and likewise leave the stored canonical session
-// untouched; the explicit resume also overrides a new_each_run session
-// policy, since the user picked the session to continue.
-func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, taskID string, role SuperRole, candidate resolvedCandidate, turnID, key string, forceNew bool, ephemeral bool, resumeID string) (*runtime, bool, error) {
+// ensureBusRuntime starts or reuses the Task/Role agent session. An explicit
+// resumeID continues the source Turn (including across new_each_run); otherwise
+// the persisted RoleSession is reused when its provider profile and cwd match.
+func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, taskID string, role SuperRole, candidate resolvedCandidate, turnID, key string, forceNew bool, resumeID string) (*runtime, bool, error) {
 	effectiveCWD := chat.Root
 	if role.CWD != "" {
 		if filepath.IsAbs(role.CWD) {
@@ -530,10 +523,10 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, taskID string,
 	requested := ""
 	switch {
 	case resumeID != "" && !forceNew:
-		// Lane continuation: resume the lane's session explicitly. A
-		// fresh-retry (stale session refused) drops the pin and starts new.
+		// Continue the source Turn's session. A fresh retry after a stale
+		// session refusal drops the pin and starts new.
 		requested = resumeID
-	case !ephemeral:
+	default:
 		state, err := p.store.roleSession(chat.ID, taskID, role.ID)
 		if err != nil {
 			return nil, false, err
@@ -554,7 +547,7 @@ func (p *Plugin) ensureBusRuntime(ctx context.Context, chat Chat, taskID string,
 		return nil, false, errors.New("agent start returned no session_id")
 	}
 	current := &runtime{sessionID: started.SessionID, profile: profile, cwd: absolute, roleID: role.ID, roleName: role.Name, pluginID: candidate.pluginID, providerKey: providerKey, target: candidate.target, ended: make(chan turnEnd, 1)}
-	if !ephemeral && resumeID == "" {
+	if resumeID == "" {
 		if err = p.store.saveRoleSession(&RoleSession{ChatID: chat.ID, TaskID: taskID, RoleID: role.ID, Provider: providerKey, ProviderProfile: profile, ProviderSessionID: started.SessionID, CWD: absolute, UpdatedAt: nowMillis()}); err != nil {
 			return nil, false, err
 		}

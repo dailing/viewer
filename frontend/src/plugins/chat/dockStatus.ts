@@ -62,11 +62,6 @@ export function markTaskRead(taskID: string): void {
   }
 }
 
-/** Drop all state for a removed Task. */
-export function forgetTask(taskID: string): void {
-  markTaskRead(taskID);
-}
-
 /** Unread dot state for one Task: error wins over done. */
 export function dockUnreadStateFor(taskID: string): TaskDockState {
   const kind = taskDockStatus.unread[taskID];

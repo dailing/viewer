@@ -146,6 +146,22 @@ func roleByID(roles []SuperRole, id string) (SuperRole, bool) {
 	return SuperRole{}, false
 }
 
+func (p *Plugin) dispatchRouterConfig(ctx context.Context) dispatchRouterConfig {
+	result := defaultDispatchRouterConfig()
+	_ = p.configGet(ctx, "dispatch_router", &result)
+	result.Model = strings.TrimSpace(result.Model)
+	if result.Model == "" {
+		result.Model = defaultRouterModel
+	}
+	if result.TimeoutSeconds <= 0 {
+		result.TimeoutSeconds = defaultRouterTimeout
+	}
+	if result.ExtraBody == nil {
+		result.ExtraBody = defaultDispatchRouterConfig().ExtraBody
+	}
+	return result
+}
+
 func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
 	result := SummaryConfig{
 		Enabled: true, ToolCharBudget: 4000, TimeoutSeconds: 60,

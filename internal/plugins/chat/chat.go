@@ -21,7 +21,7 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "chat", Version: "1.0.0",
+	ID: "chat", Version: "1.2.0",
 	Slots: map[string]any{
 		"chat:_:workspace:get": map[string]any{}, "chat:_:workspace:patch": map[string]any{},
 		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},
@@ -71,12 +71,15 @@ type Plugin struct {
 	client             *busclient.Client
 	httpClient         *http.Client
 	llmFn              llmCompleter
+	routeLLMFn         llmRouteCompleter
 	ctx                context.Context
 	cancel             context.CancelFunc
 	mu                 sync.Mutex
 	runtimes           map[string]*runtime
 	busy               map[string]bool
 	queues             map[string][]queuedMessage
+	routeQueues        map[string][]pendingRoute
+	routeRunning       map[string]bool
 	lineRaw            map[string]bool // lineKey → last dispatch's raw flag (background resumes inherit it)
 	agents             map[string]string
 	catalogs           map[string]agentdriver.Catalog
@@ -118,7 +121,7 @@ func New(dataDir string, options ...Option) (*Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, lineRaw: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, turnTasks: map[string]string{}, taskSummaryRunning: map[string]bool{}, taskSummaryPending: map[string]bool{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, background: map[string]*backgroundBlock{}, agentSlots: map[string]map[string]bool{}, httpClient: defaultHTTPClient()}
+	p := &Plugin{generation: newID(), dataDir: dataDir, store: database, runtimes: map[string]*runtime{}, busy: map[string]bool{}, queues: map[string][]queuedMessage{}, routeQueues: map[string][]pendingRoute{}, routeRunning: map[string]bool{}, lineRaw: map[string]bool{}, agents: defaultAgents(), catalogs: map[string]agentdriver.Catalog{}, turnTasks: map[string]string{}, taskSummaryRunning: map[string]bool{}, taskSummaryPending: map[string]bool{}, openText: map[string]*Message{}, openBlock: map[string]*MessageBlock{}, openToolCalls: map[string]map[string]*MessageBlock{}, patchedBanks: map[string]bool{}, background: map[string]*backgroundBlock{}, agentSlots: map[string]map[string]bool{}, httpClient: defaultHTTPClient()}
 	for _, option := range options {
 		option(p)
 	}
@@ -163,6 +166,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		return err
 	}
 	p.llmFn = p.llmCompleteViaBus
+	p.routeLLMFn = p.llmCompleteRouteViaBus
 	if err := p.recoverTaskWork(); err != nil {
 		return err
 	}
@@ -517,10 +521,8 @@ func turnTargetsPayload(turns []Turn) map[string]any {
 	return values
 }
 
-// turnSessionsPayload renders sessioned turns as turn_id → session info so
-// the pane can group boxes into session lanes and target lane continuations.
-// started_at lets the pane order lanes and pick a lane's latest turn without
-// a second query.
+// turnSessionsPayload renders turn_id → provider session info for exact
+// source-Turn continuations and background-process ownership.
 func turnSessionsPayload(turns []Turn) map[string]any {
 	values := make(map[string]any, len(turns))
 	for _, turn := range turns {

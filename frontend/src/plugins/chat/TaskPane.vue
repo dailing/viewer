@@ -12,7 +12,7 @@ import DecisionCard from "./DecisionCard.vue";
 import { decisionResponsePayload, type DecisionResponseIntent } from "./decisionInput";
 import { chatIdForView, resolveChatView, setChatViewTask } from "./viewInstances";
 import { formatChatTime as formatTime } from "./chatTime";
-import { mergeMessageWindow, readingAnchor, withReadingAnchor, type ReadingAnchor } from "./historyWindow";
+import { mergeMessageWindow, readingAnchor, withReadingAnchor, type MessageWindowEviction, type ReadingAnchor } from "./historyWindow";
 import type { Chat, ChatBlock, ChatBlockList, ChatHistory, ChatList, ChatMessage, Decision, QueuedMessage, Role, RunningTurn, Task, TaskList, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
@@ -56,10 +56,11 @@ const composerVisible = computed(() => Boolean(inputs.session(inputSessionId)?.p
 const memberRoles = computed(() => { const ids = new Set(chat.value?.member_role_ids ?? []); return roles.value.filter((role) => ids.has(role.id)); });
 const currentRunning = computed(() => [...running.value.values()].filter((turn) => turn.task_id === currentTaskId.value));
 const ended = computed(() => currentTask.value?.status === "ended");
-function mergeMessages(incoming: ChatMessage[]): void {
-  const merged = mergeMessageWindow(messages.value, incoming);
+function mergeMessages(incoming: ChatMessage[], evict: MessageWindowEviction = "older"): void {
+  const merged = mergeMessageWindow(messages.value, incoming, undefined, evict);
   messages.value = merged.messages;
   if (merged.evictedOlder) hasOlder.value = true;
+  if (merged.evictedNewer) hasNewer.value = true;
 }
 function mergeBlocks(incoming: ChatBlock[]): void {
   const byId = new Map(blocks.value.map((block) => [block.id, block]));
@@ -71,6 +72,9 @@ function noteTarget(turnId: string, target: TurnTarget): void {
   turnTargets.value = new Map(turnTargets.value).set(turnId, { dispatchId: target.dispatch_id ?? "", roleId: target.role_id ?? "", roleName: target.role_name ?? "", label });
 }
 function noteTargets(values: Record<string, TurnTarget> | undefined): void { for (const [turnId, target] of Object.entries(values ?? {})) noteTarget(turnId, target); }
+function messageOffset(messageId: string): number | undefined {
+  return thread.value?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`)?.getBoundingClientRect().top;
+}
 async function loadTasks(): Promise<void> {
   const result = await ctx.bus.request("chat:_:tasks:list", { chat_id: chatId, limit: 100 }) as TaskList;
   tasks.value = result.tasks;
@@ -137,28 +141,41 @@ async function loadHistory(around?: { createdAt: number; messageId: string }): P
     await nextTick();
     if (around) document.querySelector(`[data-message-id="${around.messageId}"]`)?.scrollIntoView({ block: "center" });
     if (thread.value) await renderMermaidIn(thread.value);
+    if (!around && thread.value) thread.value.scrollTop = thread.value.scrollHeight;
   } catch (cause) { if (generation === historyGeneration) error.value = errorText(cause); } finally { if (generation === historyGeneration) loading.value = false; }
 }
 async function loadOlder(): Promise<void> {
   const first = messages.value[0]; if (!first || !hasOlder.value || loading.value) return;
   const element = thread.value; const previousHeight = element?.scrollHeight ?? 0;
+  const previousAnchorTop = messageOffset(first.id);
   const taskId = currentTaskId.value;
   const generation = historyGeneration;
   const result = await ctx.bus.request("chat:_:history", { task_id: taskId, include_messages: true, limit: 50, before: first.created_at, before_id: first.id }) as ChatHistory;
   if (taskId !== currentTaskId.value || generation !== historyGeneration) return;
-  mergeMessages(result.messages ?? []); hasOlder.value = result.has_more === true;
+  mergeMessages(result.messages ?? [], "newer"); hasOlder.value = result.has_more === true;
   await loadVisibleBlocks(taskId, generation, false);
   if (taskId !== currentTaskId.value || generation !== historyGeneration) return;
-  await nextTick(); if (element) element.scrollTop += element.scrollHeight - previousHeight;
+  await nextTick();
+  if (element) {
+    const nextAnchorTop = messageOffset(first.id);
+    element.scrollTop += previousAnchorTop !== undefined && nextAnchorTop !== undefined
+      ? nextAnchorTop - previousAnchorTop
+      : element.scrollHeight - previousHeight;
+  }
 }
 async function loadNewer(): Promise<void> {
   const last = messages.value.at(-1); if (!last || !hasNewer.value || loading.value) return;
+  const element = thread.value; const previousAnchorTop = messageOffset(last.id);
   const taskId = currentTaskId.value;
   const generation = historyGeneration;
   const result = await ctx.bus.request("chat:_:history", { task_id: taskId, include_messages: true, limit: 50, after: last.created_at, after_id: last.id }) as ChatHistory;
   if (taskId !== currentTaskId.value || generation !== historyGeneration) return;
   mergeMessages(result.messages ?? []); hasNewer.value = result.has_more_after === true;
   await loadVisibleBlocks(taskId, generation, false);
+  if (taskId !== currentTaskId.value || generation !== historyGeneration) return;
+  await nextTick();
+  const nextAnchorTop = messageOffset(last.id);
+  if (element && previousAnchorTop !== undefined && nextAnchorTop !== undefined) element.scrollTop += nextAnchorTop - previousAnchorTop;
 }
 function onScroll(): void {
   const element = thread.value; if (!element) return;
@@ -403,7 +420,7 @@ onBeforeUnmount(() => {
   </div>
 </template>
 <style scoped>
-.task-chat{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;position:relative;color:var(--color-text)}.spin{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.rename-row,.error-row{align-items:center;display:flex;gap:5px;padding:5px 8px}.rename-row input{background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text);flex:1;min-width:0;padding:4px 6px}.error-row{color:var(--bs-danger);font-size:var(--font-size-ui-small)}.error-row button{margin-left:auto}.task-body{display:flex;flex:1;flex-direction:column;min-height:0;overflow:hidden}.timeline{flex:1;min-height:0;overflow-y:auto;padding:8px}.task-composer{border-top:1px solid var(--color-border);flex:0 0 auto;max-height:65vh;overflow-y:auto;position:relative;z-index:2}
+.task-chat{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;position:relative;color:var(--color-text)}.spin{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.rename-row,.error-row{align-items:center;display:flex;gap:5px;padding:5px 8px}.rename-row input{background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text);flex:1;min-width:0;padding:4px 6px}.error-row{color:var(--bs-danger);font-size:var(--font-size-ui-small)}.error-row button{margin-left:auto}.task-body{display:flex;flex:1;flex-direction:column;min-height:0;overflow:hidden}.timeline{flex:1;min-height:0;overflow-y:auto;padding:8px}.task-composer{border-top:1px solid var(--color-border);flex:0 0 auto;max-height:65vh;overflow:visible;position:relative;z-index:20}
 .composer-overlay-button {
   align-items: center;
   backdrop-filter: blur(6px);

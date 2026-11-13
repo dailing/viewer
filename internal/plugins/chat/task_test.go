@@ -58,6 +58,7 @@ func TestTaskSchemaStartsCleanAndPersistsAcrossReopen(t *testing.T) {
 		{&MessageBlock{}, "idx_message_blocks_task_occurred"},
 		{&Message{}, "idx_messages_task_cursor"},
 		{&Turn{}, "idx_turns_task_started"},
+		{&Decision{}, "idx_decisions_status_cursor"},
 	} {
 		if !s.db.Migrator().HasIndex(check.model, check.name) {
 			t.Errorf("ORM-managed index %s is missing", check.name)

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Persistent Decision marker, continuation, cursor list and cancellation smoke."""
+"""Persistent Decision marker, Auto Route dispatch, cursor list and cancellation smoke."""
 from __future__ import annotations
-import asyncio, json, sqlite3, sys
+import asyncio, json, sqlite3, sys, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from sdk import BusClient  # noqa: E402
@@ -16,6 +18,25 @@ def prompts(data_dir: Path) -> list[dict[str, str]]:
 async def run() -> None:
     async with chat_server() as (client, data_dir, completions):
         role, chat, task = await make_workspace(client)
+        role = await client.request("chat:_:roles:patch", {"id": role["id"], "description": "handles Decision smoke follow-ups"})
+        router_requests: list[dict[str, Any]] = []
+        class RouterHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                router_requests.append(request)
+                content = json.dumps({"role_ids": [role["id"]], "rationale": "smoke Auto Route"})
+                body = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+        router = ThreadingHTTPServer(("127.0.0.1", 0), RouterHandler)
+        router_thread = threading.Thread(target=router.serve_forever, daemon=True)
+        router_thread.start()
+        await client.request("config:_:set", {"plugin": "plugins.llm", "key": "active", "value": {"endpoint": f"http://127.0.0.1:{router.server_port}/v1", "model": "router-smoke"}})
         gateway = BusClient(client.url, GATEWAY, request_timeout=25.0)
         await gateway.connect()
         try:
@@ -29,7 +50,11 @@ async def run() -> None:
             assert pending["pending_count"] == 1 and len(pending["decisions"]) == 1
             decision = pending["decisions"][0]
             assert decision["status"] == "pending" and decision["question"] == "Continue with the recommended path?"
-            assert decision["options"] == [{"id": "option-1", "label": "Recommended path"}, {"id": "option-2", "label": "Alternative path"}]
+            assert decision["options"] == [
+                {"id": "option-1", "label": "Recommended path"},
+                {"id": "option-2", "label": "Alternative path"},
+                {"id": "viewer-end-current-task", "label": "结束当前 Task", "action": "end_current_task"},
+            ]
             start, end = decision["marker_start"], decision["marker_end"]
             history = await client.request("chat:_:history", {"task_id": task["id"], "include_messages": True, "limit": 50})
             message = next(item for item in history["messages"] if item["id"] == decision["source_message_id"])
@@ -52,11 +77,14 @@ async def run() -> None:
             else: raise AssertionError("non-gateway caller resolved a human Decision")
             response = {"decision_id": decision["id"], "response": "Recommended path", "option_id": "option-1", "expected_version": decision["version"]}
             resolved = await gateway.request("chat:_:decisions:respond", response)
+            assert resolved["status"] == "routing" and resolved["role_ids"] == []
             assert resolved["decision"]["status"] == "resolved" and resolved["decision"]["response"] == "Recommended path"
             assert resolved["decision"]["resolved_dispatch_id"]
             replay = await gateway.request("chat:_:decisions:respond", response)
             assert replay["decision"]["resolved_dispatch_id"] == resolved["decision"]["resolved_dispatch_id"]
             await wait_for(lambda: len(completions) >= 2)
+            assert any("Current message:\nRecommended path" in str(message.get("content", ""))
+                       for request in router_requests for message in request.get("messages", []))
             captured = prompts(data_dir)
             assert len(captured) == 2 and captured[1]["session_id"] == captured[0]["session_id"]
             assert "While you were away" not in captured[1]["text"]
@@ -120,7 +148,31 @@ async def run() -> None:
                 assert database.execute("select count(*) from turns where task_id=?", (end_task["id"],)).fetchone()[0] == 1
                 assert database.execute("select count(*) from messages where task_id=? and role='user' and text='End current task'", (end_task["id"],)).fetchone()[0] == 0
             finally: database.close()
-            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, visible source-Turn context, gateway response, same session without redundant bridge, direct Task end, idempotency and cursor list")
-        finally: await gateway.close()
+            generated_end_task = (await client.request("chat:_:tasks:create", {"chat_id": chat["id"], "title": "Generated Decision ending", "idempotency_key": "decision-generated-end-task-create"}))["task"]
+            await dispatch(client, generated_end_task["id"], "MOCK_DECISION generated end", role["id"], "decision-generated-end-task")
+            await wait_for(lambda: len(completions) >= 8)
+            generated = (await decisions(client, generated_end_task["id"], pending=True))["decisions"][0]
+            generated_end = generated["options"][-1]
+            assert generated_end == {"id": "viewer-end-current-task", "label": "结束当前 Task", "action": "end_current_task"}
+            before_generated_end = len(completions)
+            generated_result = await gateway.request("chat:_:decisions:respond", {
+                "decision_id": generated["id"], "response": generated_end["label"],
+                "option_id": generated_end["id"], "expected_version": generated["version"],
+            })
+            assert generated_result["task"]["status"] == "ended"
+            assert generated_result["decision"]["status"] == "resolved" and generated_result["decision"]["response"] == "结束当前 Task"
+            await asyncio.sleep(0.2)
+            assert len(completions) == before_generated_end
+            database = sqlite3.connect(data_dir / "chat.sqlite3")
+            try:
+                assert database.execute("select count(*) from turns where task_id=?", (generated_end_task["id"],)).fetchone()[0] == 1
+                assert database.execute("select count(*) from messages where task_id=? and role='user' and text=?", (generated_end_task["id"], "结束当前 Task")).fetchone()[0] == 0
+            finally: database.close()
+            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, visible source-Turn context, gateway response through async Auto Route, built-in and Agent-provided direct Task end, idempotency and cursor list")
+        finally:
+            await gateway.close()
+            router.shutdown()
+            router.server_close()
+            router_thread.join(timeout=2)
 def main() -> None: asyncio.run(run()); print("PASS Decision smoke complete")
 if __name__ == "__main__": main()

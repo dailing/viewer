@@ -251,7 +251,8 @@ const buildTime = (() => {
             >
               <i class="bi" :class="section.provider.icon"></i>
               <span class="dock-group-label">{{ section.group.label }}</span>
-              <span class="dock-group-count">{{ section.entries.length }}</span>
+              <span v-if="section.group.meta !== undefined" class="dock-group-meta">{{ section.group.meta() }}</span>
+              <span v-else class="dock-group-count">{{ section.entries.length }}</span>
             </button>
             <button
               v-if="section.provider.createForGroup !== undefined"
@@ -465,8 +466,7 @@ const buildTime = (() => {
   display: flex;
   flex: 0 0 auto;
   gap: 2px;
-  margin-top: 1px;
-  min-height: 20px;
+  min-height: 22px;
   width: calc(100% - 6px);
 }
 
@@ -476,45 +476,57 @@ const buildTime = (() => {
   background: transparent;
   border: 0;
   border-radius: var(--radius-sm);
-  color: var(--color-text-subtle);
+  color: var(--color-text-muted);
   display: inline-flex;
-  font-size: var(--font-size-ui-small);
-  height: 20px;
+  font-size: calc(var(--font-size-ui) * 7 / 6);
+  height: 22px;
   padding: 0;
 }
 
 .dock-group-toggle {
   flex: 1 1 auto;
-  gap: 5px;
+  gap: 8px;
   justify-content: flex-start;
   min-width: 0;
-  padding-left: 4px;
+  padding-left: 9px;
 }
 
 .dock-group-toggle:hover,
 .dock-group-add:hover {
   background: var(--color-surface-hover);
-  color: var(--color-text-muted);
+  color: var(--color-text);
 }
 
 .dock-group-label {
+  font-size: var(--font-size-ui);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.dock-group-count {
-  color: var(--color-text-subtle);
-  font-size: calc(var(--font-size-ui) * 3 / 4);
+.dock-group-count,
+.dock-group-meta {
+  flex: 0 0 auto;
+  font-size: var(--font-size-ui-small);
   margin-left: auto;
   padding-right: 3px;
+  white-space: nowrap;
+}
+
+.dock-group-count {
+  color: var(--color-text-subtle);
+}
+
+.dock-group-meta {
+  color: var(--color-text-muted);
 }
 
 .dock-group-add {
-  flex: 0 0 24px;
+  flex: 0 0 20px;
+  font-size: var(--font-size-ui-small);
   justify-content: center;
-  width: 24px;
+  width: 20px;
 }
 
 .dock.expanded .dock-item.dock-grouped-item {

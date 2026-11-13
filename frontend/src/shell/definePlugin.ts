@@ -39,6 +39,8 @@ export interface PluginInstanceAdapter {
 export interface DockInstanceGroup {
   id: string;
   label: string;
+  /** Optional reactive trailing summary; omitted means the instance count. */
+  meta?: () => string | number;
 }
 
 export interface DockItemAction {

@@ -149,11 +149,12 @@ async def run() -> None:
                 assert database.execute("select count(*) from messages where task_id=? and role='user' and text='End current task'", (end_task["id"],)).fetchone()[0] == 0
             finally: database.close()
             generated_end_task = (await client.request("chat:_:tasks:create", {"chat_id": chat["id"], "title": "Generated Decision ending", "idempotency_key": "decision-generated-end-task-create"}))["task"]
-            await dispatch(client, generated_end_task["id"], "MOCK_DECISION generated end", role["id"], "decision-generated-end-task")
+            await dispatch(client, generated_end_task["id"], "MOCK_NO_DECISION generated end", role["id"], "decision-generated-end-task")
             await wait_for(lambda: len(completions) >= 8)
             generated = (await decisions(client, generated_end_task["id"], pending=True))["decisions"][0]
-            generated_end = generated["options"][-1]
-            assert generated_end == {"id": "viewer-end-current-task", "label": "结束当前 Task", "action": "end_current_task"}
+            assert generated["question"] == generated_end_task["title"]
+            assert generated["options"] == [{"id": "viewer-end-current-task", "label": "结束当前 Task", "action": "end_current_task"}]
+            generated_end = generated["options"][0]
             before_generated_end = len(completions)
             generated_result = await gateway.request("chat:_:decisions:respond", {
                 "decision_id": generated["id"], "response": generated_end["label"],
@@ -168,7 +169,7 @@ async def run() -> None:
                 assert database.execute("select count(*) from turns where task_id=?", (generated_end_task["id"],)).fetchone()[0] == 1
                 assert database.execute("select count(*) from messages where task_id=? and role='user' and text=?", (generated_end_task["id"], "结束当前 Task")).fetchone()[0] == 0
             finally: database.close()
-            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, visible source-Turn context, gateway response through async Auto Route, built-in and Agent-provided direct Task end, idempotency and cursor list")
+            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, visible source-Turn context, gateway response through async Auto Route, no-marker fallback title and direct Task end, built-in and Agent-provided ending, idempotency and cursor list")
         finally:
             await gateway.close()
             router.shutdown()

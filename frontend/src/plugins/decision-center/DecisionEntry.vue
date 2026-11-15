@@ -25,6 +25,7 @@ const error = ref("");
 const isHistory = computed(() => ["resolved", "cancelled", "invalid"].includes(props.decision.status));
 const items = computed(() => decisionContextItems(messages.value, props.decision));
 const source = computed(() => `${props.decision.chat_name || props.decision.chat_id} / ${props.decision.task_title || props.decision.task_id}`);
+const title = computed(() => props.decision.question.trim() || props.decision.task_title || "本轮后续");
 const statusLabel = computed(() => decisionStatusLabel(props.decision));
 const statusIcon = computed(() => decisionStatusIcon(props.decision));
 
@@ -63,7 +64,7 @@ async function toggle(event: Event): Promise<void> {
       <summary class="decision-history-summary">
         <i class="bi history-status-icon" :class="statusIcon" />
         <span class="history-status">{{ statusLabel }}</span>
-        <strong class="history-question">{{ decision.question || '需要你的决定' }}</strong>
+        <strong class="history-question">{{ title }}</strong>
         <span class="history-source">{{ source }}</span>
         <i class="bi bi-chevron-right history-chevron" />
       </summary>

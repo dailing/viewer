@@ -1158,13 +1158,14 @@ Operate as this role only. Prefer work that matches the fixed rules, files, topi
 }
 
 const decisionPostPrompt = `Decision follow-up protocol for this Turn. Evaluate it independently on every Turn, even when earlier Turns already contained a Decision.
-After every substantive response, end the visible reply with exactly one flat marker when there is a meaningful next action, a blocking choice, or a completed Task that can be ended. Prefer one to three concrete next-step options so the user can continue without composing another prompt; put the recommended action first and make every option a complete instruction that can be sent as a user message. Omit the marker only for a purely mechanical acknowledgment with no meaningful next action and a Task that should remain open. Do not use the marker for rhetorical questions or ordinary status updates.
+After every substantive response, end the visible reply with exactly one flat marker when there is a meaningful next action, a blocking choice, or a completed Task that can be ended. Prefer one to three concrete next-step options so the user can continue without composing another prompt; put the recommended action first and make every option a complete instruction that can be sent as a user message. Omit the marker only for a purely mechanical acknowledgment with no meaningful next action and a Task that should remain open. Do not use the marker for rhetorical questions or ordinary status updates. When the marker is omitted, Viewer creates a fallback Decision with the Task title and a Task-ending option.
+The question value is a compact task-specific abstract of this Turn, written in the Task's language: name the concrete work or result and, when useful, the remaining choice. It is an informative display title, not a generic question. Prefer at most 80 characters. Never use filler titles such as "What should happen next?", "该怎么做？", or "需要你的决定".
 <viewer-decision>
 version: 1
 kind: choice
-question: What should happen next?
-option: Recommended next step
-option: Alternative next step
+question: Decision fallback and summaries implemented; choose verification or review
+option: Run the backend and frontend verification
+option: Review the changed Decision flow
 display: buttons
 tone: neutral
 </viewer-decision>

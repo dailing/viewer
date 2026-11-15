@@ -74,6 +74,8 @@ def run_prompt(request_id: Any, params: dict[str, Any]) -> None:
     tool_update(session_id)
     if "MOCK_END_TASK_DECISION" in text:
         update(session_id, "工作已完成。\n<viewer-decision>\nversion: 1\nkind: choice\nquestion: What should happen next?\noption: Continue checking\noption: End current task\noption_action: end_current_task\ndisplay: buttons\ntone: neutral\n</viewer-decision>")
+    elif "MOCK_NO_DECISION" in text:
+        update(session_id, "本轮工作已完成，没有额外选项。")
     elif "MOCK_DECISION" in text:
         update(session_id, "请选择后续方向：\n<viewer-decision>\nversion: 1\nkind: choice\nquestion: Continue with the recommended path?\noption: Recommended path\noption: Alternative path\ndisplay: buttons\ntone: neutral\n</viewer-decision>")
     else:

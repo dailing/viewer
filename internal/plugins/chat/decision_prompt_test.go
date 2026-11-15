@@ -31,6 +31,9 @@ func TestDecisionPostPromptAppendedAfterEveryNonRawPrompt(t *testing.T) {
 			if !strings.Contains(decisionPostPrompt, "option_action: end_current_task") {
 				t.Fatal("Decision protocol does not describe the Task-ending option")
 			}
+			if !strings.Contains(decisionPostPrompt, "compact task-specific abstract") || !strings.Contains(decisionPostPrompt, "Viewer creates a fallback Decision with the Task title") {
+				t.Fatal("Decision protocol does not describe informative titles and the programmatic fallback")
+			}
 		})
 	}
 }

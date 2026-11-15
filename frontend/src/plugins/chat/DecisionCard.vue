@@ -21,6 +21,7 @@ const voice = useVoiceStore();
 const responding = ref(false);
 const responseError = ref("");
 const voiceContextId = computed(() => decisionVoiceContextId(props.decision.id));
+const title = computed(() => props.decision.question.trim() || props.decision.task_title || "本轮后续");
 const interactionBusy = computed(() => props.busy === true || responding.value);
 const draft = computed({
   get: () => props.draft,
@@ -77,7 +78,7 @@ function dismissVoiceError(): void {
 
 <template>
   <section class="decision-card" :class="[decision.tone, decision.status]">
-    <div class="decision-heading"><strong>{{ decision.question || '需要你的决定' }}</strong><span class="decision-status">{{ decision.status }}</span></div>
+    <div class="decision-heading"><strong>{{ title }}</strong><span class="decision-status">{{ decision.status }}</span></div>
     <div class="decision-source">{{ decision.chat_name || decision.chat_id }} / {{ decision.task_title || decision.task_id }} · {{ decision.role_name || decision.role_id }}</div>
     <p v-if="decision.parse_warning" class="parse-warning">{{ decision.parse_warning }}</p>
     <template v-if="decision.status === 'pending'">

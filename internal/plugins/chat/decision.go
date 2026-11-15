@@ -40,45 +40,72 @@ func (p *Plugin) detectDecision(turn *Turn) {
 	if turn == nil || turn.TaskID == "" {
 		return
 	}
-	messages, err := p.store.turnMessages(turn.ID)
+	messages, err := p.decisionSourceMessages(turn)
 	if err != nil {
 		return
 	}
+	task, taskErr := p.store.task(turn.TaskID)
+	question := "本轮后续"
+	if taskErr == nil && task != nil && strings.TrimSpace(task.Title) != "" {
+		question = strings.TrimSpace(task.Title)
+	}
+	fallbackMarker := func() *decisionMarker {
+		return &decisionMarker{Kind: "choice", Question: question, OptionsJSON: "[]", Display: "auto", Tone: "neutral"}
+	}
+
+	var marker *decisionMarker
+	sourceMessageID := ""
+	status, warning := "pending", ""
 	for index := len(messages) - 1; index >= 0; index-- {
 		message := messages[index]
 		if message.Role != "assistant" {
 			continue
 		}
-		marker := parseDecisionMarker(message.Text)
-		status, warning := "pending", ""
+		sourceMessageID = message.ID
+		marker = parseDecisionMarker(message.Text)
 		if marker == nil {
-			if !hasDecisionMarkerCandidate(message.Text) {
-				return
+			if hasDecisionMarkerCandidate(message.Text) {
+				marker = &decisionMarker{Kind: "choice", OptionsJSON: "[]", Display: "auto", Tone: "neutral"}
+				status, warning = "invalid", "invalid <viewer-decision> marker; left unchanged in the assistant message"
+			} else {
+				// A substantive reply without a marker still needs a persistent
+				// management/reply entry. The Task title is the concise,
+				// task-specific abstract used for this programmatic fallback.
+				marker = fallbackMarker()
 			}
-			marker = &decisionMarker{Kind: "choice", OptionsJSON: "[]", Display: "auto", Tone: "neutral"}
-			status, warning = "invalid", "invalid <viewer-decision> marker; left unchanged in the assistant message"
 		} else {
 			warning = marker.Warning
-			ensureDecisionEndTaskOption(marker)
 		}
-		now := nowMillis()
-		decision := &Decision{ID: newID(), ChatID: turn.ChatID, TaskID: turn.TaskID, SourceTurnID: turn.ID,
-			SourceMessageID: message.ID, RoleID: turn.RoleID, Version: 1, Kind: marker.Kind, Question: marker.Question,
-			OptionsJSON: marker.OptionsJSON, Display: marker.Display, Tone: marker.Tone, ParseWarning: warning,
-			Status: status, MarkerStart: marker.Start, MarkerEnd: marker.End, CreatedAt: now, UpdatedAt: now}
-		if task, taskErr := p.store.task(turn.TaskID); taskErr == nil && task != nil && task.ended() && decision.Status == "pending" {
-			decision.Status = "cancelled"
-		}
-		if err := p.store.db.Create(decision).Error; err != nil {
-			return // unique source_turn_id makes detection idempotent
-		}
-		block := &MessageBlock{ID: newID(), EventID: decision.ID, ChatID: decision.ChatID, TaskID: decision.TaskID,
-			TurnID: decision.SourceTurnID, Kind: "decision", Text: decision.Question,
-			Payload: encodeJSON(map[string]any{"decision_id": decision.ID}), OccurredAt: now}
-		_ = p.store.db.Create(block).Error
-		p.publishDecision(decision)
-		return
+		break
 	}
+	if marker == nil {
+		// Provider failures can end a Turn without an assistant Message. Bind
+		// the fallback to the dispatching user Message so source navigation and
+		// the visible Turn context remain available.
+		if len(messages) > 0 {
+			sourceMessageID = messages[len(messages)-1].ID
+		}
+		marker = fallbackMarker()
+	}
+	if status == "pending" {
+		ensureDecisionEndTaskOption(marker)
+	}
+	now := nowMillis()
+	decision := &Decision{ID: newID(), ChatID: turn.ChatID, TaskID: turn.TaskID, SourceTurnID: turn.ID,
+		SourceMessageID: sourceMessageID, RoleID: turn.RoleID, Version: 1, Kind: marker.Kind, Question: marker.Question,
+		OptionsJSON: marker.OptionsJSON, Display: marker.Display, Tone: marker.Tone, ParseWarning: warning,
+		Status: status, MarkerStart: marker.Start, MarkerEnd: marker.End, CreatedAt: now, UpdatedAt: now}
+	if taskErr == nil && task != nil && task.ended() && decision.Status == "pending" {
+		decision.Status = "cancelled"
+	}
+	if err := p.store.db.Create(decision).Error; err != nil {
+		return // unique source_turn_id makes detection idempotent
+	}
+	block := &MessageBlock{ID: newID(), EventID: decision.ID, ChatID: decision.ChatID, TaskID: decision.TaskID,
+		TurnID: decision.SourceTurnID, Kind: "decision", Text: decision.Question,
+		Payload: encodeJSON(map[string]any{"decision_id": decision.ID}), OccurredAt: now}
+	_ = p.store.db.Create(block).Error
+	p.publishDecision(decision)
 }
 
 func (p *Plugin) publishDecision(decision *Decision) {
@@ -495,11 +522,7 @@ func (p *Plugin) handleDecisionCancel(frame busclient.Frame) {
 	p.reply(frame, map[string]any{"decision": decisionPayload(decision)}, nil)
 }
 
-func (p *Plugin) decisionTurnMessages(decision *Decision) ([]Message, error) {
-	turn, err := p.store.turn(decision.SourceTurnID)
-	if err != nil {
-		return nil, err
-	}
+func (p *Plugin) decisionSourceMessages(turn *Turn) ([]Message, error) {
 	if turn == nil {
 		return nil, errors.New("decision source turn not found")
 	}
@@ -512,6 +535,17 @@ func (p *Plugin) decisionTurnMessages(decision *Decision) ([]Message, error) {
 		return nil, err
 	}
 	return messages, nil
+}
+
+func (p *Plugin) decisionTurnMessages(decision *Decision) ([]Message, error) {
+	turn, err := p.store.turn(decision.SourceTurnID)
+	if err != nil || turn == nil {
+		if err == nil {
+			err = errors.New("decision source turn not found")
+		}
+		return nil, err
+	}
+	return p.decisionSourceMessages(turn)
 }
 
 func (p *Plugin) handleDecisionContext(frame busclient.Frame) {
@@ -548,13 +582,27 @@ func (p *Plugin) handleDecisionOpen(frame busclient.Frame) {
 		p.reply(frame, nil, err)
 		return
 	}
-	message, err := p.store.message(decision.SourceMessageID)
-	if err != nil || message == nil {
-		p.reply(frame, nil, errors.New("decision source message not found"))
-		return
+	createdAt := int64(0)
+	if decision.SourceMessageID != "" {
+		message, err := p.store.message(decision.SourceMessageID)
+		if err != nil || message == nil {
+			p.reply(frame, nil, errors.New("decision source message not found"))
+			return
+		}
+		createdAt = message.CreatedAt
+	} else {
+		turn, err := p.store.turn(decision.SourceTurnID)
+		if err != nil || turn == nil {
+			if err == nil {
+				err = errors.New("decision source turn not found")
+			}
+			p.reply(frame, nil, err)
+			return
+		}
+		createdAt = turn.StartedAt
 	}
 	p.reply(frame, map[string]any{"task_id": decision.TaskID, "source_turn_id": decision.SourceTurnID,
-		"source_message_id": decision.SourceMessageID, "created_at": message.CreatedAt,
+		"source_message_id": decision.SourceMessageID, "created_at": createdAt,
 		"marker_start": decision.MarkerStart, "marker_end": decision.MarkerEnd}, nil)
 }
 

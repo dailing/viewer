@@ -165,7 +165,7 @@ func (p *Plugin) dispatchRouterConfig(ctx context.Context) dispatchRouterConfig 
 func (p *Plugin) summaryConfig(ctx context.Context) SummaryConfig {
 	result := SummaryConfig{
 		Enabled: true, ToolCharBudget: 4000, TimeoutSeconds: 60,
-		ContextEnabled: true, SummaryCharBudget: 6000, EndedTaskSummaryCharBudget: 6000,
+		ContextEnabled: true, SummaryCharBudget: 6000, EndedTaskSummaryCharBudget: 3000,
 		TailTurns:      3,
 		TailWordBudget: 1200, TailByteBudget: 12 * 1024,
 		ContextByteBudget: 24 * 1024, TitleWordBudget: 12000,

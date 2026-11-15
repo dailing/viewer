@@ -72,13 +72,15 @@ func (p *Plugin) buildTaskSections(chatID, taskID, query string, occurredAt, aft
 	return coverage, sections
 }
 
+const endedTaskSummaryLimit = 5
+
 func (p *Plugin) endedTaskSummarySection(chatID, currentTaskID string, charBudget int, coverage *contextCoverage) string {
 	if charBudget <= 0 {
 		return ""
 	}
 	var summaries []TaskSummary
 	if err := p.store.db.Where("chat_id = ? AND task_id <> ? AND status = ? AND final = ?", chatID, currentTaskID, "completed", true).
-		Order("updated_at desc, task_id desc").Limit(50).Find(&summaries).Error; err != nil {
+		Order("updated_at desc, task_id desc").Limit(endedTaskSummaryLimit).Find(&summaries).Error; err != nil {
 		slog.Warn("chat ended-task summary context failed", "chat_id", chatID, "task_id", currentTaskID, "error", err)
 		return ""
 	}

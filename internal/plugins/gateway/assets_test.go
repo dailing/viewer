@@ -89,7 +89,10 @@ func TestAssetsPushServeAndReload(t *testing.T) {
 	if recorder.Code != http.StatusOK || recorder.Body.String() != string(bundle) {
 		t.Fatalf("GET %s: code=%d body=%q", url, recorder.Code, recorder.Body.String())
 	}
-	if recorder.Header().Get("Cache-Control") == "" || recorder.Header().Get("Content-Type") == "" {
+	if got := recorder.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if recorder.Header().Get("Content-Type") == "" {
 		t.Fatalf("headers=%v", recorder.Header())
 	}
 	// Traversal and unknown hashes are rejected.

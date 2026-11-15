@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decisionResponseIntent, decisionResponsePayload, mergeDecision } from "./decisionInput";
+import { decisionResponseIntent, decisionResponsePayload, decisionVoiceContextId, decisionVoiceTextForSend, mergeDecision } from "./decisionInput";
 const decision = { id: "d1", version: 3, created_at: 10 };
 describe("Decision response input", () => {
   it("uses one frozen payload for option, edited option and free text", () => {
@@ -14,6 +14,22 @@ describe("Decision response input", () => {
   it("retains the stored Task-ending option identity", () => {
     const intent = decisionResponseIntent(decision, "", { id: "option-2", label: "结束当前 Task", action: "end_current_task" });
     expect(decisionResponsePayload(intent!)).toEqual({ decision_id: "d1", response: "结束当前 Task", expected_version: 3, option_id: "option-2" });
+  });
+  it("binds voice per Decision and sends only final refined voice text", async () => {
+    expect(decisionVoiceContextId("d1")).toBe("decision:d1");
+    let finishCalls = 0;
+    const refined = await decisionVoiceTextForSend("typed", { status: "processing", text: "partial" }, async () => {
+      finishCalls += 1;
+      return "final refined response";
+    });
+    expect(refined).toBe("final refined response");
+    expect(finishCalls).toBe(1);
+    await expect(decisionVoiceTextForSend("typed", { status: "ready", text: "ready voice" }, async () => {
+      throw new Error("ready text must not restart voice processing");
+    })).resolves.toBe("ready voice");
+    await expect(decisionVoiceTextForSend("typed", { status: "idle", text: "" }, async () => {
+      throw new Error("typed text must not start voice processing");
+    })).resolves.toBe("typed");
   });
   it("merges cross-pane status updates without duplicating the card", () => {
     const merged = mergeDecision([decision], { ...decision, created_at: 11 });

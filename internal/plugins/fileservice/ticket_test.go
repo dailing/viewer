@@ -66,6 +66,13 @@ func TestTicketMIME(t *testing.T) {
 		"/a/b.txt":  "",
 		"/a/b":      "",
 		"/a/b.webp": "image/webp",
+		"/a/b.mp4":  "video/mp4",
+		"/a/B.M4V":  "video/mp4",
+		"/a/b.webm": "video/webm",
+		"/a/b.ogg":  "video/ogg",
+		"/a/b.ogv":  "video/ogg",
+		"/a/b.mov":  "video/quicktime",
+		"/a/b.mkv":  "video/x-matroska",
 	} {
 		if got := ticketMIME(path); got != want {
 			t.Fatalf("ticketMIME(%q) = %q, want %q", path, got, want)

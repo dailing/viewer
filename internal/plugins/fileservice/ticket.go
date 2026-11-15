@@ -79,9 +79,9 @@ func (t *ticketIssuer) verify(ticket string, now time.Time) (string, error) {
 	return string(rawPath), nil
 }
 
-// ticketMIME maps image extensions to explicit MIME types; "" means "let the
-// HTTP layer sniff". SVG in particular must be served as image/svg+xml for
-// <img> rendering, which content sniffing would get wrong.
+// ticketMIME maps image and browser-video extensions to explicit MIME types;
+// "" means "let the HTTP layer sniff". SVG in particular must be served as
+// image/svg+xml for <img> rendering, which content sniffing would get wrong.
 var ticketMIMEByExt = map[string]string{
 	".png":  "image/png",
 	".jpg":  "image/jpeg",
@@ -92,6 +92,13 @@ var ticketMIMEByExt = map[string]string{
 	".bmp":  "image/bmp",
 	".ico":  "image/x-icon",
 	".svg":  "image/svg+xml",
+	".mp4":  "video/mp4",
+	".m4v":  "video/mp4",
+	".webm": "video/webm",
+	".ogg":  "video/ogg",
+	".ogv":  "video/ogg",
+	".mov":  "video/quicktime",
+	".mkv":  "video/x-matroska",
 }
 
 func ticketMIME(path string) string {

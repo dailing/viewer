@@ -12,6 +12,19 @@ export function decisionResponseIntent(decision: Pick<Decision, "id" | "version"
   if (!response) return undefined;
   return { decisionId: decision.id, response, expectedVersion: decision.version, ...(option ? { optionId: option.id } : {}) };
 }
+export function decisionVoiceContextId(decisionId: string): string {
+  return `decision:${decisionId}`;
+}
+/** Match composer delivery: use ready voice text, or wait for the final
+ * recording/refinement result instead of sending a partial transcript. */
+export async function decisionVoiceTextForSend(
+  draft: string,
+  state: Pick<import("../voice/voiceStore").VoiceContextState, "status" | "text">,
+  finishVoice: () => Promise<string>,
+): Promise<string> {
+  if (["connecting", "recording", "processing"].includes(state.status)) return finishVoice();
+  return state.text.trim() ? state.text : draft;
+}
 export function decisionResponsePayload(intent: DecisionResponseIntent): Record<string, unknown> {
   return { decision_id: intent.decisionId, response: intent.response, expected_version: intent.expectedVersion, ...(intent.optionId ? { option_id: intent.optionId } : {}) };
 }

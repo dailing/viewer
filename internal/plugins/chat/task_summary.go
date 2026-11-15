@@ -55,6 +55,20 @@ type taskSummarySource struct {
 	text   string
 }
 
+func taskSummaryPrompt(source string, final bool) string {
+	purpose := "Summarize the current progress of this Task for another agent."
+	if final {
+		purpose = "Write the final summary of this ended Task for another agent."
+	}
+	return fmt.Sprintf(`%s
+Use only the supplied material.
+%s
+%s
+
+TASK MATERIAL:
+%s`, purpose, compactSummaryFormat, compactSummaryInstructions, source)
+}
+
 func (p *Plugin) generateTaskSummary(taskID string) {
 	task, err := p.store.task(taskID)
 	if err != nil || task == nil {
@@ -93,22 +107,12 @@ func (p *Plugin) generateTaskSummary(taskID string) {
 		return
 	}
 	_ = newIDs // allIDs is the exact previous ∪ newly covered set.
-	prompt := fmt.Sprintf(`Summarize the current progress of this Task for another agent.
-State the goal, work already done, current state, unresolved questions and suggested next steps.
-Use only the supplied material; keep concrete file names, commands and outcomes.
-
-TASK MATERIAL:
-%s`, source)
+	prompt := taskSummaryPrompt(source, false)
 	if row.Final {
-		prompt = fmt.Sprintf(`Write the final summary of this ended Task for another agent.
-State the overall conclusion, all completed work, decisions made, unresolved questions and suggested next steps.
-Use only the supplied material; keep concrete file names, commands and verification outcomes.
-
-TASK MATERIAL:
-%s`, source)
+		prompt = taskSummaryPrompt(source, true)
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, time.Duration(config.TimeoutSeconds)*time.Second)
-	result, completeErr := p.llmFn(ctx, []map[string]string{{"role": "system", "content": "You write concise factual Task summaries in the same language as the source material."}, {"role": "user", "content": prompt}}, false, config.TimeoutSeconds)
+	result, completeErr := p.llmFn(ctx, []map[string]string{{"role": "system", "content": "You write concise factual Task summaries in the same language as the source material. " + compactSummaryFormat}, {"role": "user", "content": prompt}}, false, config.TimeoutSeconds)
 	cancel()
 
 	// Ending a Task while an update is in flight changes final. Dropping this

@@ -9,7 +9,8 @@ import TurnContent from "./TurnContent.vue";
 import { activityDisplayable } from "./toolPresentation";
 import type { ChatTimelineItem } from "./turnContent";
 import DecisionCard from "./DecisionCard.vue";
-import { decisionResponsePayload, type DecisionResponseIntent } from "./decisionInput";
+import { decisionResponsePayload, decisionVoiceContextId, type DecisionResponseIntent } from "./decisionInput";
+import { useVoiceStore } from "../voice/voiceStore";
 import { chatIdForView, resolveChatView, setChatViewTask } from "./viewInstances";
 import { formatChatTime as formatTime } from "./chatTime";
 import { mergeMessageWindow, readingAnchor, withReadingAnchor, type MessageWindowEviction, type ReadingAnchor } from "./historyWindow";
@@ -24,6 +25,7 @@ const chatId = chatIdForView(viewKey);
 const view = resolveChatView(viewKey);
 const inputSessionId = `chat:${viewKey}`;
 const inputs = useInputSessionsStore();
+const voice = useVoiceStore();
 inputs.ensure({ id: inputSessionId, pluginId: "chat", paneType: "chat", instanceId: viewKey, params: { chatId }, label: "Chat input" });
 const chat = ref<Chat | null>(null);
 const roles = ref<Role[]>([]);
@@ -261,7 +263,11 @@ async function openDecisionSource(decision: Decision): Promise<void> {
   await loadHistory({ createdAt: target.created_at, messageId: target.source_message_id });
 }
 async function respondDecision(intent: DecisionResponseIntent): Promise<void> {
-  try { await ctx.bus.request("chat:_:decisions:respond", decisionResponsePayload(intent), { timeout: 90_000 }); responseDrafts.value[intent.decisionId] = ""; } catch (cause) { error.value = errorText(cause); }
+  try {
+    await ctx.bus.request("chat:_:decisions:respond", decisionResponsePayload(intent), { timeout: 90_000 });
+    responseDrafts.value[intent.decisionId] = "";
+    voice.clear(decisionVoiceContextId(intent.decisionId));
+  } catch (cause) { error.value = errorText(cause); }
 }
 async function cancelDecision(decision: Decision): Promise<void> { await ctx.bus.request("chat:_:decisions:cancel", { decision_id: decision.id, expected_version: decision.version }).catch((cause) => { error.value = errorText(cause); }); }
 async function cancelQueued(entry: QueuedMessage): Promise<void> { await ctx.bus.request("chat:_:queued-cancel", { chat_id: chatId, dispatch_id: entry.dispatch_id }).catch((cause) => { error.value = errorText(cause); }); }

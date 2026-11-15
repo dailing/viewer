@@ -9,19 +9,18 @@ import (
 	"time"
 )
 
-const turnSummarySystemPrompt = "You condense one agent work turn from a multi-role chat into a compact briefing for other agents who did not see the turn. Be factual: never invent constraints, decisions, file names or numbers that are not present in the transcript. Keep names of files, scripts, commands and important numbers verbatim. Write in the same language as the transcript (Chinese if the transcript is Chinese). Keep the whole summary under 800 characters."
+const turnSummarySystemPrompt = "You condense one agent work turn from a multi-role chat into a compact briefing for other agents who did not see the turn. Be factual: never invent constraints, decisions, file names or numbers that are not present in the transcript. Write in the same language as the transcript (Chinese if the transcript is Chinese). Keep the whole summary under 400 characters."
+
+const compactSummaryFormat = "Return one short paragraph or at most three bullets, under 400 characters."
+const compactSummaryInstructions = `Report only the work that was accomplished and the resulting current state.
+Keep concrete file names, decisions, and outcomes only when they are useful for later work.
+Do not include unresolved questions, next steps, verification commands or results, test counts, commit or restart status or advice, pending confirmations, or other operational handoff details.`
 
 const turnSummaryUserTemplate = `Below is the transcript of one agent turn (user query, assistant messages, tool calls, file changes; long tool outputs are truncated).
 
-Write a summary with exactly these four sections:
-## 任务
-(what the user asked for in this turn, 1-2 sentences)
-## 关键动作与改动
-(what the agent did: files/scripts/commands/decisions, with concrete names; bullet points)
-## 结果
-(outcome: what works now, verification results, artifacts)
-## 未决事项
-(open questions / next steps; write "无" if none)
+Write a compact briefing for another agent who did not see the turn.
+%s
+%s
 
 TRANSCRIPT:
 %s
@@ -172,7 +171,7 @@ func (p *Plugin) generateTurnSummary(turnID, provider string) {
 }
 
 func summarizeTranscript(ctx context.Context, complete llmCompleter, transcript string, timeoutSeconds int) (completionResult, error) {
-	return complete(ctx, []map[string]string{{"role": "system", "content": turnSummarySystemPrompt}, {"role": "user", "content": fmt.Sprintf(turnSummaryUserTemplate, transcript)}}, false, timeoutSeconds)
+	return complete(ctx, []map[string]string{{"role": "system", "content": turnSummarySystemPrompt}, {"role": "user", "content": fmt.Sprintf(turnSummaryUserTemplate, compactSummaryFormat, compactSummaryInstructions, transcript)}}, false, timeoutSeconds)
 }
 
 func derefMillis(value *int64, fallback int64) int64 {

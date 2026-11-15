@@ -21,7 +21,7 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "chat", Version: "1.2.0",
+	ID: "chat", Version: "1.2.1",
 	Slots: map[string]any{
 		"chat:_:workspace:get": map[string]any{}, "chat:_:workspace:patch": map[string]any{},
 		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},

@@ -112,8 +112,11 @@ func TestBrowserHello(t *testing.T) {
 
 func TestStaticFS(t *testing.T) {
 	server := New(Config{StaticFS: fstest.MapFS{
-		"index.html": &fstest.MapFile{Data: []byte("<h1>viewer</h1>")},
-		"app.js":     &fstest.MapFile{Data: []byte("export {}")},
+		"index.html":                &fstest.MapFile{Data: []byte("<h1>viewer</h1>")},
+		"app.js":                    &fstest.MapFile{Data: []byte("export {}")},
+		"assets/app-CWo1Bo7L.js":    &fstest.MapFile{Data: []byte("export {}")},
+		"assets/externals-vue.js":   &fstest.MapFile{Data: []byte("export {}")},
+		"assets/externals-pinia.js": &fstest.MapFile{Data: []byte("export {}")},
 	}})
 
 	root := httptest.NewRecorder()
@@ -124,11 +127,27 @@ func TestStaticFS(t *testing.T) {
 	if root.Header().Get("X-Viewer-Process") == "" {
 		t.Fatal("GET / is missing the restart generation header")
 	}
+	if got := root.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("GET / Cache-Control = %q, want no-cache", got)
+	}
 
-	script := httptest.NewRecorder()
-	server.serveStatic(script, httptest.NewRequest(http.MethodGet, "/app.js", nil))
-	if script.Code != http.StatusOK || script.Header().Get("Content-Type") != "text/javascript; charset=utf-8" {
-		t.Fatalf("GET /app.js = %d Content-Type %q", script.Code, script.Header().Get("Content-Type"))
+	for _, test := range []struct {
+		path         string
+		cacheControl string
+	}{
+		{path: "/app.js", cacheControl: "no-cache"},
+		{path: "/assets/app-CWo1Bo7L.js", cacheControl: "public, max-age=31536000, immutable"},
+		{path: "/assets/externals-vue.js", cacheControl: "no-cache"},
+		{path: "/assets/externals-pinia.js", cacheControl: "no-cache"},
+	} {
+		recorder := httptest.NewRecorder()
+		server.serveStatic(recorder, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/javascript; charset=utf-8" {
+			t.Fatalf("GET %s = %d Content-Type %q", test.path, recorder.Code, recorder.Header().Get("Content-Type"))
+		}
+		if got := recorder.Header().Get("Cache-Control"); got != test.cacheControl {
+			t.Fatalf("GET %s Cache-Control = %q, want %q", test.path, got, test.cacheControl)
+		}
 	}
 
 	traversal := httptest.NewRecorder()

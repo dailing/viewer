@@ -4,7 +4,7 @@ import { computed, ref, watch } from "vue";
 import { useVoiceStore } from "./voiceStore";
 
 const model = defineModel<string>({ required: true });
-const props = defineProps<{ contextId: string }>();
+const props = withDefaults(defineProps<{ contextId: string; disabled?: boolean }>(), { disabled: false });
 const emit = defineEmits<{ start: [] }>();
 
 const error = ref("");
@@ -55,7 +55,7 @@ async function startVoiceInput(): Promise<void> {
 }
 
 function toggleVoiceInput(): void {
-  if (!voice.backendAvailable) return;
+  if (props.disabled || !voice.backendAvailable) return;
   console.info("[voice] mic button clicked", {
     contextId: props.contextId,
     status: state.value.status,
@@ -103,7 +103,7 @@ defineExpose({
       type="button"
       :title="title"
       :aria-label="title"
-      :disabled="!voice.backendAvailable"
+      :disabled="disabled || !voice.backendAvailable"
       @click="toggleVoiceInput"
     >
       <i class="bi" :class="icon"></i>

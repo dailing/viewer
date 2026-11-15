@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
- * File preview area: routes by extension — image (ticket URL streamed by the
- * gateway's by-reference data plane, framework §6.2), markdown / html / latex /
- * notebook (rendered, with a source mode toggled from the pane chrome),
+ * File preview area: routes by extension — image / video (ticket URL streamed
+ * by the gateway's by-reference data plane, framework §6.2), markdown / html /
+ * latex / notebook (rendered, with a source mode toggled from the pane chrome),
  * otherwise utf-8 text. Oversized reads come back as `too_large` and binary
  * files as base64; both get a plain notice instead of a preview.
  *
@@ -25,6 +25,7 @@ import type { PreviewMode } from "./instanceStore";
 import NotebookPreview from "./NotebookPreview.vue";
 import PdfPreview from "./PdfPreview.vue";
 import TexPreview from "./TexPreview.vue";
+import VideoPreview from "./VideoPreview.vue";
 import { fileTicketUrl, readFile } from "../../services/fileData";
 import { formatBytes } from "../../services/formatBytes";
 import { kindForPath } from "../../services/fileTypes";
@@ -61,6 +62,7 @@ const error = ref("");
 const limit = ref(0);
 const text = ref("");
 const imageUrl = ref("");
+const videoUrl = ref("");
 /** Path whose content is on screen; same-path reloads keep the old render mounted. */
 let loadedPath: string | null = null;
 let loadGeneration = 0;
@@ -91,6 +93,7 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
     error.value = "";
     text.value = "";
     imageUrl.value = "";
+    videoUrl.value = "";
   }
   if (path === null) {
     loadedPath = null;
@@ -106,13 +109,14 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
     return;
   }
   try {
-    if (previewKind === "image") {
+    if (previewKind === "image" || previewKind === "video") {
       // By-reference data plane: the browser streams the bytes straight from
       // the gateway — no base64 over the bus, no size cap, no RPC timeout on
-      // large images.
+      // large media. ServeContent supports Range requests for video seeking.
       const url = await fileTicketUrl(ctx.bus, path);
       if (generation !== loadGeneration) return;
-      imageUrl.value = url;
+      if (previewKind === "image") imageUrl.value = url;
+      else videoUrl.value = url;
       status.value = "ready";
       loadedPath = path;
       return;
@@ -136,6 +140,10 @@ async function load(path: string | null, preserveScroll = false): Promise<void> 
       status.value = "error";
     }
   }
+}
+
+function retryVideo(): void {
+  if (props.path !== null) void load(props.path);
 }
 
 // --- Server-side watch: one (path, watcher id) per open preview, renewed ---
@@ -272,6 +280,12 @@ watch([rendered, renderedRef], () => {
       <div v-else-if="kind === 'image'" class="preview-image">
         <img :src="imageUrl" :alt="path ?? ''" />
       </div>
+      <VideoPreview
+        v-else-if="kind === 'video' && path !== null"
+        :src="videoUrl"
+        :label="path"
+        @retry="retryVideo"
+      />
       <iframe
         v-else-if="kind === 'html' && mode === 'render'"
         class="preview-html"

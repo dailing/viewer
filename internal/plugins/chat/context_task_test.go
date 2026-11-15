@@ -151,3 +151,91 @@ func TestTaskRoleBridgeDoesNotReplayTheSameRolesLastTurn(t *testing.T) {
 		t.Fatalf("missed-work bridge has wrong coverage:\n%s", bridge)
 	}
 }
+
+func TestSummaryPromptsRequireCompactOutcomesWithoutHandoffSections(t *testing.T) {
+	assertCompact := func(name, prompt string) {
+		t.Helper()
+		for _, expected := range []string{"under 400 characters", "work that was accomplished", "resulting current state", "Do not include unresolved questions, next steps"} {
+			if !strings.Contains(prompt, expected) {
+				t.Errorf("%s prompt missing %q:\n%s", name, expected, prompt)
+			}
+		}
+		for _, forbidden := range []string{"Write a summary with exactly these four sections", "State the goal, work already done", "all completed work, decisions made"} {
+			if strings.Contains(prompt, forbidden) {
+				t.Errorf("%s prompt retains handoff instruction %q:\n%s", name, forbidden, prompt)
+			}
+		}
+	}
+	assertCompact("running Task", taskSummaryPrompt("task material", false))
+	assertCompact("final Task", taskSummaryPrompt("task material", true))
+
+	var messages []map[string]string
+	_, err := summarizeTranscript(context.Background(), func(_ context.Context, got []map[string]string, _ bool, _ int) (completionResult, error) {
+		messages = got
+		return completionResult{Content: "short", Model: "test"}, nil
+	}, "turn transcript", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("Turn summary messages=%v", messages)
+	}
+	if !strings.Contains(messages[0]["content"], "under 400 characters") {
+		t.Errorf("Turn system prompt has no compact length requirement: %s", messages[0]["content"])
+	}
+	assertCompact("Turn user", messages[1]["content"])
+}
+
+func TestEndedTaskSummarySectionUsesOnlyFiveNewest(t *testing.T) {
+	s, err := openStorePath(filepath.Join(t.TempDir(), "chat.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	ids := []string{"task-1", "task-2", "task-3", "task-4", "task-5", "task-6"}
+	for index, id := range ids {
+		if err := s.db.Create(&TaskSummary{TaskID: id, ChatID: "chat-a", Text: "SUMMARY " + id, Status: "completed", Final: true, UpdatedAt: int64(index + 1)}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := &Plugin{store: s}
+	coverage := &contextCoverage{}
+	section := p.endedTaskSummarySection("chat-a", "current-task", 3000, coverage)
+	if strings.Contains(section, "task-1") {
+		t.Fatalf("sixth-newest summary entered context:\n%s", section)
+	}
+	for _, id := range ids[1:] {
+		if !strings.Contains(section, "SUMMARY "+id) {
+			t.Errorf("missing %s:\n%s", id, section)
+		}
+	}
+	if got, want := strings.Join(coverage.TaskSummaries, ","), "task-6,task-5,task-4,task-3,task-2"; got != want {
+		t.Fatalf("coverage=%s, want %s", got, want)
+	}
+}
+
+func TestEndedTaskSummarySectionHonorsCharBudget(t *testing.T) {
+	s, err := openStorePath(filepath.Join(t.TempDir(), "chat.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	for index, id := range []string{"task-1", "task-2", "task-3", "task-4", "task-5"} {
+		if err := s.db.Create(&TaskSummary{TaskID: id, ChatID: "chat-a", Text: strings.Repeat("x", 900), Status: "completed", Final: true, UpdatedAt: int64(index + 1)}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := &Plugin{store: s}
+	coverage := &contextCoverage{}
+	section := p.endedTaskSummarySection("chat-a", "current-task", 2000, coverage)
+	if got, want := strings.Join(coverage.TaskSummaries, ","), "task-5,task-4"; got != want {
+		t.Fatalf("coverage=%s, want %s; section:\n%s", got, want, section)
+	}
+}
+
+func TestSummaryConfigDefaultsEndedTaskBudgetTo3000(t *testing.T) {
+	p := &Plugin{}
+	if got := p.summaryConfig(context.Background()).EndedTaskSummaryCharBudget; got != 3000 {
+		t.Fatalf("EndedTaskSummaryCharBudget=%d, want 3000", got)
+	}
+}

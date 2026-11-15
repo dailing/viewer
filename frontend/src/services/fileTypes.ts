@@ -21,7 +21,7 @@ export interface DirectoryListing {
   has_more?: boolean;
 }
 
-export type PreviewKind = "image" | "markdown" | "html" | "text" | "pdf" | "latex" | "notebook";
+export type PreviewKind = "image" | "video" | "markdown" | "html" | "text" | "pdf" | "latex" | "notebook";
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
@@ -38,6 +38,7 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
 const MARKDOWN_EXTS = new Set(["md", "markdown", "mdown", "mkd"]);
 const HTML_EXTS = new Set(["html", "htm"]);
 const TEX_EXTS = new Set(["tex"]);
+const VIDEO_EXTS = new Set(["mp4", "m4v", "webm", "ogg", "ogv", "mov", "mkv"]);
 
 function extensionOf(path: string): string {
   const name = basename(path);
@@ -63,6 +64,7 @@ export function dirname(path: string): string {
 export function kindForPath(path: string): PreviewKind {
   const ext = extensionOf(path);
   if (ext in IMAGE_MIME_BY_EXT) return "image";
+  if (VIDEO_EXTS.has(ext)) return "video";
   if (ext === "pdf") return "pdf";
   if (MARKDOWN_EXTS.has(ext)) return "markdown";
   if (HTML_EXTS.has(ext)) return "html";

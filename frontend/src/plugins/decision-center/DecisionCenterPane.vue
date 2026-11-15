@@ -2,7 +2,8 @@
 import { inject, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import type { PluginCtx } from "../../shell/ctx";
 import DecisionEntry from "./DecisionEntry.vue";
-import { decisionResponsePayload, mergeDecision, type DecisionResponseIntent } from "../chat/decisionInput";
+import { decisionResponsePayload, decisionVoiceContextId, mergeDecision, type DecisionResponseIntent } from "../chat/decisionInput";
+import { useVoiceStore } from "../voice/voiceStore";
 import { storeTaskReadingAnchor } from "../chat/historyWindow";
 import { ensureTaskView } from "../chat/viewInstances";
 import type { Decision, DecisionList } from "../chat/types";
@@ -12,6 +13,7 @@ import { registryHasChat } from "./runtime";
 const injected = inject<PluginCtx>("pluginCtx");
 if (!injected) throw new Error("DecisionCenter requires PluginPaneHost");
 const ctx = injected;
+const voice = useVoiceStore();
 type Section = "pending" | "history";
 type Cursor = { createdAt: number; id: string };
 const PAGE_SIZE = 50;
@@ -83,6 +85,7 @@ async function respond(intent: DecisionResponseIntent): Promise<void> {
   try {
     const result = await ctx.bus.request("chat:_:decisions:respond", decisionResponsePayload(intent), { timeout: 90_000 }) as { decision?: Decision };
     drafts.value[intent.decisionId] = "";
+    voice.clear(decisionVoiceContextId(intent.decisionId));
     if (result.decision) onDecision({ value: result.decision });
   } catch (cause) { error.value = errorText(cause); }
   finally { busy[intent.decisionId] = false; }

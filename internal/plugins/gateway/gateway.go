@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -535,6 +536,17 @@ func isUUIDV4(value string) bool {
 	return err == nil && len(decoded) == 16 && decoded[8]&0xc0 == 0x80
 }
 
+var staticAssetHashPattern = regexp.MustCompile(`-[A-Za-z0-9_-]{8}[.][^/]+$`)
+
+func staticCacheControl(name string) string {
+	// Vite's content-hashed files are immutable. Stable import-map externals
+	// deliberately keep their URLs, so they must revalidate like index.html.
+	if strings.HasPrefix(name, "assets/") && staticAssetHashPattern.MatchString(filepath.Base(name)) {
+		return "public, max-age=31536000, immutable"
+	}
+	return "no-cache"
+}
+
 func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 	if s.config.StaticFS == nil {
 		http.Error(w, "no static directory configured", http.StatusNotFound)
@@ -570,6 +582,7 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", staticCacheControl(name))
 	if acceptsGzip(r) && isCompressible(contentType) && len(data) >= 512 {
 		var buf bytes.Buffer
 		gz := gzip.NewWriter(&buf)

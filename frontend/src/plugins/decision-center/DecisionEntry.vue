@@ -48,23 +48,28 @@ async function toggle(event: Event): Promise<void> {
 <template>
   <article class="decision-entry" :class="{ historical: isHistory }">
     <template v-if="!isHistory">
-      <details class="decision-context" @toggle="toggle">
-        <summary><i class="bi bi-chevron-right" /> 查看这一轮的消息</summary>
-        <div class="decision-context-body">
-          <div v-if="loading" class="decision-context-note">加载中…</div>
-          <div v-else-if="error" class="decision-context-error">{{ error }}</div>
-          <TurnContent v-else-if="loaded && items.length > 0" :items="items" :show-activities="false" show-message-labels />
-          <div v-else-if="loaded" class="decision-context-note">这一轮没有可见消息。</div>
-        </div>
-      </details>
-      <DecisionCard :decision="decision" :draft="draft" :busy="busy" @update:draft="emit('update:draft', $event)" @respond="emit('respond', $event)" @cancel="emit('cancel')" @open="emit('open')" />
+      <section class="decision-pending" :class="[decision.tone, decision.status]">
+        <div class="decision-pending-source">{{ source }} · {{ decision.role_name || decision.role_id }}</div>
+        <div class="decision-pending-summary">{{ title }}</div>
+        <p v-if="decision.parse_warning" class="decision-pending-warning">{{ decision.parse_warning }}</p>
+        <details class="decision-context" @toggle="toggle">
+          <summary><i class="bi bi-chevron-right" /> 查看这一轮的消息</summary>
+          <div class="decision-context-body">
+            <div v-if="loading" class="decision-context-note">加载中…</div>
+            <div v-else-if="error" class="decision-context-error">{{ error }}</div>
+            <TurnContent v-else-if="loaded && items.length > 0" :items="items" :show-activities="false" show-message-labels />
+            <div v-else-if="loaded" class="decision-context-note">这一轮没有可见消息。</div>
+          </div>
+        </details>
+        <DecisionCard embedded :decision="decision" :draft="draft" :busy="busy" @update:draft="emit('update:draft', $event)" @respond="emit('respond', $event)" @cancel="emit('cancel')" @open="emit('open')" />
+      </section>
     </template>
 
     <details v-else class="decision-history" :class="decision.status" @toggle="toggle">
       <summary class="decision-history-summary">
         <i class="bi history-status-icon" :class="statusIcon" />
         <span class="history-status">{{ statusLabel }}</span>
-        <strong class="history-question">{{ title }}</strong>
+        <span class="history-question">{{ title }}</span>
         <span class="history-source">{{ source }}</span>
         <i class="bi bi-chevron-right history-chevron" />
       </summary>
@@ -91,19 +96,25 @@ async function toggle(event: Event): Promise<void> {
 .decision-entry { border-bottom: 1px solid color-mix(in srgb, var(--color-border) 58%, transparent); padding: 2px 0 7px; }
 .decision-entry:last-child { border-bottom: 0; }
 .decision-entry.historical { padding: 0; }
-.decision-context { margin: 0 8px; }
+.decision-pending { border-left: 2px solid var(--color-border); display: flex; flex-direction: column; gap: 5px; margin: 6px 0; padding: 5px 8px 5px 10px; }
+.decision-pending.pending { border-left-color: var(--bs-primary); }
+.decision-pending.dispatching,.decision-pending.warning { border-left-color: var(--bs-warning); }
+.decision-pending-source { color: var(--color-text-muted); font-size: var(--font-size-ui-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.decision-pending-summary { font-size: var(--font-size-ui); font-weight: 400; overflow-wrap: anywhere; }
+.decision-pending-warning { color: var(--bs-warning); font-size: var(--font-size-ui-small); margin: 0; }
+.decision-context { margin: 0; }
 .decision-context summary { align-items: center; color: var(--color-text-muted); cursor: pointer; display: flex; font-size: var(--font-size-ui-small); gap: 4px; list-style: none; padding: 3px 0; user-select: none; }
 .decision-context summary::-webkit-details-marker,.decision-history-summary::-webkit-details-marker { display: none; }
 .decision-context[open] summary .bi-chevron-right { transform: rotate(90deg); }
 .decision-context summary .bi-chevron-right,.history-chevron { transition: transform 120ms ease; }
-.decision-context-body { border-left: 1px solid var(--color-border); margin: 2px 0 4px 4px; padding: 2px 10px; }
+.decision-context-body { margin: 2px 0 4px 4px; padding: 2px 0 2px 8px; }
 .decision-context-note { color: var(--color-text-muted); font-size: var(--font-size-ui-small); padding: 8px 0; }
 .decision-context-error { color: var(--bs-danger); font-size: var(--font-size-ui-small); padding: 8px 0; }
 .decision-history { min-width: 0; }
 .decision-history-summary { align-items: center; color: var(--color-text-muted); cursor: pointer; display: grid; font-size: var(--font-size-ui-small); gap: 6px; grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 1fr) auto; list-style: none; min-height: 28px; padding: 3px 6px; user-select: none; }
 .decision-history-summary:hover { background: var(--color-surface-hover); }
 .history-status { min-width: 48px; }
-.history-question { color: var(--color-text); font-size: var(--font-size-ui-small); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-question { color: var(--color-text); font-size: var(--font-size-ui-small); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .decision-history.resolved .history-status-icon,.decision-history.resolved .history-status { color: var(--bs-success); }
 .decision-history.invalid .history-status-icon,.decision-history.invalid .history-status { color: var(--bs-danger); }

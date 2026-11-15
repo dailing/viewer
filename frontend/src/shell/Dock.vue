@@ -185,7 +185,7 @@ const schedRestartTitle = computed<string>(() => {
     case "building":
       return "已计划重启：后台构建中（点击打开设置，可取消）";
     case "armed":
-      return "已计划重启：等系统空闲后自动重启（点击打开设置，可取消）";
+      return "已计划重启：等系统空闲后自动构建并重启（点击打开设置，可取消）";
     case "failed":
       return "计划重启构建失败：保持现状（点击打开设置）";
     default:

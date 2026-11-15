@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v1.36**（2026-11-15）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`。**
+> 状态：**草案 v1.37**（2026-11-15）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`。**
+> v1.37 变更：**计划重启改为空闲后构建**——`POST /api/admin/schedule-restart` 只武装等待，不再立即构建；watchdog 检测到无 running Chat Turn、无活动 voice relay 后才运行 release build，成功直接优雅重启。这样构建包含等待期间 Agent 对 Viewer 自身完成的修改；构建失败仍落 `failed`，等待及构建中均可取消。
 > v1.36 变更：**Decision Center 来源与摘要阅读顺序**——待处理条目按 Chat/Task 来源行 → 普通字重摘要 → 可折叠来源消息 → 回复选项排列；摘要不再作为加粗标题，来源消息与回复控件纳入同一左侧竖线，历史摘要同步取消加粗。
 > v1.35 变更：**每轮 Decision 兜底与任务化标题**——非取消 Turn 未输出 marker 时，Chat 自动持久化以 Task 精炼标题为摘要、仅含内置结束动作的 pending Decision；没有 assistant 消息时以来源 dispatch 的用户消息定位。post-prompt 将 `question` 定义为任务特定的本轮内容摘要，禁止通用问句，空标题在前端回退为 Task 标题。非法 marker 仍保留 invalid 诊断，取消 Turn 不生成 Decision。
 > v1.34 变更：**紧凑 Task 摘要与最近任务上下文收口**——Turn、rolling Task 和 final Task Summary 统一只描述已完成工作及结果状态，prompt 要求 400 字符内、一个短段落或最多三条 bullet，不再生成未决问题、建议下一步、验证命令或结果、提交/重启状态或建议等交接信息。fresh Context 的跨 Task 层只从同 Chat 最近 5 个 ended Tasks 的 completed final summaries 中选取，默认总正文预算降为 3000 字符，避免短摘要导致更多旧任务回填。
@@ -492,7 +493,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 | C1 | config-store | `config:_:get/set` 等 RPC channel；`plugins.<id>.*` namespace |
 | C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件；每实例变更发 `instance-store:<plugin>:<instance>` mailbox（v0.72 起前端 files 实例注册表接入） |
 | C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边裁切（v0.71；v0.83 起横/纵百分比 `trim_x`/`trim_y`）+ 磁盘 LRU 缓存（v0.70）+ watch/unwatch：打开文件变更监听（TTL 续约、目录级 fsnotify + 巡检、digest 变更才广播 `file:_:changed`，v0.74）+ dirs_only 目录树列表、串行分片 du/progress/cancel、mkdir/delete（v1.07） |
-| C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37）+ `POST /api/admin/schedule-restart`（后台 build 成功后武装、等空闲自重启，v0.43）+ `GET /api/admin/schedule-restart`（状态 none/building/armed/failed，v0.43）+ `DELETE /api/admin/schedule-restart`（取消/复位，v0.44） |
+| C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37）+ `POST /api/admin/schedule-restart`（武装并等空闲，空闲后后台 build 成功再自重启，v1.37）+ `GET /api/admin/schedule-restart`（状态 none/building/armed/failed，v0.43）+ `DELETE /api/admin/schedule-restart`（取消/复位，v0.44） |
 | C6 | llm | 全局 LLM 转发层：`llm:_:complete` 纯转发 OpenAI 兼容端点；配置 `plugins.llm`（v0.48，§8.11） |
 | C7 | voice-control | 全局语音控制：`voice-catalog:_:*` 目录合并 + 连续语音对话（LLM 直答或派发条目）+ 会话上下文压缩 + `chat:_:turn` 主动播报（v0.49，§8.11）+ 交互日志/可配置 prompt 模板/prompt 预览（v0.50，§8.11） |
 | C5 | automation-engine | 后期（§7.5） |
@@ -642,6 +643,8 @@ my-plugin/
 - **仓库结构定稿（v0.33）**：Python 参考实现（`next/`）与 `next-go/` 目录已删除；Go 主线（`cmd/`、`internal/`、`web/`、`scripts/`）上移至仓库根，单一 Go module（`viewer`）自根构建；SDK 按语言归入 `sdk/{go,python,ts}`；前端在 `frontend/`。测试即规格：`scripts/smoke_*.py`（Python SDK 黑盒）+ `sdk/ts` vitest 直接验证 Go 内核（`VIEWER_KERNEL_BIN` 可覆盖）。
 
 ## 18. 修订记录
+
+- **v1.37**（2026-11-15）：**计划重启改为空闲后构建**——`POST /api/admin/schedule-restart` 只武装等待；watchdog 检测系统空闲后运行 release build，成功直接优雅重启，确保二进制包含等待期间 Agent 对 Viewer 自身完成的修改。共享构建守卫被占用时保持 `armed` 稍后重试；构建失败落 `failed`，等待及构建中均可取消。
 
 - **v1.36**（2026-11-15）：**Decision Center 来源与摘要阅读顺序**——待处理条目按 Chat/Task 来源行 → 普通字重摘要 → 可折叠来源消息 → 回复选项排列；摘要不再作为加粗标题，来源消息与回复控件纳入同一左侧竖线，历史摘要同步取消加粗。
 
@@ -825,7 +828,7 @@ my-plugin/
 - **C1 config-store**：`config.py` + `models.py`（AppConfig schema）；路由 `GET/PUT /api/config`、`GET/POST /api/config/llm-provider-states(/clear)` → RPC `config:_:get/set` 等。前端 `ConfigPanel.vue` 拆为设置壳 + per-plugin section 贡献点（F2）。
 - **C2 instance-store**：新建（§7.2 bindings、instance state 落点）；同时接管 `viewer.layout.v1` 的服务端持久化（若需要跨设备）——view state 仍走 F6 localStorage。
 - **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切（v0.83 百分比化）+ 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方（v0.87 落地：`file:_:ticket`/`ticket:resolve` + gateway `/api/files/raw`）。v1.07 增加目录树 `dirs_only` 列表、串行分片 `du` + `du:progress` + `du:cancel`、目录创建与递归删除。
-- **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。admin API：`POST /api/admin/restart`（v0.34 优雅自重启）、`POST /api/admin/build-restart`（v0.37 构建成功后自重启）、`POST /api/admin/schedule-restart`（v0.43：先后台构建、成功才武装等空闲自重启：watchdog 5s 轮询 `chat:_:chats:list` 无 running + `voice:_:sessions` 无活动才触发；构建失败落 `failed` 不武装；`GET` 同路径返回 none/building/armed/failed；`DELETE` 同路径取消/复位（v0.44，armed/building/failed→none，幂等）；状态纯内存）。
+- **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。admin API：`POST /api/admin/restart`（v0.34 优雅自重启）、`POST /api/admin/build-restart`（v0.37 构建成功后自重启）、`POST /api/admin/schedule-restart`（v1.37：先武装并等空闲，watchdog 5s 轮询 `chat:_:chats:list` 无 running + `voice:_:sessions` 无活动后才后台构建，成功直接优雅重启，以包含等待期间 Agent 对 Viewer 的修改；构建失败落 `failed`；`GET` 同路径返回 none/building/armed/failed；`DELETE` 同路径取消/复位（armed/building/failed→none，幂等）；状态纯内存）。
 
 ### A.4 viewer.terminal（Phase 2，链路首验）
 

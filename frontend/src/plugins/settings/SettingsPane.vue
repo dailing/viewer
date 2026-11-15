@@ -170,7 +170,7 @@ const schedWaiting = ref(false);
 const SCHED_STATUS_TEXT: Record<SchedStatus, string> = {
   none: "未计划",
   building: "已计划 · 后台构建中",
-  armed: "已计划 · 等系统空闲后自动重启",
+  armed: "已计划 · 等系统空闲后自动构建并重启",
   failed: "构建失败 · 保持现状（可重试或取消）",
 };
 const schedStatusText = computed(() => SCHED_STATUS_TEXT[schedStatus.value]);
@@ -325,22 +325,21 @@ async function buildAndRestart(): Promise<void> {
 }
 
 /**
- * Scheduled build+restart: POST /api/admin/schedule-restart starts the
- * release build in the background (the gateway stays up); on success it
- * arms a one-shot deferred restart whose watchdog fires the graceful
- * restart path once the system is idle (no chat turn in flight, no voice
- * relay active). The gateway stays up while waiting, so phase 1 has no
- * deadline — waiting hours for a long agent turn is the whole point. A
- * failed build never arms: the GET status endpoint reports "failed" so we
- * stop waiting instead of polling forever; a "none" report means the
- * schedule was cancelled (here or by an agent over the HTTP API) and we
- * likewise stop waiting. Once the gateway goes down (restart fired), poll
- * until the replacement answers, then reload.
+ * Scheduled build+restart: POST /api/admin/schedule-restart arms a one-shot
+ * deferred restart. Its watchdog waits until the system is idle (no chat turn
+ * in flight, no voice relay active), then runs the release build in the
+ * background and fires the graceful restart path on success. The gateway
+ * stays up while waiting and building, so phase 1 has no deadline — waiting
+ * hours for a long agent turn is the whole point. A failed build reports
+ * "failed" through GET so we stop waiting instead of polling forever; a
+ * "none" report means the schedule was cancelled (here or by an agent over
+ * the HTTP API) and we likewise stop waiting. Once the gateway goes down
+ * (restart fired), poll until the replacement answers, then reload.
  */
 async function scheduleRestart(): Promise<void> {
   if (schedWaiting.value || restarting.value || building.value) return;
   const confirmed = window.confirm(
-    "空闲时构建并重启（viewerd）？\n先在后台跑构建（约 1-2 分钟，期间服务不中断）；构建成功后，等所有 agent 任务跑完、且没有录音进行中时自动重启；构建失败则保持现状不动。重启完成后页面自动刷新。可随时再次点击该按钮取消。"
+    "空闲时构建并重启（viewerd）？\n先等所有 agent 任务跑完、且没有录音进行中；空闲后在后台跑构建（约 1-2 分钟，期间服务不中断），构建成功后自动重启，确保包含等待期间完成的修改。构建失败则保持现状不动。重启完成后页面自动刷新。可随时再次点击该按钮取消。"
   );
   if (!confirmed) return;
   const resp = await fetch("/api/admin/schedule-restart", { method: "POST" }).catch(() => null);
@@ -349,9 +348,9 @@ async function scheduleRestart(): Promise<void> {
     window.alert(resp === null ? "计划重启请求未能送达，请检查服务状态。" : `计划重启失败：HTTP ${resp.status} ${body}`);
     return;
   }
-  schedStatus.value = "building";
+  schedStatus.value = "armed";
   schedWaiting.value = true;
-  // Phase 1: wait for the gateway to go down (build done, idle reached,
+  // Phase 1: wait for the gateway to go down (idle reached, build done,
   // restart fired). A failed build or a cancel surfaces via the status
   // endpoint.
   for (;;) {
@@ -402,12 +401,12 @@ async function scheduleRestart(): Promise<void> {
 
 /**
  * Cancel a pending scheduled restart: DELETE /api/admin/schedule-restart
- * disarms the watchdog. A build already in flight finishes but can no
- * longer arm (the gateway's building→armed transition is a CAS), so
- * cancelling mid-build is safe.
+ * disarms the watchdog. A build already in flight finishes but cannot restart
+ * or revive the schedule because completion uses a building→none CAS guard,
+ * so cancelling mid-build is safe.
  */
 async function cancelScheduledRestart(): Promise<void> {
-  const confirmed = window.confirm("取消已计划的重启？\n正在后台跑的构建会跑完，但不会触发重启。");
+  const confirmed = window.confirm("取消已计划的重启？\n若构建已开始，会跑完但不会触发重启。");
   if (!confirmed) return;
   const resp = await fetch("/api/admin/schedule-restart", { method: "DELETE" }).catch(() => null);
   if (resp === null || !resp.ok) {

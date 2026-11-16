@@ -131,6 +131,11 @@ func (c *cdpConn) nextEvent(ctx context.Context) (cdpEvent, error) {
 	select {
 	case event := <-c.events:
 		return event, nil
+	default:
+	}
+	select {
+	case event := <-c.events:
+		return event, nil
 	case <-c.done:
 		c.mu.Lock()
 		err := c.err

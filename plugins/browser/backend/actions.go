@@ -39,7 +39,7 @@ const browserRuntimeSource = `(() => {
   function snapshot(payload) {
     const maxChars = Math.max(1000, Math.min(50000, Number(payload.max_chars) || 20000));
     const maxElements = Math.max(10, Math.min(500, Number(payload.max_elements) || 200));
-    const selector = "a[href],button,input,textarea,select,summary,[role='button'],[role='link'],[contenteditable='true']";
+    const selector = "a[href],button,input,textarea,select,summary,[role='button'],[role='link'],[contenteditable='true'],[tabindex]";
     const references = new Map(); const elements = [];
     for (const element of document.querySelectorAll(selector)) {
       if (elements.length >= maxElements) break;
@@ -62,6 +62,54 @@ const browserRuntimeSource = `(() => {
     const rect = element.getBoundingClientRect();
     if (!rect.width || !rect.height) fail("stale_element", "Element has no clickable area");
     return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, element_id: payload.element_id };
+  }
+  function prepareType(payload) {
+    const element = elementFrom(payload.snapshot_id, payload.element_id);
+    if (element.type === "password") fail("sensitive_field", "Password fields must be filled by the user");
+    if (element.type === "file" || element instanceof HTMLSelectElement) fail("unsupported_field", "Element cannot be typed into");
+    if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element.isContentEditable)) fail("unsupported_field", "Element cannot be typed into");
+    element.scrollIntoView({ block: "center", inline: "center" }); element.focus();
+    if (payload.clear) {
+      if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) setNativeValue(element, "");
+      else element.textContent = "";
+      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    }
+    return { focused: true };
+  }
+  function assertActiveSafe() {
+    const element = document.activeElement;
+    if (element?.type === "password") fail("sensitive_field", "Keyboard input in password fields must be entered by the user");
+    if (element?.type === "file") fail("unsupported_field", "Use browser_upload for file inputs");
+    return { ok: true };
+  }
+  function dropdownOptions(payload) {
+    const element = elementFrom(payload.snapshot_id, payload.element_id);
+    if (!(element instanceof HTMLSelectElement)) fail("unsupported_field", "Element is not a select");
+    return { options: Array.from(element.options).map(option => ({ value: option.value, label: option.label, selected: option.selected, disabled: option.disabled })) };
+  }
+  function selectOptions(payload) {
+    const element = elementFrom(payload.snapshot_id, payload.element_id);
+    if (!(element instanceof HTMLSelectElement)) fail("unsupported_field", "Element is not a select");
+    const values = Array.isArray(payload.values) ? payload.values.map(String) : [];
+    if (!element.multiple && values.length !== 1) fail("invalid_request", "Single select requires exactly one value");
+    const available = new Set(Array.from(element.options).filter(option => !option.disabled).map(option => option.value));
+    for (const value of values) if (!available.has(value)) fail("invalid_option", "Option does not exist or is disabled: " + value);
+    for (const option of element.options) option.selected = values.includes(option.value);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return { selected: values };
+  }
+  function findText(payload) {
+    const needle = String(payload.text || ""); if (!needle) fail("invalid_request", "text is required");
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.textContent.includes(needle)) continue;
+      const element = node.parentElement;
+      if (!element || !visible(element)) continue;
+      element.scrollIntoView({ block: "center", inline: "center" });
+      return { found: true, text: needle };
+    }
+    return { found: false, text: needle };
   }
   function setNativeValue(element, value) {
     const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -104,6 +152,11 @@ const browserRuntimeSource = `(() => {
     switch (action) {
       case "snapshot": return snapshot(payload);
       case "prepare_click": return prepareClick(payload);
+      case "prepare_type": return prepareType(payload);
+      case "assert_active_safe": return assertActiveSafe();
+      case "dropdown_options": return dropdownOptions(payload);
+      case "select": return selectOptions(payload);
+      case "find_text": return findText(payload);
       case "fill": return fill(payload);
       case "scroll": return scroll(payload);
       case "wait": return wait(payload);
@@ -116,7 +169,7 @@ const browserRuntimeSource = `(() => {
 
 func (p *chromePage) executeRuntime(ctx context.Context, action string, payload map[string]any) (map[string]any, error) {
 	payloadJSON, _ := json.Marshal(payload)
-	expression := fmt.Sprintf(`Promise.resolve((%s).execute(%s, %s)).then(
+	expression := fmt.Sprintf(`Promise.resolve().then(() => (%s).execute(%s, %s)).then(
       result => ({ok:true,result}),
       error => ({ok:false,error:{code:error.code || "page_action_failed",message:String(error.message || error)}})
     )`, browserRuntimeSource, strconvQuote(action), string(payloadJSON))
@@ -157,22 +210,34 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 		url, title, _ := p.Metadata(ctx)
 		return map[string]any{"navigated": true, "url": url, "title": title}, nil
 	case "click":
-		point, err := p.executeRuntime(ctx, "prepare_click", payload)
+		return p.click(ctx, payload, "left", 1)
+	case "double_click":
+		return p.click(ctx, payload, "left", 2)
+	case "right_click":
+		return p.click(ctx, payload, "right", 1)
+	case "hover":
+		point, err := p.elementPoint(ctx, payload)
 		if err != nil {
 			return nil, err
 		}
-		x, xOK := numberValue(point["x"])
-		y, yOK := numberValue(point["y"])
-		if !xOK || !yOK {
-			return nil, errors.New("click coordinates unavailable")
+		if err := p.Input(ctx, map[string]any{"type": "mouseMoved", "x": point["x"], "y": point["y"]}); err != nil {
+			return nil, err
 		}
-		for _, eventType := range []string{"mousePressed", "mouseReleased"} {
-			if err := p.Input(ctx, map[string]any{"type": eventType, "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1}); err != nil {
+		return map[string]any{"hovered": true, "element_id": point["element_id"]}, nil
+	case "type":
+		if _, err := p.executeRuntime(ctx, "prepare_type", payload); err != nil {
+			return nil, err
+		}
+		text := stringField(payload, "text")
+		if text != "" {
+			if err := p.Input(ctx, map[string]any{"type": "insertText", "text": text}); err != nil {
 				return nil, err
 			}
 		}
-		return map[string]any{"clicked": true, "element_id": stringField(point, "element_id")}, nil
-	case "snapshot", "fill", "scroll":
+		return map[string]any{"typed": true, "element_id": stringField(payload, "element_id")}, nil
+	case "send_keys":
+		return p.sendKeys(ctx, stringField(payload, "keys"))
+	case "snapshot", "fill", "scroll", "dropdown_options", "select", "find_text":
 		return p.executeRuntime(ctx, action, payload)
 	case "wait":
 		return p.wait(ctx, payload)
@@ -188,6 +253,128 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 	}
 }
 
+func (p *chromePage) elementPoint(ctx context.Context, payload map[string]any) (map[string]any, error) {
+	point, err := p.executeRuntime(ctx, "prepare_click", payload)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := numberValue(point["x"]); !ok {
+		return nil, errors.New("click coordinates unavailable")
+	}
+	if _, ok := numberValue(point["y"]); !ok {
+		return nil, errors.New("click coordinates unavailable")
+	}
+	return point, nil
+}
+
+func (p *chromePage) click(ctx context.Context, payload map[string]any, button string, count int) (map[string]any, error) {
+	point, err := p.elementPoint(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	buttons := 1
+	if button == "right" {
+		buttons = 2
+	}
+	for clickCount := 1; clickCount <= count; clickCount++ {
+		for _, eventType := range []string{"mousePressed", "mouseReleased"} {
+			if err := p.Input(ctx, map[string]any{
+				"type": eventType, "x": point["x"], "y": point["y"],
+				"button": button, "buttons": buttons, "clickCount": clickCount,
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return map[string]any{"clicked": true, "element_id": point["element_id"], "click_count": count, "button": button}, nil
+}
+
+type keyStroke struct {
+	Key       string
+	Code      string
+	KeyCode   int
+	Modifiers int
+	Text      string
+}
+
+func parseKeyChord(chord string) (keyStroke, error) {
+	parts := strings.Split(chord, "+")
+	if len(parts) == 0 || parts[len(parts)-1] == "" {
+		return keyStroke{}, errorf("invalid_request", "invalid key chord %q", chord)
+	}
+	stroke := keyStroke{}
+	for _, modifier := range parts[:len(parts)-1] {
+		switch strings.ToLower(modifier) {
+		case "alt":
+			stroke.Modifiers |= 1
+		case "control", "ctrl":
+			stroke.Modifiers |= 2
+		case "meta", "cmd", "command":
+			stroke.Modifiers |= 4
+		case "shift":
+			stroke.Modifiers |= 8
+		default:
+			return keyStroke{}, errorf("invalid_request", "unknown key modifier %q", modifier)
+		}
+	}
+	key := parts[len(parts)-1]
+	special := map[string]keyStroke{
+		"enter":  {Key: "Enter", Code: "Enter", KeyCode: 13, Text: "\r"},
+		"escape": {Key: "Escape", Code: "Escape", KeyCode: 27}, "esc": {Key: "Escape", Code: "Escape", KeyCode: 27},
+		"tab": {Key: "Tab", Code: "Tab", KeyCode: 9}, "backspace": {Key: "Backspace", Code: "Backspace", KeyCode: 8},
+		"delete": {Key: "Delete", Code: "Delete", KeyCode: 46}, "arrowleft": {Key: "ArrowLeft", Code: "ArrowLeft", KeyCode: 37},
+		"arrowup": {Key: "ArrowUp", Code: "ArrowUp", KeyCode: 38}, "arrowright": {Key: "ArrowRight", Code: "ArrowRight", KeyCode: 39},
+		"arrowdown": {Key: "ArrowDown", Code: "ArrowDown", KeyCode: 40}, "home": {Key: "Home", Code: "Home", KeyCode: 36},
+		"end": {Key: "End", Code: "End", KeyCode: 35}, "pageup": {Key: "PageUp", Code: "PageUp", KeyCode: 33},
+		"pagedown": {Key: "PageDown", Code: "PageDown", KeyCode: 34}, "space": {Key: " ", Code: "Space", KeyCode: 32, Text: " "},
+	}
+	if mapped, ok := special[strings.ToLower(key)]; ok {
+		stroke.Key, stroke.Code, stroke.KeyCode, stroke.Text = mapped.Key, mapped.Code, mapped.KeyCode, mapped.Text
+	} else if runes := []rune(key); len(runes) == 1 {
+		stroke.Key = key
+		stroke.Text = key
+		if (runes[0] >= 'a' && runes[0] <= 'z') || (runes[0] >= 'A' && runes[0] <= 'Z') {
+			upper := strings.ToUpper(key)
+			stroke.Code = "Key" + upper
+			stroke.KeyCode = int(upper[0])
+		} else if runes[0] >= '0' && runes[0] <= '9' {
+			stroke.Code = "Digit" + key
+			stroke.KeyCode = int(runes[0])
+		} else {
+			stroke.Code = key
+		}
+	} else {
+		return keyStroke{}, errorf("invalid_request", "unknown key %q", key)
+	}
+	if stroke.Modifiers&3 != 0 || stroke.Modifiers&4 != 0 {
+		stroke.Text = ""
+	}
+	return stroke, nil
+}
+
+func (p *chromePage) sendKeys(ctx context.Context, chord string) (map[string]any, error) {
+	stroke, err := parseKeyChord(chord)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.executeRuntime(ctx, "assert_active_safe", map[string]any{}); err != nil {
+		return nil, err
+	}
+	event := map[string]any{
+		"type": "keyDown", "key": stroke.Key, "code": stroke.Code,
+		"keyCode": stroke.KeyCode, "modifiers": stroke.Modifiers, "text": stroke.Text,
+	}
+	if err := p.Input(ctx, event); err != nil {
+		return nil, err
+	}
+	event["type"] = "keyUp"
+	event["text"] = ""
+	if err := p.Input(ctx, event); err != nil {
+		return nil, err
+	}
+	return map[string]any{"sent": true, "keys": chord}, nil
+}
+
 func (p *chromePage) Input(ctx context.Context, event map[string]any) error {
 	eventType := stringField(event, "type")
 	switch eventType {
@@ -200,7 +387,7 @@ func (p *chromePage) Input(ctx context.Context, event map[string]any) error {
 			params["deltaX"], params["deltaY"] = numberField(event, "deltaX"), numberField(event, "deltaY")
 			params["button"], params["buttons"] = "none", 0
 		} else if eventType != "mouseMoved" {
-			params["clickCount"] = 1
+			params["clickCount"] = max(1, intField(event, "clickCount"))
 		}
 		_, err := p.conn.call(ctx, "Input.dispatchMouseEvent", params, nil)
 		return err

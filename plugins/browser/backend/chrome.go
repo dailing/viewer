@@ -502,13 +502,22 @@ func (p *chromePage) evaluate(ctx context.Context, expression string) (map[strin
 			Value map[string]any `json:"value"`
 		} `json:"result"`
 		ExceptionDetails *struct {
-			Text string `json:"text"`
+			Text      string `json:"text"`
+			Exception struct {
+				Description string `json:"description"`
+			} `json:"exception"`
 		} `json:"exceptionDetails"`
 	}
 	if err := json.Unmarshal(raw, &response); err != nil {
 		return nil, err
 	}
+	if response.Result.Value != nil {
+		return response.Result.Value, nil
+	}
 	if response.ExceptionDetails != nil {
+		if description := response.ExceptionDetails.Exception.Description; description != "" {
+			return nil, errors.New(description)
+		}
 		return nil, errors.New(response.ExceptionDetails.Text)
 	}
 	return response.Result.Value, nil

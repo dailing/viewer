@@ -5,6 +5,26 @@ import (
 	"time"
 )
 
+func TestParseKeyChord(t *testing.T) {
+	stroke, err := parseKeyChord("Control+a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stroke.Key != "a" || stroke.Code != "KeyA" || stroke.KeyCode != 65 || stroke.Modifiers != 2 || stroke.Text != "" {
+		t.Fatalf("stroke = %+v", stroke)
+	}
+	stroke, err = parseKeyChord("Enter")
+	if err != nil || stroke.KeyCode != 13 || stroke.Text != "\r" {
+		t.Fatalf("enter = %+v, %v", stroke, err)
+	}
+	if _, err := parseKeyChord("Control+"); err == nil {
+		t.Fatal("empty key unexpectedly valid")
+	}
+	if _, err := parseKeyChord("NotARealKey"); err == nil {
+		t.Fatal("unknown key unexpectedly valid")
+	}
+}
+
 func TestParseWaitPayload(t *testing.T) {
 	tests := []struct {
 		name      string

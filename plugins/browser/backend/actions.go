@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -171,8 +172,17 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 			}
 		}
 		return map[string]any{"clicked": true, "element_id": stringField(point, "element_id")}, nil
-	case "snapshot", "fill", "scroll", "wait":
+	case "snapshot", "fill", "scroll":
 		return p.executeRuntime(ctx, action, payload)
+	case "wait":
+		return p.wait(ctx, payload)
+	case "go_back", "go_forward":
+		return p.historyNavigate(ctx, action == "go_forward")
+	case "reload":
+		if _, err := p.conn.call(ctx, "Page.reload", map[string]any{"ignoreCache": payload["ignore_cache"] == true}, nil); err != nil {
+			return nil, err
+		}
+		return p.actionState(ctx, "reloaded", true)
 	default:
 		return nil, errorf("unknown_action", "unsupported browser action %q", action)
 	}
@@ -211,6 +221,118 @@ func (p *chromePage) Input(ctx context.Context, event map[string]any) error {
 	default:
 		return errorf("invalid_input", "unsupported input event %q", eventType)
 	}
+}
+
+type waitOptions struct {
+	predicate string
+	value     string
+	timeout   time.Duration
+}
+
+func parseWaitPayload(payload map[string]any) (waitOptions, error) {
+	options := waitOptions{timeout: time.Second}
+	for _, predicate := range []string{"text", "url_contains", "ready_state"} {
+		value := strings.TrimSpace(stringField(payload, predicate))
+		if value == "" {
+			continue
+		}
+		if options.predicate != "" {
+			return options, errorf("invalid_request", "only one wait predicate is allowed")
+		}
+		options.predicate, options.value = predicate, value
+	}
+	if options.predicate == "ready_state" {
+		switch options.value {
+		case "loading", "interactive", "complete":
+		default:
+			return options, errorf("invalid_request", "ready_state must be loading, interactive, or complete")
+		}
+	}
+	if raw, exists := payload["text"]; exists && options.predicate == "" && strings.TrimSpace(stringField(payload, "text")) == "" && raw != nil && raw != "" {
+		return options, errorf("invalid_request", "text must not be empty")
+	}
+	if options.predicate != "" {
+		options.timeout = 10 * time.Second
+	}
+	if raw, exists := payload["timeout_ms"]; exists {
+		milliseconds, ok := numberValue(raw)
+		if !ok || milliseconds < 0 {
+			return options, errorf("invalid_request", "timeout_ms must be a non-negative number")
+		}
+		milliseconds = max(100, min(30000, milliseconds))
+		options.timeout = time.Duration(milliseconds) * time.Millisecond
+	}
+	return options, nil
+}
+
+func (p *chromePage) wait(ctx context.Context, payload map[string]any) (map[string]any, error) {
+	options, err := parseWaitPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+	started := time.Now()
+	waitCtx, cancel := context.WithTimeout(ctx, options.timeout)
+	defer cancel()
+	predicate := "true"
+	switch options.predicate {
+	case "text":
+		predicate = "Boolean(document.body && document.body.innerText.includes(" + strconvQuote(options.value) + "))"
+	case "url_contains":
+		predicate = "location.href.includes(" + strconvQuote(options.value) + ")"
+	case "ready_state":
+		predicate = "document.readyState === " + strconvQuote(options.value)
+	}
+	expression := fmt.Sprintf(`({url:location.href,title:document.title,ready_state:document.readyState,found:%s})`, predicate)
+	for {
+		state, evalErr := p.evaluate(waitCtx, expression)
+		if evalErr == nil {
+			if found, _ := state["found"].(bool); found {
+				state["waited_ms"] = time.Since(started).Milliseconds()
+				return state, nil
+			}
+		}
+		select {
+		case <-waitCtx.Done():
+			return nil, errorf("wait_timeout", "browser wait timed out; take a fresh snapshot")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func (p *chromePage) actionState(ctx context.Context, key string, value any) (map[string]any, error) {
+	state, err := p.evaluate(ctx, `({url:location.href,title:document.title,ready_state:document.readyState})`)
+	if err != nil {
+		return nil, err
+	}
+	state[key] = value
+	return state, nil
+}
+
+func (p *chromePage) historyNavigate(ctx context.Context, forward bool) (map[string]any, error) {
+	raw, err := p.conn.call(ctx, "Page.getNavigationHistory", map[string]any{}, nil)
+	if err != nil {
+		return nil, err
+	}
+	var history struct {
+		CurrentIndex int `json:"currentIndex"`
+		Entries      []struct {
+			ID int `json:"id"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &history); err != nil {
+		return nil, err
+	}
+	index := history.CurrentIndex - 1
+	if forward {
+		index = history.CurrentIndex + 1
+	}
+	if index < 0 || index >= len(history.Entries) {
+		return nil, errorf("navigation_boundary", "no browser history entry in that direction")
+	}
+	if _, err := p.conn.call(ctx, "Page.navigateToHistoryEntry", map[string]any{"entryId": history.Entries[index].ID}, nil); err != nil {
+		return nil, err
+	}
+	return p.actionState(ctx, "navigated", true)
 }
 
 func numberValue(value any) (float64, bool) {

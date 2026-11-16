@@ -51,13 +51,22 @@ func TestMCPInitializeAndToolSurface(t *testing.T) {
 	}
 	listed := mcpCall(t, handler, "tools/list", map[string]any{})
 	tools := listed["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 9 {
-		t.Fatalf("tool count = %d, want 9", len(tools))
-	}
+	found := make(map[string]bool)
 	for _, raw := range tools {
-		name := raw.(map[string]any)["name"].(string)
+		tool := raw.(map[string]any)
+		name := tool["name"].(string)
+		found[name] = true
 		if name == "browser_list_targets" || name == "browser_bind" {
 			t.Fatalf("unsafe discovery tool exposed: %s", name)
+		}
+	}
+	for _, name := range []string{
+		"browser_status", "browser_require", "browser_release", "browser_snapshot",
+		"browser_click", "browser_fill", "browser_navigate", "browser_wait", "browser_scroll",
+		"browser_go_back", "browser_go_forward", "browser_reload",
+	} {
+		if !found[name] {
+			t.Errorf("required browser tool is missing: %s", name)
 		}
 	}
 }

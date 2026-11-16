@@ -12,6 +12,8 @@ import (
 	"github.com/coder/websocket"
 )
 
+const cdpEventQueueSize = 256
+
 type cdpCall struct {
 	id     int64
 	result chan cdpOutcome
@@ -22,14 +24,21 @@ type cdpOutcome struct {
 	err    error
 }
 
+type cdpEvent struct {
+	Method    string
+	Params    json.RawMessage
+	SessionID string
+}
+
 type cdpConn struct {
 	conn *websocket.Conn
 
-	next  atomic.Int64
-	mu    sync.Mutex
-	calls map[int64]chan cdpOutcome
-	done  chan struct{}
-	err   error
+	next   atomic.Int64
+	mu     sync.Mutex
+	calls  map[int64]chan cdpOutcome
+	events chan cdpEvent
+	done   chan struct{}
+	err    error
 }
 
 func dialCDP(ctx context.Context, url string) (*cdpConn, error) {
@@ -38,7 +47,10 @@ func dialCDP(ctx context.Context, url string) (*cdpConn, error) {
 		return nil, err
 	}
 	conn.SetReadLimit(16 << 20)
-	client := &cdpConn{conn: conn, calls: make(map[int64]chan cdpOutcome), done: make(chan struct{})}
+	client := &cdpConn{
+		conn: conn, calls: make(map[int64]chan cdpOutcome),
+		events: make(chan cdpEvent, cdpEventQueueSize), done: make(chan struct{}),
+	}
 	go client.readLoop()
 	return client, nil
 }
@@ -54,14 +66,32 @@ func (c *cdpConn) readLoop() {
 			continue
 		}
 		var message struct {
-			ID     int64           `json:"id"`
-			Result json.RawMessage `json:"result"`
-			Error  *struct {
+			ID        int64           `json:"id"`
+			Method    string          `json:"method"`
+			Params    json.RawMessage `json:"params"`
+			SessionID string          `json:"sessionId"`
+			Result    json.RawMessage `json:"result"`
+			Error     *struct {
 				Code    int    `json:"code"`
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		if json.Unmarshal(data, &message) != nil || message.ID == 0 {
+		if json.Unmarshal(data, &message) != nil {
+			continue
+		}
+		if message.Method != "" {
+			event := cdpEvent{Method: message.Method, Params: message.Params, SessionID: message.SessionID}
+			select {
+			case c.events <- event:
+			default:
+				err := errors.New("CDP event queue overflow")
+				c.finish(err)
+				_ = c.conn.Close(websocket.StatusInternalError, "CDP event queue overflow")
+				return
+			}
+			continue
+		}
+		if message.ID == 0 {
 			continue
 		}
 		c.mu.Lock()
@@ -94,6 +124,23 @@ func (c *cdpConn) finish(err error) {
 	c.mu.Unlock()
 	for _, result := range calls {
 		result <- cdpOutcome{err: err}
+	}
+}
+
+func (c *cdpConn) nextEvent(ctx context.Context) (cdpEvent, error) {
+	select {
+	case event := <-c.events:
+		return event, nil
+	case <-c.done:
+		c.mu.Lock()
+		err := c.err
+		c.mu.Unlock()
+		if err == nil {
+			err = errors.New("CDP connection closed")
+		}
+		return cdpEvent{}, err
+	case <-ctx.Done():
+		return cdpEvent{}, ctx.Err()
 	}
 }
 

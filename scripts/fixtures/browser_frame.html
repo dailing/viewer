@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Browser frame fixture</title>
+<h2>Frame fixture</h2>
+<input id="frame-input" placeholder="Frame input">
+<button id="frame-button">Frame button</button>
+<output id="frame-output">frame ready</output>
+<script>
+  document.getElementById('frame-button').addEventListener('click', () => {
+    document.getElementById('frame-output').textContent = 'frame clicked';
+  });
+</script>

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Viewer Browser Fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; max-width: 900px; }
+    section { margin: 18px 0; padding: 12px; border: 1px solid #ddd; }
+    button, input, select, textarea { margin: 4px; }
+    #hover-target { padding: 12px; background: #eee; }
+    iframe { width: 90%; height: 180px; border: 1px solid #aaa; }
+  </style>
+</head>
+<body>
+  <h1 id="heading">Viewer Browser Fixture</h1>
+  <nav>
+    <a id="page-two" href="?page=two">Open second navigation state</a>
+    <a id="home" href="./">Return fixture home</a>
+  </nav>
+  <output id="status">ready</output>
+
+  <section id="forms">
+    <h2>Forms</h2>
+    <label>Name <input id="name" name="name" autocomplete="off" placeholder="Ordinary name"></label>
+    <label>Password <input id="password" name="password" type="password"></label>
+    <label>Notes <textarea id="notes">initial notes</textarea></label>
+    <label>Choice <select id="choice"><option value="one">One</option><option value="two">Two</option><option value="three" disabled>Three disabled</option></select></label>
+    <label>Multi <select id="multi" multiple><option value="red">Red</option><option value="green">Green</option><option value="blue">Blue</option></select></label>
+    <div id="editable" contenteditable="true">editable text</div>
+    <input id="upload" type="file" multiple>
+    <span id="file-count">0 files</span>
+  </section>
+
+  <section id="mouse">
+    <h2>Mouse and keyboard</h2>
+    <button id="click-target">Click counter</button>
+    <span id="click-count">0 clicks</span>
+    <button id="double-target">Double click</button>
+    <button id="context-target">Right click</button>
+    <div id="hover-target" tabindex="0">Hover target</div>
+    <span id="mouse-status">no mouse event</span>
+    <input id="key-target" placeholder="Focus and send keys">
+    <output id="key-status">no key event</output>
+  </section>
+
+  <section id="downloads">
+    <h2>Downloads and dialogs</h2>
+    <a id="download-link" href="/download.txt?origin=fixture" download="fixture-download.txt">Download fixture file</a>
+    <button id="alert-button">Open alert</button>
+    <button id="confirm-button">Open confirm</button>
+    <button id="prompt-button">Open prompt</button>
+  </section>
+
+  <section id="tabs">
+    <h2>Tabs</h2>
+    <a id="popup-link" href="?page=popup" target="_blank">Open popup tab</a>
+  </section>
+
+  <section id="components">
+    <h2>Components and frames</h2>
+    <div id="shadow-host"></div>
+    <iframe id="same-frame" title="Same origin frame" src="/frame.html"></iframe>
+    <iframe id="cross-frame" title="Cross origin frame" src="{{CROSS_ORIGIN}}/frame.html"></iframe>
+  </section>
+
+  <section id="find-section">
+    <p>Scrollable filler</p>
+    <div style="height:1200px"></div>
+    <p id="needle">Unique text needle for browser find</p>
+  </section>
+
+  <script>
+    const status = document.getElementById('status');
+    const params = new URLSearchParams(location.search);
+    if (params.has('page')) {
+      document.getElementById('heading').textContent = 'Navigation state ' + params.get('page');
+      document.title = 'Fixture ' + params.get('page');
+    }
+    let clicks = 0;
+    document.getElementById('click-target').addEventListener('click', () => {
+      document.getElementById('click-count').textContent = ++clicks + ' clicks';
+    });
+    document.getElementById('double-target').addEventListener('dblclick', () => { status.textContent = 'double clicked'; });
+    document.getElementById('context-target').addEventListener('contextmenu', event => {
+      event.preventDefault(); status.textContent = 'right clicked';
+    });
+    document.getElementById('hover-target').addEventListener('mouseenter', () => {
+      document.getElementById('mouse-status').textContent = 'hovered';
+    });
+    document.getElementById('key-target').addEventListener('keydown', event => {
+      document.getElementById('key-status').textContent = event.key + ':' + event.ctrlKey;
+    });
+    document.getElementById('upload').addEventListener('change', event => {
+      document.getElementById('file-count').textContent = event.target.files.length + ' files';
+    });
+    document.getElementById('alert-button').addEventListener('click', () => alert('Fixture alert'));
+    document.getElementById('confirm-button').addEventListener('click', () => confirm('Fixture confirm'));
+    document.getElementById('prompt-button').addEventListener('click', () => prompt('Fixture prompt'));
+    const shadow = document.getElementById('shadow-host').attachShadow({mode:'open'});
+    shadow.innerHTML = '<button id="shadow-button">Shadow button</button><input id="shadow-input" placeholder="Shadow input"><output id="shadow-output">shadow ready</output>';
+    shadow.getElementById('shadow-button').addEventListener('click', () => { shadow.getElementById('shadow-output').textContent = 'shadow clicked'; });
+  </script>
+</body>
+</html>

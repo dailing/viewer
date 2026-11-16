@@ -138,6 +138,7 @@ func (m *ChromeManager) OpenPage(ctx context.Context, pageID, rawURL string, vie
 		return nil, err
 	}
 	page := &chromePage{manager: m, pageID: pageID, targetID: target.ID, conn: conn, slot: m.nextSlot % 15}
+	go drainCDPEvents(conn)
 	m.nextSlot++
 	m.pages[pageID] = page
 	for _, method := range []string{"Page.enable", "Runtime.enable"} {
@@ -323,6 +324,7 @@ func (m *ChromeManager) connectBrowserLocked(ctx context.Context) error {
 						return err
 					}
 					m.browser = conn
+					go drainCDPEvents(conn)
 					m.debugURL = base
 					return nil
 				}
@@ -418,6 +420,14 @@ func (m *ChromeManager) Close() {
 		_, _ = m.xvfb.Process.Wait()
 	}
 	m.mu.Unlock()
+}
+
+func drainCDPEvents(conn *cdpConn) {
+	for {
+		if _, err := conn.nextEvent(context.Background()); err != nil {
+			return
+		}
+	}
 }
 
 type chromePage struct {

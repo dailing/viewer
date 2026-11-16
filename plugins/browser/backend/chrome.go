@@ -2,10 +2,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net"
 	"net/http"
@@ -521,4 +526,141 @@ func (p *chromePage) evaluate(ctx context.Context, expression string) (map[strin
 		return nil, errors.New(response.ExceptionDetails.Text)
 	}
 	return response.Result.Value, nil
+}
+
+func (p *chromePage) evaluateAny(ctx context.Context, expression string) (any, string, error) {
+	if strings.TrimSpace(expression) == "" {
+		return nil, "", errors.New("expression is required")
+	}
+	raw, err := p.conn.call(ctx, "Runtime.evaluate", map[string]any{
+		"expression": expression, "returnByValue": true, "awaitPromise": true,
+	}, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	var response struct {
+		Result struct {
+			Type  string          `json:"type"`
+			Value json.RawMessage `json:"value"`
+		} `json:"result"`
+		ExceptionDetails *struct {
+			Text      string `json:"text"`
+			Exception struct {
+				Description string `json:"description"`
+			} `json:"exception"`
+		} `json:"exceptionDetails"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return nil, "", err
+	}
+	if response.ExceptionDetails != nil {
+		if description := response.ExceptionDetails.Exception.Description; description != "" {
+			return nil, "", errors.New(description)
+		}
+		return nil, "", errors.New(response.ExceptionDetails.Text)
+	}
+	if len(response.Result.Value) == 0 {
+		if response.Result.Type == "undefined" {
+			return nil, "undefined", nil
+		}
+		return nil, "", errors.New("JavaScript result is not JSON serializable")
+	}
+	var value any
+	if err := json.Unmarshal(response.Result.Value, &value); err != nil {
+		return nil, "", fmt.Errorf("decode JavaScript result: %w", err)
+	}
+	return value, response.Result.Type, nil
+}
+
+func (p *chromePage) screenshot(ctx context.Context, payload map[string]any) (map[string]any, error) {
+	format := strings.ToLower(stringField(payload, "format"))
+	if format == "" {
+		format = "png"
+	}
+	if format != "png" && format != "jpeg" {
+		return nil, errorf("invalid_request", "screenshot format must be png or jpeg")
+	}
+	fullPage := payload["full_page"] == true
+	params := map[string]any{"format": format, "captureBeyondViewport": fullPage}
+	if format == "jpeg" {
+		quality := intField(payload, "quality")
+		if quality == 0 {
+			quality = 85
+		}
+		if quality < 1 || quality > 100 {
+			return nil, errorf("invalid_request", "JPEG quality must be between 1 and 100")
+		}
+		params["quality"] = quality
+	}
+	if fullPage {
+		raw, err := p.conn.call(ctx, "Page.getLayoutMetrics", map[string]any{}, nil)
+		if err != nil {
+			return nil, err
+		}
+		var metrics struct {
+			ContentSize struct {
+				Width  float64 `json:"width"`
+				Height float64 `json:"height"`
+			} `json:"contentSize"`
+		}
+		if err := json.Unmarshal(raw, &metrics); err != nil {
+			return nil, err
+		}
+		params["clip"] = map[string]any{"x": 0, "y": 0, "width": metrics.ContentSize.Width, "height": metrics.ContentSize.Height, "scale": 1}
+	}
+	raw, err := p.conn.call(ctx, "Page.captureScreenshot", params, nil)
+	if err != nil {
+		return nil, err
+	}
+	var captured struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &captured); err != nil {
+		return nil, err
+	}
+	data, err := base64.StdEncoding.DecodeString(captured.Data)
+	if err != nil {
+		return nil, err
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode screenshot dimensions: %w", err)
+	}
+	directory := filepath.Join(p.manager.config.ProfileDir, "screenshots", p.pageID)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, err
+	}
+	token, err := randomToken("shot_", 16)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(directory, token+"."+format)
+	temporary, err := os.CreateTemp(directory, ".screenshot-*")
+	if err != nil {
+		return nil, err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return nil, err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return nil, err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return nil, err
+	}
+	if err := temporary.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"mime_type": "image/" + format, "path": path, "width": config.Width,
+		"height": config.Height, "full_page": fullPage, "data": captured.Data,
+	}, nil
 }

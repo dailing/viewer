@@ -237,6 +237,21 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 		return map[string]any{"typed": true, "element_id": stringField(payload, "element_id")}, nil
 	case "send_keys":
 		return p.sendKeys(ctx, stringField(payload, "keys"))
+	case "evaluate":
+		value, valueType, err := p.evaluateAny(ctx, stringField(payload, "expression"))
+		if err != nil {
+			return nil, errorf("evaluation_error", "%v", err)
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, errorf("evaluation_error", "result is not JSON serializable: %v", err)
+		}
+		if len(encoded) > 256<<10 {
+			return nil, errorf("result_too_large", "JavaScript result exceeds 256 KiB; narrow the query")
+		}
+		return map[string]any{"value": value, "value_type": valueType}, nil
+	case "screenshot":
+		return p.screenshot(ctx, payload)
 	case "snapshot", "fill", "scroll", "dropdown_options", "select", "find_text":
 		return p.executeRuntime(ctx, action, payload)
 	case "wait":

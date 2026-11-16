@@ -31,6 +31,9 @@ func (d *fakeDriver) Execute(_ context.Context, action string, payload map[strin
 		d.url = stringField(payload, "url")
 		return map[string]any{"navigated": true, "url": d.url, "title": d.title}, nil
 	}
+	if action == "screenshot" {
+		return map[string]any{"data": "aGVsbG8=", "mime_type": "image/png", "path": "/tmp/screenshot.png", "width": 1, "height": 1}, nil
+	}
 	return map[string]any{"snapshot_id": "snap_test", "url": d.url, "title": d.title, "elements": []any{}}, nil
 }
 func (d *fakeDriver) Input(_ context.Context, event map[string]any) error {

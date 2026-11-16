@@ -51,6 +51,8 @@ var mcpTools = []mcpTool{
 	{Name: "browser_dropdown_options", Description: "List options for a select element from a current snapshot.", InputSchema: schema([]string{"page_id", "lease_id", "snapshot_id", "element_id"}, withIDs(map[string]any{"snapshot_id": map[string]any{"type": "string"}, "element_id": map[string]any{"type": "string"}}))},
 	{Name: "browser_select", Description: "Select one or more option values on a select element from a current snapshot.", InputSchema: schema([]string{"page_id", "lease_id", "snapshot_id", "element_id", "values"}, withIDs(map[string]any{"snapshot_id": map[string]any{"type": "string"}, "element_id": map[string]any{"type": "string"}, "values": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1}}))},
 	{Name: "browser_find_text", Description: "Find visible text and scroll it into view on the exact page.", InputSchema: schema([]string{"page_id", "lease_id", "text"}, withIDs(map[string]any{"text": map[string]any{"type": "string", "minLength": 1}}))},
+	{Name: "browser_evaluate", Description: "Evaluate JavaScript on the exact page and return a JSON-serializable value up to 256 KiB. Never use this to read credentials, cookies, tokens, or to bypass human authorization.", InputSchema: schema([]string{"page_id", "lease_id", "expression"}, withIDs(map[string]any{"expression": map[string]any{"type": "string", "minLength": 1}}))},
+	{Name: "browser_screenshot", Description: "Capture the exact page as PNG or JPEG. Returns MCP image content and a local artifact path.", InputSchema: schema([]string{"page_id", "lease_id"}, withIDs(map[string]any{"format": map[string]any{"type": "string", "enum": []string{"png", "jpeg"}}, "quality": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "full_page": map[string]any{"type": "boolean"}}))},
 	{Name: "browser_fill", Description: "Fill an input, textarea, select, or contenteditable element from a current snapshot. Password fields are rejected.", InputSchema: schema([]string{"page_id", "lease_id", "snapshot_id", "element_id", "text"}, withIDs(map[string]any{"snapshot_id": map[string]any{"type": "string"}, "element_id": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}}))},
 	{Name: "browser_navigate", Description: "Navigate the exact managed page to an http(s) URL. Never selects another page.", InputSchema: schema([]string{"page_id", "lease_id", "url"}, withIDs(map[string]any{"url": map[string]any{"type": "string", "format": "uri"}}))},
 	{Name: "browser_go_back", Description: "Go back one entry in the exact page's navigation history.", InputSchema: schema([]string{"page_id", "lease_id"}, withIDs(nil))},
@@ -145,8 +147,29 @@ func (h *MCPHandler) dispatch(ctx context.Context, method string, raw json.RawMe
 			text, _ := json.Marshal(payload)
 			return map[string]any{"content": []map[string]any{{"type": "text", "text": string(text)}}, "structuredContent": payload, "isError": true}, nil
 		}
-		text, _ := json.Marshal(result)
-		return map[string]any{"content": []map[string]any{{"type": "text", "text": string(text)}}, "structuredContent": result, "isError": false}, nil
+		structured := result
+		var imageContent map[string]any
+		if params.Name == "browser_screenshot" {
+			if object, ok := result.(map[string]any); ok {
+				copyObject := make(map[string]any, len(object))
+				for key, value := range object {
+					copyObject[key] = value
+				}
+				data := stringField(copyObject, "data")
+				mimeType := stringField(copyObject, "mime_type")
+				delete(copyObject, "data")
+				structured = copyObject
+				if data != "" && mimeType != "" {
+					imageContent = map[string]any{"type": "image", "data": data, "mimeType": mimeType}
+				}
+			}
+		}
+		text, _ := json.Marshal(structured)
+		content := []map[string]any{{"type": "text", "text": string(text)}}
+		if imageContent != nil {
+			content = append(content, imageContent)
+		}
+		return map[string]any{"content": content, "structuredContent": structured, "isError": false}, nil
 	default:
 		return nil, &rpcError{Code: -32601, Message: "method not found"}
 	}

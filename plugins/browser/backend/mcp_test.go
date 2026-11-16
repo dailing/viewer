@@ -64,10 +64,34 @@ func TestMCPInitializeAndToolSurface(t *testing.T) {
 		"browser_status", "browser_require", "browser_release", "browser_snapshot",
 		"browser_click", "browser_fill", "browser_navigate", "browser_wait", "browser_scroll",
 		"browser_go_back", "browser_go_forward", "browser_reload",
+		"browser_evaluate", "browser_screenshot",
 	} {
 		if !found[name] {
 			t.Errorf("required browser tool is missing: %s", name)
 		}
+	}
+}
+
+func TestMCPScreenshotReturnsImageContentWithoutDuplicateBase64(t *testing.T) {
+	service, _, _, pageID := newTestService(t)
+	handler := &MCPHandler{service: service}
+	required := mcpCall(t, handler, "tools/call", map[string]any{"name": "browser_require", "arguments": map[string]any{"page_id": pageID}})
+	leaseID := required["result"].(map[string]any)["structuredContent"].(map[string]any)["lease_id"]
+	response := mcpCall(t, handler, "tools/call", map[string]any{
+		"name": "browser_screenshot", "arguments": map[string]any{"page_id": pageID, "lease_id": leaseID},
+	})
+	result := response["result"].(map[string]any)
+	structured := result["structuredContent"].(map[string]any)
+	if _, exists := structured["data"]; exists {
+		t.Fatal("base64 data duplicated in structured content")
+	}
+	content := result["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("screenshot content = %#v", content)
+	}
+	image := content[1].(map[string]any)
+	if image["type"] != "image" || image["mimeType"] != "image/png" || image["data"] != "aGVsbG8=" {
+		t.Fatalf("image content = %#v", image)
 	}
 }
 

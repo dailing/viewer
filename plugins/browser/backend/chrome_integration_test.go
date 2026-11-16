@@ -163,6 +163,46 @@ func TestChromeAdvancedActions(t *testing.T) {
 	}
 }
 
+func TestChromeEvaluationAndScreenshot(t *testing.T) {
+	manager := newIntegrationChrome(t)
+	server := browserFixtureServer(t)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	page, err := manager.OpenPage(ctx, "pg_visual", server.URL, defaultViewport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close(context.Background())
+	result := integrationAction(t, page, "evaluate", map[string]any{"expression": `({answer:42,items:[1,2]})`})
+	value := result["value"].(map[string]any)
+	if value["answer"] != float64(42) || result["value_type"] != "object" {
+		t.Fatalf("evaluation result = %#v", result)
+	}
+	result = integrationAction(t, page, "evaluate", map[string]any{"expression": `Promise.resolve(21*2)`})
+	if result["value"] != float64(42) {
+		t.Fatalf("promise result = %#v", result)
+	}
+	if _, err := page.Execute(ctx, "evaluate", map[string]any{"expression": `throw new Error("fixture failure")`}); err == nil {
+		t.Fatal("JavaScript exception unexpectedly succeeded")
+	} else {
+		requireErrorCode(t, err, "evaluation_error")
+	}
+	for _, format := range []string{"png", "jpeg"} {
+		result = integrationAction(t, page, "screenshot", map[string]any{"format": format, "full_page": true})
+		if stringField(result, "data") == "" || intField(result, "width") <= 0 || intField(result, "height") <= 720 {
+			t.Fatalf("screenshot result = %#v", result)
+		}
+		path := stringField(result, "path")
+		if !strings.HasPrefix(path, manager.config.ProfileDir+string(os.PathSeparator)) {
+			t.Fatalf("screenshot escaped profile: %q", path)
+		}
+		if info, err := os.Stat(path); err != nil || info.Size() == 0 {
+			t.Fatalf("screenshot file = %v, %v", info, err)
+		}
+	}
+}
+
 func TestChromeNavigationAndWaits(t *testing.T) {
 	manager := newIntegrationChrome(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

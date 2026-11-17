@@ -35,6 +35,11 @@ func browserFixtureServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	crossServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write(frame)
+	}))
+	t.Cleanup(crossServer.Close)
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -47,7 +52,7 @@ func browserFixtureServer(t *testing.T) *httptest.Server {
 			_, _ = fmt.Fprint(w, "downloaded fixture content\n")
 		default:
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(strings.ReplaceAll(string(fixture), "{{CROSS_ORIGIN}}", server.URL)))
+			_, _ = w.Write([]byte(strings.ReplaceAll(string(fixture), "{{CROSS_ORIGIN}}", crossServer.URL)))
 		}
 	}))
 	return server
@@ -160,6 +165,104 @@ func TestChromeAdvancedActions(t *testing.T) {
 		t.Fatal("password keyboard input unexpectedly succeeded")
 	} else {
 		requireErrorCode(t, err, "sensitive_field")
+	}
+}
+
+func TestChromeShadowDOMAndFrames(t *testing.T) {
+	manager := newIntegrationChrome(t)
+	server := browserFixtureServer(t)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	page, err := manager.OpenPage(ctx, "pg_frames", server.URL, defaultViewport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close(context.Background())
+
+	snapshot := integrationSnapshot(t, page)
+	if len(snapshot["frames"].([]map[string]any)) != 3 {
+		t.Fatalf("frame metadata = %#v; warnings=%#v", snapshot["frames"], snapshot["frame_warnings"])
+	}
+	if warnings := snapshot["frame_warnings"].([]string); len(warnings) != 0 {
+		t.Fatalf("frame warnings = %#v", warnings)
+	}
+	if !strings.Contains(stringField(snapshot, "text"), "shadow ready") {
+		t.Fatalf("shadow text missing from aggregate snapshot: %q", snapshot["text"])
+	}
+	frameForURL := func(rawURL string) string {
+		for _, raw := range snapshot["frames"].([]map[string]any) {
+			if strings.HasPrefix(stringField(raw, "url"), rawURL) && stringField(raw, "parent_frame_id") != "" {
+				return stringField(raw, "frame_id")
+			}
+		}
+		t.Fatalf("frame with URL prefix %q missing: %#v", rawURL, snapshot["frames"])
+		return ""
+	}
+	sameFrameID := frameForURL(server.URL + "/frame.html")
+	crossFrameID := ""
+	for _, raw := range snapshot["frames"].([]map[string]any) {
+		frameID := stringField(raw, "frame_id")
+		if parent := stringField(raw, "parent_frame_id"); parent != "" && frameID != sameFrameID {
+			crossFrameID = frameID
+		}
+	}
+	if crossFrameID == "" {
+		t.Fatal("cross-origin frame missing")
+	}
+
+	shadowID := integrationElement(t, snapshot, "Shadow input")
+	shadowPayload := integrationElementPayload(snapshot, shadowID)
+	shadowPayload["text"] = "shadow value"
+	integrationAction(t, page, "fill", shadowPayload)
+	integrationAction(t, page, "click", integrationElementPayload(snapshot, integrationElement(t, snapshot, "Shadow button")))
+
+	frameElement := func(frameID, text string) map[string]any {
+		for _, raw := range snapshot["elements"].([]any) {
+			element := raw.(map[string]any)
+			if stringField(element, "frame_id") == frameID && strings.Contains(stringField(element, "text"), text) {
+				return integrationElementPayload(snapshot, stringField(element, "id"))
+			}
+		}
+		t.Fatalf("element %q missing in frame %s: %#v", text, frameID, snapshot["elements"])
+		return nil
+	}
+	for _, test := range []struct {
+		frameID string
+		value   string
+	}{{sameFrameID, "same value"}, {crossFrameID, "cross value"}} {
+		input := frameElement(test.frameID, "Frame input")
+		input["text"] = test.value
+		integrationAction(t, page, "fill", input)
+		integrationAction(t, page, "click", frameElement(test.frameID, "Frame button"))
+		result := integrationAction(t, page, "evaluate", map[string]any{"frame_id": test.frameID, "expression": `({value:document.getElementById("frame-input").value,output:document.getElementById("frame-output").textContent})`})
+		value := result["value"].(map[string]any)
+		if stringField(value, "value") != test.value || stringField(value, "output") != "frame clicked" {
+			t.Fatalf("frame action result = %#v", value)
+		}
+	}
+	shadowResult := integrationAction(t, page, "evaluate", map[string]any{"expression": `({value:document.getElementById("shadow-host").shadowRoot.getElementById("shadow-input").value,output:document.getElementById("shadow-host").shadowRoot.getElementById("shadow-output").textContent})`})
+	if value := shadowResult["value"].(map[string]any); stringField(value, "value") != "shadow value" || stringField(value, "output") != "shadow clicked" {
+		t.Fatalf("shadow action result = %#v", value)
+	}
+
+	stale := frameElement(sameFrameID, "Frame button")
+	integrationAction(t, page, "evaluate", map[string]any{"expression": `document.getElementById("same-frame").src="/frame.html?navigated=1"`})
+	var staleErr error
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		_, staleErr = page.Execute(ctx, "click", stale)
+		if staleErr != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if staleErr == nil {
+		t.Fatal("navigated frame accepted an old snapshot element")
+	}
+
+	bounded := integrationAction(t, page, "snapshot", map[string]any{"max_elements": 10, "max_chars": 1000})
+	if len(bounded["elements"].([]any)) != 10 {
+		t.Fatalf("aggregate element budget = %d", len(bounded["elements"].([]any)))
 	}
 }
 

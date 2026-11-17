@@ -42,11 +42,19 @@ func (p *chromePage) upload(ctx context.Context, payload map[string]any) (map[st
 	if err != nil {
 		return nil, err
 	}
-	if _, err := p.executeRuntime(ctx, "validate_upload", payload); err != nil {
+	if _, err := p.executeRuntimeForElement(ctx, "validate_upload", payload); err != nil {
+		return nil, err
+	}
+	tab, frameID, err := p.snapshotElement(payload)
+	if err != nil {
+		return nil, err
+	}
+	frame, err := p.frameByID(tab, frameID)
+	if err != nil {
 		return nil, err
 	}
 	expression := fmt.Sprintf("globalThis.__viewerManagedBrowser.resolveElement(%s,%s)", strconvQuote(stringField(payload, "snapshot_id")), strconvQuote(stringField(payload, "element_id")))
-	raw, err := p.conn.call(ctx, "Runtime.evaluate", map[string]any{"expression": expression, "returnByValue": false}, nil)
+	raw, err := tab.conn.callSession(ctx, frame.SessionID, "Runtime.evaluate", map[string]any{"expression": expression, "contextId": frame.ContextID, "returnByValue": false})
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +76,7 @@ func (p *chromePage) upload(ctx context.Context, payload map[string]any) (map[st
 	if response.Result.ObjectID == "" || response.Result.Subtype != "node" {
 		return nil, errorf("stale_element", "File input element could not be resolved")
 	}
-	if _, err := p.conn.call(ctx, "DOM.setFileInputFiles", map[string]any{"files": paths, "objectId": response.Result.ObjectID}, nil); err != nil {
+	if _, err := tab.conn.callSession(ctx, frame.SessionID, "DOM.setFileInputFiles", map[string]any{"files": paths, "objectId": response.Result.ObjectID}); err != nil {
 		return nil, err
 	}
 	return map[string]any{"uploaded": true, "paths": paths, "element_id": stringField(payload, "element_id")}, nil

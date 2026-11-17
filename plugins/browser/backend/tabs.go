@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -14,6 +15,9 @@ type chromeTab struct {
 	targetID string
 	conn     *cdpConn
 	index    int
+
+	frameMu sync.Mutex
+	frames  map[string]*frameContext
 }
 
 func (p *chromePage) ensureVisible(ctx context.Context) error {
@@ -91,7 +95,11 @@ func (p *chromePage) attachTab(ctx context.Context, targetID string) (*chromeTab
 		return nil, err
 	}
 	tab := &chromeTab{id: id, targetID: targetID, conn: conn}
-	go drainCDPEvents(conn)
+	go p.runTabEvents(tab)
+	if _, err := conn.call(ctx, "Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true}, nil); err != nil {
+		conn.close()
+		return nil, err
+	}
 	return tab, nil
 }
 
@@ -105,6 +113,7 @@ func (p *chromePage) activateTab(ctx context.Context, tab *chromeTab) error {
 	p.tabMu.Lock()
 	p.activeTabID, p.targetID, p.conn = tab.id, tab.targetID, tab.conn
 	p.tabMu.Unlock()
+	p.invalidateSnapshot()
 	return p.ensureVisible(ctx)
 }
 
@@ -352,5 +361,13 @@ func (m *ChromeManager) removeTarget(targetID string) {
 func (p *chromePage) setHumanRequired(kind, detail string) {
 	p.tabMu.Lock()
 	p.humanRequired = map[string]any{"kind": kind, "detail": detail}
+	p.tabMu.Unlock()
+}
+
+func (p *chromePage) clearHumanRequired(kind string) {
+	p.tabMu.Lock()
+	if stringField(p.humanRequired, "kind") == kind {
+		p.humanRequired = nil
+	}
 	p.tabMu.Unlock()
 }

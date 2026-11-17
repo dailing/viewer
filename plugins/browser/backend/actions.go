@@ -36,19 +36,35 @@ const browserRuntimeSource = `(() => {
     }
     return item;
   }
+  function deepElements(root, selector, output = []) {
+    for (const element of root.querySelectorAll(selector)) output.push(element);
+    for (const element of root.querySelectorAll("*")) if (element.shadowRoot) deepElements(element.shadowRoot, selector, output);
+    return output;
+  }
+  function deepText(root) {
+    let text = "";
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (parent && !["SCRIPT", "STYLE", "NOSCRIPT"].includes(parent.tagName)) text += node.textContent;
+    }
+    for (const element of root.querySelectorAll("*")) if (element.shadowRoot) text += deepText(element.shadowRoot);
+    return text.replace(/\u0000/g, "").replace(/[ \t]+/g, " ");
+  }
   function snapshot(payload) {
-    const maxChars = Math.max(1000, Math.min(50000, Number(payload.max_chars) || 20000));
-    const maxElements = Math.max(10, Math.min(500, Number(payload.max_elements) || 200));
+    const maxChars = Math.max(0, Math.min(50000, Number(payload.max_chars) || 0));
+    const maxElements = Math.max(0, Math.min(500, Number(payload.max_elements) || 0));
+    const startIndex = Math.max(0, Number(payload.start_index) || 0);
     const selector = "a[href],button,input,textarea,select,summary,[role='button'],[role='link'],[contenteditable='true'],[tabindex]";
     const references = new Map(); const elements = [];
-    for (const element of document.querySelectorAll(selector)) {
+    for (const element of deepElements(document, selector)) {
       if (elements.length >= maxElements) break;
       if (!visible(element)) continue;
-      const id = "e" + (elements.length + 1); references.set(id, element); elements.push(describe(element, id));
+      const id = "e" + (startIndex + elements.length + 1); references.set(id, element); elements.push(describe(element, id));
     }
-    const snapshotID = "snap_" + crypto.randomUUID(); latestSnapshot = { id: snapshotID, references }; revision += 1;
-    const bodyText = (document.body?.innerText || "").replace(/\u0000/g, "");
-    return { snapshot_id: snapshotID, revision, url: location.href, title: document.title, text: bodyText.slice(0, maxChars), text_truncated: bodyText.length > maxChars, elements, elements_truncated: elements.length >= maxElements };
+    const snapshotID = String(payload.snapshot_id || ""); latestSnapshot = { id: snapshotID, references }; revision += 1;
+    const bodyText = deepText(document);
+    return { snapshot_id: snapshotID, revision, url: location.href, title: document.title, text: bodyText.slice(0, maxChars), text_truncated: bodyText.length > maxChars, elements, next_index: startIndex + elements.length, elements_truncated: elements.length >= maxElements };
   }
   function elementFrom(snapshotID, elementID) {
     if (!latestSnapshot || latestSnapshot.id !== snapshotID) fail("stale_snapshot", "Snapshot changed; call browser_snapshot again");
@@ -176,28 +192,7 @@ const browserRuntimeSource = `(() => {
 })()`
 
 func (p *chromePage) executeRuntime(ctx context.Context, action string, payload map[string]any) (map[string]any, error) {
-	payloadJSON, _ := json.Marshal(payload)
-	expression := fmt.Sprintf(`Promise.resolve().then(() => (%s).execute(%s, %s)).then(
-      result => ({ok:true,result}),
-      error => ({ok:false,error:{code:error.code || "page_action_failed",message:String(error.message || error)}})
-    )`, browserRuntimeSource, strconvQuote(action), string(payloadJSON))
-	response, err := p.evaluate(ctx, expression)
-	if err != nil {
-		return nil, err
-	}
-	if ok, _ := response["ok"].(bool); !ok {
-		errorValue, _ := response["error"].(map[string]any)
-		code := stringField(errorValue, "code")
-		if code == "" {
-			code = "page_action_failed"
-		}
-		return nil, errorf(code, "%s", stringField(errorValue, "message"))
-	}
-	result, _ := response["result"].(map[string]any)
-	if result == nil {
-		result = make(map[string]any)
-	}
-	return result, nil
+	return p.executeRuntimeInFrame(ctx, "", action, payload)
 }
 
 func strconvQuote(value string) string {
@@ -246,7 +241,7 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 		}
 		return map[string]any{"hovered": true, "element_id": point["element_id"]}, nil
 	case "type":
-		if _, err := p.executeRuntime(ctx, "prepare_type", payload); err != nil {
+		if _, err := p.executeRuntimeForElement(ctx, "prepare_type", payload); err != nil {
 			return nil, err
 		}
 		text := stringField(payload, "text")
@@ -259,8 +254,11 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 	case "send_keys":
 		return p.sendKeys(ctx, stringField(payload, "keys"))
 	case "evaluate":
-		value, valueType, err := p.evaluateAny(ctx, stringField(payload, "expression"))
+		value, valueType, err := p.evaluateAnyFrame(ctx, stringField(payload, "frame_id"), stringField(payload, "expression"))
 		if err != nil {
+			if _, structured := err.(*Error); structured {
+				return nil, err
+			}
 			return nil, errorf("evaluation_error", "%v", err)
 		}
 		encoded, err := json.Marshal(value)
@@ -277,7 +275,16 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 		return p.upload(ctx, payload)
 	case "downloads":
 		return map[string]any{"downloads": p.manager.downloadsForPage(p.pageID)}, nil
-	case "snapshot", "fill", "scroll", "dropdown_options", "select", "find_text":
+	case "snapshot":
+		return p.snapshot(ctx, payload)
+	case "fill", "dropdown_options", "select":
+		return p.executeRuntimeForElement(ctx, action, payload)
+	case "scroll":
+		if stringField(payload, "element_id") != "" {
+			return p.executeRuntimeForElement(ctx, action, payload)
+		}
+		return p.executeRuntime(ctx, action, payload)
+	case "find_text":
 		return p.executeRuntime(ctx, action, payload)
 	case "wait":
 		return p.wait(ctx, payload)
@@ -294,16 +301,24 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 }
 
 func (p *chromePage) elementPoint(ctx context.Context, payload map[string]any) (map[string]any, error) {
-	point, err := p.executeRuntime(ctx, "prepare_click", payload)
+	point, err := p.executeRuntimeForElement(ctx, "prepare_click", payload)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := numberValue(point["x"]); !ok {
+	x, xOK := numberValue(point["x"])
+	y, yOK := numberValue(point["y"])
+	if !xOK || !yOK {
 		return nil, errors.New("click coordinates unavailable")
 	}
-	if _, ok := numberValue(point["y"]); !ok {
-		return nil, errors.New("click coordinates unavailable")
+	tab, _, err := p.activeTab()
+	if err != nil {
+		return nil, err
 	}
+	x, y, err = p.translatePoint(ctx, tab, stringField(point, "frame_id"), x, y)
+	if err != nil {
+		return nil, err
+	}
+	point["x"], point["y"] = x, y
 	return point, nil
 }
 

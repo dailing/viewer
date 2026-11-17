@@ -152,7 +152,7 @@ func (m *ChromeManager) OpenPage(ctx context.Context, pageID, rawURL string, vie
 	}
 	page.tabs = map[string]*chromeTab{tabID: {id: tabID, targetID: target.ID, conn: conn}}
 	page.activeTabID = tabID
-	go drainCDPEvents(conn)
+	go page.runTabEvents(page.tabs[tabID])
 	m.nextSlot++
 	m.pages[pageID] = page
 	for _, method := range []string{"Page.enable", "Runtime.enable"} {
@@ -161,6 +161,11 @@ func (m *ChromeManager) OpenPage(ctx context.Context, pageID, rawURL string, vie
 			delete(m.pages, pageID)
 			return nil, err
 		}
+	}
+	if _, err := conn.call(ctx, "Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true}, nil); err != nil {
+		conn.close()
+		delete(m.pages, pageID)
+		return nil, err
 	}
 	readyDeadline := time.Now().Add(10 * time.Second)
 	for {
@@ -437,14 +442,6 @@ func (m *ChromeManager) Close() {
 	m.mu.Unlock()
 }
 
-func drainCDPEvents(conn *cdpConn) {
-	for {
-		if _, err := conn.nextEvent(context.Background()); err != nil {
-			return
-		}
-	}
-}
-
 type chromePage struct {
 	manager  *ChromeManager
 	pageID   string
@@ -457,6 +454,9 @@ type chromePage struct {
 	tabs          map[string]*chromeTab
 	activeTabID   string
 	humanRequired map[string]any
+
+	snapshotMu      sync.Mutex
+	currentSnapshot *pageSnapshot
 }
 
 func (p *chromePage) StreamTarget() (string, uint32) {
@@ -552,50 +552,6 @@ func (p *chromePage) evaluate(ctx context.Context, expression string) (map[strin
 		return nil, errors.New(response.ExceptionDetails.Text)
 	}
 	return response.Result.Value, nil
-}
-
-func (p *chromePage) evaluateAny(ctx context.Context, expression string) (any, string, error) {
-	if strings.TrimSpace(expression) == "" {
-		return nil, "", errors.New("expression is required")
-	}
-	raw, err := p.conn.call(ctx, "Runtime.evaluate", map[string]any{
-		"expression": expression, "returnByValue": true, "awaitPromise": true,
-	}, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	var response struct {
-		Result struct {
-			Type  string          `json:"type"`
-			Value json.RawMessage `json:"value"`
-		} `json:"result"`
-		ExceptionDetails *struct {
-			Text      string `json:"text"`
-			Exception struct {
-				Description string `json:"description"`
-			} `json:"exception"`
-		} `json:"exceptionDetails"`
-	}
-	if err := json.Unmarshal(raw, &response); err != nil {
-		return nil, "", err
-	}
-	if response.ExceptionDetails != nil {
-		if description := response.ExceptionDetails.Exception.Description; description != "" {
-			return nil, "", errors.New(description)
-		}
-		return nil, "", errors.New(response.ExceptionDetails.Text)
-	}
-	if len(response.Result.Value) == 0 {
-		if response.Result.Type == "undefined" {
-			return nil, "undefined", nil
-		}
-		return nil, "", errors.New("JavaScript result is not JSON serializable")
-	}
-	var value any
-	if err := json.Unmarshal(response.Result.Value, &value); err != nil {
-		return nil, "", fmt.Errorf("decode JavaScript result: %w", err)
-	}
-	return value, response.Result.Type, nil
 }
 
 func (p *chromePage) screenshot(ctx context.Context, payload map[string]any) (map[string]any, error) {

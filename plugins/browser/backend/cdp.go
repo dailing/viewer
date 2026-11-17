@@ -150,6 +150,10 @@ func (c *cdpConn) nextEvent(ctx context.Context) (cdpEvent, error) {
 }
 
 func (c *cdpConn) call(ctx context.Context, method string, params any, target json.RawMessage) (json.RawMessage, error) {
+	return c.callSession(ctx, "", method, params)
+}
+
+func (c *cdpConn) callSession(ctx context.Context, sessionID, method string, params any) (json.RawMessage, error) {
 	id := c.next.Add(1)
 	result := make(chan cdpOutcome, 1)
 	c.mu.Lock()
@@ -161,6 +165,9 @@ func (c *cdpConn) call(ctx context.Context, method string, params any, target js
 	c.calls[id] = result
 	c.mu.Unlock()
 	message := map[string]any{"id": id, "method": method, "params": params}
+	if sessionID != "" {
+		message["sessionId"] = sessionID
+	}
 	data, err := json.Marshal(message)
 	if err != nil {
 		return nil, err

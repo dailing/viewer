@@ -24,10 +24,10 @@ const (
 )
 
 var Manifest = busclient.Manifest{
-	ID: PluginID, Version: "0.2.0",
+	ID: PluginID, Version: "0.3.0",
 	Slots: map[string]any{
 		PluginID + ":_:start": map[string]any{}, PluginID + ":_:prompt": map[string]any{}, PluginID + ":_:cancel": map[string]any{},
-		PluginID + ":_:catalog-refresh": map[string]any{},
+		PluginID + ":_:catalog-refresh": map[string]any{}, PluginID + ":_:usage": map[string]any{},
 	},
 	Emits: map[string]any{
 		PluginID + ":_:event": map[string]any{}, PluginID + ":_:turn-ended": map[string]any{}, PluginID + ":_:catalog": map[string]any{},
@@ -50,6 +50,7 @@ type Plugin struct {
 	wg           sync.WaitGroup
 	closed       bool
 	catalogCache *agentdriver.CatalogCache
+	usageCache   codexUsageCache
 }
 
 func New() *Plugin {
@@ -63,7 +64,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	p.client = busclient.New(kernelWS, Manifest, busclient.WithManaged(managed), busclient.WithInstanceID("_"))
 	for channel, handler := range map[string]func(busclient.Frame){
 		PluginID + ":_:start": p.handleStart, PluginID + ":_:prompt": p.handlePrompt, PluginID + ":_:cancel": p.handleCancel,
-		PluginID + ":_:catalog-refresh": p.handleCatalogRefresh,
+		PluginID + ":_:catalog-refresh": p.handleCatalogRefresh, PluginID + ":_:usage": p.handleUsage,
 	} {
 		if _, err := p.client.Subscribe(channel, func(frame busclient.Frame) { go handler(frame) }); err != nil {
 			return err

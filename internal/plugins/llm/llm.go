@@ -22,10 +22,11 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "llm", Version: "0.6.0",
+	ID: "llm", Version: "0.7.0",
 	Slots: map[string]any{
 		"llm:_:complete":       map[string]any{"summary": "OpenAI-compatible chat completion; RPC {messages, model?, json_mode?, timeout_seconds?, extra_body?} -> {content, model}; extra_body is merged verbatim into the request body over the active config's default extra_body (callers win per key; endpoint-specific). Fallback chain: a requested model's configs first (several configs may share one model name = its providers, list order decides priority), then active, then the remaining profiles top-down; an endpoint that fails with a retryable error (transport, 404/408/429/5xx, malformed reply) cools down for 60s and is skipped meanwhile"},
 		"llm:_:test":           map[string]any{"summary": "Probe one endpoint config {endpoint, key?, model, timeout_seconds?, extra_body?} with a minimal completion -> {ok, latency_ms, model?, error?}; isolated from the fallback chain and the breaker"},
+		"llm:_:usage":          map[string]any{"summary": "Read Kimi Coding Plan 5-hour and 7-day quota for each configured Kimi profile without exposing credentials"},
 		"llm:_:http:configure": map[string]any{"summary": "Configure the OpenAI-compatible HTTP facade {enabled, port, expose}"},
 		"llm:_:http:status":    map[string]any{"summary": "Report the loopback HTTP facade state"},
 	},
@@ -77,6 +78,7 @@ type Plugin struct {
 	server     *http.Server
 	httpConfig HTTPConfig
 	httpError  string
+	usageCache kimiUsageCache
 }
 
 func New() *Plugin {
@@ -92,6 +94,9 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	}
 	if _, err := p.client.Subscribe("llm:_:test", p.handleTest); err != nil {
 		return fmt.Errorf("subscribe llm:_:test: %w", err)
+	}
+	if _, err := p.client.Subscribe("llm:_:usage", p.handleUsage); err != nil {
+		return fmt.Errorf("subscribe llm:_:usage: %w", err)
 	}
 	if _, err := p.client.Subscribe("llm:_:http:configure", p.handleHTTPConfigure); err != nil {
 		return fmt.Errorf("subscribe llm:_:http:configure: %w", err)
@@ -211,6 +216,7 @@ func normalizeEndpoint(value string) string {
 // storedProfile mirrors one entry of the frontend-managed profiles library
 // (`plugins.llm.profiles`).
 type storedProfile struct {
+	ID             string         `json:"id"`
 	Name           string         `json:"name"`
 	Endpoint       string         `json:"endpoint"`
 	APIKey         string         `json:"key"`

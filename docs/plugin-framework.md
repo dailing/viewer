@@ -1,6 +1,7 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v1.37**（2026-11-15）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`。**
+> 状态：**草案 v1.38**（2026-11-16）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`。**
+> v1.38 变更：**Dock 额度节奏与供应商配额 RPC**——`llm:_:usage` 按 Kimi profile 读取 Coding Plan 5 小时/7 天窗口，`viewer.agent-codex:_:usage` 经 App Server `account/rateLimits/read` 返回同一配额结构，浏览器不接触凭据。Dock 展开时在底部操作区上方显示周余量、已用额度条与时间进度刻度，5 小时用尽优先提示；详情提供短窗口、准确重置时间、手动刷新和 Kimi active/固定账号选择，无可靠周期边界时不绘制时间进度。
 > v1.37 变更：**计划重启改为空闲后构建**——`POST /api/admin/schedule-restart` 只武装等待，不再立即构建；watchdog 检测到无 running Chat Turn、无活动 voice relay 后才运行 release build，成功直接优雅重启。这样构建包含等待期间 Agent 对 Viewer 自身完成的修改；构建失败仍落 `failed`，等待及构建中均可取消。
 > v1.36 变更：**Decision Center 来源与摘要阅读顺序**——待处理条目按 Chat/Task 来源行 → 普通字重摘要 → 可折叠来源消息 → 回复选项排列；摘要不再作为加粗标题，来源消息与回复控件纳入同一左侧竖线，历史摘要同步取消加粗。
 > v1.35 变更：**每轮 Decision 兜底与任务化标题**——非取消 Turn 未输出 marker 时，Chat 自动持久化以 Task 精炼标题为摘要、仅含内置结束动作的 pending Decision；没有 assistant 消息时以来源 dispatch 的用户消息定位。post-prompt 将 `question` 定义为任务特定的本轮内容摘要，禁止通用问句，空标题在前端回退为 Task 标题。非法 marker 仍保留 invalid 诊断，取消 Turn 不生成 Decision。
@@ -643,6 +644,8 @@ my-plugin/
 - **仓库结构定稿（v0.33）**：Python 参考实现（`next/`）与 `next-go/` 目录已删除；Go 主线（`cmd/`、`internal/`、`web/`、`scripts/`）上移至仓库根，单一 Go module（`viewer`）自根构建；SDK 按语言归入 `sdk/{go,python,ts}`；前端在 `frontend/`。测试即规格：`scripts/smoke_*.py`（Python SDK 黑盒）+ `sdk/ts` vitest 直接验证 Go 内核（`VIEWER_KERNEL_BIN` 可覆盖）。
 
 ## 18. 修订记录
+
+- **v1.38**（2026-11-16）：**Dock 额度节奏与供应商配额 RPC**——新增 `llm:_:usage` 和 `viewer.agent-codex:_:usage`，分别归一化 Kimi Coding Plan `/usages` 与 Codex App Server `account/rateLimits/read` 的 5 小时/周窗口，凭据留在各后端插件。`UsageDock.vue` 只在 Dock 展开时显示底部额度区，以同一轨道对照已用额度和周期时间，优先提示短窗口用尽；详情支持刷新、准确重置时间及 Kimi 跟随 active/固定 profile，无法确认固定周期时只显示余量。
 
 - **v1.37**（2026-11-15）：**计划重启改为空闲后构建**——`POST /api/admin/schedule-restart` 只武装等待；watchdog 检测系统空闲后运行 release build，成功直接优雅重启，确保二进制包含等待期间 Agent 对 Viewer 自身完成的修改。共享构建守卫被占用时保持 `armed` 稍后重试；构建失败落 `failed`，等待及构建中均可取消。
 

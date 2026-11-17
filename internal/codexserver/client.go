@@ -249,6 +249,13 @@ func (c *Client) ThreadStart(ctx context.Context, cwd, model string) (string, er
 func (c *Client) ModelList(ctx context.Context) (map[string]any, error) {
 	return c.request(ctx, "model/list", map[string]any{})
 }
+
+// AccountRateLimits reads the signed-in ChatGPT account's subscription quota.
+// Codex owns token refresh and never exposes its OAuth credential to Viewer.
+func (c *Client) AccountRateLimits(ctx context.Context) (map[string]any, error) {
+	return c.request(ctx, "account/rateLimits/read", map[string]any{})
+}
+
 func (c *Client) ThreadResume(ctx context.Context, threadID, cwd string) error {
 	c.mu.Lock()
 	bound := c.bound[threadID]

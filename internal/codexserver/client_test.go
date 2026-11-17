@@ -19,6 +19,10 @@ func TestProtocolSubset(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	limits, err := client.AccountRateLimits(ctx)
+	if err != nil || limits["rateLimits"] == nil {
+		t.Fatalf("rate limits: %#v %v", limits, err)
+	}
 	updates := make(chan Update, 10)
 	client.OnUpdate(func(update Update) { updates <- update })
 	thread, err := client.ThreadStart(ctx, "/tmp", "gpt-test")

@@ -12,16 +12,18 @@ import type { DockItemAction, DockProvider } from "./definePlugin";
 import { collectDockSections, openDockEntry, openProvider, type DockEntry, type DockSection } from "./dockModel";
 import { openShellInstance } from "./instances";
 import { dockActions, dockProviders } from "./registries";
+import UsageDock from "./UsageDock.vue";
 
 const layout = useLayoutStore();
 const dockSettings = useDockSettingsStore();
 const menuOpen = ref(false);
 const expanded = ref(false);
+const usageDetailsOpen = ref(false);
 const navEl = ref<HTMLElement | null>(null);
 // Pinned: the Dock stays expanded and its width takes real layout space
 // (compressing the panes), instead of overlaying them on hover.
 const pinned = computed(() => dockSettings.pinned);
-const isExpanded = computed(() => pinned.value || expanded.value);
+const isExpanded = computed(() => pinned.value || expanded.value || usageDetailsOpen.value);
 const hoverExpandMs = computed(() => dockSettings.hoverExpandMs);
 // Width: drag override while resizing, otherwise the persisted setting.
 const dragWidth = ref<number | null>(null);
@@ -305,6 +307,8 @@ const buildTime = (() => {
         </template>
         <div v-if="sections.length === 0" class="dock-empty" title="没有正在运行的 instance"><i class="bi bi-dash-lg"></i></div>
       </div>
+
+      <UsageDock :expanded="isExpanded" @details-change="usageDetailsOpen = $event" />
 
       <div class="dock-foot">
         <button

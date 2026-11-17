@@ -13,6 +13,7 @@ import (
 	"viewer/internal/kernel"
 	"viewer/internal/plugins/agentcodex"
 	"viewer/internal/plugins/pluginrpc"
+	"viewer/internal/usage"
 	"viewer/sdk/go/busclient"
 )
 
@@ -88,6 +89,15 @@ func TestCodexBusContractWithMockServer(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
+	}
+
+	usageValue, err := caller.Request(ctx, agentcodex.PluginID+":_:usage", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var quota usage.Account
+	if err := decode(usageValue, &quota); err != nil || quota.Plan != "plus" || len(quota.Windows) != 2 || quota.Windows[1].ID != "7d" || quota.Windows[1].UsedPercent != 25 {
+		t.Fatalf("usage=%#v err=%v", quota, err)
 	}
 
 	startedValue, err := caller.Request(ctx, agentcodex.PluginID+":_:start", map[string]any{"cwd": t.TempDir(), "target": agentdriver.Target{Agent: "codex-app-server", Provider: "openai-subscription", Model: "gpt-test", Parameters: map[string]any{}}})

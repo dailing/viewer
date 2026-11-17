@@ -25,6 +25,14 @@ for line in sys.stdin:
     elif method == "model/list":
         # codex ≥0.151 wire shape: models under "data".
         send({"id": request_id, "result": {"data": [{"id": "gpt-test"}, {"id": "fail-start"}]}})
+    elif method == "account/rateLimits/read":
+        snapshot = {
+            "limitId": "codex",
+            "planType": "plus",
+            "primary": {"usedPercent": 5, "windowDurationMins": 300, "resetsAt": 1794854971},
+            "secondary": {"usedPercent": 25, "windowDurationMins": 10080, "resetsAt": 1795173670},
+        }
+        send({"id": request_id, "result": {"rateLimits": snapshot, "rateLimitsByLimitId": {"codex": snapshot}}})
     elif method == "thread/start":
         if params.get("model") == "fail-start":
             send({"id": request_id, "error": {"code": -32000, "message": "mock start failure"}})

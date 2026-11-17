@@ -809,6 +809,11 @@ func pageState(page *Page) map[string]any {
 		"viewport": page.Viewport, "video": page.Video, "watchers": len(page.Watchers),
 		"busy": page.Lease != nil, "viewport_owner": page.ViewportOwner,
 	}
+	if provider, ok := page.driver.(interface{ HumanRequired() map[string]any }); ok {
+		if required := provider.HumanRequired(); required != nil {
+			state["human_required"] = required
+		}
+	}
 	if page.LastError != "" {
 		state["last_error"] = page.LastError
 	}

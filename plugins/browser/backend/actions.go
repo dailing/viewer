@@ -200,7 +200,18 @@ func strconvQuote(value string) string {
 	return string(encoded)
 }
 
-func (p *chromePage) Execute(ctx context.Context, action string, payload map[string]any) (any, error) {
+func (p *chromePage) Execute(ctx context.Context, action string, payload map[string]any) (result any, err error) {
+	if err := p.humanRequiredError(); err != nil {
+		return nil, err
+	}
+	actionCtx, cancel := p.humanActionContext(ctx)
+	defer cancel()
+	ctx = actionCtx
+	defer func() {
+		if p.HumanRequired() != nil {
+			result, err = nil, p.humanRequiredError()
+		}
+	}()
 	if action != "list_tabs" && action != "switch_tab" {
 		if err := p.ensureVisible(ctx); err != nil {
 			return nil, err

@@ -434,6 +434,15 @@ func (m *ChromeManager) Close() {
 	}
 	if m.chrome != nil {
 		_ = m.chrome.Process.Kill()
+		if m.chromeDone != nil {
+			done := m.chromeDone
+			m.mu.Unlock()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+			}
+			m.mu.Lock()
+		}
 	}
 	if m.xvfb != nil {
 		_ = m.xvfb.Process.Kill()
@@ -454,6 +463,7 @@ type chromePage struct {
 	tabs          map[string]*chromeTab
 	activeTabID   string
 	humanRequired map[string]any
+	humanSignal   chan struct{}
 
 	snapshotMu      sync.Mutex
 	currentSnapshot *pageSnapshot

@@ -21,12 +21,16 @@ type fakeDriver struct {
 	inputs   []map[string]any
 	actions  []string
 	closed   bool
+	human    map[string]any
 }
 
 func (d *fakeDriver) Execute(_ context.Context, action string, payload map[string]any) (any, error) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.human != nil {
+		return nil, errorf("human_required", "%s", stringField(d.human, "detail"))
+	}
 	d.actions = append(d.actions, action)
-	d.mu.Unlock()
 	if action == "navigate" {
 		d.url = stringField(payload, "url")
 		return map[string]any{"navigated": true, "url": d.url, "title": d.title}, nil
@@ -35,6 +39,11 @@ func (d *fakeDriver) Execute(_ context.Context, action string, payload map[strin
 		return map[string]any{"data": "aGVsbG8=", "mime_type": "image/png", "path": "/tmp/screenshot.png", "width": 1, "height": 1}, nil
 	}
 	return map[string]any{"snapshot_id": "snap_test", "url": d.url, "title": d.title, "elements": []any{}}, nil
+}
+func (d *fakeDriver) HumanRequired() map[string]any {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.human
 }
 func (d *fakeDriver) Input(_ context.Context, event map[string]any) error {
 	d.mu.Lock()
@@ -125,6 +134,45 @@ func watchTestPage(t *testing.T, service *Service, pageID, viewerID string, valu
 		t.Fatal(err)
 	}
 	return result
+}
+
+func TestHumanRequiredStatusAndPromptFailure(t *testing.T) {
+	service, backend, _, pageID := newTestService(t)
+	lease, err := service.Require(pageID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := backend.drivers[pageID]
+	driver.mu.Lock()
+	driver.human = map[string]any{"kind": "dialog", "detail": "Fixture prompt"}
+	driver.mu.Unlock()
+	status, err := service.Status(pageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, _ := status["human_required"].(map[string]any)
+	if stringField(required, "kind") != "dialog" || stringField(required, "detail") != "Fixture prompt" {
+		t.Fatalf("human-required status = %#v", status)
+	}
+	started := time.Now()
+	if _, err := service.Execute(context.Background(), pageID, lease["lease_id"].(string), "snapshot", nil, 35*time.Second); err == nil {
+		t.Fatal("dialog did not block browser action")
+	} else {
+		requireErrorCode(t, err, "human_required")
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("human-required action waited for the action timeout")
+	}
+	driver.mu.Lock()
+	driver.human = nil
+	driver.mu.Unlock()
+	status, err = service.Status(pageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := status["human_required"]; exists {
+		t.Fatalf("cleared dialog remained in status: %#v", status)
+	}
 }
 
 func TestPageIsolationAndExclusiveLease(t *testing.T) {

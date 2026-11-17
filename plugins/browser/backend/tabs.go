@@ -358,9 +358,56 @@ func (m *ChromeManager) removeTarget(targetID string) {
 	tab.conn.close()
 }
 
+func (p *chromePage) HumanRequired() map[string]any {
+	p.tabMu.Lock()
+	defer p.tabMu.Unlock()
+	if p.humanRequired == nil {
+		return nil
+	}
+	return map[string]any{"kind": stringField(p.humanRequired, "kind"), "detail": stringField(p.humanRequired, "detail")}
+}
+
+func (p *chromePage) humanRequiredError() error {
+	state := p.HumanRequired()
+	if state == nil {
+		return nil
+	}
+	detail := stringField(state, "detail")
+	if detail == "" {
+		detail = "Browser requires user handling before automation can continue"
+	}
+	return errorf("human_required", "%s", detail)
+}
+
+func (p *chromePage) humanActionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	p.tabMu.Lock()
+	if p.humanSignal == nil {
+		p.humanSignal = make(chan struct{})
+	}
+	signal := p.humanSignal
+	p.tabMu.Unlock()
+	actionCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-signal:
+			cancel()
+		case <-actionCtx.Done():
+		}
+	}()
+	return actionCtx, cancel
+}
+
 func (p *chromePage) setHumanRequired(kind, detail string) {
 	p.tabMu.Lock()
 	p.humanRequired = map[string]any{"kind": kind, "detail": detail}
+	if p.humanSignal == nil {
+		p.humanSignal = make(chan struct{})
+	}
+	select {
+	case <-p.humanSignal:
+	default:
+		close(p.humanSignal)
+	}
 	p.tabMu.Unlock()
 }
 
@@ -368,6 +415,7 @@ func (p *chromePage) clearHumanRequired(kind string) {
 	p.tabMu.Lock()
 	if stringField(p.humanRequired, "kind") == kind {
 		p.humanRequired = nil
+		p.humanSignal = make(chan struct{})
 	}
 	p.tabMu.Unlock()
 }

@@ -168,6 +168,60 @@ func TestChromeAdvancedActions(t *testing.T) {
 	}
 }
 
+func TestChromeDialogsRequireHuman(t *testing.T) {
+	manager := newIntegrationChrome(t)
+	server := browserFixtureServer(t)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	page, err := manager.OpenPage(ctx, "pg_dialogs", server.URL, defaultViewport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close(context.Background())
+	chrome := page.(*chromePage)
+	for _, test := range []struct {
+		button string
+		detail string
+	}{{"Open alert", "Fixture alert"}, {"Open confirm", "Fixture confirm"}, {"Open prompt", "Fixture prompt"}} {
+		t.Run(test.button, func(t *testing.T) {
+			snapshot := integrationSnapshot(t, page)
+			if _, clickErr := page.Execute(ctx, "click", integrationElementPayload(snapshot, integrationElement(t, snapshot, test.button))); clickErr != nil {
+				requireErrorCode(t, clickErr, "human_required")
+			}
+			started := time.Now()
+			var actionErr error
+			for time.Since(started) < 2*time.Second {
+				_, actionErr = page.Execute(ctx, "snapshot", map[string]any{})
+				if actionErr != nil {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if actionErr == nil {
+				t.Fatal("dialog did not block the next browser action")
+			}
+			requireErrorCode(t, actionErr, "human_required")
+			if time.Since(started) > 2*time.Second {
+				t.Fatal("dialog action approached the CDP timeout")
+			}
+			if required := chrome.HumanRequired(); stringField(required, "kind") != "dialog" || !strings.Contains(stringField(required, "detail"), test.detail) {
+				t.Fatalf("dialog state = %#v", required)
+			}
+			if _, err := chrome.conn.call(ctx, "Page.handleJavaScriptDialog", map[string]any{"accept": true, "promptText": "human test response"}, nil); err != nil {
+				t.Fatalf("test harness could not simulate human dialog handling: %v", err)
+			}
+			for deadline := time.Now().Add(2 * time.Second); chrome.HumanRequired() != nil && time.Now().Before(deadline); {
+				time.Sleep(25 * time.Millisecond)
+			}
+			if required := chrome.HumanRequired(); required != nil {
+				t.Fatalf("dialog state did not clear: %#v", required)
+			}
+			integrationSnapshot(t, page)
+		})
+	}
+}
+
 func TestChromeShadowDOMAndFrames(t *testing.T) {
 	manager := newIntegrationChrome(t)
 	server := browserFixtureServer(t)

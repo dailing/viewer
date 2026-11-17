@@ -117,6 +117,37 @@ func (p *chromePage) activateTab(ctx context.Context, tab *chromeTab) error {
 	return p.ensureVisible(ctx)
 }
 
+func (p *chromePage) AcquireControl(ctx context.Context) error {
+	p.tabMu.Lock()
+	tabs := make([]*chromeTab, 0, len(p.tabs))
+	for _, tab := range p.tabs {
+		tabs = append(tabs, tab)
+	}
+	currentID := p.activeTabID
+	p.tabMu.Unlock()
+	var visible *chromeTab
+	for _, tab := range tabs {
+		value, err := evaluateOnConn(ctx, tab.conn, "({visible:document.visibilityState===\"visible\"})")
+		if err != nil {
+			continue
+		}
+		if visibleState, _ := value["visible"].(bool); visibleState {
+			visible = tab
+			break
+		}
+	}
+	if visible == nil {
+		return errorf("active_tab_changed", "No visible tab is available; ask the user to select a tab in this Page")
+	}
+	p.tabMu.Lock()
+	p.activeTabID, p.targetID, p.conn = visible.id, visible.targetID, visible.conn
+	p.tabMu.Unlock()
+	if visible.id != currentID {
+		p.invalidateSnapshot()
+	}
+	return nil
+}
+
 func (p *chromePage) newTab(ctx context.Context, rawURL string) (map[string]any, error) {
 	if rawURL == "" {
 		rawURL = "about:blank"

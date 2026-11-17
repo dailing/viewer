@@ -413,12 +413,25 @@ func (s *Service) Require(pageID, leaseID string) (map[string]any, error) {
 	if page.Lease != nil && (page.Lease.Owner != "agent" || leaseID != page.Lease.ID) {
 		return nil, errorf("page_busy", "page is controlled by another owner")
 	}
+	newLease := false
 	if page.Lease == nil {
 		id, err := randomToken("ls_", 16)
 		if err != nil {
 			return nil, err
 		}
 		page.Lease = &Lease{ID: id, Owner: "agent"}
+		newLease = true
+	}
+	if newLease {
+		if driver, ok := page.driver.(interface{ AcquireControl(context.Context) error }); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := driver.AcquireControl(ctx)
+			cancel()
+			if err != nil {
+				page.Lease = nil
+				return nil, err
+			}
+		}
 	}
 	page.Lease.ExpiresAt = s.now().Add(s.leaseTTL)
 	result := map[string]any{"page_id": pageID, "lease_id": page.Lease.ID, "expires_at": page.Lease.ExpiresAt}

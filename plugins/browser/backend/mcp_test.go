@@ -46,7 +46,8 @@ func TestMCPInitializeAndToolSurface(t *testing.T) {
 	handler := &MCPHandler{service: service}
 	initialized := mcpCall(t, handler, "initialize", map[string]any{"protocolVersion": "2025-03-26"})
 	result := initialized["result"].(map[string]any)
-	if result["protocolVersion"] != "2025-03-26" || !strings.Contains(result["instructions"].(string), "page_id") {
+	serverInfo := result["serverInfo"].(map[string]any)
+	if result["protocolVersion"] != "2025-03-26" || serverInfo["version"] != "0.3.0" || !strings.Contains(result["instructions"].(string), "page_id") {
 		t.Fatalf("unexpected initialize result: %v", result)
 	}
 	listed := mcpCall(t, handler, "tools/list", map[string]any{})

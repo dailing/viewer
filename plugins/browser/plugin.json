@@ -1,6 +1,6 @@
 {
   "id": "viewer.browser",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "name": "Browser",
   "icon": "bi-window-desktop",
   "description": "Persistent managed Chrome pages with isolated page ids, live H.264 video and exclusive control leases.",

@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if ! command -v go >/dev/null 2>&1 && [ -x /home/linuxbrew/.linuxbrew/bin/go ]; then
+    PATH=/home/linuxbrew/.linuxbrew/bin:$PATH
+    export PATH
+fi
 (cd "$DIR" && go build -o "$DIR/viewer-browser" .)
 cd "$DIR/.."
 exec "$DIR/viewer-browser" "$@"

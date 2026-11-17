@@ -17,7 +17,7 @@ import (
 )
 
 var manifest = busclient.Manifest{
-	ID: "viewer.browser", Version: "0.2.0", Name: "Browser", Icon: "bi-window-desktop",
+	ID: "viewer.browser", Version: "0.3.0", Name: "Browser", Icon: "bi-window-desktop",
 	Description: "Persistent managed Chrome pages with isolated page ids, live H.264 video and exclusive control leases.",
 	Slots: map[string]any{
 		"state": map[string]any{}, "create": map[string]any{}, "close": map[string]any{},

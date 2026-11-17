@@ -370,7 +370,13 @@ func TestChromePageScopedTabs(t *testing.T) {
 	} else {
 		requireErrorCode(t, visibilityErr, "active_tab_changed")
 	}
-	integrationAction(t, page, "switch_tab", map[string]any{"tab_id": secondID})
+	if err := chrome.AcquireControl(ctx); err != nil {
+		t.Fatalf("new lease did not adopt the human-visible tab: %v", err)
+	}
+	if chrome.activeTabID != secondID {
+		t.Fatalf("new lease active tab = %s, want %s", chrome.activeTabID, secondID)
+	}
+	integrationAction(t, page, "wait", map[string]any{"text": "Two"})
 	integrationAction(t, page, "close_tab", map[string]any{"tab_id": secondID})
 	remaining := integrationAction(t, page, "list_tabs", map[string]any{})
 	if len(remaining["tabs"].([]map[string]any)) != 1 {

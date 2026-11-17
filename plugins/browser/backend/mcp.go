@@ -132,8 +132,8 @@ func (h *MCPHandler) dispatch(ctx context.Context, method string, raw json.RawMe
 		return map[string]any{
 			"protocolVersion": version,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": "viewer-browser", "version": "0.2.0"},
-			"instructions":    "Use only the random page_id explicitly supplied by the user. There is intentionally no page-list or current-page tool. Call browser_require first and pass its lease_id to every read/action tool. Never substitute another page on any error. Call browser_release when finished.",
+			"serverInfo":      map[string]any{"name": "viewer-browser", "version": "0.3.0"},
+			"instructions":    "Use only the random page_id explicitly supplied by the user; there is no page-list or current-page tool. Call browser_require first and pass its lease_id to every read/action tool. Never substitute another page on any error. Take a fresh snapshot after navigation or tab operations. For login, credentials, authorization, payment, dialogs, invalid_lease, page_busy, active_tab_changed, or human_required, stop and ask the user instead of bypassing or retrying. Release when finished; after human resume, require and snapshot again. Call browser_release in cleanup.",
 		}, nil
 	case "ping":
 		return map[string]any{}, nil

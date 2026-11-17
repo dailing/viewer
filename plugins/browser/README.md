@@ -62,6 +62,28 @@ mcp_servers:
 
 工具注册为 `mcp_viewer_browser_browser_*`。已有 Agent 进程不会热加载新增 MCP 配置，需重读配置后使用。
 
+## 人工接管与恢复
+
+登录、密码、2FA、CAPTCHA、OAuth/授权、支付确认和不明确的权限/dialog 由用户在真实 Page 中完成。Agent 不使用 JS、截图、键鼠、Cookie/storage 或原始 CDP 绕过这一边界，也不在聊天或 Decision 中索取凭据。
+
+需要人工时，Agent 停止操作并释放 lease，结束当前 Turn 但保持 Task 和 Page 打开；回复中给出 `page_id`、当前进度和具体步骤，然后使用普通 Decision。例如：
+
+```text
+Page pg_... 已打开登录页，请你在该 Page 完成登录；我不会读取或填写密码。
+<viewer-decision>
+version: 1
+kind: choice
+question: 登录需要人工完成，之后继续原 Page
+option: 我已完成登录，重新接管并继续
+option: 无法登录，换其他方案
+option: 停止浏览器任务
+display: buttons
+tone: neutral
+</viewer-decision>
+```
+
+普通 Decision 回复启动新 Turn。Agent 必须重新 `browser_require` 并取得新 snapshot；旧 lease、snapshot、元素、frame 和 tab 引用都不能复用。`invalid_lease`、`page_busy`、`active_tab_changed`、`human_required` 都表示停止并询问，不能盲目重试、抢占或自动切回用户刚切走的 tab。Chat/Decision 不需要 Browser 专用字段或 action。
+
 ## 运行依赖与构建
 
 需要完整 Chrome/Chromium、Xvfb、X11 工具，以及带 `x11grab` 和 `libx264` 的 FFmpeg。Chrome 路径可由 `--chrome-path` 指定；未指定时自动探测。

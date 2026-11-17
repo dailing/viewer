@@ -163,6 +163,62 @@ func TestChromeAdvancedActions(t *testing.T) {
 	}
 }
 
+func TestChromeFileUploadAndDownload(t *testing.T) {
+	manager := newIntegrationChrome(t)
+	server := browserFixtureServer(t)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	page, err := manager.OpenPage(ctx, "pg_files", server.URL, defaultViewport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close(context.Background())
+	uploadPath := filepath.Join(t.TempDir(), "upload.txt")
+	if err := os.WriteFile(uploadPath, []byte("upload fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := integrationSnapshot(t, page)
+	fileInput := ""
+	for _, raw := range snapshot["elements"].([]any) {
+		element := raw.(map[string]any)
+		if stringField(element, "input_type") == "file" {
+			fileInput = stringField(element, "id")
+		}
+	}
+	payload := integrationElementPayload(snapshot, fileInput)
+	payload["paths"] = []string{uploadPath}
+	integrationAction(t, page, "upload", payload)
+	result := integrationAction(t, page, "evaluate", map[string]any{"expression": `document.querySelector('input[type=file]').files[0]?.name`})
+	if result["value"] != "upload.txt" {
+		t.Fatalf("uploaded file = %#v", result)
+	}
+
+	integrationAction(t, page, "click", integrationElementPayload(snapshot, integrationElement(t, snapshot, "Download fixture")))
+	var downloadID string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		result = integrationAction(t, page, "downloads", map[string]any{})
+		for _, download := range result["downloads"].([]map[string]any) {
+			if stringField(download, "state") == "completed" {
+				downloadID = stringField(download, "id")
+			}
+		}
+		if downloadID != "" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if downloadID == "" {
+		t.Fatalf("download records = %#v", result)
+	}
+	result = integrationAction(t, page, "wait", map[string]any{"download_id": downloadID})
+	data, err := os.ReadFile(stringField(result, "path"))
+	if err != nil || string(data) != "downloaded fixture content\n" {
+		t.Fatalf("downloaded content = %q, %v", data, err)
+	}
+}
+
 func TestChromeEvaluationAndScreenshot(t *testing.T) {
 	manager := newIntegrationChrome(t)
 	server := browserFixtureServer(t)

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,15 +15,15 @@ import (
 const maxDownloadsPerPage = 50
 
 type downloadRecord struct {
-	ID               string `json:"id"`
-	PageID           string `json:"page_id"`
-	URL              string `json:"url"`
-	SuggestedName    string `json:"suggested_filename"`
-	Path             string `json:"path,omitempty"`
-	State            string `json:"state"`
-	ReceivedBytes    int64  `json:"received_bytes"`
-	TotalBytes       int64  `json:"total_bytes"`
-	CreatedAt        string `json:"created_at"`
+	ID            string `json:"id"`
+	PageID        string `json:"page_id"`
+	URL           string `json:"url"`
+	SuggestedName string `json:"suggested_filename"`
+	Path          string `json:"path,omitempty"`
+	State         string `json:"state"`
+	ReceivedBytes int64  `json:"received_bytes"`
+	TotalBytes    int64  `json:"total_bytes"`
+	CreatedAt     string `json:"created_at"`
 }
 
 type downloadTracker struct {
@@ -63,7 +65,17 @@ func (t *downloadTracker) progress(params map[string]any) {
 	switch stringField(params, "state") {
 	case "completed":
 		record.State = "completed"
-		record.Path = filepath.Join(t.root, record.PageID, id)
+		directory := filepath.Join(t.root, record.PageID)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			record.State = "failed"
+			break
+		}
+		destination := filepath.Join(directory, id)
+		if err := os.Rename(filepath.Join(t.root, id), destination); err != nil {
+			record.State = "failed"
+			break
+		}
+		record.Path = destination
 	case "canceled":
 		record.State = "canceled"
 	default:
@@ -131,8 +143,8 @@ func (t *downloadTracker) wait(ctx context.Context, pageID, downloadID string) (
 			result := downloadMap(copyRecord)
 			result["found"] = true
 			return result, nil
-		case "canceled":
-			return nil, errorf("download_failed", "Download was canceled")
+		case "canceled", "failed":
+			return nil, errorf("download_failed", "Download did not complete: %s", copyRecord.State)
 		}
 		select {
 		case <-ctx.Done():
@@ -158,10 +170,16 @@ func (m *ChromeManager) browserEventLoop(conn *cdpConn) {
 			return
 		}
 		switch event.Method {
-		case "Browser.downloadWillBegin":
-			m.downloads.begin(m.pageIDForFrame(stringField(event.Params, "frameId")), event.Params)
-		case "Browser.downloadProgress":
-			m.downloads.progress(event.Params)
+		case "Browser.downloadWillBegin", "Browser.downloadProgress":
+			var params map[string]any
+			if json.Unmarshal(event.Params, &params) != nil {
+				continue
+			}
+			if event.Method == "Browser.downloadWillBegin" {
+				m.downloads.begin(m.pageIDForFrame(stringField(params, "frameId")), params)
+			} else {
+				m.downloads.progress(params)
+			}
 		}
 	}
 }

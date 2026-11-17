@@ -111,6 +111,13 @@ const browserRuntimeSource = `(() => {
     }
     return { found: false, text: needle };
   }
+  function validateUpload(payload) {
+    const element = elementFrom(payload.snapshot_id, payload.element_id);
+    if (!(element instanceof HTMLInputElement) || element.type !== "file") fail("unsupported_field", "Element is not a file input");
+    if (element.disabled) fail("stale_element", "File input is disabled");
+    if (!element.multiple && Array.isArray(payload.paths) && payload.paths.length !== 1) fail("invalid_request", "File input accepts exactly one file");
+    return { valid: true };
+  }
   function setNativeValue(element, value) {
     const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
@@ -157,13 +164,14 @@ const browserRuntimeSource = `(() => {
       case "dropdown_options": return dropdownOptions(payload);
       case "select": return selectOptions(payload);
       case "find_text": return findText(payload);
+      case "validate_upload": return validateUpload(payload);
       case "fill": return fill(payload);
       case "scroll": return scroll(payload);
       case "wait": return wait(payload);
       default: fail("unknown_action", "Unsupported browser action " + action);
     }
   }
-  globalThis.__viewerManagedBrowser = { execute };
+  globalThis.__viewerManagedBrowser = { execute, resolveElement: elementFrom };
   return globalThis.__viewerManagedBrowser;
 })()`
 
@@ -252,6 +260,10 @@ func (p *chromePage) Execute(ctx context.Context, action string, payload map[str
 		return map[string]any{"value": value, "value_type": valueType}, nil
 	case "screenshot":
 		return p.screenshot(ctx, payload)
+	case "upload":
+		return p.upload(ctx, payload)
+	case "downloads":
+		return map[string]any{"downloads": p.manager.downloadsForPage(p.pageID)}, nil
 	case "snapshot", "fill", "scroll", "dropdown_options", "select", "find_text":
 		return p.executeRuntime(ctx, action, payload)
 	case "wait":
@@ -433,7 +445,7 @@ type waitOptions struct {
 
 func parseWaitPayload(payload map[string]any) (waitOptions, error) {
 	options := waitOptions{timeout: time.Second}
-	for _, predicate := range []string{"text", "url_contains", "ready_state"} {
+	for _, predicate := range []string{"text", "url_contains", "ready_state", "download_id"} {
 		value := strings.TrimSpace(stringField(payload, predicate))
 		if value == "" {
 			continue
@@ -449,6 +461,9 @@ func parseWaitPayload(payload map[string]any) (waitOptions, error) {
 		default:
 			return options, errorf("invalid_request", "ready_state must be loading, interactive, or complete")
 		}
+	}
+	if options.predicate == "download_id" && !validateDownloadID(options.value) {
+		return options, errorf("invalid_request", "download_id is invalid")
 	}
 	if raw, exists := payload["text"]; exists && options.predicate == "" && strings.TrimSpace(stringField(payload, "text")) == "" && raw != nil && raw != "" {
 		return options, errorf("invalid_request", "text must not be empty")
@@ -475,6 +490,17 @@ func (p *chromePage) wait(ctx context.Context, payload map[string]any) (map[stri
 	started := time.Now()
 	waitCtx, cancel := context.WithTimeout(ctx, options.timeout)
 	defer cancel()
+	if options.predicate == "download_id" {
+		result, err := p.manager.waitDownload(waitCtx, p.pageID, options.value)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, errorf("wait_timeout", "download wait timed out; call browser_downloads before retrying")
+		}
+		if err != nil {
+			return nil, err
+		}
+		result["waited_ms"] = time.Since(started).Milliseconds()
+		return result, nil
+	}
 	predicate := "true"
 	switch options.predicate {
 	case "text":

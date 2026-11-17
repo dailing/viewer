@@ -50,6 +50,7 @@ type ChromeManager struct {
 	browser       *cdpConn
 	debugURL      string
 	nextSlot      int
+	downloads     *downloadTracker
 	pages         map[string]*chromePage
 	bootstrapBase string
 	bootstrapHTTP *http.Server
@@ -82,6 +83,7 @@ func NewChromeManager(config ChromeConfig) (*ChromeManager, error) {
 		return nil, fmt.Errorf("listen for Chrome bootstrap pages: %w", err)
 	}
 	manager := &ChromeManager{config: config, pages: make(map[string]*chromePage), bootstrapBase: "http://" + listener.Addr().String()}
+	manager.downloads = newDownloadTracker(filepath.Join(config.ProfileDir, "downloads"))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/new/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -259,7 +261,7 @@ func (m *ChromeManager) ensureBrowserLocked(ctx context.Context, pageID string) 
 		_ = command.Process.Kill()
 		return false, err
 	}
-	_, _ = m.browser.call(ctx, "Browser.setDownloadBehavior", map[string]any{"behavior": "allow", "downloadPath": filepath.Join(m.config.ProfileDir, "downloads")}, nil)
+	_, _ = m.browser.call(ctx, "Browser.setDownloadBehavior", map[string]any{"behavior": "allowAndName", "downloadPath": filepath.Join(m.config.ProfileDir, "downloads"), "eventsEnabled": true}, nil)
 	return true, nil
 }
 
@@ -329,7 +331,7 @@ func (m *ChromeManager) connectBrowserLocked(ctx context.Context) error {
 						return err
 					}
 					m.browser = conn
-					go drainCDPEvents(conn)
+					go m.browserEventLoop(conn)
 					m.debugURL = base
 					return nil
 				}

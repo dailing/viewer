@@ -163,6 +163,91 @@ func TestChromeAdvancedActions(t *testing.T) {
 	}
 }
 
+func TestChromePageScopedTabs(t *testing.T) {
+	manager := newIntegrationChrome(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path == "/two" {
+			_, _ = fmt.Fprint(w, "<title>Two</title><h1>Two</h1>")
+		} else {
+			_, _ = fmt.Fprint(w, `<title>One</title><h1>One</h1><a href="/two" target="_blank">Open two</a>`)
+		}
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	page, err := manager.OpenPage(ctx, "pg_tabs", server.URL+"/one", defaultViewport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close(context.Background())
+	initial := integrationAction(t, page, "list_tabs", map[string]any{})
+	initialTabs := initial["tabs"].([]map[string]any)
+	if len(initialTabs) != 1 {
+		t.Fatalf("initial tabs = %#v", initial)
+	}
+	firstID := stringField(initialTabs[0], "tab_id")
+	created := integrationAction(t, page, "new_tab", map[string]any{"url": server.URL + "/two"})
+	secondID := stringField(created, "tab_id")
+	if secondID == "" || secondID == firstID {
+		t.Fatalf("created tab = %#v", created)
+	}
+	integrationAction(t, page, "wait", map[string]any{"text": "Two"})
+	integrationAction(t, page, "switch_tab", map[string]any{"tab_id": firstID})
+	integrationAction(t, page, "wait", map[string]any{"text": "One"})
+
+	chrome := page.(*chromePage)
+	if _, err := manager.browser.call(ctx, "Target.activateTarget", map[string]any{"targetId": chrome.tabs[secondID].targetID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var visibilityErr error
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		_, visibilityErr = page.Execute(ctx, "snapshot", map[string]any{})
+		if visibilityErr != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if visibilityErr == nil {
+		t.Fatal("hidden tab action unexpectedly succeeded")
+	} else {
+		requireErrorCode(t, visibilityErr, "active_tab_changed")
+	}
+	integrationAction(t, page, "switch_tab", map[string]any{"tab_id": secondID})
+	integrationAction(t, page, "close_tab", map[string]any{"tab_id": secondID})
+	remaining := integrationAction(t, page, "list_tabs", map[string]any{})
+	if len(remaining["tabs"].([]map[string]any)) != 1 {
+		t.Fatalf("remaining tabs = %#v", remaining)
+	}
+	popupSnapshot := integrationSnapshot(t, page)
+	integrationAction(t, page, "click", integrationElementPayload(popupSnapshot, integrationElement(t, popupSnapshot, "Open two")))
+	var popupTabs []map[string]any
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		popupTabs = integrationAction(t, page, "list_tabs", map[string]any{})["tabs"].([]map[string]any)
+		if len(popupTabs) == 2 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(popupTabs) != 2 {
+		t.Fatalf("same-window popup was not adopted: %#v", popupTabs)
+	}
+	integrationAction(t, page, "close_tab", map[string]any{})
+	if err := chrome.RestoreTabs(ctx, []storedTab{{URL: server.URL + "/one"}, {URL: server.URL + "/two"}}, 1); err != nil {
+		t.Fatal(err)
+	}
+	restored := integrationAction(t, page, "list_tabs", map[string]any{})
+	if len(restored["tabs"].([]map[string]any)) != 2 {
+		t.Fatalf("restored tabs = %#v", restored)
+	}
+	integrationAction(t, page, "close_tab", map[string]any{})
+	if _, err := page.Execute(ctx, "close_tab", map[string]any{}); err == nil {
+		t.Fatal("last tab unexpectedly closed")
+	} else {
+		requireErrorCode(t, err, "last_tab")
+	}
+}
+
 func TestChromeFileUploadAndDownload(t *testing.T) {
 	manager := newIntegrationChrome(t)
 	server := browserFixtureServer(t)

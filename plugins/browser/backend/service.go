@@ -99,18 +99,27 @@ type Page struct {
 	Lease         *Lease              `json:"lease,omitempty"`
 	Watchers      map[string]*Watcher `json:"-"`
 	ViewportOwner string              `json:"-"`
+	Tabs          []storedTab         `json:"-"`
+	ActiveTab     int                 `json:"-"`
 
 	driver PageDriver
 	stream StreamController
 	opMu   sync.Mutex
 }
 
+type storedTab struct {
+	URL   string `json:"url"`
+	Title string `json:"title,omitempty"`
+}
+
 type storedPage struct {
-	PageID   string        `json:"page_id"`
-	URL      string        `json:"url"`
-	Title    string        `json:"title"`
-	Viewport Viewport      `json:"viewport"`
-	Video    VideoSettings `json:"video"`
+	PageID    string        `json:"page_id"`
+	URL       string        `json:"url"`
+	Title     string        `json:"title"`
+	Viewport  Viewport      `json:"viewport"`
+	Video     VideoSettings `json:"video"`
+	Tabs      []storedTab   `json:"tabs,omitempty"`
+	ActiveTab int           `json:"active_tab,omitempty"`
 }
 
 type storedState struct {
@@ -231,7 +240,7 @@ func (s *Service) load() error {
 		if viewport.CSSWidth == 0 {
 			viewport = defaultViewport()
 		}
-		s.pages[item.PageID] = &Page{ID: item.PageID, URL: item.URL, Title: item.Title, Viewport: viewport, Video: normalizeVideo(item.Video), Watchers: make(map[string]*Watcher)}
+		s.pages[item.PageID] = &Page{ID: item.PageID, URL: item.URL, Title: item.Title, Viewport: viewport, Video: normalizeVideo(item.Video), Tabs: item.Tabs, ActiveTab: item.ActiveTab, Watchers: make(map[string]*Watcher)}
 	}
 	return nil
 }
@@ -239,7 +248,7 @@ func (s *Service) load() error {
 func (s *Service) saveLocked() error {
 	stored := storedState{Pages: make([]storedPage, 0, len(s.pages))}
 	for _, page := range s.pages {
-		stored.Pages = append(stored.Pages, storedPage{PageID: page.ID, URL: page.URL, Title: page.Title, Viewport: page.Viewport, Video: page.Video})
+		stored.Pages = append(stored.Pages, storedPage{PageID: page.ID, URL: page.URL, Title: page.Title, Viewport: page.Viewport, Video: page.Video, Tabs: page.Tabs, ActiveTab: page.ActiveTab})
 	}
 	sort.Slice(stored.Pages, func(i, j int) bool { return stored.Pages[i].PageID < stored.Pages[j].PageID })
 	data, err := json.MarshalIndent(stored, "", "  ")
@@ -289,7 +298,22 @@ func (s *Service) Restore(ctx context.Context) {
 			continue
 		}
 		page.opMu.Lock()
-		driver, err := s.backend.OpenPage(ctx, id, page.URL, page.Viewport)
+		initialURL := page.URL
+		tabs := append([]storedTab(nil), page.Tabs...)
+		if len(tabs) > 0 && tabs[0].URL != "" {
+			initialURL = tabs[0].URL
+		}
+		driver, err := s.backend.OpenPage(ctx, id, initialURL, page.Viewport)
+		if err == nil && len(tabs) > 0 {
+			if restorer, ok := driver.(interface {
+				RestoreTabs(context.Context, []storedTab, int) error
+			}); ok {
+				err = restorer.RestoreTabs(ctx, tabs, page.ActiveTab)
+				if err != nil {
+					_ = driver.Close(ctx)
+				}
+			}
+		}
 		s.mu.Lock()
 		if err != nil {
 			page.Online, page.LastError = false, err.Error()
@@ -476,9 +500,32 @@ func (s *Service) Execute(ctx context.Context, pageID, leaseID, action string, p
 	}
 	result, err := page.driver.Execute(ctx, action, payload)
 	if object, ok := result.(map[string]any); ok {
+		s.updateTabsFromResult(page, object)
 		s.updatePageMetadata(page, stringField(object, "url"), stringField(object, "title"))
 	}
 	return result, err
+}
+
+func (s *Service) updateTabsFromResult(page *Page, object map[string]any) {
+	raw, exists := object["tab_state"]
+	if !exists {
+		return
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	var state struct {
+		Tabs      []storedTab `json:"tabs"`
+		ActiveTab int         `json:"active_tab"`
+	}
+	if json.Unmarshal(encoded, &state) != nil || len(state.Tabs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	page.Tabs, page.ActiveTab = state.Tabs, state.ActiveTab
+	_ = s.saveLocked()
+	s.mu.Unlock()
 }
 
 func (s *Service) updatePageMetadata(page *Page, rawURL, title string) {
@@ -489,6 +536,15 @@ func (s *Service) updatePageMetadata(page *Page, rawURL, title string) {
 	}
 	if title != "" && page.Title != title {
 		page.Title, changed = title, true
+	}
+	if len(page.Tabs) > 0 && page.ActiveTab >= 0 && page.ActiveTab < len(page.Tabs) {
+		tab := &page.Tabs[page.ActiveTab]
+		if rawURL != "" && tab.URL != rawURL {
+			tab.URL, changed = rawURL, true
+		}
+		if title != "" && tab.Title != title {
+			tab.Title, changed = title, true
+		}
 	}
 	if changed {
 		_ = s.saveLocked()

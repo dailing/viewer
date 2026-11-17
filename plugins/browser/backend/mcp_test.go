@@ -65,6 +65,7 @@ func TestMCPInitializeAndToolSurface(t *testing.T) {
 		"browser_click", "browser_fill", "browser_navigate", "browser_wait", "browser_scroll",
 		"browser_go_back", "browser_go_forward", "browser_reload",
 		"browser_evaluate", "browser_screenshot", "browser_upload", "browser_downloads",
+		"browser_list_tabs", "browser_new_tab", "browser_switch_tab", "browser_close_tab",
 	} {
 		if !found[name] {
 			t.Errorf("required browser tool is missing: %s", name)

@@ -206,7 +206,20 @@ func strconvQuote(value string) string {
 }
 
 func (p *chromePage) Execute(ctx context.Context, action string, payload map[string]any) (any, error) {
+	if action != "list_tabs" && action != "switch_tab" {
+		if err := p.ensureVisible(ctx); err != nil {
+			return nil, err
+		}
+	}
 	switch action {
+	case "list_tabs":
+		return p.tabState(ctx)
+	case "new_tab":
+		return p.newTab(ctx, stringField(payload, "url"))
+	case "switch_tab":
+		return p.switchTab(ctx, stringField(payload, "tab_id"))
+	case "close_tab":
+		return p.closeTab(ctx, stringField(payload, "tab_id"))
 	case "navigate":
 		rawURL := stringField(payload, "url")
 		if !validHTTPURL(rawURL) {

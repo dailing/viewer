@@ -170,15 +170,22 @@ func (m *ChromeManager) browserEventLoop(conn *cdpConn) {
 			return
 		}
 		switch event.Method {
-		case "Browser.downloadWillBegin", "Browser.downloadProgress":
+		case "Browser.downloadWillBegin", "Browser.downloadProgress", "Target.targetCreated", "Target.targetDestroyed":
 			var params map[string]any
 			if json.Unmarshal(event.Params, &params) != nil {
 				continue
 			}
-			if event.Method == "Browser.downloadWillBegin" {
+			switch event.Method {
+			case "Browser.downloadWillBegin":
 				m.downloads.begin(m.pageIDForFrame(stringField(params, "frameId")), params)
-			} else {
+			case "Browser.downloadProgress":
 				m.downloads.progress(params)
+			case "Target.targetCreated":
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				m.adoptPopup(ctx, params)
+				cancel()
+			case "Target.targetDestroyed":
+				m.removeTarget(stringField(params, "targetId"))
 			}
 		}
 	}

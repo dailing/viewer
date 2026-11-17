@@ -145,6 +145,13 @@ func (m *ChromeManager) OpenPage(ctx context.Context, pageID, rawURL string, vie
 		return nil, err
 	}
 	page := &chromePage{manager: m, pageID: pageID, targetID: target.ID, conn: conn, slot: m.nextSlot % 15}
+	tabID, err := randomToken("tab_", 8)
+	if err != nil {
+		conn.close()
+		return nil, err
+	}
+	page.tabs = map[string]*chromeTab{tabID: {id: tabID, targetID: target.ID, conn: conn}}
+	page.activeTabID = tabID
 	go drainCDPEvents(conn)
 	m.nextSlot++
 	m.pages[pageID] = page
@@ -213,7 +220,7 @@ func (m *ChromeManager) chromeArgs(withDebug bool, pageID string) []string {
 	if withDebug {
 		args = append(args, "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", "--remote-allow-origins=*")
 	}
-	return append(args, "--app="+m.bootstrapURL(pageID))
+	return append(args, "--new-window", m.bootstrapURL(pageID))
 }
 
 func (m *ChromeManager) ensureBrowserLocked(ctx context.Context, pageID string) (bool, error) {
@@ -262,6 +269,7 @@ func (m *ChromeManager) ensureBrowserLocked(ctx context.Context, pageID string) 
 		return false, err
 	}
 	_, _ = m.browser.call(ctx, "Browser.setDownloadBehavior", map[string]any{"behavior": "allowAndName", "downloadPath": filepath.Join(m.config.ProfileDir, "downloads"), "eventsEnabled": true}, nil)
+	_, _ = m.browser.call(ctx, "Target.setDiscoverTargets", map[string]any{"discover": true}, nil)
 	return true, nil
 }
 
@@ -371,7 +379,7 @@ func (m *ChromeManager) waitTargetLocked(ctx context.Context, rawURL string) (*c
 }
 
 func (m *ChromeManager) waitXWindowLocked(ctx context.Context, pageID string) (uint32, error) {
-	pattern := regexp.MustCompile(`^\s*(0x[0-9a-fA-F]+)\s+"Viewer ` + regexp.QuoteMeta(pageID) + `"`)
+	pattern := regexp.MustCompile(`^\s*(0x[0-9a-fA-F]+)\s+"Viewer ` + regexp.QuoteMeta(pageID) + `(?: - [^"]*)?"`)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		command := exec.CommandContext(ctx, "xwininfo", "-root", "-tree")
@@ -444,6 +452,11 @@ type chromePage struct {
 	xid      uint32
 	slot     int
 	conn     *cdpConn
+
+	tabMu         sync.Mutex
+	tabs          map[string]*chromeTab
+	activeTabID   string
+	humanRequired map[string]any
 }
 
 func (p *chromePage) StreamTarget() (string, uint32) {
@@ -491,12 +504,23 @@ func (p *chromePage) Metadata(ctx context.Context) (string, string, error) {
 }
 
 func (p *chromePage) Close(ctx context.Context) error {
-	_, err := p.manager.browser.call(ctx, "Target.closeTarget", map[string]any{"targetId": p.targetID}, nil)
-	p.conn.close()
+	p.tabMu.Lock()
+	tabs := make([]*chromeTab, 0, len(p.tabs))
+	for _, tab := range p.tabs {
+		tabs = append(tabs, tab)
+	}
+	p.tabMu.Unlock()
+	var firstErr error
+	for _, tab := range tabs {
+		if _, err := p.manager.browser.call(ctx, "Target.closeTarget", map[string]any{"targetId": tab.targetID}, nil); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		tab.conn.close()
+	}
 	p.manager.mu.Lock()
 	delete(p.manager.pages, p.pageID)
 	p.manager.mu.Unlock()
-	return err
+	return firstErr
 }
 
 func (p *chromePage) evaluate(ctx context.Context, expression string) (map[string]any, error) {

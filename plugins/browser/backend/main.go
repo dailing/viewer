@@ -23,6 +23,7 @@ var manifest = busclient.Manifest{
 		"state": map[string]any{}, "create": map[string]any{}, "close": map[string]any{},
 		"release": map[string]any{}, "watch": map[string]any{}, "unwatch": map[string]any{},
 		"control": map[string]any{}, "input": map[string]any{}, "navigate": map[string]any{},
+		"tabs": map[string]any{}, "tab": map[string]any{},
 		"mcp_status": map[string]any{}, "mcp_configure": map[string]any{},
 	},
 	Emits: map[string]any{"state": map[string]any{}},
@@ -64,6 +65,7 @@ func main() {
 		"viewer.browser:_:state": nil, "viewer.browser:_:create": nil, "viewer.browser:_:close": nil,
 		"viewer.browser:_:release": nil, "viewer.browser:_:watch": nil, "viewer.browser:_:unwatch": nil,
 		"viewer.browser:_:control": nil, "viewer.browser:_:input": nil, "viewer.browser:_:navigate": nil,
+		"viewer.browser:_:tabs": nil, "viewer.browser:_:tab": nil,
 		"viewer.browser:_:mcp_status": nil, "viewer.browser:_:mcp_configure": nil,
 	} {
 		if _, err := client.Subscribe(pattern, func(frame busclient.Frame) { handleRPC(client, service, mcp, frame) }); err != nil {
@@ -160,6 +162,10 @@ func handleRPC(client *busclient.Client, service *Service, mcp *mcpServer, frame
 		err = service.Input(context.Background(), stringField(value, "page_id"), stringField(value, "viewer_id"), event)
 	case "viewer.browser:_:navigate":
 		result, err = service.HumanNavigate(context.Background(), stringField(value, "page_id"), stringField(value, "viewer_id"), stringField(value, "url"))
+	case "viewer.browser:_:tabs":
+		result, err = service.ListTabs(context.Background(), stringField(value, "page_id"))
+	case "viewer.browser:_:tab":
+		result, err = service.HumanTab(context.Background(), stringField(value, "page_id"), stringField(value, "viewer_id"), stringField(value, "action"), value)
 	case "viewer.browser:_:mcp_status":
 		result = mcp.Status()
 	case "viewer.browser:_:mcp_configure":

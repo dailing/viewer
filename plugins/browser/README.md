@@ -20,6 +20,7 @@
 - 插件向 Gateway loopback `/api/media/publish` 发布视频。Viewer 前端通过同源 `/api/media/ticket` 和 `/api/media/webrtc` 建立 WebRTC；不会连接插件 MCP 或 Chrome 调试端口。
 - 视频不经过 Viewer Bus mailbox；页面管理、watch 和人工输入仍走 Bus RPC。
 - 人工鼠标、滚轮、文本和键盘事件由 `frontend/src/humanInput.ts` 串行发送，并共享同一次控制申请；首次点击的 press/release 和首次输入不会因等待 lease 而丢失或乱序。前端根据 `expires_at` 续订人工 lease，避免空闲超时后的第一个事件被旧 lease 拒绝。
+- 地址栏下方的 tab 栏支持人工新建、切换和逐个关闭 tab。网页通过 `target=_blank` 打开的同窗口 tab 会自动出现；关闭活动 tab 后自动激活剩余 tab。最后一个 tab 不单独关闭，继续使用 Page 的“关闭页面”操作。tab 列表、活动位置、标题和地址会同步保存，供插件重启后恢复。
 
 ## 独立参数
 

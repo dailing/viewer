@@ -480,6 +480,45 @@ func TestChromePageScopedTabs(t *testing.T) {
 	}
 }
 
+func TestServiceHumanTabLifecycle(t *testing.T) {
+	manager := newIntegrationChrome(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprintf(w, "<title>%s</title><h1>%s</h1>", r.URL.Path, r.URL.Path)
+	}))
+	defer server.Close()
+	service, err := NewService(&fakeBus{}, filepath.Join(t.TempDir(), "pages.json"), manager, func(string) StreamController { return &fakeStream{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	created, err := service.CreatePage(context.Background(), server.URL+"/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageID := stringField(created, "page_id")
+	watchTestPage(t, service, pageID, "human-tabs", nil)
+	if _, err := service.HumanControl(pageID, "human-tabs", false); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := service.HumanTab(context.Background(), pageID, "human-tabs", "new_tab", map[string]any{"url": server.URL + "/two"})
+	if err != nil || len(opened["tabs"].([]map[string]any)) != 2 {
+		t.Fatalf("human new_tab = %#v, %v", opened, err)
+	}
+	closed, err := service.HumanTab(context.Background(), pageID, "human-tabs", "close_tab", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := closed["tabs"].([]map[string]any)
+	if len(remaining) != 1 || remaining[0]["active"] != true || !strings.HasSuffix(stringField(remaining[0], "url"), "/one") {
+		t.Fatalf("closing active tab did not activate the remaining tab: %#v", closed)
+	}
+	listed, err := service.ListTabs(context.Background(), pageID)
+	if err != nil || len(listed["tabs"].([]map[string]any)) != 1 {
+		t.Fatalf("human tab list = %#v, %v", listed, err)
+	}
+}
+
 func TestChromeFileUploadAndDownload(t *testing.T) {
 	manager := newIntegrationChrome(t)
 	server := browserFixtureServer(t)

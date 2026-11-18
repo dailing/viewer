@@ -25,6 +25,8 @@ interface BrowserPage {
   last_error?: string;
 }
 interface BrowserState { backend: string; pages: BrowserPage[] }
+interface BrowserTab { tab_id: string; url: string; title: string; active: boolean }
+interface TabResult { tabs: BrowserTab[] }
 interface WatchResult {
   page: BrowserPage;
   viewport_owner: boolean;
@@ -54,6 +56,8 @@ const fps = ref(ctx.storage.get("fps", "15"));
 const bitrate = ref(ctx.storage.get("bitrate_kbps", "4000"));
 const address = ref("");
 const copied = ref(false);
+const tabs = ref<BrowserTab[]>([]);
+const tabBusy = ref(false);
 const error = ref("");
 const streamStatus = ref("连接中");
 const viewportOwner = ref(true);
@@ -67,6 +71,9 @@ let rtcGeneration = 0;
 let watchInFlight = false;
 let watchQueued = false;
 let heartbeat = 0;
+let tabsHeartbeat = 0;
+let tabsInFlight = false;
+let tabsRevision = 0;
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 let observer: ResizeObserver | undefined;
 let moveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -243,6 +250,42 @@ async function navigate(): Promise<void> {
   }
 }
 
+function applyTabs(result: TabResult): void {
+  tabs.value = result.tabs;
+  const active = result.tabs.find((tab) => tab.active);
+  if (active && document.activeElement?.id !== "browser-address") address.value = active.url;
+}
+
+async function refreshTabs(): Promise<void> {
+  if (tabBusy.value || tabsInFlight) return;
+  tabsInFlight = true;
+  const revision = ++tabsRevision;
+  try {
+    const result = await ctx.bus.request<TabResult>("viewer.browser:_:tabs", { page_id: pageID });
+    if (revision === tabsRevision) applyTabs(result);
+  } catch {
+    // Video state reports permanent browser failures; tab polling stays quiet.
+  } finally {
+    tabsInFlight = false;
+  }
+}
+
+async function runTabAction(action: "new_tab" | "switch_tab" | "close_tab", tabID = ""): Promise<void> {
+  if (tabBusy.value) return;
+  tabBusy.value = true;
+  const revision = ++tabsRevision;
+  try {
+    if (!(await humanInput.ensureControl())) return;
+    const result = await ctx.bus.request<TabResult>("viewer.browser:_:tab", { page_id: pageID, viewer_id: viewerID, action, tab_id: tabID });
+    if (revision === tabsRevision) applyTabs(result);
+    error.value = "";
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : String(caught);
+  } finally {
+    tabBusy.value = false;
+  }
+}
+
 function point(event: PointerEvent | WheelEvent): { x: number; y: number } {
   const rect = video.value?.getBoundingClientRect();
   if (!rect || rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
@@ -294,7 +337,9 @@ function pointerMove(event: PointerEvent): void {
 function pointerUp(event: PointerEvent): void {
   event.preventDefault();
   const p = point(event);
-  void humanInput.send({ type: "mouseReleased", ...p, button: buttonName(event.button), buttons: event.buttons });
+  void humanInput.send({ type: "mouseReleased", ...p, button: buttonName(event.button), buttons: event.buttons }).then((sent) => {
+    if (sent) void refreshTabs();
+  });
 }
 
 function modifiers(event: KeyboardEvent): number {
@@ -369,13 +414,16 @@ onMounted(() => {
   observer = new ResizeObserver(() => scheduleWatch());
   if (stage.value) observer.observe(stage.value);
   void nextTick(() => watchPage());
+  void refreshTabs();
   heartbeat = window.setInterval(() => void watchPage(), 10000);
+  tabsHeartbeat = window.setInterval(() => void refreshTabs(), 2000);
   ctx.onDispose(() => {
     if (observer) observer.disconnect();
     if (resizeTimer) clearTimeout(resizeTimer);
     if (moveTimer) clearTimeout(moveTimer);
     if (wheelTimer) clearTimeout(wheelTimer);
     window.clearInterval(heartbeat);
+    window.clearInterval(tabsHeartbeat);
     rtcGeneration++;
     peer?.close();
     void ctx.bus.request("viewer.browser:_:unwatch", { page_id: pageID, viewer_id: viewerID }, { timeout: 2000 }).catch(() => undefined);
@@ -390,6 +438,27 @@ onMounted(() => {
       <input id="browser-address" v-model="address" aria-label="页面地址" spellcheck="false" @keyup.enter="navigate" />
       <button type="button" title="导航" @click="navigate"><i class="bi bi-arrow-right"></i></button>
       <code :title="pageID">{{ pageID }}</code>
+    </div>
+    <div class="tab-row" role="tablist" aria-label="浏览器标签页">
+      <div v-for="tab in tabs" :key="tab.tab_id" class="tab-item" :class="{ active: tab.active }">
+        <button
+          type="button"
+          class="tab-select"
+          role="tab"
+          :aria-selected="tab.active"
+          :title="tab.url"
+          :disabled="tabBusy"
+          @click="runTabAction('switch_tab', tab.tab_id)"
+        >{{ tab.title || tab.url || "新标签页" }}</button>
+        <button
+          type="button"
+          class="tab-close"
+          :title="tabs.length === 1 ? '最后一个标签页请使用关闭页面' : '关闭标签页'"
+          :disabled="tabBusy || tabs.length === 1"
+          @click="runTabAction('close_tab', tab.tab_id)"
+        ><i class="bi bi-x"></i></button>
+      </div>
+      <button type="button" class="new-tab" title="新建标签页" :disabled="tabBusy" @click="runTabAction('new_tab')"><i class="bi bi-plus"></i></button>
     </div>
     <div v-if="error" class="browser-error">{{ error }}</div>
     <div ref="stage" class="video-stage" @wheel="wheel" @contextmenu.prevent>
@@ -434,6 +503,14 @@ onMounted(() => {
 .address-row button { border: 0; background: transparent; color: var(--color-text-muted); cursor: pointer; padding: 2px 5px; }
 .address-row button:hover { color: var(--color-text); }
 .address-row code { max-width: 230px; overflow: hidden; text-overflow: ellipsis; color: var(--color-text-muted); user-select: all; }
+.tab-row { min-height: 28px; display: flex; align-items: stretch; gap: 2px; padding: 2px 5px 0; background: var(--color-canvas); overflow-x: auto; font-size: calc(var(--font-size-ui) * 11 / 12); }
+.tab-item { display: flex; align-items: center; min-width: 0; max-width: 220px; color: var(--color-text-muted); border-bottom: 1px solid transparent; }
+.tab-item.active { color: var(--color-text); border-bottom-color: var(--color-text-muted); }
+.tab-row button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 5px; }
+.tab-row button:hover:not(:disabled) { color: var(--color-text); }
+.tab-row button:disabled { cursor: default; opacity: 0.45; }
+.tab-select { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.tab-close, .new-tab { flex: 0 0 auto; }
 .browser-error { padding: 4px 8px; background: var(--color-canvas); color: var(--color-danger); font-size: calc(var(--font-size-ui) * 11 / 12); overflow-wrap: anywhere; }
 .video-stage { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #111; }
 .video-stage video { display: block; width: 100%; height: 100%; object-fit: fill; opacity: 0; touch-action: none; user-select: none; cursor: default; }

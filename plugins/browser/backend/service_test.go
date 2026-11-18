@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -22,6 +23,94 @@ type fakeDriver struct {
 	actions  []string
 	closed   bool
 	human    map[string]any
+	tabs     []map[string]any
+}
+
+func (d *fakeDriver) tabResultLocked(action, tabID string) map[string]any {
+	public := make([]map[string]any, 0, len(d.tabs))
+	stored := make([]storedTab, 0, len(d.tabs))
+	active := 0
+	for index, tab := range d.tabs {
+		item := map[string]any{"tab_id": tab["tab_id"], "url": tab["url"], "title": tab["title"], "active": tab["active"]}
+		public = append(public, item)
+		stored = append(stored, storedTab{URL: stringField(tab, "url"), Title: stringField(tab, "title")})
+		if tab["active"] == true {
+			active = index
+		}
+	}
+	return map[string]any{"action": action, "tab_id": tabID, "tabs": public, "tab_state": map[string]any{"tabs": stored, "active_tab": active}}
+}
+
+func (d *fakeDriver) executeTabLocked(action string, payload map[string]any) (map[string]any, error) {
+	if d.tabs == nil {
+		d.tabs = []map[string]any{{"tab_id": "tab_1", "url": d.url, "title": d.title, "active": true}}
+	}
+	activeIndex := 0
+	for index, tab := range d.tabs {
+		if tab["active"] == true {
+			activeIndex = index
+		}
+	}
+	switch action {
+	case "list_tabs":
+		return d.tabResultLocked("listed", stringField(d.tabs[activeIndex], "tab_id")), nil
+	case "new_tab":
+		for _, tab := range d.tabs {
+			tab["active"] = false
+		}
+		rawURL := stringField(payload, "url")
+		if rawURL == "" {
+			rawURL = "about:blank"
+		}
+		tabID := fmt.Sprintf("tab_%d", len(d.tabs)+1)
+		d.tabs = append(d.tabs, map[string]any{"tab_id": tabID, "url": rawURL, "title": "Fake " + tabID, "active": true})
+		d.url, d.title = rawURL, "Fake "+tabID
+		return d.tabResultLocked("created", tabID), nil
+	case "switch_tab":
+		tabID := stringField(payload, "tab_id")
+		for index, tab := range d.tabs {
+			tab["active"] = tab["tab_id"] == tabID
+			if tab["active"] == true {
+				activeIndex = index
+			}
+		}
+		if d.tabs[activeIndex]["tab_id"] != tabID {
+			return nil, errorf("tab_not_found", "unknown fake tab")
+		}
+		d.url, d.title = stringField(d.tabs[activeIndex], "url"), stringField(d.tabs[activeIndex], "title")
+		return d.tabResultLocked("switched", tabID), nil
+	case "close_tab":
+		if len(d.tabs) == 1 {
+			return nil, errorf("last_tab", "close the Page explicitly")
+		}
+		tabID := stringField(payload, "tab_id")
+		if tabID == "" {
+			tabID = stringField(d.tabs[activeIndex], "tab_id")
+		}
+		closeIndex := -1
+		for index, tab := range d.tabs {
+			if tab["tab_id"] == tabID {
+				closeIndex = index
+			}
+		}
+		if closeIndex < 0 {
+			return nil, errorf("tab_not_found", "unknown fake tab")
+		}
+		wasActive := d.tabs[closeIndex]["active"] == true
+		d.tabs = append(d.tabs[:closeIndex], d.tabs[closeIndex+1:]...)
+		if wasActive {
+			activeIndex = min(closeIndex, len(d.tabs)-1)
+			d.tabs[activeIndex]["active"] = true
+		}
+		for index, tab := range d.tabs {
+			if tab["active"] == true {
+				activeIndex = index
+			}
+		}
+		d.url, d.title = stringField(d.tabs[activeIndex], "url"), stringField(d.tabs[activeIndex], "title")
+		return d.tabResultLocked("closed", tabID), nil
+	}
+	return nil, errorf("invalid_request", "unknown fake tab action")
 }
 
 func (d *fakeDriver) Execute(_ context.Context, action string, payload map[string]any) (any, error) {
@@ -31,6 +120,10 @@ func (d *fakeDriver) Execute(_ context.Context, action string, payload map[strin
 		return nil, errorf("human_required", "%s", stringField(d.human, "detail"))
 	}
 	d.actions = append(d.actions, action)
+	switch action {
+	case "list_tabs", "new_tab", "switch_tab", "close_tab":
+		return d.executeTabLocked(action, payload)
+	}
 	if action == "navigate" {
 		d.url = stringField(payload, "url")
 		return map[string]any{"navigated": true, "url": d.url, "title": d.title}, nil
@@ -309,6 +402,54 @@ func TestHumanTakeoverFencesAgent(t *testing.T) {
 	service.Unwatch(pageID, "human")
 	if _, err := service.Require(pageID, ""); err != nil {
 		t.Fatalf("agent could not acquire after human pane closed: %v", err)
+	}
+}
+
+func TestHumanTabLifecycleAndPersistence(t *testing.T) {
+	service, _, _, pageID := newTestService(t)
+	watchTestPage(t, service, pageID, "human", nil)
+	listed, err := service.ListTabs(context.Background(), pageID)
+	if err != nil || len(listed["tabs"].([]map[string]any)) != 1 {
+		t.Fatalf("initial tabs = %#v, %v", listed, err)
+	}
+	if _, err := service.HumanTab(context.Background(), pageID, "human", "new_tab", map[string]any{}); err == nil {
+		t.Fatal("tab action succeeded without human control")
+	} else {
+		requireErrorCode(t, err, "invalid_lease")
+	}
+	if _, err := service.HumanControl(pageID, "human", false); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.HumanTab(context.Background(), pageID, "human", "new_tab", map[string]any{"url": "https://example.org/two"})
+	if err != nil || len(created["tabs"].([]map[string]any)) != 2 {
+		t.Fatalf("created tabs = %#v, %v", created, err)
+	}
+	page := service.getPage(pageID)
+	if page.URL != "https://example.org/two" || page.ActiveTab != 1 || len(page.Tabs) != 2 {
+		t.Fatalf("active tab metadata = %#v", page)
+	}
+	persisted, err := NewService(&fakeBus{}, service.stateFile, &fakeBackend{}, func(string) StreamController { return &fakeStream{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := persisted.getPage(pageID)
+	if len(stored.Tabs) != 2 || stored.ActiveTab != 1 || stored.Tabs[1].URL != "https://example.org/two" {
+		t.Fatalf("persisted tabs = %#v", stored)
+	}
+	if _, err := service.HumanTab(context.Background(), pageID, "human", "switch_tab", map[string]any{"tab_id": "tab_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if page.URL != "https://example.com" || page.ActiveTab != 0 {
+		t.Fatalf("switched tab metadata = %#v", page)
+	}
+	closed, err := service.HumanTab(context.Background(), pageID, "human", "close_tab", map[string]any{"tab_id": "tab_2"})
+	if err != nil || len(closed["tabs"].([]map[string]any)) != 1 {
+		t.Fatalf("closed tabs = %#v, %v", closed, err)
+	}
+	if _, err := service.HumanTab(context.Background(), pageID, "human", "close_tab", map[string]any{}); err == nil {
+		t.Fatal("last tab unexpectedly closed")
+	} else {
+		requireErrorCode(t, err, "last_tab")
 	}
 }
 

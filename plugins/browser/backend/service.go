@@ -536,9 +536,55 @@ func (s *Service) updateTabsFromResult(page *Page, object map[string]any) {
 		return
 	}
 	s.mu.Lock()
+	changed := len(page.Tabs) != len(state.Tabs) || page.ActiveTab != state.ActiveTab
+	if !changed {
+		for index := range state.Tabs {
+			if page.Tabs[index] != state.Tabs[index] {
+				changed = true
+				break
+			}
+		}
+	}
 	page.Tabs, page.ActiveTab = state.Tabs, state.ActiveTab
-	_ = s.saveLocked()
+	if page.ActiveTab >= 0 && page.ActiveTab < len(page.Tabs) {
+		active := page.Tabs[page.ActiveTab]
+		if page.URL != active.URL || page.Title != active.Title {
+			page.URL, page.Title = active.URL, active.Title
+			changed = true
+		}
+	}
+	if changed {
+		_ = s.saveLocked()
+	}
 	s.mu.Unlock()
+	if changed {
+		s.publishState()
+	}
+}
+
+func (s *Service) ListTabs(ctx context.Context, pageID string) (map[string]any, error) {
+	page := s.getPage(pageID)
+	if page == nil {
+		return nil, errorf("page_not_found", "managed page does not exist")
+	}
+	page.opMu.Lock()
+	defer page.opMu.Unlock()
+	s.mu.Lock()
+	online := page.Online
+	s.mu.Unlock()
+	if !online {
+		return nil, errorf("page_offline", "managed Chrome page is offline")
+	}
+	result, err := page.driver.Execute(ctx, "list_tabs", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	object, ok := result.(map[string]any)
+	if !ok {
+		return nil, errorf("internal_error", "browser returned an invalid tab list")
+	}
+	s.updateTabsFromResult(page, object)
+	return object, nil
 }
 
 func (s *Service) updatePageMetadata(page *Page, rawURL, title string) {
@@ -715,6 +761,38 @@ func (s *Service) HumanNavigate(ctx context.Context, pageID, viewerID, rawURL st
 	url, title, _ := page.driver.Metadata(ctx)
 	s.updatePageMetadata(page, url, title)
 	return map[string]any{"navigated": true, "url": url, "title": title}, nil
+}
+
+func (s *Service) HumanTab(ctx context.Context, pageID, viewerID, action string, payload map[string]any) (map[string]any, error) {
+	if action != "new_tab" && action != "switch_tab" && action != "close_tab" {
+		return nil, errorf("invalid_request", "unsupported human tab action %q", action)
+	}
+	page := s.getPage(pageID)
+	if page == nil {
+		return nil, errorf("page_not_found", "managed page does not exist")
+	}
+	page.opMu.Lock()
+	defer page.opMu.Unlock()
+	s.mu.Lock()
+	s.expireLeaseLocked(page)
+	validControl := page.Online && page.Lease != nil && page.Lease.Owner == "human" && page.Lease.ViewerID == viewerID
+	if validControl {
+		page.Lease.ExpiresAt = s.now().Add(humanLeaseTTL)
+	}
+	s.mu.Unlock()
+	if !validControl {
+		return nil, errorf("invalid_lease", "human input control is required")
+	}
+	result, err := page.driver.Execute(ctx, action, payload)
+	if err != nil {
+		return nil, err
+	}
+	object, ok := result.(map[string]any)
+	if !ok {
+		return nil, errorf("internal_error", "browser returned an invalid tab action result")
+	}
+	s.updateTabsFromResult(page, object)
+	return object, nil
 }
 
 func (s *Service) ClosePage(ctx context.Context, pageID string) error {

@@ -98,8 +98,44 @@ func (p *Plugin) detectDecision(turn *Turn) {
 	if taskErr == nil && task != nil && task.ended() && decision.Status == "pending" {
 		decision.Status = "cancelled"
 	}
-	if err := p.store.db.Create(decision).Error; err != nil {
-		return // unique source_turn_id makes detection idempotent
+	var superseded []Decision
+	if err := p.store.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(decision).Error; err != nil {
+			return err // unique source_turn_id makes detection idempotent
+		}
+		if decision.Status != "pending" {
+			return nil
+		}
+		if err := tx.Where("task_id = ? AND status = ? AND id <> ?", decision.TaskID, "pending", decision.ID).
+			Order("created_at, id").Find(&superseded).Error; err != nil {
+			return err
+		}
+		if len(superseded) == 0 {
+			return nil
+		}
+		ids := make([]string, 0, len(superseded))
+		for index := range superseded {
+			ids = append(ids, superseded[index].ID)
+		}
+		update := tx.Model(&Decision{}).Where("id IN ? AND status = ?", ids, "pending").
+			Updates(map[string]any{"status": "cancelled", "version": gorm.Expr("version + 1"), "updated_at": now})
+		if update.Error != nil {
+			return update.Error
+		}
+		if update.RowsAffected != int64(len(superseded)) {
+			return errors.New("pending Decision supersede conflict")
+		}
+		for index := range superseded {
+			superseded[index].Status = "cancelled"
+			superseded[index].Version++
+			superseded[index].UpdatedAt = now
+		}
+		return nil
+	}); err != nil {
+		return
+	}
+	for index := range superseded {
+		p.publishDecision(&superseded[index])
 	}
 	block := &MessageBlock{ID: newID(), EventID: decision.ID, ChatID: decision.ChatID, TaskID: decision.TaskID,
 		TurnID: decision.SourceTurnID, Kind: "decision", Text: decision.Question,

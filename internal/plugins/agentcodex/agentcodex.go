@@ -213,7 +213,7 @@ func (p *Plugin) handleUpdate(sessionID string, current *session, update codexse
 	turnID := current.turnID
 	current.seq++
 	p.mu.Unlock()
-	frame := agentdriver.EventFrame{SessionID: sessionID, TurnID: turnID, Seq: seq, Kind: update.Method, RawJSON: string(update.Raw), Block: codexserver.ParseBlock(update.Method, update.Params)}
+	frame := agentdriver.EventFrame{SessionID: sessionID, TurnID: turnID, Seq: seq, Kind: update.Method, RawJSON: string(update.Raw), Block: codexserver.ParseBlock(update.Method, update.Params), Usage: codexserver.ParseTokenUsage(update.Method, update.Params)}
 	_ = p.client.Publish(context.Background(), PluginID+":_:event", frame)
 }
 

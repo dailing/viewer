@@ -232,7 +232,7 @@ func (p *Plugin) handleUpdate(sessionID string, current *session, update acp.Upd
 	turnID := current.turnID
 	current.seq++
 	p.mu.Unlock()
-	frame := agentdriver.EventFrame{SessionID: sessionID, TurnID: turnID, Seq: seq, Kind: kind, RawJSON: string(update.Raw), Block: acp.ParseBlock(kind, update.Value)}
+	frame := agentdriver.EventFrame{SessionID: sessionID, TurnID: turnID, Seq: seq, Kind: kind, RawJSON: string(update.Raw), Block: acp.ParseBlock(kind, update.Value), Usage: acp.ParseTokenUsage(kind, update.Value)}
 	_ = p.client.Publish(context.Background(), PluginID+":_:event", frame)
 }
 

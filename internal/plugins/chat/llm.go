@@ -24,6 +24,20 @@ type llmCompleter func(ctx context.Context, messages []map[string]string, jsonMo
 // llmCompleter contract and continue following the global active model.
 type llmRouteCompleter func(ctx context.Context, messages []map[string]string, jsonMode bool, timeoutSeconds int, model string, extraBody map[string]any) (completionResult, error)
 
+type llmTrackingContextKey struct{}
+
+type llmTracking struct {
+	Purpose    string `json:"purpose"`
+	ChatID     string `json:"chat_id,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
+	TurnID     string `json:"turn_id,omitempty"`
+	DispatchID string `json:"dispatch_id,omitempty"`
+}
+
+func withLLMTracking(ctx context.Context, purpose, chatID, taskID, turnID, dispatchID string) context.Context {
+	return context.WithValue(ctx, llmTrackingContextKey{}, llmTracking{Purpose: purpose, ChatID: chatID, TaskID: taskID, TurnID: turnID, DispatchID: dispatchID})
+}
+
 // llmCompleteViaBus calls the global llm plugin over the bus. The RPC
 // deadline exceeds the LLM-side timeout so a slow completion surfaces the
 // llm plugin's own error instead of an opaque bus timeout.
@@ -46,6 +60,9 @@ func (p *Plugin) llmCompleteRouteViaBus(ctx context.Context, messages []map[stri
 	}
 	if extraBody != nil {
 		payload["extra_body"] = extraBody
+	}
+	if tracking, ok := ctx.Value(llmTrackingContextKey{}).(llmTracking); ok {
+		payload["tracking"] = tracking
 	}
 	value, err := p.client.Request(ctx, "llm:_:complete", payload, time.Duration(timeoutSeconds+15)*time.Second)
 	if err != nil {

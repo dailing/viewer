@@ -151,6 +151,7 @@ func (p *Plugin) generateTurnSummary(turnID, provider string) {
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, time.Duration(config.TimeoutSeconds)*time.Second)
 	started := time.Now()
+	ctx = withLLMTracking(ctx, "turn_summary", turn.ChatID, turn.TaskID, turnID, "")
 	result, err := summarizeTranscript(ctx, p.llmFn, transcript, config.TimeoutSeconds)
 	cancel()
 	base.LatencyMS = int(time.Since(started).Milliseconds())

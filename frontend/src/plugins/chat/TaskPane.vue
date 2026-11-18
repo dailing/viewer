@@ -14,7 +14,8 @@ import { useVoiceStore } from "../voice/voiceStore";
 import { chatIdForView, resolveChatView, setChatViewTask } from "./viewInstances";
 import { formatChatTime as formatTime } from "./chatTime";
 import { mergeMessageWindow, readingAnchor, withReadingAnchor, type MessageWindowEviction, type ReadingAnchor } from "./historyWindow";
-import type { Chat, ChatBlock, ChatBlockList, ChatHistory, ChatList, ChatMessage, Decision, QueuedMessage, Role, RunningTurn, Task, TaskList, TurnTarget, TurnTargetEntry, Workspace } from "./types";
+import { backgroundSnapshot, reduceBackgroundEvent } from "./backgroundState";
+import type { BackgroundTurn, Chat, ChatBlock, ChatBlockList, ChatHistory, ChatList, ChatMessage, Decision, QueuedMessage, Role, RunningTurn, Task, TaskList, TurnTarget, TurnTargetEntry, Workspace } from "./types";
 import { errorText } from "./types";
 
 const injected = inject<PluginCtx>("pluginCtx");
@@ -38,6 +39,9 @@ const blocks = ref<ChatBlock[]>([]);
 const decisions = ref<Decision[]>([]);
 const queued = ref<QueuedMessage[]>([]);
 const running = ref<Map<string, RunningTurn>>(new Map());
+const backgroundTurns = ref<Map<string, BackgroundTurn>>(new Map());
+const backgroundOpenTurnId = ref("");
+const selectedBackground = computed(() => backgroundTurns.value.get(backgroundOpenTurnId.value) ?? null);
 const turnTargets = ref<Map<string, TurnTargetEntry>>(new Map());
 const error = ref("");
 const loading = ref(false);
@@ -135,6 +139,7 @@ async function loadHistory(around?: { createdAt: number; messageId: string }): P
     hasOlder.value = result.has_more === true; hasNewer.value = result.has_more_after === true;
     noteTargets(result.turn_targets);
     running.value = new Map((result.running_turns ?? []).map((turn) => [turn.turn_id, turn]));
+    backgroundTurns.value = backgroundSnapshot(result.background_turns);
     queued.value = (result.queued_messages ?? []).filter((entry) => entry.task_id === taskId);
     const decisionResult = await ctx.bus.request("chat:_:decisions:list", { task_id: taskId }) as { decisions: Decision[] };
     if (taskId !== currentTaskId.value || generation !== historyGeneration) return;
@@ -195,6 +200,8 @@ async function bootstrap(): Promise<void> {
 watch(currentTaskId, (taskId, previous) => {
   if (taskId === previous) return;
   summaryOpen.value = false;
+  backgroundOpenTurnId.value = "";
+  backgroundTurns.value = new Map();
   if (previous) saveReadingAnchor(previous);
   if (!taskId) { historyGeneration += 1; messages.value = []; blocks.value = []; return; }
   ctx.storage.set("currentTaskId", taskId); inputs.setTask(inputSessionId, taskId);
@@ -315,6 +322,8 @@ const timeline = computed<TimelineGroup[]>(() => {
 });
 function queuedFor(turnId: string): QueuedMessage[] { return queued.value.filter((entry) => entry.dispatch_id === turnId); }
 function roleTarget(turnId: string): string { return turnTargets.value.get(turnId)?.label ?? ""; }
+function backgroundFor(turnId: string): BackgroundTurn | undefined { return backgroundTurns.value.get(turnId); }
+function toggleBackground(turnId: string): void { backgroundOpenTurnId.value = backgroundOpenTurnId.value === turnId ? "" : turnId; }
 function onMessage(frame: { value?: unknown }): void { const value = frame.value as ChatMessage | undefined; if (value?.chat_id === chatId && value.task_id === currentTaskId.value) mergeMessages([value]); }
 function onBlock(frame: { value?: unknown }): void { const value = frame.value as ChatBlock | undefined; if (value?.chat_id === chatId && value.task_id === currentTaskId.value) mergeBlocks([value]); }
 function onTurn(frame: { value?: unknown }): void {
@@ -327,6 +336,12 @@ function onTurn(frame: { value?: unknown }): void {
   if (value.task_id) tasks.value = tasks.value.map((task) => task.id === value.task_id ? { ...task, running: value.phase !== "completed" } : task);
 }
 function onQueue(): void { if (currentTaskId.value) void loadHistory(savedReadingAnchor(currentTaskId.value)); }
+function onBackground(frame: { value?: unknown }): void {
+  const value = frame.value as BackgroundTurn | undefined;
+  if (!value || value.chat_id !== chatId || value.task_id !== currentTaskId.value) return;
+  backgroundTurns.value = reduceBackgroundEvent(backgroundTurns.value, value);
+  if (backgroundOpenTurnId.value && !backgroundTurns.value.has(backgroundOpenTurnId.value)) backgroundOpenTurnId.value = "";
+}
 function onTask(frame: { value?: unknown }): void {
   const task = frame.value as Task | undefined; if (!task?.id) return;
   const byId = new Map(tasks.value.map((item) => [item.id, item])); byId.set(task.id, task);
@@ -347,14 +362,14 @@ function onExternalSourceOpen(event: Event): void {
 onMounted(() => {
   inputs.activate(inputSessionId); if (currentTaskId.value) { inputs.setTask(inputSessionId, currentTaskId.value); setChatViewTask(viewKey, currentTaskId.value); window.dispatchEvent(new CustomEvent("viewer:task-current", { detail: { viewKey, taskId: currentTaskId.value } })); }
   window.addEventListener("viewer:task-open-source", onExternalSourceOpen);
-  ctx.bus.subscribe(`chat:${chatId}:message`, onMessage); ctx.bus.subscribe(`chat:${chatId}:block`, onBlock); ctx.bus.subscribe("chat:_:turn", onTurn); ctx.bus.subscribe("chat:_:queue", onQueue); ctx.bus.subscribe("chat:_:task", onTask); ctx.bus.subscribe("chat:_:decision", onDecision); ctx.bus.subscribe("chat:_:task-summary", onSummary); void bootstrap();
+  ctx.bus.subscribe(`chat:${chatId}:message`, onMessage); ctx.bus.subscribe(`chat:${chatId}:block`, onBlock); ctx.bus.subscribe("chat:_:turn", onTurn); ctx.bus.subscribe("chat:_:background", onBackground); ctx.bus.subscribe("chat:_:queue", onQueue); ctx.bus.subscribe("chat:_:task", onTask); ctx.bus.subscribe("chat:_:decision", onDecision); ctx.bus.subscribe("chat:_:task-summary", onSummary); void bootstrap();
 });
 onBeforeUnmount(() => {
   if (anchorTimer !== undefined) clearTimeout(anchorTimer);
   saveReadingAnchor();
   window.dispatchEvent(new CustomEvent("viewer:task-current", { detail: { viewKey, taskId: "" } }));
   window.removeEventListener("viewer:task-open-source", onExternalSourceOpen);
-  ctx.bus.unsubscribe(`chat:${chatId}:message`, onMessage); ctx.bus.unsubscribe(`chat:${chatId}:block`, onBlock); ctx.bus.unsubscribe("chat:_:turn", onTurn); ctx.bus.unsubscribe("chat:_:queue", onQueue); ctx.bus.unsubscribe("chat:_:task", onTask); ctx.bus.unsubscribe("chat:_:decision", onDecision); ctx.bus.unsubscribe("chat:_:task-summary", onSummary);
+  ctx.bus.unsubscribe(`chat:${chatId}:message`, onMessage); ctx.bus.unsubscribe(`chat:${chatId}:block`, onBlock); ctx.bus.unsubscribe("chat:_:turn", onTurn); ctx.bus.unsubscribe("chat:_:background", onBackground); ctx.bus.unsubscribe("chat:_:queue", onQueue); ctx.bus.unsubscribe("chat:_:task", onTask); ctx.bus.unsubscribe("chat:_:decision", onDecision); ctx.bus.unsubscribe("chat:_:task-summary", onSummary);
 });
 </script>
 <template>
@@ -382,11 +397,35 @@ onBeforeUnmount(() => {
         <p v-else class="summary-empty">暂无摘要。</p>
         <button v-if="currentTask.summary_status === 'failed' || currentTask.summary_status === 'missing'" class="summary-retry" type="button" @click="retrySummary">重试摘要</button>
       </section>
+      <button v-if="selectedBackground" class="background-backdrop" type="button" aria-label="关闭后台进程详情" @click="backgroundOpenTurnId = ''" />
+      <section v-if="selectedBackground" class="background-popover" role="dialog" aria-label="后台进程详情">
+        <header class="background-heading">
+          <strong>后台进程 · {{ selectedBackground.processes.length }}</strong>
+          <span>{{ selectedBackground.role_name || selectedBackground.role_id }}</span>
+          <button type="button" title="关闭后台进程详情" @click="backgroundOpenTurnId = ''"><i class="bi bi-x-lg" /></button>
+        </header>
+        <div class="background-since">监测开始于 {{ formatTime(selectedBackground.since) }}</div>
+        <ul class="background-list">
+          <li v-for="process in selectedBackground.processes" :key="process.session_id">
+            <code>{{ process.command }}</code>
+            <span>PID {{ process.pid }} · 进程会话 {{ process.session_id }}</span>
+          </li>
+        </ul>
+      </section>
       <div ref="thread" class="timeline" @scroll.passive="onScroll">
         <button v-if="hasOlder" class="page-button" type="button" @click="loadOlder">加载更早消息</button><div v-if="loading && messages.length === 0" class="empty-state">加载中…</div>
         <article v-for="group in timeline" :key="group.id" class="turn-box" :class="{ user: group.user }" :data-message-id="groupAnchorId(group)">
           <header class="turn-header">
             <strong>{{ group.user ? 'User' : group.roleName }}</strong>
+            <button
+              v-if="!group.user && backgroundFor(group.turnId)"
+              class="background-trigger"
+              :class="{ active: backgroundOpenTurnId === group.turnId }"
+              type="button"
+              :title="`查看 ${backgroundFor(group.turnId)?.processes.length ?? 0} 个后台进程`"
+              :aria-expanded="backgroundOpenTurnId === group.turnId"
+              @click="toggleBackground(group.turnId)"
+            ><i class="bi bi-terminal" aria-hidden="true" /> 后台 {{ backgroundFor(group.turnId)?.processes.length }}</button>
             <span v-for="entry in queuedFor(group.turnId)" :key="entry.dispatch_id" class="queued-meta">
               <i class="bi bi-hourglass-split" aria-hidden="true" />
               <span>排队 #{{ entry.position }}</span>
@@ -510,6 +549,30 @@ onBeforeUnmount(() => {
 .summary-text,
 .summary-empty { font-size: var(--font-size-ui); line-height: 1.5; margin: 8px 0; white-space: pre-wrap; }
 .summary-empty { color: var(--color-text-muted); }
+.background-backdrop { background: transparent; border: 0; inset: 0; padding: 0; position: absolute; z-index: 14; }
+.background-popover {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--bs-body-color) 18%, transparent);
+  max-height: min(60vh, calc(100% - 48px));
+  overflow: auto;
+  padding: 10px 12px;
+  position: absolute;
+  right: 8px;
+  top: 42px;
+  width: min(560px, calc(100% - 16px));
+  z-index: 15;
+}
+.background-heading { align-items: center; display: flex; font-size: var(--font-size-ui); gap: 8px; }
+.background-heading > span { color: var(--color-text-muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.background-heading > button { background: transparent; border: 0; color: var(--color-text-muted); font-size: var(--font-size-ui-small); padding: 2px 4px; }
+.background-heading > button:hover { color: var(--color-text); }
+.background-since { color: var(--color-text-muted); font-size: var(--font-size-ui-small); margin-top: 4px; }
+.background-list { display: flex; flex-direction: column; gap: 8px; list-style: none; margin: 10px 0 0; padding: 0; }
+.background-list li { border-top: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent); display: flex; flex-direction: column; gap: 3px; padding-top: 8px; }
+.background-list code { color: var(--color-text); font-size: var(--font-size-code); overflow-wrap: anywhere; white-space: pre-wrap; }
+.background-list span { color: var(--color-text-muted); font-size: var(--font-size-ui-small); overflow-wrap: anywhere; }
 
 /* Old Viewer turn styling: quiet metadata, one muted surface per Turn, and
    compact content typography. Activity rows remain boxless inside it. */
@@ -538,6 +601,9 @@ onBeforeUnmount(() => {
 }
 .turn-header time { color: var(--color-text-muted); flex: 0 0 auto; font-size: var(--font-size-ui-small); line-height: 1.2; margin-left: auto; }
 .turn-running { align-items: center; color: var(--bs-primary); display: inline-flex; flex: 0 0 auto; font-size: calc(var(--font-size-ui) * 7 / 8); gap: 4px; }
+.background-trigger { align-items: center; background: transparent; border: 0; color: var(--bs-primary); display: inline-flex; flex: 0 0 auto; font-size: var(--font-size-ui-small); gap: 3px; line-height: 1.2; padding: 0 2px; }
+.background-trigger:hover,
+.background-trigger.active { color: var(--color-accent); }
 .cite-button,
 .turn-stop-button { background: none; border: 0; font-size: var(--font-size-ui); line-height: 1; padding: 0 2px; }
 .cite-button { color: var(--color-text-muted); }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, ref, watchEffect } from "vue";
-import type { PluginCtx } from "@viewer/bus-sdk";
+import { uuidv4, type PluginCtx } from "@viewer/bus-sdk";
 
 interface Viewport {
   css_width: number;
@@ -40,7 +40,7 @@ const injected = inject<PluginCtx>("pluginCtx");
 if (injected === undefined) throw new Error("BrowserPane requires pluginCtx");
 const ctx: PluginCtx = injected;
 const pageID = ctx.instanceId;
-const viewerID = crypto.randomUUID();
+const viewerID = uuidv4();
 const stage = ref<HTMLDivElement>();
 const video = ref<HTMLVideoElement>();
 const keyboard = ref<HTMLTextAreaElement>();

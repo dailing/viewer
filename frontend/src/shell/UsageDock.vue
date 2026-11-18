@@ -46,21 +46,6 @@ function paceFor(window: UsageWindow | null): UsagePace | null {
   return usagePace(window, now.value);
 }
 
-function summaryLine(account: UsageAccount): string {
-  const short = accountWindow(account, "5h");
-  if (short !== null && short.used_percent >= 100) return `5h 已用尽 · ${formatCountdown(short.reset_at, now.value)}`;
-  const main = mainWindow(account);
-  if (main === null) return account.error || "暂无窗口数据";
-  const pace = paceFor(main);
-  return [paceLabel(pace), formatCountdown(main.reset_at, now.value)].filter(Boolean).join(" · ");
-}
-
-function summaryTone(account: UsageAccount): UsagePace["tone"] | "neutral" {
-  const short = accountWindow(account, "5h");
-  if (short !== null && short.used_percent >= 100) return "exhausted";
-  return paceFor(mainWindow(account))?.tone ?? "neutral";
-}
-
 function trackTitle(window: UsageWindow | null): string {
   if (window === null) return "暂无额度窗口";
   const pace = paceFor(window);
@@ -168,7 +153,6 @@ onBeforeUnmount(() => {
         <span class="usage-track-fill" :style="{ width: `${mainWindow(account)!.used_percent}%` }"></span>
         <span class="usage-track-time" :style="{ left: `${paceFor(mainWindow(account))!.elapsedPercent}%` }"></span>
       </span>
-      <span class="usage-summary" :class="`usage-text-${summaryTone(account)}`">{{ summaryLine(account) }}</span>
     </button>
 
     <button v-if="visibleAccounts.length === 0" type="button" class="usage-empty" :disabled="loading" @click="refresh(true)">
@@ -207,7 +191,7 @@ onBeforeUnmount(() => {
           <span class="usage-track-time" :style="{ left: `${paceFor(accountWindow(detailsAccount, '7d'))!.elapsedPercent}%` }"></span>
         </div>
         <div v-if="paceFor(accountWindow(detailsAccount, '7d'))" class="usage-pace-explanation" :class="`usage-text-${paceFor(accountWindow(detailsAccount, '7d'))!.tone}`">
-          {{ paceExplanation(paceFor(accountWindow(detailsAccount, '7d'))!) }}
+          {{ paceLabel(paceFor(accountWindow(detailsAccount, '7d'))!) }} · {{ paceExplanation(paceFor(accountWindow(detailsAccount, '7d'))!) }}
         </div>
         <div class="usage-detail-line">剩余 {{ remainingPercent(accountWindow(detailsAccount, '7d')!) }}% · {{ formatCountdown(accountWindow(detailsAccount, '7d')!.reset_at, now) }}</div>
         <div class="usage-exact">{{ exactReset(accountWindow(detailsAccount, '7d')) }}</div>
@@ -250,7 +234,6 @@ onBeforeUnmount(() => {
 .usage-heading { align-items: center; display: flex; gap: 6px; width: 100%; }
 .usage-name { color: var(--color-text); font-size: var(--font-size-ui); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-remaining { flex: 0 0 auto; font-size: var(--font-size-ui-small); margin-left: auto; }
-.usage-summary { font-size: var(--font-size-ui-small); line-height: 1.25; }
 .usage-track { background: var(--color-surface-selected); border-radius: 2px; display: block; height: 5px; overflow: visible; position: relative; width: 100%; }
 .usage-track-fill { background: var(--color-text-subtle); border-radius: 2px; bottom: 0; left: 0; position: absolute; top: 0; }
 .usage-track-time { background: var(--color-text); bottom: -2px; position: absolute; top: -2px; width: 1px; }

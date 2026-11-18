@@ -45,12 +45,13 @@ type Block struct {
 }
 
 type EventFrame struct {
-	SessionID string `json:"session_id"`
-	TurnID    string `json:"turn_id"`
-	Seq       int    `json:"seq"`
-	Kind      string `json:"kind"`
-	RawJSON   string `json:"raw_json"`
-	Block     Block  `json:"block"`
+	SessionID string      `json:"session_id"`
+	TurnID    string      `json:"turn_id"`
+	Seq       int         `json:"seq"`
+	Kind      string      `json:"kind"`
+	RawJSON   string      `json:"raw_json"`
+	Block     Block       `json:"block"`
+	Usage     *TokenUsage `json:"usage,omitempty"`
 }
 
 type TurnEndedFrame struct {

@@ -203,6 +203,19 @@ async def run() -> None:
             print("PI_BUS_EVENT_SAMPLE", json.dumps(next(item for item in pi_events if item["kind"] == "get_session_stats"), separators=(",", ":")))
             print("PASS pi native RPC bus start -> prompt -> normalized/raw event persistence -> session stats -> turn-ended")
 
+            metrics = await client.request("chat:_:metrics:dashboard", {"chat_id": pi_chat["id"], "timezone": "UTC"})
+            print("METRICS_SUMMARY_SAMPLE", metrics["summary"])
+            print("METRICS_TOP_SAMPLE", metrics["top_tasks"], metrics["top_turns"])
+            assert metrics["summary"]["prompts"] == 1 and metrics["summary"]["turns"] == 1
+            assert metrics["summary"]["total_tokens"] == 110, metrics["summary"]
+            assert metrics["summary"]["tool_calls"] >= 3 and metrics["top_tasks"] and metrics["top_turns"]
+            assert metrics["top_tools"][0]["calls"] >= 1 and metrics["daily"]
+            llm_metrics = await client.request("llm:_:metrics:dashboard", {"chat_id": pi_chat["id"], "timezone": "UTC"})
+            print("LLM_METRICS_SUMMARY_SAMPLE", llm_metrics["summary"])
+            assert llm_metrics["available"] is True and llm_metrics["summary"]["attempts"] == 0
+            assert llm_metrics["summary"]["total_tokens"] == 0 and llm_metrics["daily"]
+            print("PASS metrics RPCs expose real Agent usage without polluting the independent LLM token ledger")
+
             failover_role = await client.request("chat:_:roles:create", {"name": "Fallback", "description": "fallback", "prompt": "FALLBACK-RULE", "provider": "codex-app-server", "routing_policy_id": "failover-policy"})
             failover_chat = await client.request("chat:_:chats:create", {"name": "Failover", "root": str(ROOT), "type": "direct", "member_role_ids": [failover_role["id"]]})
             await send(client, failover_chat["id"], message="fallback hello", role_ids=[failover_role["id"]])

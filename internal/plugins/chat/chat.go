@@ -21,7 +21,7 @@ import (
 )
 
 var Manifest = busclient.Manifest{
-	ID: "chat", Version: "1.2.1",
+	ID: "chat", Version: "1.3.0",
 	Slots: map[string]any{
 		"chat:_:workspace:get": map[string]any{}, "chat:_:workspace:patch": map[string]any{},
 		"chat:_:roles:list": map[string]any{}, "chat:_:roles:create": map[string]any{}, "chat:_:roles:patch": map[string]any{}, "chat:_:roles:delete": map[string]any{},
@@ -33,7 +33,7 @@ var Manifest = busclient.Manifest{
 		"chat:_:decisions:list": map[string]any{}, "chat:_:decisions:respond": map[string]any{}, "chat:_:decisions:cancel": map[string]any{}, "chat:_:decisions:open": map[string]any{}, "chat:_:decisions:context": map[string]any{}, "chat:_:tasks:export": map[string]any{},
 		"chat:_:stop": map[string]any{}, "chat:_:queued-cancel": map[string]any{}, "chat:_:queued-update": map[string]any{}, "chat:_:draft:get": map[string]any{}, "chat:_:draft:set": map[string]any{},
 		"chat:_:agent-catalog": map[string]any{}, "chat:_:agent-catalog-refresh": map[string]any{}, "chat:_:blocks:list": map[string]any{},
-		"chat:_:voice:invoke": map[string]any{},
+		"chat:_:voice:invoke": map[string]any{}, "chat:_:metrics:dashboard": map[string]any{},
 	},
 	Emits: map[string]any{
 		"chat:*:message": map[string]any{}, "chat:*:block": map[string]any{}, "chat:*:turn-completed": map[string]any{}, "chat:_:active": map[string]any{},
@@ -148,7 +148,7 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 		"chat:_:decisions:list": p.handleDecisionsList, "chat:_:decisions:respond": p.handleDecisionRespond, "chat:_:decisions:cancel": p.handleDecisionCancel, "chat:_:decisions:open": p.handleDecisionOpen, "chat:_:decisions:context": p.handleDecisionContext, "chat:_:tasks:export": p.handleTaskExport,
 		"chat:_:stop": p.handleStop, "chat:_:queued-cancel": p.handleQueuedCancel, "chat:_:queued-update": p.handleQueuedUpdate, "chat:_:draft:get": p.handleDraftGet, "chat:_:draft:set": p.handleDraftSet,
 		"chat:_:agent-catalog": p.handleAgentCatalog, "chat:_:agent-catalog-refresh": p.handleAgentCatalogRefresh, "chat:_:blocks:list": p.handleBlocksList,
-		"chat:_:voice:invoke": p.handleVoiceInvoke,
+		"chat:_:voice:invoke": p.handleVoiceInvoke, "chat:_:metrics:dashboard": p.handleMetricsDashboard,
 	}
 	for pattern, handler := range handlers {
 		asyncHandler := handler
@@ -167,6 +167,9 @@ func (p *Plugin) Start(ctx context.Context, kernelWS string, managed bool) error
 	}
 	p.llmFn = p.llmCompleteViaBus
 	p.routeLLMFn = p.llmCompleteRouteViaBus
+	if err := p.backfillCodexTokenUsage(); err != nil {
+		slog.Warn("Codex token usage backfill failed", "error", err)
+	}
 	if err := p.recoverTaskWork(); err != nil {
 		return err
 	}
@@ -448,6 +451,7 @@ func (p *Plugin) handleChatsList(frame busclient.Frame) {
 	result["task"] = task.payload()
 	result["running_turns"] = p.runningTaskTurns(taskID)
 	result["background_task_ids"] = p.backgroundTaskIDs(task.ChatID)
+	result["background_turns"] = p.backgroundTurns(taskID)
 	targets, err := p.store.chatTurnTargets(taskID)
 	if err != nil {
 		p.reply(frame, nil, err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -293,6 +294,16 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 	// The caller's model is the requested model: its configs are tried first
 	// (see buildCandidates); the serving config's own model is sent upstream.
 	requested, _ := body["model"].(string)
+	callID := p.beginCall("http", "http_facade", "http_facade", requested, callTracking{Purpose: "http_facade"})
+	defer func() {
+		var callErr error
+		if requestError != "" {
+			callErr = errors.New(requestError)
+		} else if upstreamStatus < 200 || upstreamStatus >= 300 {
+			callErr = errors.New("upstream HTTP status was not successful")
+		}
+		p.finishCall(callID, callErr)
+	}()
 	chain, err := p.candidates(request.Context(), requested)
 	if err != nil {
 		requestError = err.Error()
@@ -311,6 +322,11 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 	var response *http.Response
 	cancel := context.CancelFunc(func() {})
 	var failures []string
+	attempt := 0
+	committedAttempt := 0
+	var committedProfile string
+	var committedModel string
+	var committedStartedAt time.Time
 	for _, entry := range chain {
 		key := entry.key()
 		if p.router.cooled(key) {
@@ -327,6 +343,14 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 			}
 		}
 		candidateBody["model"] = config.Model
+		if streaming, _ := candidateBody["stream"].(bool); streaming {
+			streamOptions, _ := candidateBody["stream_options"].(map[string]any)
+			if streamOptions == nil {
+				streamOptions = map[string]any{}
+			}
+			streamOptions["include_usage"] = true
+			candidateBody["stream_options"] = streamOptions
+		}
 		encoded, err := json.Marshal(candidateBody)
 		if err != nil {
 			requestError = err.Error()
@@ -353,8 +377,11 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 		if config.APIKey != "" {
 			upstream.Header.Set("Authorization", "Bearer "+config.APIKey)
 		}
+		attempt++
+		attemptStartedAt := time.Now()
 		response, err = p.httpClient.Do(upstream)
 		if err != nil {
+			p.recordAttempt(callID, attempt, entry.name, requested, config.Model, attemptStartedAt, err, nil)
 			attemptCancel()
 			p.router.fail(key)
 			upstreamStatus = 0
@@ -367,6 +394,7 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 			upstreamStatus = status
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 			response.Body.Close()
+			p.recordAttempt(callID, attempt, entry.name, requested, config.Model, attemptStartedAt, fmt.Errorf("upstream HTTP %d", status), nil)
 			response = nil
 			attemptCancel()
 			p.router.fail(key)
@@ -376,6 +404,7 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 		}
 		p.router.succeed(key)
 		cancel = attemptCancel
+		committedAttempt, committedProfile, committedModel, committedStartedAt = attempt, entry.name, config.Model, attemptStartedAt
 		break
 	}
 	if response == nil {
@@ -395,9 +424,16 @@ func (p *Plugin) serveChatCompletions(writer http.ResponseWriter, request *http.
 		}
 	}
 	writer.WriteHeader(response.StatusCode)
-	if _, err := io.Copy(writer, response.Body); err != nil {
-		requestError = err.Error()
+	capture := &responseUsageCapture{}
+	_, copyErr := io.Copy(io.MultiWriter(writer, capture), response.Body)
+	if copyErr != nil {
+		requestError = copyErr.Error()
 	}
+	attemptErr := copyErr
+	if attemptErr == nil && (response.StatusCode < 200 || response.StatusCode >= 300) {
+		attemptErr = fmt.Errorf("upstream HTTP %d", response.StatusCode)
+	}
+	p.recordAttempt(callID, committedAttempt, committedProfile, requested, committedModel, committedStartedAt, attemptErr, usageFromResponseBytes(capture.Bytes()))
 }
 
 type limitedLogBuffer struct {

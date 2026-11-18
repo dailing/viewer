@@ -529,7 +529,8 @@ func (p *Plugin) selectRoles(request dispatchRequest, raw map[string]any, chat C
 	}
 	config := p.dispatchRouterConfig(p.ctx)
 	started := time.Now()
-	ids, rationale, err := routeWithLLM(p.ctx, p.routeLLMFn, request.Message, eligible, history, config)
+	routeContext := withLLMTracking(p.ctx, "dispatch_router", chat.ID, request.TaskID, "", request.DispatchID)
+	ids, rationale, err := routeWithLLM(routeContext, p.routeLLMFn, request.Message, eligible, history, config)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
 		slog.Warn("chat dispatch routing failed", "chat_id", chat.ID, "task_id", request.TaskID, "dispatch_id", request.DispatchID, "model", config.Model, "latency_ms", latency, "error", err)
@@ -1021,7 +1022,7 @@ func (p *Plugin) runRelay(chat Chat, workspace Workspace, targets []relayTarget,
 			go func(id, provider string) { defer p.wg.Done(); p.generateTurnSummary(id, provider) }(turnID, summaryProvider)
 		}
 		if turnSession != "" {
-			sessions = append(sessions, relaySession{pluginID: turnPluginID, sessionID: turnSession, task: target.task, role: role})
+			sessions = append(sessions, relaySession{pluginID: turnPluginID, sessionID: turnSession, task: target.task, turnID: turnID, role: role})
 		}
 		if err != nil || reason == "error" || reason == "cancelled" {
 			break

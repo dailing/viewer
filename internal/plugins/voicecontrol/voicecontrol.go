@@ -739,6 +739,7 @@ func (p *Plugin) llmCompleteViaBus(ctx context.Context, messages []map[string]st
 	}
 	value, err := p.client.Request(ctx, "llm:_:complete", map[string]any{
 		"messages": messages, "json_mode": jsonMode, "timeout_seconds": timeoutSeconds,
+		"tracking": map[string]any{"purpose": "voice_refine"},
 		// Voice is latency-sensitive: ask thinking-capable endpoints to skip
 		// reasoning. Passed through verbatim by the llm plugin; endpoints that
 		// don't know the field ignore or reject it (surfaced as llm_error).

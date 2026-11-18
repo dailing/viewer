@@ -37,6 +37,7 @@ type backgroundProcess struct {
 type backgroundBlock struct {
 	chatID    string
 	taskID    string
+	turnID    string
 	role      SuperRole
 	pluginID  string
 	sessionID string
@@ -52,6 +53,7 @@ type relaySession struct {
 	pluginID  string
 	sessionID string
 	task      string
+	turnID    string
 	role      SuperRole
 }
 
@@ -127,6 +129,18 @@ func (p *Plugin) queryBackground(pluginID, sessionID string) ([]backgroundProces
 	return reply.Processes, nil
 }
 
+func backgroundProcessesChanged(previous, current []backgroundProcess) bool {
+	if len(previous) != len(current) {
+		return true
+	}
+	for index := range current {
+		if previous[index] != current[index] {
+			return true
+		}
+	}
+	return false
+}
+
 // releaseBusyOrHold replaces releaseBusy at relay end: a line whose relay
 // sessions still have live background processes stays busy (queued messages
 // keep queueing) under a background block; everything else releases
@@ -158,13 +172,13 @@ func (p *Plugin) holdForBackground(key string, sessions []relaySession) bool {
 		}
 		p.mu.Lock()
 		p.background[key] = &backgroundBlock{
-			chatID: strings.SplitN(key, "\x00", 2)[0], taskID: session.task,
+			chatID: strings.SplitN(key, "\x00", 2)[0], taskID: session.task, turnID: session.turnID,
 			role: session.role, pluginID: session.pluginID, sessionID: session.sessionID,
 			processes: processes, since: nowMillis(),
 		}
 		p.mu.Unlock()
-		slog.Info("chat line held for background processes", "chat_id", strings.SplitN(key, "\x00", 2)[0], "task", session.task, "role_id", session.role.ID, "session_id", session.sessionID, "processes", len(processes))
-		p.publishBackground(key)
+		slog.Info("chat line held for background processes", "chat_id", strings.SplitN(key, "\x00", 2)[0], "task", session.task, "turn_id", session.turnID, "role_id", session.role.ID, "session_id", session.sessionID, "processes", len(processes))
+		p.publishBackground(key, nil)
 		p.ensureBackgroundWatcher()
 		return true
 	}
@@ -224,12 +238,15 @@ func (p *Plugin) watchBackground() {
 				continue
 			}
 			current.errors = 0
+			changed := backgroundProcessesChanged(current.processes, processes)
 			if len(processes) > 0 {
 				current.processes = processes
 			}
 			p.mu.Unlock()
 			if len(processes) == 0 {
 				p.completeBackground(key)
+			} else if changed {
+				p.publishBackground(key, nil)
 			}
 		}
 	}
@@ -239,13 +256,13 @@ func (p *Plugin) watchBackground() {
 // completion turn (poll-error tolerance, stop escape, vanished chat).
 func (p *Plugin) dropBackgroundBlock(key, reason string) {
 	p.mu.Lock()
-	_, existed := p.background[key]
+	block := p.background[key]
 	delete(p.background, key)
 	p.mu.Unlock()
-	if !existed {
+	if block == nil {
 		return
 	}
-	p.publishBackground(key)
+	p.publishBackground(key, block)
 	p.releaseBusy([]string{key})
 	slog.Info("chat background block dropped", "line_key", strings.ReplaceAll(key, "\x00", "/"), "reason", reason)
 }
@@ -264,7 +281,7 @@ func (p *Plugin) completeBackground(key string) {
 	}
 	delete(p.background, key)
 	p.mu.Unlock()
-	p.publishBackground(key)
+	p.publishBackground(key, block)
 	slog.Info("chat background processes finished; dispatching completion", "chat_id", block.chatID, "task", block.taskID, "session_id", block.sessionID, "held_ms", nowMillis()-block.since)
 	chat, err := p.store.chat(block.chatID)
 	if err != nil || chat == nil {
@@ -332,24 +349,61 @@ func backgroundCompletionText(block *backgroundBlock) string {
 
 // publishBackground pushes one line's background-hold state (active with
 // the live process list, or inactive after release) on the background feed.
-func (p *Plugin) publishBackground(key string) {
+// Released blocks are passed back so the inactive frame retains the exact
+// source Turn identity needed to remove only that message's indicator.
+func (p *Plugin) publishBackground(key string, released *backgroundBlock) {
 	p.mu.Lock()
-	block := p.background[key]
+	current := p.background[key]
+	var payload map[string]any
+	if current != nil {
+		payload = backgroundPayload(key, current, true)
+	}
 	p.mu.Unlock()
+	if payload == nil {
+		payload = backgroundPayload(key, released, false)
+	}
+	p.publish("chat:_:background", payload)
+}
+
+func backgroundPayload(key string, block *backgroundBlock, active bool) map[string]any {
 	chatID := strings.SplitN(key, "\x00", 2)[0]
 	taskID := ""
 	if parts := strings.SplitN(key, "\x00", 3); len(parts) == 3 {
 		taskID = parts[2]
 	}
-	payload := map[string]any{"chat_id": chatID, "task_id": taskID, "active": false}
 	if block != nil {
-		processes := make([]map[string]any, 0, len(block.processes))
-		for _, process := range block.processes {
-			processes = append(processes, map[string]any{"session_id": process.SessionID, "command": process.Command, "pid": process.PID})
-		}
-		payload = map[string]any{"chat_id": chatID, "active": true, "task_id": block.taskID, "session_id": block.sessionID, "role_id": block.role.ID, "role_name": block.role.Name, "processes": processes, "since": block.since}
+		chatID, taskID = block.chatID, block.taskID
 	}
-	p.publish("chat:_:background", payload)
+	payload := map[string]any{"chat_id": chatID, "task_id": taskID, "active": active}
+	if block == nil {
+		return payload
+	}
+	processes := make([]map[string]any, 0, len(block.processes))
+	for _, process := range block.processes {
+		processes = append(processes, map[string]any{"session_id": process.SessionID, "command": process.Command, "pid": process.PID})
+	}
+	payload["turn_id"] = block.turnID
+	payload["session_id"] = block.sessionID
+	payload["role_id"] = block.role.ID
+	payload["role_name"] = block.role.Name
+	payload["processes"] = processes
+	payload["since"] = block.since
+	return payload
+}
+
+// backgroundTurns returns the active per-Turn process snapshot for history
+// reads, allowing a remounted Task pane to restore badges and detail cards.
+func (p *Plugin) backgroundTurns(taskID string) []map[string]any {
+	p.mu.Lock()
+	result := []map[string]any{}
+	for key, block := range p.background {
+		if block.taskID == taskID {
+			result = append(result, backgroundPayload(key, block, true))
+		}
+	}
+	p.mu.Unlock()
+	sort.Slice(result, func(i, j int) bool { return result[i]["turn_id"].(string) < result[j]["turn_id"].(string) })
+	return result
 }
 
 // backgroundTaskIDs returns the named lines currently held by live

@@ -27,6 +27,10 @@ func TestPushAssetsSDK(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(small, "frontend.js"), []byte("export default {};\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Vite emits shared chunks with a leading underscore.
+	if err := os.WriteFile(filepath.Join(small, "_plugin-vue_export-helper-test.js"), []byte("export {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	reply, err := busclient.PushAssets(ctx, caller, small, map[string]any{"name": "My Plugin"})
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +38,11 @@ func TestPushAssetsSDK(t *testing.T) {
 	entry, ok := reply.(map[string]any)
 	if !ok || entry["entry"] != "frontend.js" || entry["url"] == "" {
 		t.Fatalf("reply=%#v", reply)
+	}
+	recorder := httptest.NewRecorder()
+	server.serveHTTP(recorder, httptest.NewRequest(http.MethodGet, entry["url"].(string)+"_plugin-vue_export-helper-test.js", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "export {};\n" {
+		t.Fatalf("GET underscore chunk: code=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 
 	// Missing entry file fails before touching the bus.
@@ -65,7 +74,7 @@ func TestPushAssetsSDK(t *testing.T) {
 	if url == "" {
 		t.Fatalf("reply=%#v", reply)
 	}
-	recorder := httptest.NewRecorder()
+	recorder = httptest.NewRecorder()
 	server.serveHTTP(recorder, httptest.NewRequest(http.MethodGet, url+"frontend.js", nil))
 	if recorder.Code != http.StatusOK || len(recorder.Body.Bytes()) != len(payload) {
 		t.Fatalf("GET: code=%d len=%d want %d", recorder.Code, len(recorder.Body.Bytes()), len(payload))

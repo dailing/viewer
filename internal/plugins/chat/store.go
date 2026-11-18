@@ -51,7 +51,7 @@ type Task struct {
 	CausationID         string `json:"causation_id"`
 	CorrelationID       string `json:"correlation_id"`
 	Pinned              bool   `json:"pinned"`
-	CreatedAt           int64  `json:"created_at"`
+	CreatedAt           int64  `gorm:"index" json:"created_at"`
 	UpdatedAt           int64  `json:"updated_at"`
 	EndedAt             *int64 `gorm:"index" json:"ended_at"`
 }
@@ -196,6 +196,26 @@ type Turn struct {
 	StopReason *string
 }
 
+type AgentTokenUsage struct {
+	ID                    string `gorm:"primaryKey"`
+	EventID               string `gorm:"uniqueIndex;not null"`
+	ChatID                string `gorm:"index;not null"`
+	TaskID                string `gorm:"index:idx_agent_usage_task_occurred,priority:1;not null"`
+	TurnID                string `gorm:"index;not null"`
+	Agent                 string
+	Provider              string
+	Model                 string
+	InputTokens           *int64
+	CachedInputTokens     *int64
+	CacheWriteInputTokens *int64
+	OutputTokens          *int64
+	ReasoningOutputTokens *int64
+	TotalTokens           *int64
+	OccurredAt            int64 `gorm:"index;index:idx_agent_usage_task_occurred,priority:2"`
+}
+
+func (AgentTokenUsage) TableName() string { return "agent_token_usages" }
+
 type TurnSummary struct {
 	TurnID             string `gorm:"primaryKey"`
 	ChatID             string `gorm:"index;not null"`
@@ -291,7 +311,7 @@ func openStorePath(path string) (*store, error) {
 			return nil, ErrLegacyChatSchema
 		}
 	}
-	if err := db.AutoMigrate(&Chat{}, &Task{}, &TaskSummary{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &OperationReceipt{}, &Draft{}, &Decision{}, &ContextBuild{}); err != nil {
+	if err := db.AutoMigrate(&Chat{}, &Task{}, &TaskSummary{}, &SuperRole{}, &RoutingPolicyRow{}, &RoleSession{}, &Message{}, &Turn{}, &AgentTokenUsage{}, &TurnSummary{}, &TurnEvent{}, &MessageBlock{}, &PluginState{}, &OperationReceipt{}, &Draft{}, &Decision{}, &ContextBuild{}); err != nil {
 		return nil, fmt.Errorf("migrate chat database: %w", err)
 	}
 	if err := db.Save(&PluginState{Key: "chat_schema_version", Value: chatSchemaVersion}).Error; err != nil {
@@ -588,7 +608,7 @@ func (s *store) importDomain(roles []SuperRole, routing RoutingConfig) error {
 
 func (s *store) deleteChat(id string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &Turn{}, &TurnSummary{}, &TaskSummary{}, &RoleSession{}, &ContextBuild{}, &Decision{}, &OperationReceipt{}, &Draft{}, &Task{}} {
+		for _, model := range []any{&MessageBlock{}, &TurnEvent{}, &Message{}, &AgentTokenUsage{}, &Turn{}, &TurnSummary{}, &TaskSummary{}, &RoleSession{}, &ContextBuild{}, &Decision{}, &OperationReceipt{}, &Draft{}, &Task{}} {
 			if err := tx.Where("chat_id = ?", id).Delete(model).Error; err != nil {
 				return err
 			}

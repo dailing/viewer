@@ -1,6 +1,11 @@
 # Viewer Plugin Framework 设计文档
 
-> 状态：**草案 v1.38**（2026-11-16）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`。**
+> 状态：**草案 v1.43**（2026-11-18）。本文档是架构决策的唯一权威来源，逐节评审、迭代定稿。只记录已决定的内容，不记录决策过程。**线路级协议规范见 `docs/plugin-protocol.md`。**
+> v1.43 变更：**Metrics 双账本与真实 Token 采集**——Agent 每次模型响应的 usage 持久化到 Chat 的 `agent_token_usages`，Viewer 自身 RPC/HTTP LLM 调用及 fallback attempts 独立写入 `llm.sqlite3`；两套账不相加，缓存/reasoning 只作子集，ACP 上下文占用不算消耗。新增 Chat/LLM 聚合 RPC 和 Metrics 前端，提供筛选、趋势、热力图与 Top 10。
+> v1.42 变更：**来源 Turn 的后台进程计数与详情**——Hermes 仍是唯一声明后台进程 RPC 的 Agent；Chat 将存活进程列表绑定到来源 Turn，并在历史快照和实时事件中携带同一身份。Agent 消息标题行显示紧凑后台数量，点击打开浮层查看命令、PID 与进程会话 ID；部分进程退出时实时更新，全部结束后只移除对应 Turn 的指示。
+> v1.41 变更：**Browser Page 关闭 pane 后保留 Dock 恢复入口**——Browser Dock 列出后端状态中的所有已打开 Page，不再按 active watcher 过滤。关闭最后一个 pane 只停止观看与视频流，Page 条目仍保留，点击即可重新打开；只有显式关闭 Page 才移除条目。
+> v1.40 变更：**新 pending Decision 取代同 Task 旧 pending**——Turn 结束持久化新的 pending Decision 时，在同一事务中取消同 Task 全部其他 pending Decision，保留 `dispatching`、历史状态和其他 Task 不变。后台任务完成唤醒等连续 Turn 因此不再累积可回复 Decision，被取消项仍保留在历史中。
+> v1.39 变更：**Browser 前端资产与 plain HTTP 初始化修复**——Gateway 资产相对路径允许首字符为 `_`，接受 Vite 生成的共享 chunk，避免整包上传失败后 Dock 缺少插件入口。TS SDK 公开 `uuidv4()`，Browser pane 改用该安全/非安全上下文均可用的 UUID 助手，避免局域网 HTTP 下组件初始化空白。
 > v1.38 变更：**Dock 额度节奏与供应商配额 RPC**——`llm:_:usage` 按 Kimi profile 读取 Coding Plan 5 小时/7 天窗口，`viewer.agent-codex:_:usage` 经 App Server `account/rateLimits/read` 返回同一配额结构，浏览器不接触凭据。Dock 展开时在底部操作区上方显示周余量、已用额度条与时间进度刻度，5 小时用尽优先提示；详情提供短窗口、准确重置时间、手动刷新和 Kimi active/固定账号选择，无可靠周期边界时不绘制时间进度。
 > v1.37 变更：**计划重启改为空闲后构建**——`POST /api/admin/schedule-restart` 只武装等待，不再立即构建；watchdog 检测到无 running Chat Turn、无活动 voice relay 后才运行 release build，成功直接优雅重启。这样构建包含等待期间 Agent 对 Viewer 自身完成的修改；构建失败仍落 `failed`，等待及构建中均可取消。
 > v1.36 变更：**Decision Center 来源与摘要阅读顺序**——待处理条目按 Chat/Task 来源行 → 普通字重摘要 → 可折叠来源消息 → 回复选项排列；摘要不再作为加粗标题，来源消息与回复控件纳入同一左侧竖线，历史摘要同步取消加粗。
@@ -408,14 +413,14 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 - **紧凑 Dock 与 ended Task 续聊（v1.13）**：分组行和 Task 行采用紧凑行高，条目之间无额外 gap。composer 对 open/ended Task 均固定显示；ended Task 的普通人工发送显式携带 `reopen_ended=true`，后端先恢复 open 再执行同一 dispatch。旧 summary 文本保留但取消 final，下一次 end 重新生成 final summary。未显式携带该字段的调用不得隐式重开。
 - **Chat 名称切换分组（v1.14，v1.26 持久化）**：分组默认全部折叠，不显示独立 chevron；点击 Chat 名称展开或折叠其 Tasks。展开的 group key 集合保存于浏览器本地 `viewer.dock.expandedGroups.v1`，刷新后恢复；空分组也保留其展开偏好。Dock hover 展开和新建菜单仍为会话瞬态，不持久化。
 - **预览重启代际与独立 Composer（v1.15）**：独立二进制通过 `VIEWER_REPO_ROOT` 找到源码，release build 输出到当前 executable；手动预览启动时清除继承的 `INVOCATION_ID`。普通重启比较首页 `X-Viewer-Process`，确认新进程后才刷新。composer 是 Task 根 flex 布局中消息 section 的兄弟节点，不放入消息的 overflow 裁切容器。
-- **Plain HTTP UUID（v1.16）**：前端组件统一调用 `utils/randomUUID.ts`，不得直接依赖仅安全上下文提供的 `crypto.randomUUID()`。回退仍生成 RFC 4122 UUID，保证局域网 HTTP 下 composer、文件实例、文件 watch 和 LLM 配置正常初始化。
+- **Plain HTTP UUID（v1.16，v1.39 外部插件补齐）**：内置前端组件统一调用 `utils/randomUUID.ts`，外部插件调用 `@viewer/bus-sdk` 公开的 `uuidv4()`，均不得直接依赖仅安全上下文提供的 `crypto.randomUUID()`。回退仍生成 RFC 4122 UUID，保证局域网 HTTP 下 composer、文件实例、文件 watch、LLM 配置和 Browser pane 正常初始化。
 
 ### 8.8 Pane chrome 注册（v0.56 修订）
 
 - **workspace 单一 title bar**：所有 tiled panes 共用 shell 顶部一条抬头（active pane 的图标 + 标题 + 状态 + 插件 actions/controls + layout selector + move/refresh/add-or-split/float/close）；tile 内不再重复占用标题高度，以 accent border 标 active。浮动 pane 因需 drag handle 而保留自己的标题栏。**插件禁止自渲染标题栏**；插件自定义标题/按钮一律走注册，注册 API 不变。
 - **注册 API**：`ctx.setChrome({title?, status?, statusClass?, actions?, controls?})`，按 instance uid（`paneType:instanceId`）键控；ctx dispose 时自动清除。actions = `{id, title, icon?, label?, active?, variant?, run()}`；controls = `select`（options + onChange）或 `chips`（只读条目）——类型移植自老版 `stores/paneToolbar.ts`，语义不变。
 - **标题回退**：未注册时 shell 沿用自动标题（provider title + instance 标识）。
-- **dock 实例过滤（v1.12，v1.22 增补）**：chat 显示全部 open Tasks 并按上述弱分组组织，ended Tasks 不进入 Dock；pinned Chat 的空分组不是 Task 实例，可以常驻并创建新 Task。文件仍只显示置顶实例，Browser 仍只显示有 watcher 的已打开 Page，运行中终端不占位。完整 Chat 设置仍在 插件管理 → 聊天，完整 open/ended Task 管理归独立 Tasks 页面。
+- **dock 实例过滤（v1.12，v1.22 增补，v1.41 Browser 恢复入口）**：chat 显示全部 open Tasks 并按上述弱分组组织，ended Tasks 不进入 Dock；pinned Chat 的空分组不是 Task 实例，可以常驻并创建新 Task。文件仍只显示置顶实例，Browser 显示所有已打开 Page（包括没有 active watcher 的 Page），关闭 pane 后条目仍保留并可点击恢复，只有显式关闭 Page 才移除；运行中终端不占位。完整 Chat 设置仍在 插件管理 → 聊天，完整 open/ended Task 管理归独立 Tasks 页面。
 - **dock 自动展开（v0.26 引入，v0.27 修订）**：dock 默认纯图标窄条；hover 持续超过阈值自动展开，每个条目显示名字（图标 + 文本）；指针移出即收回。**v0.27 修订两点**：①展开改 **overlay**——展开面板覆盖在 workspace 之上，dock 的 flex 占位不变，右侧 pane 布局不因展开/收回而 reflow；②悬停延迟**可配**（默认 500ms，0 = 立即），入口为 dock 底部设置按钮，值持久化于 localStorage（view state，F6）。
 
 ### 8.9 管理面板版式约定（v0.27 定稿）
@@ -454,6 +459,13 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 - **入口**：Dock-foot 新增**全局动作扩展点** `createDockActions`（icon/title/active 为响应式 getter，任意插件可注册，渲染在 pin/设置按钮旁）；voice-control 的耳机 toggle 是第一个用户。composer 耳机按钮删除；Ctrl+Shift+M 提升为全局快捷键。voice-control 另挂 singleton Dock pane（v0.50）：日志 / Prompt / 功能目录三 tab 的调试面板。
 - **主动播报（基本版）**：voice-control 订阅 `chat:_:turn`（全局 turn 生命周期 feed），loop 开启时 turn 完成自动念该聊天最新回复摘要（复用 chat 的 read-latest + speakable）；`stop_reason=error` 直接念「XX 的任务执行失败」（失败 turn 无新回复可读，不读陈旧消息），cancelled 静默。开关 = 前端 toggle 同步 `voice-control:_:enable {enabled}`；播报经 `voice-control:_:announce` 推前端，播放时暂停麦克风、播完恢复，防回声。
 - **端点检测不变**（v0.47 结论保留）：不用带内关键词（无法区分命令与内容）；客户端静音端点检测（AnalyserNode RMS + 自适应阈值）：命令/确认 2s、口述 4s 尾静音自动结束；关键词只出现在确认回路（整句即答案，无歧义）与退出词（命令相整句本地匹配）。TTS = 浏览器 SpeechSynthesis 单槽队列，TTS 播完才开麦。命令/确认录音跳过 LLM refine（更快、保关键词），口述沿用用户 refine 设置。
+
+### 8.12 Metrics 双账本（v1.43）
+
+- **Agent 真实消耗**：Agent 驱动在事件帧的可选 `usage` 中上报单次真实模型响应；Codex 只取 `tokenUsage.last`，Pi 只取 `message_end`，ACP `usage_update.used/size` 仅保留上下文占用含义。Chat 将 usage 以 `turn_events.id` 去重写入 `chat.sqlite3.agent_token_usages`，并在启动时一次性回填历史 Codex `last`。
+- **Viewer 自身调用**：`llm:_:complete` 和 HTTP facade 写入独立 `llm.sqlite3` 的 `llm_calls`/`llm_call_attempts`，RPC `tracking` 仅携带 purpose 与 Chat/Task/Turn/Dispatch 关联，不转发上游。缓存输入、cache-write 和 reasoning output 是子集，不重复加入 total；缺失 usage 保持缺失并显示覆盖率，不做文本估算，两套账不相加。
+- **聚合 RPC**：`chat:_:metrics:dashboard` 汇总 Task、Prompt、Turn、Decision、工具调用和 Agent Token；`llm:_:metrics:dashboard` 汇总 Viewer call/attempt、用途、模型与 Task。两者接受 `{from,to,timezone,chat_id?,task_id?}`，按毫秒半开区间和本地日分桶。
+- **前端**：`plugins/metrics` 提供日期/Chat/Task 筛选、日/周/月趋势、活动热力图及 Task/Turn/Role/Tool Top 10；Agent 与 Viewer LLM 分 Tab，避免重复解释。
 
 ## 9. 进程模型与监督
 
@@ -495,7 +507,7 @@ slot/emits 声明 payload 类型；hello 握手与 binding 物化时校验 sourc
 | C2 | instance-store | instance state CRUD（§7.2 数据落点）；自由 JSON，schema 归插件；每实例变更发 `instance-store:<plugin>:<instance>` mailbox（v0.72 起前端 files 实例注册表接入） |
 | C3 | file-service | resolve/read/hash/raw/list：引用签发 + 目录列表（v0.21，收紧程度待决议 §16-5）+ pdfpage：PDF 逐页 WebP 栅格化 + 白边裁切（v0.71；v0.83 起横/纵百分比 `trim_x`/`trim_y`）+ 磁盘 LRU 缓存（v0.70）+ watch/unwatch：打开文件变更监听（TTL 续约、目录级 fsnotify + 巡检、digest 变更才广播 `file:_:changed`，v0.74）+ dirs_only 目录树列表、串行分片 du/progress/cancel、mkdir/delete（v1.07） |
 | C4 | http-gateway | 单 WS 翻译器 + by-reference 数据面 + serve 前端静态资源 + `POST /api/admin/restart`（优雅自重启，v0.34）+ `POST /api/admin/build-restart`（后台 build 成功后自重启，v0.37）+ `POST /api/admin/schedule-restart`（武装并等空闲，空闲后后台 build 成功再自重启，v1.37）+ `GET /api/admin/schedule-restart`（状态 none/building/armed/failed，v0.43）+ `DELETE /api/admin/schedule-restart`（取消/复位，v0.44） |
-| C6 | llm | 全局 LLM 转发层：`llm:_:complete` 纯转发 OpenAI 兼容端点；配置 `plugins.llm`（v0.48，§8.11） |
+| C6 | llm | 全局 LLM 转发层：`llm:_:complete` 纯转发 OpenAI 兼容端点；配置 `plugins.llm`（v0.48，§8.11）；独立 call/attempt Token 账本与 `llm:_:metrics:dashboard`（v1.43，§8.12） |
 | C7 | voice-control | 全局语音控制：`voice-catalog:_:*` 目录合并 + 连续语音对话（LLM 直答或派发条目）+ 会话上下文压缩 + `chat:_:turn` 主动播报（v0.49，§8.11）+ 交互日志/可配置 prompt 模板/prompt 预览（v0.50，§8.11） |
 | C5 | automation-engine | 后期（§7.5） |
 
@@ -587,7 +599,7 @@ my-plugin/
 
 - 内核 config 维护插件注册表：条目指向 `~/.view/plugins/<id>/`（安装态）或**任意外部路径**（开发态，直接指向工作目录）。
 - **启动 ABI（固定 cmdline 契约，语言无关）**：插件后端入口 = 可执行文件 `backend/run`（Python entry / shell 脚本 / 编译二进制皆可）；supervisor 插件用固定参数拉起：`backend/run --kernel-ws ws://127.0.0.1:<port>`，参数集仅此一项、全框架统一，后续按需追加遇到再加。插件 spawn 自己子进程时传什么参数（如 chat 插件给 per-chat 子进程传 `--instance-id`）是**插件内部 ABI**，框架不约定（§9）。supervisor 插件与被拉起的插件进程之间只约定这一组参数 + §5 协议。
-- **前端资产管道（WS push + 内容寻址）**：所有插件（本地 supervised / standalone attach / 远程）hello 后经总线 RPC `gateway:_:assets:push` 主动 push 自己的 bundle 字节（§6.2 例外）；**gateway 不读任何插件目录**。gateway 存进内容寻址资产库 `~/.view/plugin-assets/<id>/<content-hash>/`，并维护 **`plugins:_:assets` mailbox**（id → url/hash）；shell 拿到的 URL 是 `/plugins/<id>/assets/<hash>/frontend.js`（与内核的 `plugins:_:list` 求交集后才成为入口，§8.6 规则 3b）。URL hash = 内容 hash，热更新 cache-bust 自动成立。SDK 在 hello 后自动 push，dev watch 模式下 dist 变化自动重推。
+- **前端资产管道（WS push + 内容寻址）**：所有插件（本地 supervised / standalone attach / 远程）hello 后经总线 RPC `gateway:_:assets:push` 主动 push 自己的 bundle 字节（§6.2 例外）；**gateway 不读任何插件目录**。gateway 存进内容寻址资产库 `~/.view/plugin-assets/<id>/<content-hash>/`，并维护 **`plugins:_:assets` mailbox**（id → url/hash）；shell 拿到的 URL 是 `/plugins/<id>/assets/<hash>/frontend.js`（与内核的 `plugins:_:list` 求交集后才成为入口，§8.6 规则 3b）。URL hash = 内容 hash，热更新 cache-bust 自动成立。SDK 在 hello 后自动 push，dev watch 模式下 dist 变化自动重推。资产相对路径允许 Vite 共享 chunk 使用的首字符 `_`；首字符不得为 `.` 或 `-`，仍拒绝绝对路径、`..` 和隐藏文件。
 - 安装/卸载/启用/禁用/重载：经总线 RPC（如 `plugins:_:install/reload`）。
 - In-repo core plugins 走 §8.4 阶段 A，不经此机制。
 
@@ -644,6 +656,16 @@ my-plugin/
 - **仓库结构定稿（v0.33）**：Python 参考实现（`next/`）与 `next-go/` 目录已删除；Go 主线（`cmd/`、`internal/`、`web/`、`scripts/`）上移至仓库根，单一 Go module（`viewer`）自根构建；SDK 按语言归入 `sdk/{go,python,ts}`；前端在 `frontend/`。测试即规格：`scripts/smoke_*.py`（Python SDK 黑盒）+ `sdk/ts` vitest 直接验证 Go 内核（`VIEWER_KERNEL_BIN` 可覆盖）。
 
 ## 18. 修订记录
+
+- **v1.43**（2026-11-18）：**Metrics 双账本与真实 Token 采集**——统一 Agent usage 模型，Codex 只取 `last`、Pi 只取 `message_end`、ACP 上下文占用不计消耗；Chat 新增 `agent_token_usages`、历史 Codex 回填和 `chat:_:metrics:dashboard`。LLM 新增独立 `llm.sqlite3` call/attempt 账本、RPC/HTTP 真实 usage 与 `llm:_:metrics:dashboard`。前端新增 Metrics 插件，提供筛选、趋势、热力图和 Task/Turn/Role/Tool Top 10；缓存/reasoning 不重复加总，两套账不相加。
+
+- **v1.42**（2026-11-18）：**来源 Turn 的后台进程计数与详情**——Chat 在 background block 和实时 active/inactive 帧中保存并发布来源 `turn_id`，Task history 新增 `background_turns` 快照；进程列表变化但仍有存活项时也发布增量。`TaskPane.vue` 在来源 Agent 名称旁显示后台数量，浮层列出命令、PID 和进程会话 ID，重载后可恢复，结束事件只清除对应 Turn。当前只有 Hermes 实现 provider 后台进程 RPC，其他 Agent 不显示该入口。
+
+- **v1.41**（2026-11-18）：**Browser Page 关闭 pane 后保留 Dock 恢复入口**——Browser Dock 直接映射后端状态中的所有已打开 Page，不再过滤 `watchers=0` 的条目。关闭 pane 仍只 unwatch 并停止无人观看的视频流，不关闭 Chrome Page；点击保留的 Dock 条目通过统一 instance adapter 重新打开同一 `page_id`，显式 close Page 后才从状态与 Dock 移除。
+
+- **v1.40**（2026-11-18）：**新 pending Decision 取代同 Task 旧 pending**——Turn 结束持久化新的 pending Decision 时，同事务取消同 Task 全部其他 pending Decision 并逐条发布状态更新；`dispatching`、resolved/cancelled/invalid 历史和其他 Task 不变。重复 Turn 检测仍由 `source_turn_id` 唯一约束幂等，后台完成唤醒不再累积 pending，旧项保留为 cancelled 历史。
+
+- **v1.39**（2026-11-17）：**Browser 前端资产与 plain HTTP 初始化修复**——资产路径校验接受首字符为 `_` 的 Vite 共享 chunk，上传与同源 serving 使用同一规则。`@viewer/bus-sdk` 公开 `uuidv4()`，Browser pane 不再直接调用仅安全上下文可用的 `crypto.randomUUID()`。
 
 - **v1.38**（2026-11-16）：**Dock 额度节奏与供应商配额 RPC**——新增 `llm:_:usage` 和 `viewer.agent-codex:_:usage`，分别归一化 Kimi Coding Plan `/usages` 与 Codex App Server `account/rateLimits/read` 的 5 小时/周窗口，凭据留在各后端插件。`UsageDock.vue` 只在 Dock 展开时显示底部额度区，以同一轨道对照已用额度和周期时间，优先提示短窗口用尽；详情支持刷新、准确重置时间及 Kimi 跟随 active/固定 profile，无法确认固定周期时只显示余量。
 
@@ -833,6 +855,8 @@ my-plugin/
 - **C3 file-service**：`files.py` 的 resolve/hash/raw 字节 + `list_directory()` 目录列表（v0.21 新增 `file:_:list` RPC：一次性全量、目录优先排序、entry 对齐 FileEntry 字段）+ PDF 逐页栅格化（v0.70 新增 `file:_:pdfpage` RPC：mutool+ImageMagick 管线、磁盘 LRU 缓存；v0.71 起白边裁切（v0.83 百分比化）+ 响应带图像尺寸）+ `storage.py` + `watcher.py`（目录变更 → 总线事件 `files:_:changed`）。by-reference 数据面（§6.2）的引用签发方（v0.87 落地：`file:_:ticket`/`ticket:resolve` + gateway `/api/files/raw`）。v1.07 增加目录树 `dirs_only` 列表、串行分片 `du` + `du:progress` + `du:cancel`、目录创建与递归删除。
 - **C4 http-gateway**：单 WS 翻译器；serve 前端构建产物与内容寻址资产库（§14.3）；`plugins:_:assets` mailbox 维护者；by-reference HTTP 数据面。admin API：`POST /api/admin/restart`（v0.34 优雅自重启）、`POST /api/admin/build-restart`（v0.37 构建成功后自重启）、`POST /api/admin/schedule-restart`（v1.37：先武装并等空闲，watchdog 5s 轮询 `chat:_:chats:list` 无 running + `voice:_:sessions` 无活动后才后台构建，成功直接优雅重启，以包含等待期间 Agent 对 Viewer 的修改；构建失败落 `failed`；`GET` 同路径返回 none/building/armed/failed；`DELETE` 同路径取消/复位（armed/building/failed→none，幂等）；状态纯内存）。
 
+- **C6 llm**：OpenAI 兼容 RPC/HTTP 转发、共享配置与 fallback；v1.43 增加 `llm.sqlite3` 独立调用/attempt 账本、流式最终 usage 提取和 `llm:_:metrics:dashboard` 聚合，不记录 prompt/response 正文或凭据。
+
 ### A.4 viewer.terminal（Phase 2，链路首验）
 
 - 后端：`terminals.py` + `process_registry.py`；路由 `/api/terminals`（CRUD/terminate）+ `/api/terminals/{id}/ws`。
@@ -868,10 +892,11 @@ my-plugin/
 - **Task dispatch 与 session（v1.25）**：同一 Task 的 dispatch 串行排队，不再接受 `parallel_dispatch`，也不存在匿名或 lane 私有 runtime。RoleSession 始终归 `(chat_id, task_id, role_id)`；`new_each_run` 每次 dispatch fresh，composer 的 force-new 只影响下一次 dispatch。`continue_turn_id` 仅表示续接来源 Turn 的 Role/session，并优先于 new-each-run；它不创建匿名并行通道。
 - **发送接单与 Auto Route（v1.29）**：`send-message` 的同步边界是本地接单，不是 LLM 路由完成。Auto Route 先保存并发布 user Message、写入 `status=routing` 的 OperationReceipt，再立即返回；按 Task 串行的路由 worker 保证同 Task 的发送顺序，不同 Task 可并行路由。初始回执先于 worker 启动落库，完成后推进为 `running`/`queued`，失败则更新回执并持久化 `Auto Route` error block；进程恢复将未完成的 routing 回执标为 failed，不保留无状态等待。显式 `role_ids` 不调用路由 LLM；Decision 普通回复不继承来源 Turn 的 Role/session，统一进入同一异步 Auto Route。`plugins.viewer-chat.dispatch_router` 默认 `{model:"k2.8",timeout_seconds:15,extra_body:{reasoning_effort:"none",temperature:0.6}}`，经 `llm:_:complete` 逐调用读取。
 - **紧凑摘要与最近 Task context（v1.34）**：Turn、rolling Task 和 final Task Summary 只记录已完成工作及结果状态；prompt 统一要求 400 字符内、一个短段落或最多三条 bullet，仅保留对后续工作有用的文件名、决策和结果，不写未决问题、建议下一步、验证命令或结果、提交/重启状态或建议等交接信息。rolling 机制仍按精确 `source_turn_ids` 前进。fresh Context 的跨 Task 层按 `updated_at` 只读取同 Chat 最近 5 个 ended Tasks 的 completed final TaskSummary，默认 `ended_task_summary_char_budget=3000`，在候选内按正文预算取舍，不向更早 Task 回填。
+- **来源 Turn 的后台进程可见性（v1.42）**：provider 的 `:_:background` 是可选能力，当前仅 Hermes 实现；Chat 不为 Codex、OpenCode 或 Pi 伪造后台状态。background block 记录来源 `turn_id`，`chat:_:background` 的 active/inactive 帧均保留该身份及进程列表，history 响应以 `background_turns` 返回当前 Task 快照。watcher 在部分进程退出、列表仍非空时也发布更新。Task 消息标题行只在对应 Agent Turn 显示后台数量，点击浮层展示命令、PID 和进程会话 ID；前端以事件更新并用 history 快照恢复，结束事件不得清除同 Task 其他 Turn 的指示。
 - **Turn 可运行状态（v1.25）**：后端先设置 `activeTurn` 再发布 `phase=started`，因此收到 started 后刷新 `runningTaskTurns` 不得读到 false。Tasks 页订阅 Turn/background 事件做有界对账；Chat 插件的异步 refresh 使用 generation 丢弃旧响应，避免完成事件被较早 RPC 覆盖。
 - **Decision Center 独立插件与来源上下文（v1.20，v1.30 紧凑历史与分页，v1.36 来源与摘要阅读顺序）**：`decision-center` 前端插件拥有全局 pane 与显式常驻 Dock instance，pending 数量由实例 `meta` 提供，Chat 继续拥有 Decision/Task/Turn/Message 数据和事务。Center 以 Decision event 触发更新并用 RPC 对账，另监听 retained `plugins:_:list`，Chat 就绪后重试初始加载，避免 bootstrap RPC 竞态导致空列表或计数不更新；不直接打开 SQLite，不把 event 当唯一真相源。界面为单列表，pending/dispatching 在前并保留完整回复控件，resolved/cancelled/invalid 历史默认显示带状态色的单行 disclosure，不显示 Turn 完成记录；pending 条目按“Chat/Task 来源行 → 普通字重摘要 → 可折叠来源 Turn 消息 → Decision 控件”排列，摘要与历史摘要均不加粗，来源消息和回复控件共享同一左侧竖线；展开正文不设置内部 max-height 或滚动容器，由 Center 列表统一滚动；两个分区各自提供每页 50 条的上一页/下一页游标导航，不持续追加 DOM。`decisions:context` 仅返回来源 Turn 的 user/assistant 可见消息（含触发该 Turn 的用户输入），只在展开时懒加载；前端逐条隐藏有效 marker 后合并连续 assistant 分段，再复用 `TurnContent` 并设置 `showActivities=false`，invalid 保留原文，不查询或渲染 tool call、tool result、reasoning 等 activity block。列表直接查询带 `(status,created_at,id)` 复合索引的独立 `decisions` 表，当前页 Task 标题一次批量读取，不扫描或 parse 全量消息历史。
 - **Decision 行内代码边界（v1.19）**：candidate 检测与 marker parser 使用同一 inline-code masking；Markdown 行内代码中的开闭标签只是说明文本，不产生 Decision。代码围栏排除、标签独占一行、末尾约束和其他非法核心输入的拒绝规则不变。
-- **Decision prompt、结束动作与 bridge（v1.18，v1.33 内置结束选项，v1.35 每轮兜底与任务化标题）**：Decision post-prompt 不属于 Role 的静态 initial prompt；每个非 raw Turn 在 fresh/resumed/bridge 用户正文完成后统一追加一次。`question` 是任务特定的本轮内容摘要，需点明具体工作或结果，避免“该怎么做？”等无信息量通用标题，空标题由前端回退为 Task 标题。非取消 Turn 未输出 marker 时，Chat 自动持久化 pending Decision，以 Task 精炼标题为摘要并只提供内置 `end_current_task`；没有 assistant Message 时以来源 dispatch 的用户 Message 定位，非法 marker 仍保存 invalid 与 parse warning，取消 Turn 不生成 Decision。平铺 marker 允许在 option 后紧跟 `option_action: end_current_task`，同一 marker 至多一个；Chat 持久化有效 Decision 时，如果 Agent 未提供结束动作，自动追加固定 `option_id=viewer-end-current-task` 的「结束当前 Task」选项，已有动作不重复；升级前的 pending Decision 在读取与回复路径由后端补同一内置动作。前端回复必须携带持久化或内置 option 的 `option_id`，后端按存储内容和固定白名单判定动作。该动作复用 `decisions:respond`，原子 resolve 当前 Decision、取消同 Task 其他 pending Decision、结束 Task 并排期 final summary，不调用 `send-message`、不新增 Turn。普通回复不续接来源 Turn 的 Role/session，而是统一进入异步 Auto Route，由 LLM 重新选择 Role。bridge 的活动高水位对已结束 Turn 使用 `ended_at`，运行中 Turn 才使用 `started_at`，因此同一 Role 上一轮自身输出不会重复注入。
+- **Decision prompt、结束动作与 bridge（v1.18，v1.33 内置结束选项，v1.35 每轮兜底与任务化标题，v1.40 最新 pending 取代）**：Decision post-prompt 不属于 Role 的静态 initial prompt；每个非 raw Turn 在 fresh/resumed/bridge 用户正文完成后统一追加一次。`question` 是任务特定的本轮内容摘要，需点明具体工作或结果，避免“该怎么做？”等无信息量通用标题，空标题由前端回退为 Task 标题。非取消 Turn 未输出 marker 时，Chat 自动持久化 pending Decision，以 Task 精炼标题为摘要并只提供内置 `end_current_task`；没有 assistant Message 时以来源 dispatch 的用户 Message 定位，非法 marker 仍保存 invalid 与 parse warning，取消 Turn 不生成 Decision。持久化新的 pending Decision 时，Chat 在同一事务中取消同 Task 全部其他 pending Decision 并逐条发布状态更新；`dispatching`、已有历史状态和其他 Task 不变，重复 Turn 检测仍按 `source_turn_id` 幂等。因此后台任务完成唤醒等连续 Turn 只保留最新可回复 Decision，被取消项进入 cancelled 历史。平铺 marker 允许在 option 后紧跟 `option_action: end_current_task`，同一 marker 至多一个；Chat 持久化有效 Decision 时，如果 Agent 未提供结束动作，自动追加固定 `option_id=viewer-end-current-task` 的「结束当前 Task」选项，已有动作不重复；升级前的 pending Decision 在读取与回复路径由后端补同一内置动作。前端回复必须携带持久化或内置 option 的 `option_id`，后端按存储内容和固定白名单判定动作。该动作复用 `decisions:respond`，原子 resolve 当前 Decision、取消同 Task 其他 pending Decision、结束 Task 并排期 final summary，不调用 `send-message`、不新增 Turn。普通回复不续接来源 Turn 的 Role/session，而是统一进入异步 Auto Route，由 LLM 重新选择 Role。bridge 的活动高水位对已结束 Turn 使用 `ended_at`，运行中 Turn 才使用 `started_at`，因此同一 Role 上一轮自身输出不会重复注入。
 - 存储：Task-first SQLite（新库，无旧 Branch/DAG 表）；`turn_events` 保存 driver 原文，`message_blocks` 保存归一化块，`messages` 保存可见文本；Tasks/Turns/RoleSessions/TurnSummaries/TaskSummaries/Decisions/ContextBuilds/OperationReceipts 同库。Hindsight bank 仅以 Chat 为边界；任务级跨 Task 信息由 completed final Task Summary 进入 fresh Context，bridge 不重复注入跨 Task 层。
 - 兼容性：Task-first 正常运行时不读取旧 Branch/DAG 数据库，也不保留一次性迁移或修复工具。
 

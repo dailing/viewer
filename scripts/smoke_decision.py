@@ -113,9 +113,25 @@ async def run() -> None:
             await wait_for(lambda: len(completions) >= 5)
             captured = prompts(data_dir)
             assert captured[-1]["text"] == "raw independent" and "<viewer-decision>" not in captured[-1]["text"]
+            raw_fallback = (await decisions(client, task["id"], pending=True))["decisions"][0]
+            # Seed a second legacy pending row so the next ordinary dispatch cannot auto-associate either one.
+            # Its completed Turn must then supersede both, matching the background-completion path's no-association boundary.
+            database = sqlite3.connect(data_dir / "chat.sqlite3")
+            try:
+                database.execute("insert into decisions (id,chat_id,task_id,source_turn_id,role_id,version,kind,options_json,display,tone,status,created_at,updated_at) values (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                 ("decision-legacy-pending", chat["id"], task["id"], "turn-legacy-pending", role["id"], 7, "choice", "[]", "auto", "neutral", "pending", raw_fallback["created_at"] - 1, raw_fallback["created_at"] - 1))
+                database.commit()
+            finally: database.close()
             await dispatch(client, task["id"], "MOCK_DECISION third", role["id"], "decision-third")
             await wait_for(lambda: len(completions) >= 6)
-            third = (await decisions(client, task["id"], pending=True))["decisions"][0]
+            third_pending = await decisions(client, task["id"], pending=True)
+            assert third_pending["pending_count"] == 1 and len(third_pending["decisions"]) == 1
+            third = third_pending["decisions"][0]
+            third_history = (await decisions(client, task["id"], history=True))["decisions"]
+            superseded = next(item for item in third_history if item["id"] == raw_fallback["id"])
+            legacy = next(item for item in third_history if item["id"] == "decision-legacy-pending")
+            assert superseded["status"] == "cancelled" and superseded["version"] == raw_fallback["version"] + 1
+            assert legacy["status"] == "cancelled" and legacy["version"] == 8
             ended = await client.request("chat:_:tasks:end", {"task_id": task["id"]})
             assert ended["task"]["status"] == "ended"
             cancelled = next(item for item in (await decisions(client, task["id"], history=True))["decisions"] if item["id"] == third["id"])
@@ -169,7 +185,7 @@ async def run() -> None:
                 assert database.execute("select count(*) from turns where task_id=?", (generated_end_task["id"],)).fetchone()[0] == 1
                 assert database.execute("select count(*) from messages where task_id=? and role='user' and text=?", (generated_end_task["id"], "结束当前 Task")).fetchone()[0] == 0
             finally: database.close()
-            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, visible source-Turn context, gateway response through async Auto Route, no-marker fallback title and direct Task end, built-in and Agent-provided ending, idempotency and cursor list")
+            print("PASS Decision per-Turn prompt/raw boundary, parse/strip, visible source-Turn context, gateway response through async Auto Route, no-marker fallback title, latest-pending supersession and direct Task end, built-in and Agent-provided ending, idempotency and cursor list")
         finally:
             await gateway.close()
             router.shutdown()

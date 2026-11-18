@@ -201,7 +201,7 @@ func (p *Plugin) handlePrompt(frame busclient.Frame) {
 		cancel()
 		if statsErr == nil {
 			if block, ok := pirpc.SessionStatsBlock(stats); ok {
-				p.publishBlock(request.SessionID, current, "get_session_stats", raw, block)
+				p.publishBlock(request.SessionID, current, "get_session_stats", raw, block, nil)
 			}
 		}
 		p.mu.Lock()
@@ -245,10 +245,10 @@ func (p *Plugin) handleCancel(frame busclient.Frame) {
 }
 
 func (p *Plugin) handleEvent(sessionID string, current *session, event pirpc.Event) {
-	p.publishBlock(sessionID, current, event.Type, event.Raw, pirpc.ParseBlock(event.Type, event.Value))
+	p.publishBlock(sessionID, current, event.Type, event.Raw, pirpc.ParseBlock(event.Type, event.Value), pirpc.ParseTokenUsage(event.Type, event.Value))
 }
 
-func (p *Plugin) publishBlock(sessionID string, current *session, kind string, raw json.RawMessage, block agentdriver.Block) {
+func (p *Plugin) publishBlock(sessionID string, current *session, kind string, raw json.RawMessage, block agentdriver.Block, usage *agentdriver.TokenUsage) {
 	p.mu.Lock()
 	if !current.active {
 		p.mu.Unlock()
@@ -258,7 +258,7 @@ func (p *Plugin) publishBlock(sessionID string, current *session, kind string, r
 	turnID := current.turnID
 	current.seq++
 	p.mu.Unlock()
-	frame := agentdriver.EventFrame{SessionID: sessionID, TurnID: turnID, Seq: seq, Kind: kind, RawJSON: string(raw), Block: block}
+	frame := agentdriver.EventFrame{SessionID: sessionID, TurnID: turnID, Seq: seq, Kind: kind, RawJSON: string(raw), Block: block, Usage: usage}
 	_ = p.client.Publish(context.Background(), PluginID+":_:event", frame)
 }
 

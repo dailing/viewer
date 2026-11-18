@@ -150,6 +150,18 @@ func (p *Plugin) handleAgentEvent(frame busclient.Frame) {
 	if err := p.store.addTurnEvent(event); err != nil {
 		log.Printf("viewer-chat raw event persistence failed turn_id=%s provider=%s kind=%s: %v", turnID, provider, update.Kind, err)
 	} else {
+		if update.Usage != nil {
+			usage := &AgentTokenUsage{ID: newID(), EventID: event.ID, ChatID: event.ChatID, TaskID: taskID, TurnID: turnID,
+				Provider: provider, InputTokens: update.Usage.InputTokens, CachedInputTokens: update.Usage.CachedInputTokens,
+				CacheWriteInputTokens: update.Usage.CacheWriteInputTokens, OutputTokens: update.Usage.OutputTokens,
+				ReasoningOutputTokens: update.Usage.ReasoningOutputTokens, TotalTokens: update.Usage.TotalTokens, OccurredAt: occurredAt}
+			if turn, turnErr := p.store.turn(turnID); turnErr == nil && turn != nil {
+				usage.Agent, usage.Provider, usage.Model = turn.Agent, turn.Provider, turn.Model
+			}
+			if err := p.store.db.Create(usage).Error; err != nil {
+				log.Printf("viewer-chat token usage persistence failed turn_id=%s event_id=%s: %v", turnID, event.ID, err)
+			}
+		}
 		block := &MessageBlock{ID: newID(), EventID: event.ID, ChatID: event.ChatID, TaskID: taskID, TurnID: turnID, Kind: update.Block.Kind, Text: update.Block.Text, Payload: update.Block.Payload, OccurredAt: occurredAt}
 		if block.Kind == "" {
 			block.Kind = agentdriver.KindOther

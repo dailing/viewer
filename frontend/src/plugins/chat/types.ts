@@ -6,6 +6,8 @@ export interface TurnTargetEntry { dispatchId: string; roleId: string; roleName:
 export interface TurnSession { session_id: string; dispatch_id?: string; role_id?: string; role_name?: string; started_at?: number; task_id: string }
 export interface QueuedMessage { message_id: string; dispatch_id: string; chat_id: string; task_id: string; role_id: string; role_ids?: string[]; role_name?: string; text: string; enqueued_at: number; position?: number }
 export interface RunningTurn { turn_id: string; task_id: string; role_id: string; role_name?: string }
+export interface BackgroundProcess { session_id: string; command: string; pid: number }
+export interface BackgroundTurn { chat_id: string; task_id: string; turn_id: string; role_id: string; role_name?: string; session_id: string; active: boolean; processes: BackgroundProcess[]; since: number }
 export interface Task {
   id: string; chat_id: string; chat_name?: string; title: string; title_source: "default" | "generated" | "manual";
   title_revision: number; title_query_message_id?: string; created_by: string; causation_id?: string; correlation_id?: string;
@@ -25,7 +27,7 @@ export interface Decision {
 export interface DecisionList { decisions: Decision[]; has_more?: boolean; next_created_at?: number; next_id?: string; pending_count?: number }
 export interface TaskList { tasks: Task[]; has_more?: boolean; next_updated_at?: number; next_id?: string }
 export interface ChatBlockList { blocks: ChatBlock[]; truncated?: boolean; next_after?: number; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession> }
-export interface ChatHistory { chat: Chat; running_turns?: RunningTurn[]; background_task_ids?: string[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; messages?: ChatMessage[]; has_more?: boolean; has_more_after?: boolean }
+export interface ChatHistory { chat: Chat; running_turns?: RunningTurn[]; background_task_ids?: string[]; background_turns?: BackgroundTurn[]; turn_targets?: Record<string, TurnTarget>; turn_sessions?: Record<string, TurnSession>; queued_messages?: QueuedMessage[]; messages?: ChatMessage[]; has_more?: boolean; has_more_after?: boolean }
 export interface ChatList { chats: Chat[]; active_chat_id: string; running_chat_ids?: string[] }
 export interface Role { id: string; name: string; description: string; prompt: string; cwd: string; routing_policy_id: string; session_policy: string; created_at: number; updated_at: number }
 export interface Chat { id: string; name: string; type: string; pinned: boolean; position: number; root: string; common_prompt: string; member_role_ids: string[]; role_routing_policy_overrides: Record<string, string>; created_at: number; updated_at: number }

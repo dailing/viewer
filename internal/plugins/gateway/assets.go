@@ -71,7 +71,7 @@ const (
 var (
 	assetIDPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 	assetHashPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
-	assetPathPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$`)
+	assetPathPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]{0,255}$`)
 )
 
 var assetsManifest = busclient.Manifest{

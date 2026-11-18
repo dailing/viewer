@@ -5,6 +5,7 @@ export {
   PROTOCOL_VERSION,
   RpcError,
   RpcTimeoutError,
+  uuidv4,
 } from "./client.js";
 export { definePlugin } from "./plugin.js";
 export type {

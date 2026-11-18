@@ -152,7 +152,7 @@ func newConfigStore(config RuntimeConfig) (Plugin, error) {
 }
 
 func newLLM(config RuntimeConfig) (Plugin, error) {
-	plugin := llm.New()
+	plugin := llm.New(config.DataDir)
 	return lifecycleAdapter{
 		start: func(ctx context.Context) error { return plugin.Start(ctx, config.KernelWS, false) },
 		wait:  waitContext, close: plugin.Close,

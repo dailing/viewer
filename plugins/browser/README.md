@@ -5,7 +5,7 @@
 ## 目录
 
 - `backend/`：Go 后端；Chrome/Xvfb 生命周期、CDP、页面注册表、lease、FFmpeg 采集编码、Viewer RPC 和 loopback MCP。
-- `frontend/`：Browser Dock 与视频 pane；Dock 只列出当前有 watcher 的已打开 Page，“＋”新建并打开 Page；地址栏、人工输入和四组独立 viewport/视频参数。
+- `frontend/`：Browser Dock 与视频 pane；Dock 列出所有已打开 Page（包括当前没有 watcher 的 Page），点击条目可重新打开 pane，“＋”新建并打开 Page；地址栏、人工输入和四组独立 viewport/视频参数。
 - `plugin.json`：插件 manifest。
 
 ## 页面与视频

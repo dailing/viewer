@@ -173,7 +173,8 @@ hello 之后调用一次即可；SDK 自动选择 one-shot 或分片（超 1 MiB
 你应 expect：
 
 - `frontend/dist` 必须含入口 **`frontend.js`**（缺失直接报错）；`frontend.css` 若存在会被 shell 自动注入。
-- 推送成功 → `plugins:_:assets` mailbox 出现你的条目 → **所有开着的浏览器页面热加载你的插件**（无刷新）。
+- 推送成功 → `plugins:_:assets` mailbox 出现你的条目 → **所有开着的浏览器页面热加载你的插件**（无刷新）。Vite 生成的首字符为 `_` 的共享 chunk 也属于合法资产路径。
+- 组件需要随机 ID 时使用 `@viewer/bus-sdk` 的 `uuidv4()`，不要直接调用仅在 HTTPS/localhost 可用的 `crypto.randomUUID()`。
 - 重新构建后再推一次 = **热重载**：内容 hash 变化 → 新 URL → shell 先 deactivate 旧模块再 import 新模块，打开的 pane 原地更新。
 - 资产存于 gateway 内容寻址库（保留最近 3 代），重启 viewer 不丢。
 - **入口可见性 = 资产 ∩ 在线**（framework v0.55）：shell 只对「有 bundle 且后端连着总线」的插件显示 Dock 入口；你的后端断线时入口自动隐藏，重连后自动恢复（资产还在，无需重推）。

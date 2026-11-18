@@ -19,7 +19,7 @@ interface BrowserState {
 function createDockProvider(ctx: PluginCtx) {
   const instances = reactive<DockInstance[]>([]);
   function sync(state: BrowserState): void {
-    instances.splice(0, instances.length, ...(state.pages ?? []).filter((page) => page.watchers > 0).map((page) => ({
+    instances.splice(0, instances.length, ...(state.pages ?? []).map((page) => ({
       id: page.page_id,
       label: `${page.title || page.url || "Browser"} · ${page.page_id}`,
       state: !page.online ? "error" : page.control_owner === "agent" ? "running" : "idle",

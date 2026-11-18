@@ -112,6 +112,7 @@ func (p *Plugin) generateTaskSummary(taskID string) {
 		prompt = taskSummaryPrompt(source, true)
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, time.Duration(config.TimeoutSeconds)*time.Second)
+	ctx = withLLMTracking(ctx, "task_summary", task.ChatID, task.ID, "", "")
 	result, completeErr := p.llmFn(ctx, []map[string]string{{"role": "system", "content": "You write concise factual Task summaries in the same language as the source material. " + compactSummaryFormat}, {"role": "user", "content": prompt}}, false, config.TimeoutSeconds)
 	cancel()
 
@@ -252,6 +253,7 @@ func (p *Plugin) generateTaskTitle(taskID, messageID string) {
 	config := p.summaryConfig(p.ctx)
 	query := truncateWords(message.Text, config.TitleWordBudget)
 	ctx, cancel := context.WithTimeout(p.ctx, time.Duration(config.TimeoutSeconds)*time.Second)
+	ctx = withLLMTracking(ctx, "task_title", task.ChatID, taskID, "", "")
 	result, err := p.llmFn(ctx, []map[string]string{{"role": "system", "content": "Generate a concise Task title in the same language as the user's message. Return only JSON: {\"title\":\"...\"}. The title must contain at most 40 Unicode characters and no newline."}, {"role": "user", "content": query}}, false, config.TimeoutSeconds)
 	cancel()
 	if err != nil {

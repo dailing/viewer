@@ -19,6 +19,7 @@
 - Chrome 使用 Xvfb 中的 headed 普通窗口，不为每个 tab 新开 Viewer Page。FFmpeg 采集当前可见 tab 的 X11 raw window pixels，经 libx264 编码为 Annex-B H.264 access units；不使用 JPEG、CDP screencast 或 base64 图片帧。Agent 遇到 popup 或看不见的后台 tab 时不会盲点，而是得到 `page_visible_required`。
 - 插件向 Gateway loopback `/api/media/publish` 发布视频。Viewer 前端通过同源 `/api/media/ticket` 和 `/api/media/webrtc` 建立 WebRTC；不会连接插件 MCP 或 Chrome 调试端口。
 - 视频不经过 Viewer Bus mailbox；页面管理、watch 和人工输入仍走 Bus RPC。
+- 人工鼠标、滚轮、文本和键盘事件由 `frontend/src/humanInput.ts` 串行发送，并共享同一次控制申请；首次点击的 press/release 和首次输入不会因等待 lease 而丢失或乱序。前端根据 `expires_at` 续订人工 lease，避免空闲超时后的第一个事件被旧 lease 拒绝。
 
 ## 独立参数
 
@@ -126,7 +127,7 @@ VIEWER_BROWSER_INTEGRATION=1 go test ./plugins/browser/backend -count=1
 go test ./internal/plugins/gateway -run TestMediaHubH264WebRTCEndToEnd
 
 # 前端
-cd plugins/browser/frontend && npm run build
+cd plugins/browser/frontend && npm test && npm run build
 
 # 对正在运行的 managed 插件执行真实 Chrome + FFmpeg smoke
 .venv/bin/python scripts/smoke_browser_plugin.py \

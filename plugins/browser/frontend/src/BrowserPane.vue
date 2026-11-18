@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, ref, watchEffect } from "vue";
 import { uuidv4, type PluginCtx } from "@viewer/bus-sdk";
+import { HumanInputController } from "./humanInput";
 
 interface Viewport {
   css_width: number;
@@ -57,7 +58,7 @@ const error = ref("");
 const streamStatus = ref("连接中");
 const viewportOwner = ref(true);
 const humanLease = ref("");
-const controlBusy = ref(false);
+let humanLeaseExpiresAt = 0;
 const videoReady = ref(false);
 let peer: RTCPeerConnection | undefined;
 let peerStreamID = "";
@@ -87,24 +88,21 @@ function syncState(next: BrowserState): void {
 }
 
 async function ensureControl(takeover = false): Promise<boolean> {
-  if (humanLease.value && !takeover) return true;
-  if (controlBusy.value) return false;
-  controlBusy.value = true;
+  if (humanLease.value && !takeover && Date.now() + 1000 < humanLeaseExpiresAt) return true;
   try {
-    const result = await ctx.bus.request<{ lease_id: string }>("viewer.browser:_:control", { page_id: pageID, viewer_id: viewerID, takeover });
+    const result = await ctx.bus.request<{ lease_id: string; expires_at: string }>("viewer.browser:_:control", { page_id: pageID, viewer_id: viewerID, takeover });
     humanLease.value = result.lease_id;
+    humanLeaseExpiresAt = Date.parse(result.expires_at);
     error.value = "";
     return true;
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : String(caught);
     return false;
-  } finally {
-    controlBusy.value = false;
   }
 }
 
 async function takeover(): Promise<void> {
-  if (await ensureControl(true)) keyboard.value?.focus();
+  if (await humanInput.ensureControl(() => ensureControl(true))) keyboard.value?.focus();
 }
 
 function scheduleWatch(delay = 200): void {
@@ -237,7 +235,7 @@ async function closePage(): Promise<void> {
 
 async function navigate(): Promise<void> {
   const raw = address.value.trim();
-  if (!raw || !(await ensureControl())) return;
+  if (!raw || !(await humanInput.ensureControl())) return;
   try {
     await ctx.bus.request("viewer.browser:_:navigate", { page_id: pageID, viewer_id: viewerID, url: raw });
   } catch (caught) {
@@ -260,22 +258,24 @@ async function sendInput(event: BrowserInput): Promise<void> {
     error.value = "";
   } catch (caught) {
     humanLease.value = "";
+    humanLeaseExpiresAt = 0;
     error.value = caught instanceof Error ? caught.message : String(caught);
   }
 }
+
+const humanInput = new HumanInputController<BrowserInput>(() => ensureControl(), sendInput);
 
 function buttonName(value: number): string {
   return value === 1 ? "middle" : value === 2 ? "right" : "left";
 }
 
-async function pointerDown(event: PointerEvent): Promise<void> {
+function pointerDown(event: PointerEvent): void {
   if (event.button > 2) return;
   event.preventDefault();
   keyboard.value?.focus({ preventScroll: true });
   video.value?.setPointerCapture(event.pointerId);
-  if (!(await ensureControl())) return;
   const p = point(event);
-  await sendInput({ type: "mousePressed", ...p, button: buttonName(event.button), buttons: event.buttons });
+  void humanInput.send({ type: "mousePressed", ...p, button: buttonName(event.button), buttons: event.buttons });
 }
 
 function pointerMove(event: PointerEvent): void {
@@ -287,14 +287,14 @@ function pointerMove(event: PointerEvent): void {
     moveTimer = undefined;
     if (!latest) return;
     const p = point(latest);
-    void sendInput({ type: "mouseMoved", ...p, button: latest.buttons ? buttonName(latest.button) : "none", buttons: latest.buttons });
+    void humanInput.send({ type: "mouseMoved", ...p, button: latest.buttons ? buttonName(latest.button) : "none", buttons: latest.buttons });
   }, 33);
 }
 
-async function pointerUp(event: PointerEvent): Promise<void> {
-  if (!humanLease.value) return;
+function pointerUp(event: PointerEvent): void {
+  event.preventDefault();
   const p = point(event);
-  await sendInput({ type: "mouseReleased", ...p, button: buttonName(event.button), buttons: event.buttons });
+  void humanInput.send({ type: "mouseReleased", ...p, button: buttonName(event.button), buttons: event.buttons });
 }
 
 function modifiers(event: KeyboardEvent): number {
@@ -303,7 +303,6 @@ function modifiers(event: KeyboardEvent): number {
 
 function wheel(event: WheelEvent): void {
   event.preventDefault();
-  if (!humanLease.value) return;
   const multiplier = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.value.css_height : 1;
   wheelDeltaX += event.deltaX * multiplier;
   wheelDeltaY += event.deltaY * multiplier;
@@ -316,29 +315,27 @@ function wheel(event: WheelEvent): void {
     const deltaY = wheelDeltaY;
     wheelDeltaX = wheelDeltaY = 0;
     wheelTimer = undefined;
-    void sendInput({ type: "mouseWheel", ...p, deltaX, deltaY });
+    void humanInput.send({ type: "mouseWheel", ...p, deltaX, deltaY });
   }, 40);
 }
 
-async function keyDown(event: KeyboardEvent): Promise<void> {
+function keyDown(event: KeyboardEvent): void {
   if (composing || (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey)) return;
   event.preventDefault();
-  if (!(await ensureControl())) return;
-  await sendInput({ type: "keyDown", key: event.key, code: event.code, keyCode: event.keyCode, modifiers: modifiers(event) });
+  void humanInput.send({ type: "keyDown", key: event.key, code: event.code, keyCode: event.keyCode, modifiers: modifiers(event) });
 }
 
-async function keyUp(event: KeyboardEvent): Promise<void> {
+function keyUp(event: KeyboardEvent): void {
   if (composing || (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey)) return;
   event.preventDefault();
-  if (!humanLease.value) return;
-  await sendInput({ type: "keyUp", key: event.key, code: event.code, keyCode: event.keyCode, modifiers: modifiers(event) });
+  void humanInput.send({ type: "keyUp", key: event.key, code: event.code, keyCode: event.keyCode, modifiers: modifiers(event) });
 }
 
-async function insertText(): Promise<void> {
+function insertText(): void {
   if (composing || !keyboard.value) return;
   const text = keyboard.value.value;
   keyboard.value.value = "";
-  if (text && humanLease.value) await sendInput({ type: "insertText", text });
+  if (text) void humanInput.send({ type: "insertText", text });
 }
 
 function compositionEnd(): void {

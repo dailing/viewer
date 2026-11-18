@@ -168,6 +168,75 @@ func TestChromeAdvancedActions(t *testing.T) {
 	}
 }
 
+func TestChromeHumanInputEvents(t *testing.T) {
+	manager := newIntegrationChrome(t)
+	server := browserFixtureServer(t)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	page, err := manager.OpenPage(ctx, "pg_human_input", server.URL, defaultViewport())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer page.Close(context.Background())
+
+	point := func(selector string) map[string]any {
+		result := integrationAction(t, page, "evaluate", map[string]any{"expression": `(() => { const rect = document.querySelector(` + strconvQuote(selector) + `).getBoundingClientRect(); return {x:rect.left + rect.width / 2, y:rect.top + rect.height / 2}; })()`})
+		value := result["value"].(map[string]any)
+		return map[string]any{"x": value["x"], "y": value["y"]}
+	}
+	click := func(selector string) {
+		event := point(selector)
+		for _, eventType := range []string{"mousePressed", "mouseReleased"} {
+			event["type"] = eventType
+			event["button"] = "left"
+			event["buttons"] = 0
+			if eventType == "mousePressed" {
+				event["buttons"] = 1
+			}
+			if err := page.Input(ctx, event); err != nil {
+				t.Fatalf("human %s on %s failed: %v", eventType, selector, err)
+			}
+		}
+	}
+
+	click("#click-target")
+	clicked := false
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		clickState := integrationAction(t, page, "evaluate", map[string]any{"expression": `document.getElementById("click-count").textContent`})
+		if clickState["value"] == "1 clicks" {
+			clicked = true
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !clicked {
+		t.Fatal("human mouse press/release did not click the fixture button")
+	}
+	click("#name")
+	if err := page.Input(ctx, map[string]any{"type": "insertText", "text": "Manual keyboard"}); err != nil {
+		t.Fatal(err)
+	}
+	typed := integrationAction(t, page, "evaluate", map[string]any{"expression": `document.getElementById("name").value`})
+	if typed["value"] != "Manual keyboard" {
+		t.Fatalf("human text input = %#v", typed["value"])
+	}
+	for _, event := range []map[string]any{
+		{"type": "keyDown", "key": "a", "code": "KeyA", "keyCode": 65, "modifiers": 2},
+		{"type": "keyUp", "key": "a", "code": "KeyA", "keyCode": 65, "modifiers": 2},
+		{"type": "keyDown", "key": "Backspace", "code": "Backspace", "keyCode": 8},
+		{"type": "keyUp", "key": "Backspace", "code": "Backspace", "keyCode": 8},
+	} {
+		if err := page.Input(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := integrationAction(t, page, "evaluate", map[string]any{"expression": `document.getElementById("name").value`})
+	if result["value"] != "" {
+		t.Fatalf("human keyboard input did not edit the focused field: %#v", result["value"])
+	}
+}
+
 func TestChromeDialogsRequireHuman(t *testing.T) {
 	manager := newIntegrationChrome(t)
 	server := browserFixtureServer(t)
